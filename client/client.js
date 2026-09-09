@@ -17,7 +17,7 @@ var module = { exports: {} }; var exports = module.exports;
 // ---------- 依赖 ----------
 const React = require('react')
 const h = React.createElement
-const { useState, useEffect } = React
+const { useState, useEffect, useRef } = React
 
 // ---------- 常量 ----------
 const WS_URL = 'wss://api.p2pquake.net/v2/ws'
@@ -98,11 +98,29 @@ function loadJSON(key, fallback) {
 function saveJSON(key, value) {
   try { window.localStorage.setItem(key, JSON.stringify(value)) } catch (err) { /* 容量/隐私模式忽略 */ }
 }
-// 历史记录必须是「对象数组」：渲染层会读 e.key / e.headline，元素为 null 会直接抛错
+// 历史记录必须是「对象数组」，且每个字段必须是渲染层能直接交给 React 的基本类型：
+// 元素为 null 会抛错；字段是对象/数组则会让 React 抛「Objects are not valid as a React child」。
+const strOr = (v, fallback) => (typeof v === 'string' ? v : (typeof v === 'number' || typeof v === 'boolean' ? String(v) : fallback))
+function normalizeHistoryEntry(e, i) {
+  const key = strOr(e.key, '') || strOr(e.id, '')
+  return {
+    key: key || 'legacy-' + i, // 早期版本可能没有 key，补一个稳定兜底键，保证 React key 与去重都可用
+    id: strOr(e.id, ''),
+    kind: strOr(e.kind, ''),
+    label: strOr(e.label, ''),
+    severity: strOr(e.severity, ''),
+    issued: strOr(e.issued, ''),
+    headline: strOr(e.headline, ''),
+    pref: strOr(e.pref, ''),
+    hit: e.hit === true,
+    suppressed: e.suppressed === true,
+    suppressedReason: strOr(e.suppressedReason, ''),
+  }
+}
 function loadHistory() {
   const v = loadJSON(HISTORY_KEY, null)
   if (!Array.isArray(v)) return []
-  return v.filter((e) => isPlainObject(e)).slice(0, HISTORY_MAX)
+  return v.filter((e) => isPlainObject(e)).slice(0, HISTORY_MAX).map(normalizeHistoryEntry)
 }
 // 每次都返回全新对象：避免调用方改动嵌套字段时污染 DEFAULT_CFG 常量
 const freshCfg = () => ({
@@ -114,13 +132,8 @@ const freshCfg = () => ({
   notify: { ...DEFAULT_CFG.notify },
   dedupe: { ...DEFAULT_CFG.dedupe },
 })
-function loadCfg() {
-  const stored = loadJSON(STORAGE_KEY, null)
-  if (!isPlainObject(stored) || stored.version !== DEFAULT_CFG.version) {
-    const fresh = freshCfg()
-    saveJSON(STORAGE_KEY, fresh)
-    return fresh
-  }
+// 逐字段校验 + 回退默认值：任何形状的输入都归一成一份合法配置
+function normalizeCfg(stored) {
   const w = isPlainObject(stored.watch) ? stored.watch : {}
   const d = isPlainObject(stored.disasters) ? stored.disasters : {}
   const t = isPlainObject(stored.thresholds) ? stored.thresholds : {}
@@ -156,6 +169,19 @@ function loadCfg() {
       windowMinutes: numOr(de.windowMinutes, DEFAULT_CFG.dedupe.windowMinutes, 1, 1440),
     },
   }
+}
+function loadCfg() {
+  const stored = loadJSON(STORAGE_KEY, null)
+  if (!isPlainObject(stored)) {
+    const fresh = freshCfg()
+    saveJSON(STORAGE_KEY, fresh)
+    return fresh
+  }
+  const cfg = normalizeCfg(stored)
+  // 版本不同（插件升级 / 用户手改）时不再直接清空：按当前 schema 归一保留可识别字段，再写回当前版本号。
+  // 旧实现会在这里 saveJSON(默认值)，一次版本号变化就会静默丢掉用户选好的关注地区与阈值。
+  if (stored.version !== DEFAULT_CFG.version) saveJSON(STORAGE_KEY, cfg)
+  return cfg
 }
 function saveCfg(cfg) {
   const next = { ...cfg, version: DEFAULT_CFG.version }
@@ -247,6 +273,11 @@ function regionsOfArea(name, forecastPref, value, valueKey) {
   })
 }
 const scaleText = (v) => own(SCALE_TEXT, v) || (typeof v === 'number' && v > 0 ? '震度' + Math.floor(v / 10) : '未公布')
+// 震度后缀：只在有效震度时追加，避免「最大震度未公布」这类噪音。
+// 震度是用户判断严重性的关键信息（阈值也是按震度设的），必须出现在 headline 里。
+// prefix 例：'最大' → 「最大震度3」；'预测最大' → 「预测最大震度5强」。
+const scaleSuffix = (v, prefix) => (typeof v === 'number' && v > 0 ? ' · ' + prefix + scaleText(v) : '')
+const sevColor = (s) => (s === 'red' ? '#e5484d' : (s === 'orange' ? '#f76b15' : '#3b82f6'))
 const severityOfScale = (v) => {
   if (typeof v !== 'number' || v <= 0) return 'info'
   if (v >= 55) return 'red'
@@ -265,9 +296,10 @@ function parseQuake(raw) {
   const hypo = eq.hypocenter || {}
   const pts = raw.points || []
   const hasHypo = typeof hypo.name === 'string' && hypo.name !== ''
-  const headline = hasHypo
+  const headBase = hasHypo
     ? '震源 ' + hypo.name + ' · M' + (typeof hypo.magnitude === 'number' ? hypo.magnitude : '—')
     : (own(labelMap, type) || '地震情报')
+  const headline = headBase + scaleSuffix(eq.maxScale, '最大')
   return {
     id: String(raw.id || raw._id || ''), code: 551, kind: 'quake',
     kindLabel: own(labelMap, type) || '地震情报',
@@ -296,7 +328,7 @@ function parseEew(raw) {
     kindLabel: cancelled ? 'EEW·已取消' : '紧急地震速报（警报）',
     severity: cancelled ? 'info' : 'red',
     issued: (raw.issue && raw.issue.time) || raw.time || '',
-    headline: cancelled ? '本警报已取消' : '震源 ' + (hypo.name || '—') + ' · M' + (typeof hypo.magnitude === 'number' ? hypo.magnitude : '—'),
+    headline: cancelled ? '本警报已取消' : '震源 ' + (hypo.name || '—') + ' · M' + (typeof hypo.magnitude === 'number' ? hypo.magnitude : '—') + scaleSuffix(maxTo, '预测最大'),
     maxScale: maxTo,
     // EEW 的多报共享 issue.eventId（serial 递增），用它做事件级去重
     eventKey: (raw.issue && raw.issue.eventId) ? 'eew:' + raw.issue.eventId : '',
@@ -411,7 +443,8 @@ let anonSeq = 0 // 兜底：无 id 消息用递增匿名 key，避免空 id 互�
 function addEvent(ev) {
   const hasId = ev && ev.id && ev.id !== ''
   const key = hasId ? ev.id : ('anon-' + (++anonSeq))
-  const item = Object.assign({}, ev, { key })
+  // 统一过一遍字段规整：写入侧也保证历史里不会出现对象/数组字段
+  const item = normalizeHistoryEntry(Object.assign({}, ev, { key }), 0)
   store.events = [item].concat(store.events.filter((e) => e.key !== key)).slice(0, HISTORY_MAX)
   saveJSON(HISTORY_KEY, store.events.slice(0, HISTORY_MAX))
   store.push({})
@@ -444,6 +477,11 @@ const SOUNDS = {
   quake: { notes: [
     { freq: 659, start: 0, dur: 0.18, type: 'sine' },
     { freq: 880, start: 0.2, dur: 0.3, type: 'sine' },
+  ] },
+  // 取消 / 解除：下行音，与「警报」区分开
+  cancel: { notes: [
+    { freq: 880, start: 0, dur: 0.16, type: 'sine' },
+    { freq: 659, start: 0.18, dur: 0.34, type: 'sine' },
   ] },
   test: { notes: [
     { freq: 784, start: 0, dur: 0.16, type: 'sine' },
@@ -559,7 +597,7 @@ function isDuplicate(id, windowMinutes) {
   if (!id) return false
   const now = Date.now()
   const win = Math.max(1, windowMinutes || 10) * 60 * 1000
-  for (const [k, v] of seen) if (now - v > win) seen.delete(k)
+  for (const [k, v] of seen) if (now - v > win || v > now) seen.delete(k)
   if (seen.has(id)) return true
   seen.set(id, now)
   return false
@@ -571,11 +609,31 @@ function isEventRepeat(alert, windowMinutes) {
   if (!alert.eventKey) return false
   const now = Date.now()
   const win = Math.max(1, windowMinutes || 10) * 60 * 1000
-  for (const [k, v] of eventSeen) if (now - v.ts > win) eventSeen.delete(k)
+  for (const [k, v] of eventSeen) if (now - v.ts > win || v.ts > now) eventSeen.delete(k)
   const prev = eventSeen.get(alert.eventKey)
   if (prev && alert.strength <= prev.strength) return true
   eventSeen.set(alert.eventKey, { ts: now, strength: alert.strength })
   return false
+}
+// 已实际提醒过的事件（eventKey / kind → ts）。
+// 取消 / 解除消息只在「此前确实提醒过同一事件」时才补一条：既避免「没收到警报却收到取消」的困惑，
+// 也让用户知道已经发出的警报作废（EEW 取消 / 海啸解除本身是有用信息，不该静默）。
+const ALERTED_MAX_MS = 1440 * 60 * 1000
+const alertedEvents = new Map()
+const cancelKeyOf = (alert) => alert.eventKey || alert.kind
+function rememberAlerted(alert) {
+  const now = Date.now()
+  for (const [k, v] of alertedEvents) if (now - v > ALERTED_MAX_MS || v > now) alertedEvents.delete(k)
+  alertedEvents.set(cancelKeyOf(alert), now)
+}
+function wasRecentlyAlerted(alert, windowMinutes) {
+  const key = cancelKeyOf(alert)
+  const v = alertedEvents.get(key)
+  if (typeof v !== 'number') return false
+  const now = Date.now()
+  const win = Math.max(1, windowMinutes || 10) * 60 * 1000
+  if (v > now || now - v > win) { alertedEvents.delete(key); return false }
+  return true
 }
 // 多开 DSH 页面时每个标签页都会收到同一条推送；用 BroadcastChannel 协商，只让一个标签页播报。
 // 通道必须在插件加载时就建立监听（见 apply），否则后加载的标签页会错过先到的广播。
@@ -589,29 +647,71 @@ function ensureAlertChannel() {
     alertChannel = new window.BroadcastChannel('dsh-quake-alert')
     alertChannel.onmessage = (ev) => {
       const d = ev && ev.data
-      if (d && d.type === 'alerted' && d.key) tabAlerted.set(String(d.key), Date.now())
+      if (!d || d.type !== 'alerted' || !d.key) return
+      tabAlerted.set(String(d.key), Date.now())
+      // 顺带同步事件键：其它标签页此前提醒过的事件，本标签页在收到取消消息时也要知道
+      if (d.eventKey) alertedEvents.set(String(d.eventKey), Date.now())
     }
   } catch (err) { alertChannel = null }
   return alertChannel
 }
-function claimAlertForTab(key) {
+function claimAlertForTab(key, eventKey) {
   if (!key) return true
   const now = Date.now()
-  for (const [k, v] of tabAlerted) if (now - v > TAB_DEDUPE_MS) tabAlerted.delete(k)
+  for (const [k, v] of tabAlerted) if (now - v > TAB_DEDUPE_MS || v > now) tabAlerted.delete(k)
   if (tabAlerted.has(key)) return false
   tabAlerted.set(key, now)
   if (ensureAlertChannel()) {
-    try { alertChannel.postMessage({ type: 'alerted', key }) } catch (err) { /* 通道已关闭等忽略 */ }
+    try { alertChannel.postMessage({ type: 'alerted', key, eventKey: eventKey || '' }) } catch (err) { /* 通道已关闭等忽略 */ }
   }
   return true
 }
 
 // ---------- 主链：收到消息 ----------
+// 取消 / 解除消息：仅当此前提醒过同一事件时才补一条「已取消」，否则只记历史（避免打扰）。
+function handleCancelled(alert, cfg) {
+  if (alert.kind !== 'eew' && alert.kind !== 'tsunami') return
+  const disasters = cfg.disasters || {}
+  if (alert.kind === 'eew' && disasters.earthquake === false) return
+  if (alert.kind === 'tsunami' && disasters.tsunami === false) return
+  if (!wasRecentlyAlerted(alert, cfg.dedupe.windowMinutes)) {
+    addEvent({
+      id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
+      issued: alert.issued, headline: alert.headline + '（未命中：取消 / 解除消息，且此前未提醒过该事件）', hit: false,
+    })
+    return
+  }
+  alertedEvents.delete(cancelKeyOf(alert)) // 同一条取消只提醒一次
+  if (!claimAlertForTab('cancel:' + (alert.id || cancelKeyOf(alert)), '')) {
+    addEvent({
+      id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
+      issued: alert.issued, headline: alert.headline, hit: true,
+      suppressed: true, suppressedReason: '其它 DSH 标签页已提醒',
+    })
+    return
+  }
+  addEvent({
+    id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
+    issued: alert.issued, headline: alert.headline, hit: true,
+  })
+  const title = alert.kind === 'eew' ? '✅ 紧急地震速报已取消' : '✅ 海啸预报已解除'
+  const body = alert.headline + '\n此前发出的警报已作废。\n—— 仅供参考，请以气象厅官方发布为准'
+  if (cfg.notify.sound !== false) playSound('cancel', cfg.notify.volume)
+  const pageVisible = typeof document !== 'undefined' && document.visibilityState === 'visible'
+  if (pageVisible) {
+    showToast({ title, body, color: '#4ade80' })
+  } else if (cfg.notify.system) {
+    const ok = showSystemNotification({ title, body, tag: 'quake-alert-cancel-' + alert.id, silent: true })
+    if (!ok) showToast({ title, body, color: '#4ade80', ttlMs: 20000 })
+  }
+}
+
 function handleRaw(raw, cfg) {
   const alert = parse(raw)
   if (!alert) return
   store.received += 1
   if (isDuplicate(alert.id, cfg.dedupe.windowMinutes)) return
+  if (alert.cancelled) { handleCancelled(alert, cfg); return }
   const m = matchAlert(alert, cfg)
   if (!m.hit) {
     // 不打扰：仅在设置页历史记录里记为"未命中"，便于用户核对配置
@@ -622,10 +722,14 @@ function handleRaw(raw, cfg) {
     return
   }
   const hitPref = m.region ? m.region.pref : ''
+  // 严重度按「命中区域的实际强度」判定，而不是全日本最大值——关注县震度低时颜色不该是红
+  const hitSeverity = alert.kind === 'tsunami'
+    ? alert.severity
+    : severityOfScale(m.region && typeof m.region.scale === 'number' ? m.region.scale : alert.maxScale)
   // 同一次地震的后续发布（速报 → 震源 → 各地震度、或 EEW 多报）强度未升级 → 只更新历史，不再响铃
   if (isEventRepeat(alert, cfg.dedupe.windowMinutes)) {
     addEvent({
-      id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
+      id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true, suppressedReason: '同一地震的后续发布（强度未升级）',
     })
@@ -633,9 +737,9 @@ function handleRaw(raw, cfg) {
   }
   // 其它 DSH 标签页已经播报过同一条消息 → 本标签页静默，避免多个页面同时响铃。
   // 用消息 id 而不是事件键：多标签页收到的是同一条消息，而同一事件的不同消息（如强度升级）不应被拦。
-  if (!claimAlertForTab(alert.id)) {
+  if (!claimAlertForTab(alert.id, cancelKeyOf(alert))) {
     addEvent({
-      id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
+      id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true, suppressedReason: '其它 DSH 标签页已提醒',
     })
@@ -652,7 +756,7 @@ function handleRaw(raw, cfg) {
   if (alert.kind === 'tsunami') bodyLines.push('请立即远离海岸与河口')
   bodyLines.push('—— 仅供参考，请以气象厅官方发布为准')
   addEvent({
-    id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
+    id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
     issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
   })
   const vol = cfg.notify.volume
@@ -660,15 +764,13 @@ function handleRaw(raw, cfg) {
   const pageVisible = typeof document !== 'undefined' && document.visibilityState === 'visible'
   const body = bodyLines.join('\n')
   if (pageVisible) {
-    showToast({ title, body, color: alert.severity === 'red' ? '#e5484d' : (alert.severity === 'orange' ? '#f76b15' : '#3b82f6') })
-    if (cfg.notify.system) {
-      const ok = showSystemNotification({ title, body, tag: 'quake-alert-' + alert.id, silent: true })
-      if (!ok) showToast({ title, body, color: '#f76b15', ttlMs: 20000 })
-    }
+    // 页面可见时只用页内 toast（DESIGN 第 7 节：可见 → toast，后台 → 系统通知）
+    showToast({ title, body, color: sevColor(hitSeverity) })
   } else if (cfg.notify.system) {
     const ok = showSystemNotification({ title, body, tag: 'quake-alert-' + alert.id, silent: true })
-    if (!ok) showToast({ title, body, color: '#f76b15', ttlMs: 20000 })
+    if (!ok) showToast({ title, body, color: sevColor(hitSeverity), ttlMs: 20000 })
   }
+  rememberAlerted(alert)
 }
 
 // ---------- WebSocket 客户端 ----------
@@ -731,6 +833,16 @@ function createWsClient() {
 let activeClient = null
 
 // ---------- 设置页 UI ----------
+// 连接状态 → 颜色 / 文案（设置页与侧边栏状态指示共用）
+function statusMetaOf(status, retries) {
+  return {
+    idle: { color: '#7c8494', text: '未启动' },
+    connecting: { color: '#d9a406', text: '连接中…' },
+    open: { color: '#4ade80', text: '已连接' },
+    reconnecting: { color: '#d9a406', text: '重连中（第 ' + retries + ' 次）' },
+    closed: { color: '#e5484d', text: '已停止' },
+  }[status] || { color: '#7c8494', text: String(status) }
+}
 const s = {
   section: (title, ...children) => h('div', { style: { padding: '14px 16px', borderBottom: '1px solid rgba(148,163,184,0.14)' } },
     h('div', { style: { fontWeight: 700, fontSize: 13, marginBottom: 10, color: '#dfe3e8' } }, title), ...children),
@@ -756,8 +868,18 @@ function SettingsPanel() {
   const [, setTick] = useState(0)
   const [perm, setPerm] = useState(() => notificationPermission())
   const [testMsg, setTestMsg] = useState('')
-  useEffect(() => store.subscribe(() => setTick((t) => t + 1)), [])
   const [expanded, setExpanded] = useState(null)
+  // 音量滑块：拖动期间只改本地草稿，停手 300ms 后才落盘（避免每移动 1px 写一次 localStorage）
+  const [volDraft, setVolDraft] = useState(null)
+  const volTimer = useRef(null)
+  useEffect(() => store.subscribe(() => setTick((t) => t + 1)), [])
+  useEffect(() => () => { if (volTimer.current) clearTimeout(volTimer.current) }, [])
+  // 其它 DSH 标签页改了配置 → 本页跟随（storage 事件只在「别的标签页」写入时触发）
+  useEffect(() => {
+    const onStorage = (e) => { if (!e || e.key === STORAGE_KEY) setCfgState(loadCfg()) }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [])
 
   // 立即基于最新持久配置计算并写盘，再 setState（避免 updater 内副作用时机不确定）
   const setCfg = (fn) => { const next = saveCfg(fn(loadCfg())); setCfgState(next) }
@@ -766,15 +888,18 @@ function SettingsPanel() {
     const next = cur.indexOf(jp) === -1 ? cur.concat(jp) : cur.filter((p) => p !== jp)
     return { ...c, watch: { ...c.watch, prefectures: next } }
   })
+  const onVolumeInput = (v) => {
+    setVolDraft(v)
+    if (volTimer.current) clearTimeout(volTimer.current)
+    volTimer.current = setTimeout(() => {
+      volTimer.current = null
+      setVolDraft(null)
+      setCfg((c) => ({ ...c, notify: { ...c.notify, volume: v } }))
+    }, 300)
+  }
+  const volShown = volDraft === null ? cfg.notify.volume : volDraft
 
-  const st = store.status
-  const statusMeta = {
-    idle: { color: '#7c8494', text: '未启动' },
-    connecting: { color: '#d9a406', text: '连接中…' },
-    open: { color: '#4ade80', text: '已连接' },
-    reconnecting: { color: '#d9a406', text: '重连中（第 ' + store.retries + ' 次）' },
-    closed: { color: '#e5484d', text: '已停止' },
-  }[st] || { color: '#7c8494', text: st }
+  const statusMeta = statusMetaOf(store.status, store.retries)
   const dot = h('span', { style: { display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: statusMeta.color, marginRight: 8 } })
 
   const kindColor = { eew: '#e5484d', quake: '#3b82f6', tsunami: '#f76b15' }
@@ -849,10 +974,10 @@ function SettingsPanel() {
       ),
       s.row(s.label('音量'), h('input', {
         type: 'range', min: 0, max: 100,
-        value: Math.round(cfg.notify.volume * 100),
-        onChange: (e) => setCfg((c) => ({ ...c, notify: { ...c.notify, volume: Number(e.target.value) / 100 } })),
+        value: Math.round(volShown * 100),
+        onChange: (e) => onVolumeInput(Number(e.target.value) / 100),
         style: { flex: 1, minWidth: 120 },
-      }), h('span', { style: { color: '#9aa0a6', fontSize: 11, width: 34 } }, Math.round(cfg.notify.volume * 100) + '%')),
+      }), h('span', { style: { color: '#9aa0a6', fontSize: 11, width: 34 } }, Math.round(volShown * 100) + '%')),
       s.row(
         s.btn('试听地震音', () => playSound('quake', cfg.notify.volume)),
         s.btn('试听 EEW 音', () => playSound('eew', cfg.notify.volume)),
@@ -917,7 +1042,7 @@ function SettingsPanel() {
                 }, open ? { boxShadow: 'inset 0 0 0 1px rgba(148,163,184,0.55)' } : null),
               },
                 h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
-                  h('span', { style: { fontWeight: 700, fontSize: 12, color: kindColor[e.kind] || '#dfe3e8' } }, e.label || ''),
+                  h('span', { style: { fontWeight: 700, fontSize: 12, color: kindColor[e.kind] || '#dfe3e8' } }, String(e.label || '')),
                   h('span', { style: { fontSize: 11, border: '1px solid ' + (muted ? '#8b8f98' : '#4ade80'), color: muted ? '#8b8f98' : '#4ade80', borderRadius: 8, padding: '0 6px' } }, statusText),
                   h('span', { style: { color: '#9aa0a6', fontSize: 11, marginLeft: 'auto', whiteSpace: 'nowrap' } }, open ? '▲ 收起' : '▼ 展开')),
                 !open
@@ -925,16 +1050,16 @@ function SettingsPanel() {
                   : h('div', { style: { fontSize: 12, marginTop: 6 } },
                       h('div', { style: { display: 'flex', gap: 6 } },
                         h('span', { style: { color: '#9aa0a6', width: 44 } }, '类型'),
-                        h('span', { style: { color: '#e6e6e8' } }, (e.label || '') + '（code ' + codeNum + '）')),
+                        h('span', { style: { color: '#e6e6e8' } }, String(e.label || '') + '（code ' + codeNum + '）')),
                       h('div', { style: { display: 'flex', gap: 6, marginTop: 2 } },
                         h('span', { style: { color: '#9aa0a6', width: 44 } }, '时间'),
-                        h('span', { style: { color: '#e6e6e8' } }, e.issued || '—')),
+                        h('span', { style: { color: '#e6e6e8' } }, String(e.issued || '—'))),
                       e.pref ? h('div', { style: { display: 'flex', gap: 6, marginTop: 2 } },
                         h('span', { style: { color: '#9aa0a6', width: 44 } }, '命中'),
-                        h('span', { style: { color: '#e6e6e8' } }, e.pref)) : null,
+                        h('span', { style: { color: '#e6e6e8' } }, String(e.pref))) : null,
                       e.suppressedReason ? h('div', { style: { display: 'flex', gap: 6, marginTop: 2 } },
                         h('span', { style: { color: '#9aa0a6', width: 44 } }, '说明'),
-                        h('span', { style: { color: '#e6e6e8' } }, e.suppressedReason)) : null,
+                        h('span', { style: { color: '#e6e6e8' } }, String(e.suppressedReason))) : null,
                       h('div', { style: { display: 'flex', gap: 6, marginTop: 2 } },
                         h('span', { style: { color: '#9aa0a6', width: 44 } }, '内容'),
                         h('span', { style: { color: '#e6e6e8', flex: 1, wordBreak: 'break-all' } }, head)),
@@ -945,6 +1070,20 @@ function SettingsPanel() {
       s.row(s.btn('清空记录', () => { store.events = []; saveJSON(HISTORY_KEY, []); store.push({}) })),
     ),
   )
+}
+
+// ---------- 侧边栏状态指示（DESIGN 第 6 节：连接状态显示在插件图标与设置页） ----------
+function StatusIndicator(props) {
+  const [, setTick] = useState(0)
+  useEffect(() => store.subscribe(() => setTick((t) => t + 1)), [])
+  const meta = statusMetaOf(store.status, store.retries)
+  const wide = Boolean(props && props.wide)
+  return h('div', {
+    title: '灾害预警：' + meta.text + (store.detail ? ' · ' + store.detail : ''),
+    style: { display: 'flex', alignItems: 'center', gap: 6, padding: wide ? '4px 8px' : '4px', fontSize: 12, color: 'inherit', cursor: 'default' },
+  },
+    h('span', { style: { display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: meta.color, flex: '0 0 auto' } }),
+    wide ? h('span', { style: { whiteSpace: 'nowrap' } }, '灾害预警') : null)
 }
 
 // ---------- 插件入口 ----------
@@ -968,11 +1107,15 @@ exports.apply = function apply(ctx) {
     try { if (alertChannel) { alertChannel.close(); alertChannel = null } } catch (err) { /* 忽略 */ }
   }, 'dsh-quake-alert: tab channel')
 
-  // WebSocket 常驻连接（与设置页是否打开无关）
+  // WebSocket 常驻连接（与设置页是否打开无关）。
+  // start() 必须写在 effect 内：若同一 apply 后面的注册抛错，连接也要随 fiber 一起收掉，
+  // 否则会留下一条没有清理器的 socket，直到用户刷新页面。
   const client = createWsClient()
   activeClient = client
-  client.start()
-  ctx.effect(() => () => { try { client.stop() } catch (err) {} }, 'dsh-quake-alert: ws client')
+  ctx.effect(() => {
+    client.start()
+    return () => { try { client.stop() } catch (err) {} }
+  }, 'dsh-quake-alert: ws client')
 
   // 设置页：设置 → 灾害预警
   ctx.slots.inject('settings.section', () => ctx.slots.register({
@@ -981,10 +1124,18 @@ exports.apply = function apply(ctx) {
     order: 60,
     label: () => '灾害预警',
   }, (props) => h(SettingsPanel, { close: props ? props.close : undefined })))
+
+  // 侧边栏底部状态指示（绿/黄/红圆点，悬停显示详情）
+  ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+    name: 'sidebar.footer.action',
+    id: 'quake-alert-status',
+    order: 50,
+    label: () => '灾害预警',
+  }, (props) => h(StatusIndicator, props || {})))
 }
 
 // 单测钩子（客户端宿主忽略额外导出）
-exports.__test = { parse, parseQuake, parseEew, parseTsunami, matchAlert, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, loadHistory, addEvent, handleRaw, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG }
+exports.__test = { parse, parseQuake, parseEew, parseTsunami, matchAlert, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG }
 
 return module.exports;
 } });

@@ -35,6 +35,9 @@ function loadClientEx(seedStorage, opts) {
     setTimeout: o.setTimeout || setTimeout,
     clearTimeout: o.clearTimeout || clearTimeout,
   }
+  // client.js 的 handleRaw 用裸 `document` 判断页面可见性（浏览器里就是 window.document），
+  // 注入 document 的用例需要把它同时挂到沙箱全局，否则永远走「后台」分支。
+  if (windowStub.document) sandbox.document = windowStub.document
   sandbox.window.window = sandbox.window
   windowStub.__ModuleLoader__ = {
     load: ({ id, factory }) => {
@@ -391,6 +394,153 @@ console.log('== 震源情报（无 points）给出明确说明 ==')
   }
   const m = t.matchAlert(t.parse(dest), cfg)
   assert(m.hit === false && m.reason.indexOf('震源情报') !== -1, '未命中原因说明「震源情报，无震度数据，无法按阈值判定」')
+}
+
+console.log('== 震度信息进入 headline（阈值就是按震度设的） ==')
+{
+  const q = T.parse(quakeDetail)
+  assert(q.headline.indexOf('最大震度3') !== -1, '551 headline 含「最大震度3」')
+  const e = T.parse(eew)
+  assert(e.headline.indexOf('预测最大震度5强') !== -1, '556 headline 含「预测最大震度5强」')
+  const dest = T.parse({
+    code: 551, id: 'd2', issue: { type: 'Destination', time: 't' },
+    earthquake: { time: 't', maxScale: -1, hypocenter: { name: '福島県沖', magnitude: 6.2 } }, points: [],
+  })
+  assert(dest.headline.indexOf('震度') === -1, '无震度的震源情报不追加「最大震度未公布」这类噪音')
+}
+console.log('== 配置版本不同不再清空用户配置 ==')
+{
+  const stored = JSON.stringify({
+    version: 999, source: 'sandbox', watch: { prefectures: ['東京都', '京都府'] },
+    thresholds: { quakeScale: 55, eewScale: 50, tsunamiGrade: 'Warning' },
+    notify: { sound: false, system: true, volume: 0.3 }, dedupe: { windowMinutes: 30 },
+  })
+  const { exports: ex, storage } = loadClientEx({ 'dsh.quakeAlert.v1': stored })
+  const cfg = ex.__test.loadCfg()
+  assert(cfg.watch.prefectures.join() === '東京都,京都府', '版本 999 → 关注地区保留')
+  assert(cfg.thresholds.quakeScale === 55 && cfg.thresholds.tsunamiGrade === 'Warning', '阈值保留')
+  assert(cfg.source === 'sandbox' && cfg.notify.volume === 0.3, '数据源与音量保留')
+  assert(JSON.parse(storage.get('dsh.quakeAlert.v1')).version === 1, '写回当前版本号（迁移而非清空）')
+}
+console.log('== 历史字段被污染成对象也不崩渲染层 ==')
+{
+  const dirty = JSON.stringify([
+    { key: 'a', label: { oops: 1 }, headline: { bad: true }, issued: {}, pref: [], suppressedReason: {}, hit: true },
+    { label: 'ok', headline: 42, issued: null, hit: false },
+  ])
+  const h = loadClientEx({ 'dsh.quakeAlert.history': dirty }).exports.__test.loadHistory()
+  assert(h.length === 2, '两条脏记录都被保留')
+  const flat = h.every((e) => ['label', 'headline', 'issued', 'pref', 'suppressedReason'].every((k) => typeof e[k] === 'string'))
+  assert(flat, '渲染用字段全部规整为字符串（React 不会再收到对象/数组）')
+  assert(h[0].hit === true && h[1].hit === false, 'hit 规整为布尔')
+  assert(h[1].key === 'legacy-1', '缺 key 的旧记录补上稳定兜底键')
+}
+console.log('== EEW 取消 / 海啸解除在「此前提醒过」时补提醒 ==')
+{
+  const t = loadClientEx({}).exports.__test
+  const cfg = {
+    watch: { prefectures: [] }, disasters: { earthquake: true, tsunami: true },
+    thresholds: { quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch' },
+    notify: { sound: false, system: false, volume: 0.7 }, dedupe: { windowMinutes: 10 },
+  }
+  const eewMsg = (id, cancelled, scaleTo, eventId) => ({
+    code: 556, id, cancelled, issue: { time: 't', eventId: eventId || 'EV-C1', serial: '1' },
+    earthquake: { hypocenter: { name: '茨城県南部', magnitude: 6.7 } },
+    areas: cancelled ? [] : [{ pref: '茨城', name: '茨城県南部', scaleFrom: scaleTo, scaleTo }],
+  })
+  t.handleRaw(eewMsg('c1', false, 50), cfg)
+  assert(t.store.events[0].hit === true && !t.store.events[0].suppressed, 'EEW 警报 → 提醒')
+  t.handleRaw(eewMsg('c2', true, 0), cfg)
+  assert(t.store.events[0].hit === true && t.store.events[0].headline.indexOf('取消') !== -1, '同一事件随后取消 → 补一条取消提醒')
+  t.handleRaw(eewMsg('c3', true, 0), cfg)
+  assert(t.store.events[0].hit === false, '重复的取消消息不再提醒')
+  t.handleRaw(eewMsg('c4', true, 0, 'EV-C2'), cfg)
+  assert(t.store.events[0].hit === false && t.store.events[0].headline.indexOf('此前未提醒过') !== -1, '未提醒过的事件取消 → 只记历史，不打扰')
+  t.handleRaw(tsunami, cfg)
+  assert(t.store.events[0].hit === true, '海啸警报 → 提醒')
+  t.handleRaw(Object.assign({}, tsunami, { id: 't-clear', cancelled: true, areas: [] }), cfg)
+  assert(t.store.events[0].hit === true && t.store.events[0].headline.indexOf('解除') !== -1, '海啸解除 → 补一条解除提醒')
+}
+console.log('== 通知行为：前台只 toast / 后台系统通知 ==')
+{
+  function stubDom(visibility) {
+    const toasts = []
+    const notes = []
+    const doc = {
+      visibilityState: visibility,
+      body: { appendChild(el) { toasts.push(el); el.parentNode = this }, removeChild() {} },
+      createElement: () => ({ style: {}, appendChild() {}, addEventListener() {}, parentNode: null, textContent: '' }),
+    }
+    class FakeNotification { constructor(title, opts) { notes.push({ title, opts }) } static permission = 'granted' }
+    return { win: { document: doc, Notification: FakeNotification }, toasts, notes }
+  }
+  const raw = readSample('ws-sandbox-20230905-fukushima.json')
+  const cfg = {
+    watch: { prefectures: ['福島県'] }, disasters: { earthquake: true, tsunami: true },
+    thresholds: { quakeScale: 10, eewScale: 45, tsunamiGrade: 'Watch' },
+    notify: { sound: false, system: true, volume: 0.7 }, dedupe: { windowMinutes: 10 },
+  }
+  const fg = stubDom('visible')
+  loadClientEx({}, { window: fg.win }).exports.__test.handleRaw(raw, cfg)
+  assert(fg.toasts.length === 1 && fg.notes.length === 0, '页面可见 → 只弹 toast，不再同时发系统通知')
+  const bg = stubDom('hidden')
+  loadClientEx({}, { window: bg.win }).exports.__test.handleRaw(raw, cfg)
+  assert(bg.toasts.length === 0 && bg.notes.length === 1, '页面后台 → 只发系统通知')
+}
+console.log('== 跨标签页：广播同步事件键，取消消息也能补提醒 ==')
+{
+  const channels = []
+  class FakeBC {
+    constructor(name) { this.name = name; this.onmessage = null; channels.push(this) }
+    postMessage(data) { channels.forEach((c) => { if (c !== this && c.name === this.name && c.onmessage) c.onmessage({ data }) }) }
+    close() {}
+  }
+  const a = loadClientEx({}, { window: { BroadcastChannel: FakeBC } }).exports.__test
+  const b = loadClientEx({}, { window: { BroadcastChannel: FakeBC } }).exports.__test
+  a.ensureAlertChannel()
+  b.ensureAlertChannel()
+  const cfg = {
+    watch: { prefectures: [] }, disasters: { earthquake: true, tsunami: true },
+    thresholds: { quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch' },
+    notify: { sound: false, system: false, volume: 0.7 }, dedupe: { windowMinutes: 10 },
+  }
+  const mk = (id, cancelled) => ({
+    code: 556, id, cancelled, issue: { time: 't', eventId: 'EV-TAB', serial: '1' },
+    earthquake: { hypocenter: { name: '茨城県南部', magnitude: 6.7 } },
+    areas: cancelled ? [] : [{ pref: '茨城', name: '茨城県南部', scaleFrom: 50, scaleTo: 50 }],
+  })
+  a.handleRaw(mk('tab-1', false), cfg)
+  assert(a.store.events[0].hit === true && !a.store.events[0].suppressed, '标签页 A 播报警报')
+  b.handleRaw(mk('tab-1', false), cfg)
+  assert(b.store.events[0].suppressed === true, '标签页 B 同一条消息被跨页去重')
+  b.handleRaw(mk('tab-2', true), cfg)
+  assert(b.store.events[0].hit === true && b.store.events[0].headline.indexOf('取消') !== -1, 'B 经广播拿到事件键，收到取消也能补提醒')
+}
+console.log('== toast 颜色按命中区域强度，而非全日本最大值 ==')
+{
+  const t = loadClientEx({}).exports.__test
+  const cfg = {
+    watch: { prefectures: ['熊本県'] }, disasters: { earthquake: true, tsunami: true },
+    thresholds: { quakeScale: 20, eewScale: 45, tsunamiGrade: 'Watch' },
+    notify: { sound: false, system: false, volume: 0.7 }, dedupe: { windowMinutes: 10 },
+  }
+  t.handleRaw({
+    code: 551, id: 'sev-1', issue: { type: 'DetailScale', time: 't' },
+    earthquake: { time: 't', maxScale: 60, hypocenter: { name: '熊本県熊本地方', magnitude: 5 } },
+    points: [{ pref: '熊本県', addr: '熊本市', scale: 20 }, { pref: '福岡県', addr: '福岡市', scale: 60 }],
+  }, cfg)
+  assert(t.store.events[0].severity === 'info', '命中熊本（震度2）→ severity=info，而不是全日本最大 6弱 的 red')
+}
+console.log('== 沙箱真实推送样本纳入回归 ==')
+{
+  const raw = readSample('ws-sandbox-20230905-fukushima.json')
+  const a = T.parse(raw)
+  assert(a && a.code === 551 && a.regions[0].pref === '福島県', '沙箱实测样本（福島県沖 M4.0）解析出福島県')
+  const m = T.matchAlert(a, {
+    watch: { prefectures: ['福島県'] }, disasters: { earthquake: true, tsunami: true },
+    thresholds: { quakeScale: 10, eewScale: 45, tsunamiGrade: 'Watch' }, notify: {}, dedupe: { windowMinutes: 10 },
+  })
+  assert(m.hit === true, '关注福島県时该样本命中')
 }
 
 console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败')

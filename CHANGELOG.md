@@ -2,6 +2,50 @@
 
 本文件记录 dsh-quake-alert 的显著变更，格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.1.3] - 2026-09-10
+
+审查（0.1.2 之后）修复版本：补回提醒里的震度信息、把取消 / 解除消息纳入提醒、加固配置迁移与历史渲染，并加上侧边栏连接状态指示。
+
+### Added
+
+- **取消 / 解除提醒**：此前提醒过的 EEW 被取消、或海啸预报被解除时，补一条下行音提醒（标题「紧急地震速报已取消」/「海啸预报已解除」），说明先前的警报已作废；未曾提醒过的事件只记历史、不打扰。跨标签页经 `BroadcastChannel` 同步事件键，任一标签页都能正确判断
+- **侧边栏连接状态指示**：注册到 `sidebar.footer.action` 的状态圆点（绿＝已连接 / 黄＝连接中·重连中 / 红＝已停止），悬停显示详情；与设置页共用同一份状态映射
+- 音效新增 `cancel`（下行音），用于取消 / 解除提醒
+
+### Fixed
+
+- **提醒里看不到震度**（P1）：0.1.2 删除 `second` 字段后，551 / 556 的 headline 只剩「震源 X · M」。现在 551 追加「· 最大震度3」、556 追加「· 预测最大震度5强」；无震度的震源情报不追加噪音
+- **配置版本变化会清空用户配置**（P2）：`loadCfg()` 原本在 `version` 不等于当前值时直接写回默认值，一次版本号变化就会静默丢掉用户选好的关注地区与阈值。改为按当前 schema 逐字段归一、保留可识别字段后再写回当前版本号
+- **历史记录字段被污染会崩设置页**（P2）：`label` / `issued` / `pref` / `suppressedReason` 若是对象或数组，会原样交给 React 抛「Objects are not valid as a React child」。现在读入与写入都经 `normalizeHistoryEntry` 规整为字符串 / 布尔，渲染层再 `String()` 兜底；缺 `key` 的旧记录补 `legacy-N` 兜底键
+- **前台同时弹 toast 与系统通知**（P2）：与 DESIGN 第 7 节「可见 → toast，后台 → 系统通知」不符。现在页面可见只弹 toast，后台才发系统通知（不可用时回退 toast），也不再出现系统通知失败后重复弹第二条 toast
+- **取消消息静默**（P2）：EEW 取消 / 海啸解除此前一律只记历史，用户不知道已发出的警报作废
+- **`client.start()` 在 `ctx.effect` 之外**（P2）：若同一 `apply` 后续注册抛错，会留下一条没有清理器的 WebSocket 连接。改为在 effect 内 start、卸载时 stop
+- **去重窗口在系统时间回拨时失效**（P3）：`seen` / `eventSeen` / `tabAlerted` 的清理条件补上 `v > now`
+- **toast 颜色按全日本最大震度**（P3）：改为按命中区域的实测 / 预测震度着色，关注县震度低时不再显示成红色
+
+### Changed
+
+- 音量滑块改为本地草稿 + 300ms 防抖落盘，拖动时不再每移动 1px 写一次 localStorage
+- 设置页监听 `storage` 事件：其它 DSH 标签页改了配置后本页立即同步
+- 回归断言从 105 项扩展到 130 项：新增震度 headline、配置版本迁移、脏历史字段规整、EEW 取消 / 海啸解除、前台·后台通知分支、跨标签页取消同步、命中区域着色，并把沙箱实测样本 `ws-sandbox-20230905-fukushima.json` 纳入回归
+- `scaleText()` 从死代码变为 headline 的震度来源
+
+## [0.1.2] - 2026-09-09
+
+0.1.1 审查后的收尾版本：修掉一处文案错误、清理死代码、把测试组件纳入仓库，并为 README 增加英 / 中 / 日三语版本。
+
+### Fixed
+
+- EEW 未携带区域数据时提示「本条为震源情报」——措辞错（EEW 不是震源情报）→ 按 `kind` 区分：EEW 提示「本条 EEW 未携带区域数据，无法按阈值判定」
+
+### Changed
+
+- 清理死代码与未用字段：`unique()`、`prefOfName()`（区域归一改造后已无消费者）、Alert 的 `second` 字段
+- 同步 DESIGN.md：Alert 模型字段对齐实现（`issued` / `hypo` / `eventKey` / `strength`）、新增区域名归一与三层去重说明、M1 标记为已达成、修正「无需自建地理数据」的旧结论
+- **测试组件纳入仓库**：`tests/`（`sync-test.cjs`、`area-tables.cjs`）与 `samples/`（5 个真实消息样本 + 说明）从 `.gitignore` 移出。入库前已扫描确认：无本地绝对路径、无凭据 / 密钥、无 `eval` / `child_process` / 网络请求、无编码 payload、无控制字符、无 BOM；唯一外部 URL 是注释中的 P2PQuake 规格文档链接。样本与区域表均为公开信息（P2PQuake 公开 API / 気象庁 公开区域名称），克隆仓库后可直接运行 105 项回归测试
+- README 提供三语版本：英文为 `README.md`（主），新增 `README.zh.md`（中文）与 `README.ja.md`（日语），三份文档顶部互相链接；README 同步说明 `samples/` / `tests/` 随仓库分发、`DESIGN.md` 不上传仓库
+- `package.json` 的 `files` 补上 `CHANGELOG.md` 与两份 README 译文，使其随 npm 包分发
+
 ## [0.1.1] - 2026-09-09
 
 代码审查后的修复版本：修掉一处「勾选了关注却收不到预警」的静默漏报，加固 localStorage 读取，
@@ -27,7 +71,6 @@
 - `notificationSupported()` 原用 `'Notification' in window` 判断，属性存在但值不是构造函数时会误判并在发送通知时抛错 → 改为 `typeof window.Notification === 'function'`
 - 删除两处死代码：`alert.kind !== 'other'`（恒为真）与 Host 半边空的 `ctx.on('dispose')` 监听
 - toast 的 z-index 由 2147483000 降为 2000：高于 DSH 前端自身层级（最高约 1100），但不再用极端值压住一切
-- EEW 未携带区域数据时提示「本条为震源情报」——措辞错（EEW 不是震源情报）→ 按 `kind` 区分：EEW 提示「本条 EEW 未携带区域数据，无法按阈值判定」
 
 ### Added
 
@@ -38,12 +81,6 @@
 
 - 回归测试从 33 项扩展到 105 项：新增気象庁 188 个 EEW 区域名与 66 个津波予報区全量归一断言、存储与原型链污染注入、事件级去重与强度升级、跨标签页去重、重连状态机等用例
 - README 修正「EEW 延迟约 70ms 级」的说法（实测样本从气象厅发布到 P2PQuake 转播约 811ms，改为「数百毫秒级」），并补充智能去重、多标签页连接数、震源情报三项说明
-- 清理死代码与未用字段：`unique()`、`prefOfName()`（区域归一改造后已无消费者）、Alert 的 `second` 字段
-- 同步 DESIGN.md：Alert 模型字段对齐实现（`issued` / `hypo` / `eventKey` / `strength`）、新增区域名归一与三层去重说明、M1 标记为已达成、修正「无需自建地理数据」的旧结论
-- README 补充说明 `samples/` / `tests/` 随仓库分发、`DESIGN.md` 不上传仓库
-- **测试组件纳入仓库**：`tests/`（`sync-test.cjs`、`area-tables.cjs`）与 `samples/`（5 个真实消息样本 + 说明）从 `.gitignore` 移出。入库前已扫描确认：无本地绝对路径、无凭据 / 密钥、无 `eval` / `child_process` / 网络请求、无编码 payload、无控制字符、无 BOM；唯一外部 URL 是注释中的 P2PQuake 规格文档链接。样本与区域表均为公开信息（P2PQuake 公开 API / 気象庁 公开区域名称），克隆仓库后可直接运行 105 项回归测试
-- `package.json` 的 `files` 补上 `CHANGELOG.md`，使变更日志随 npm 包分发
-- README 提供三语版本：英文为 `README.md`（主），新增 `README.zh.md`（中文）与 `README.ja.md`（日语），三份文档顶部互相链接；`package.json` 的 `files` 同步加入两份译文
 
 ## [0.1.0] - 2026-09-08
 
