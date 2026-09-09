@@ -1,0 +1,62 @@
+{
+  "name": "dsh-quake-alert",
+  "version": "0.1.0",
+  "description": "灾害预警 QuakeAlert：用户使用 DSH 时，实时接收日本地震/海啸预警（P2PQuake WebSocket），按关注地区与阈值匹配后以系统通知+提示音提醒。",
+  "private": false,
+  "type": "module",
+  "license": "MIT",
+  "author": "XuZhichao",
+  "engines": {
+    "node": ">=22.19.0",
+    "dsh": ">=0.1.0-rc.6"
+  },
+  "files": [
+    "lib",
+    "client",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "earthquake",
+    "tsunami",
+    "eew",
+    "p2pquake",
+    "disaster-alert",
+    "灾害预警",
+    "地震"
+  ],
+  "dsh": {
+    "category": "extension",
+    "displayName": "灾害预警 QuakeAlert",
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-theme"
+      ],
+      "platform": "web"
+    }
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "check": "node --check lib/index.js && node --check client/client.js"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  }
+}
