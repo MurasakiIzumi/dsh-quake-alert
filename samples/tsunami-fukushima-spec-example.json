@@ -1,0 +1,23 @@
+{
+  "code": 552,
+  "id": "spec-example-20190618-fukushima",
+  "cancelled": false,
+  "issue": { "source": "気象庁", "time": "2019/06/18 22:24:00", "type": "Focus" },
+  "areas": [
+    {
+      "grade": "Warning",
+      "immediate": true,
+      "name": "福島県",
+      "firstHeight": { "condition": "津波到達中と推測" },
+      "maxHeight": { "description": "３ｍ", "value": 3 }
+    },
+    {
+      "grade": "Watch",
+      "immediate": false,
+      "name": "青森県太平洋沿岸",
+      "firstHeight": { "arrivalTime": "2019/06/18 22:40:00" },
+      "maxHeight": { "description": "１ｍ", "value": 1 }
+    }
+  ],
+  "time": "2019/06/18 22:24:00.000"
+}

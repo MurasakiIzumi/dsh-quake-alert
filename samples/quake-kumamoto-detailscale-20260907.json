@@ -1,0 +1,30 @@
+{
+  "code": 551,
+  "id": "6a9ec94be88ee598246bf2d6",
+  "issue": { "type": "DetailScale", "time": "2026/09/07 23:25:14", "correct": "None", "source": "気象庁" },
+  "earthquake": {
+    "time": "2026/09/07 23:21:00",
+    "hypocenter": { "name": "熊本県熊本地方", "latitude": 32.5, "longitude": 130.6, "depth": 10, "magnitude": 3.8 },
+    "maxScale": 30,
+    "domesticTsunami": "None",
+    "foreignTsunami": "Unknown"
+  },
+  "points": [
+    { "addr": "上天草市大矢野町", "isArea": false, "pref": "熊本県", "scale": 30 },
+    { "addr": "上天草市龍ヶ岳町", "isArea": false, "pref": "熊本県", "scale": 20 },
+    { "addr": "八代市新地町", "isArea": false, "pref": "熊本県", "scale": 20 },
+    { "addr": "八代市平山新町", "isArea": false, "pref": "熊本県", "scale": 20 },
+    { "addr": "水俣市牧ノ内", "isArea": false, "pref": "熊本県", "scale": 10 },
+    { "addr": "芦北町芦北", "isArea": false, "pref": "熊本県", "scale": 20 },
+    { "addr": "雲仙市小浜町雲仙", "isArea": false, "pref": "長崎県", "scale": 20 },
+    { "addr": "南島原市口之津町", "isArea": false, "pref": "長崎県", "scale": 10 },
+    { "addr": "長島町獅子島", "isArea": false, "pref": "鹿児島県", "scale": 20 },
+    { "addr": "鹿児島出水市高尾野町", "isArea": false, "pref": "鹿児島県", "scale": 10 },
+    { "addr": "西都市上の宮", "isArea": false, "pref": "宮崎県", "scale": 10 },
+    { "addr": "延岡市北川町川内名白石", "isArea": false, "pref": "宮崎県", "scale": 10 }
+  ],
+  "time": "2026/09/07 23:25:15.24",
+  "timestamp": { "convert": "2026/09/07 23:25:15.226", "register": "2026/09/07 23:25:15.24" },
+  "user_agent": "jmaxml-seis-parser-go, relay, register-api",
+  "ver": "20231023"
+}

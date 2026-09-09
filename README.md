@@ -1,88 +1,92 @@
-# dsh-quake-alert · 灾害预警 QuakeAlert
+# dsh-quake-alert · QuakeAlert
 
-> DeepSeek Harness（DSH）灾害预警插件：你在使用 DSH 时，实时接收日本地震 / 海啸预警（P2PQuake 推送），按你关注地区与阈值匹配命中后，以提示音 + 页面 toast + 系统通知提醒。
+**English** · [中文](./README.zh.md) · [日本語](./README.ja.md)
 
-⚠️ **免责声明（请先阅读）**：预警数据由 [P2PQuake](https://www.p2pquake.net/) 转播，非气象厅官方直接数据源；紧急地震速报（EEW）等内容与配信品质无保证。本插件提醒**仅供参考**，避险请以日本气象厅（気象庁）官方发布为准。插件仅在 DSH 页面开启时工作。
+> A DeepSeek Harness (DSH) plugin that delivers real-time Japanese earthquake and tsunami alerts (relayed by P2PQuake) while you are using DSH. When an alert matches the regions and thresholds you configured, it notifies you with an alert tone, an in-page toast, and a system notification.
 
-## 功能特性
+⚠️ **Disclaimer — please read first**: Alert data is relayed by [P2PQuake](https://www.p2pquake.net/), not a direct official feed from the Japan Meteorological Agency (JMA). The content and delivery quality of Earthquake Early Warnings (EEW) are not guaranteed. Alerts from this plugin are **for reference only**; for evacuation decisions always follow the official announcements of the JMA (気象庁). The plugin works only while a DSH page is open.
 
-- **实时推送**：WebSocket 长连接 P2PQuake，收到预警第一时间解析（EEW 从气象厅发布到 P2PQuake 转播通常为数百毫秒级）
-- **断线自动重连**：指数退避（1s → 60s 封顶），P2PQuake 每约 10 分钟强制断线属常态，无需干预
-- **灾害类型**：地震情报（551）、紧急地震速报 EEW（556）、海啸预报（552）
-- **关注地区**：日本 47 都道府县多选；未选择时默认提醒全日本
-- **提醒阈值**：地震按实测震度、EEW 按预测震度、海啸按等级（注意报 / 警报 / 大海啸警报）分别设置
-- **通知方式**：提示音（Web Audio 合成，地震 / EEW / 海啸三种音色）+ 音量可调；页面可见时 toast，后台时系统通知
-- **数据源切换**：正式源（实时）与沙箱源（回放 2023 年历史，约 30 秒/条，用于测试）
-- **智能去重**：同一次地震的多次发布（震度速报 → 各地震度、EEW 多报）只提醒一次，仅在震度升级时再次提醒；多开 DSH 页面时也只有一个标签页响铃
-- **历史记录**：最近 30 条处理记录（含未达阈值未提醒的条目），点击条目展开详情
-- 配置存于浏览器 localStorage，零系统依赖，纯浏览器方案
+## Features
 
-## 工作原理
+- **Real-time push**: a persistent WebSocket connection to P2PQuake; alerts are parsed as soon as they arrive (EEW typically reaches P2PQuake a few hundred milliseconds after the JMA issues it).
+- **Automatic reconnection**: exponential backoff (1s → capped at 60s). P2PQuake force-closes connections about every 10 minutes, so reconnecting is normal and needs no intervention.
+- **Disaster types**: earthquake reports (code 551), Earthquake Early Warnings (code 556), and tsunami forecasts (code 552).
+- **Watch regions**: pick any of Japan's 47 prefectures; leaving the list empty means all of Japan.
+- **Alert thresholds**: configured separately for earthquake intensity (observed), EEW intensity (predicted), and tsunami grade (advisory / warning / major warning).
+- **Notifications**: synthesized alert tones (Web Audio, one per disaster type) with adjustable volume; in-page toast when the page is visible, system notification when it is in the background.
+- **Data source switch**: production (live) or sandbox (replays 2023 history, roughly one message every 30 seconds, for testing).
+- **Smart de-duplication**: multiple releases for the same earthquake (intensity prompt → detailed intensity report, or successive EEW updates) notify you only once, and again only when the intensity is upgraded. With several DSH pages open, only one tab plays the alert.
+- **History**: the most recent 30 processed messages, including entries that did not reach the threshold; click an entry to expand its details.
+- Configuration is stored in browser localStorage — no system dependencies, pure browser.
+
+## How it works
 
 ```
-P2PQuake WebSocket ──▶ 解析器（code → 统一预警对象）
+P2PQuake WebSocket ──▶ parser (code → unified alert object)
                             │
                             ▼
-                   匹配引擎（关注地区 × 阈值 × 三层去重）
-                            │ 命中
+                  matcher (watch regions × thresholds × 3-layer dedupe)
+                            │ hit
                             ▼
-             通知：提示音 + toast（前台）/ 系统通知（后台）
+            notify: tone + toast (foreground) / system notification (background)
                             │
                             ▼
-                最近预警记录（localStorage 持久化）
+                recent alert history (persisted in localStorage)
 ```
 
-- 全部逻辑在浏览器端（Client 半边），Host 半边仅保留插件装载所需的空壳。
-- WebSocket 消息与 HTTP `/history` 返回内容一致，但 id 字段名不同（WS 为 `_id`），解析器两者兼容。
-- 区域名归一：EEW / 海啸消息里的区域名（如 `上川地方北部`、`東京湾内湾`）先经显式区域表、再按 47 都道府县名做前缀匹配，最后用 EEW 的府県予報区名兜底，确保关注某县即可收到该县预警；跨县区域（如 `有明・八代海`）会展开为多个县分别判定。
-- 三层去重：① 消息 id（防重连重放）② 事件键（同一地震的多次发布；强度升级时穿透，仍会再次提醒）③ 跨标签页（`BroadcastChannel`，只由一个页面播报）。
+- All logic runs in the browser (the Client half); the Host half is only an empty shell required to load the plugin row.
+- WebSocket messages carry the same payload as the HTTP `/history` endpoint, but the id field name differs (WS uses `_id`); the parser accepts both.
+- Region normalization: area names in EEW / tsunami messages (such as `上川地方北部` or `東京湾内湾`) are resolved through an explicit area table, then by prefix-matching the 47 prefecture names, and finally by the EEW prefecture forecast name. This guarantees that watching a prefecture actually catches its alerts. Areas spanning several prefectures (such as `有明・八代海`) are expanded and evaluated per prefecture.
+- Three-layer de-duplication: ① message id (guards against replay after a reconnect) ② event key (multiple releases of the same earthquake; an intensity upgrade still breaks through and alerts again) ③ cross-tab (`BroadcastChannel`, so only one page plays the alert).
 
-## 安装
+## Installation
 
 ```sh
-# 从目录安装（开发模式：改代码后重启 dsh web 生效，无需重新安装）
-dsh plugin --profile web add link:此仓库目录
+# Install from a local directory (development mode: restart dsh web after code changes, no reinstall needed)
+dsh plugin --profile web add link:/path/to/this/repo
 
-# 重启 dsh web 使插件生效
+# Restart dsh web to activate the plugin
 ```
 
-## 使用
+## Usage
 
-1. 打开 **设置 → 灾害预警**。
-2. **关注地区**：点选你所在 / 关注的都道府县（不选 = 提醒全日本）。
-3. **提醒阈值**：设置地震 / EEW / 海啸的最低提醒档位，避免无关打扰。
-4. **通知与声音**：开启提示音 / 系统通知，调节音量；可用「试听」按钮验证音色，「测试系统通知」授权并验证。
-5. **数据源**：日常保持「正式」；想验证链路或看效果时切「沙箱」（约 30 秒收到一条 2023 年历史回放）。
+1. Open **Settings → Disaster Alerts** (灾害预警).
+2. **Watch regions**: select the prefectures you live in or care about (leave empty for all of Japan).
+3. **Alert thresholds**: set the minimum level for earthquake / EEW / tsunami alerts to avoid unnecessary interruptions.
+4. **Notifications and sound**: enable the alert tone and/or system notifications and adjust the volume. Use the preview buttons to check the tones, and "Test system notification" to grant permission and verify delivery.
+5. **Data source**: keep "Production" for daily use; switch to "Sandbox" to verify the pipeline or see it in action (about one 2023 replay every 30 seconds).
 
-收到命中预警时：提示音 + 前台 toast 或后台系统通知，并记录到「最近预警记录」。
+When an alert matches, you get a tone plus a foreground toast or a background system notification, and the event is recorded in "Recent alerts".
 
-## 已知限制
+## Known limitations
 
-- 插件随 DSH 页面运行：页面关闭则停止；浏览器若冻结后台标签页，通知可能延迟。
-- 多开 DSH 页面时每个页面各维持一条 WebSocket 连接（提醒已通过 BroadcastChannel 去重，但连接数随标签页数增加）。
-- 震源情报（551 的「震源情报 / 远地地震」）不含震度数据，无法按阈值判定，只会记录到「最近预警」并标注说明。
-- 系统通知权限需首次点击「测试系统通知」授权；提示音需一次用户交互后可用（浏览器自动播放策略）。
-- 目前覆盖日本地区（地震 / 海啸）；泥石流、洪水等与全球数据源为后续版本规划。
-- 沙箱回放的历史多为低震度小地震，默认「震度4以上」阈值下可能长时间无命中属正常。
+- The plugin runs with the DSH page: closing the page stops it, and browsers may throttle background tabs, delaying notifications.
+- With several DSH pages open, each page keeps its own WebSocket connection (alerts are de-duplicated via BroadcastChannel, but the number of connections grows with the number of tabs).
+- Hypocenter-only reports (551 "hypocenter information" / "distant earthquake") carry no intensity data and cannot be evaluated against thresholds; they are recorded in "Recent alerts" with an explanatory note.
+- System notification permission must be granted once via "Test system notification"; the alert tone requires one user interaction before the browser allows it (autoplay policy).
+- Coverage is currently Japan (earthquakes / tsunamis); landslides, floods, and global data sources are planned for later versions.
+- The sandbox replays mostly small, low-intensity earthquakes, so long periods without a match under the default "intensity 4 or higher" threshold are expected.
 
-## 开发
+## Development
 
 ```
-client/client.js      # 全部逻辑（DSH 模块加载器格式，单文件分节）
-lib/index.js          # Host 半边（M1 空壳；M2 用于 settings 机器级持久化）
-cordis.patch.yml      # 插件行 insert 声明
-tests/sync-test.cjs   # 解析器/匹配引擎/区域归一回归测试（node 直接运行，无需浏览器）
-tests/area-tables.cjs # 気象庁 区域名 / 津波予報区 → 都道府县 期望值（测试数据）
+client/client.js      # all logic (DSH module-loader format, single file in sections)
+lib/index.js          # Host half (empty shell in M1; used in M2 for machine-level settings persistence)
+cordis.patch.yml      # plugin row insert declaration
+tests/sync-test.cjs   # regression tests for parser / matcher / region normalization (plain node, no browser)
+tests/area-tables.cjs # JMA area names and tsunami forecast areas → expected prefectures (test data)
 ```
 
 ```sh
-node --check client/client.js && node --check lib/index.js   # 语法检查
-node tests/sync-test.cjs                                     # 回归测试（105 项断言）
+node --check client/client.js && node --check lib/index.js   # syntax check
+node tests/sync-test.cjs                                     # regression tests (105 assertions)
 ```
 
-## 更新记录
+> `samples/` and `tests/` ship with the repository (plain-text test assets with no external dependencies and no network access), so the regression tests above run right after cloning. They are not part of the npm package (not listed in `package.json` `files`). `DESIGN.md` is an internal design document and is not uploaded to the repository.
 
-当前版本 **0.1.1**。各版本的变更明细见 [CHANGELOG.md](./CHANGELOG.md)。
+## Changelog
+
+Current version **0.1.1**. See [CHANGELOG.md](./CHANGELOG.md) for the details of each release.
 
 ## License
 

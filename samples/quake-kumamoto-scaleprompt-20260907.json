@@ -1,0 +1,19 @@
+{
+  "code": 551,
+  "id": "6a9ec8c5e88ee598246bf2d4",
+  "issue": { "type": "ScalePrompt", "time": "2026/09/07 23:23:00", "correct": "None", "source": "気象庁" },
+  "earthquake": {
+    "time": "2026/09/07 23:21:00",
+    "hypocenter": { "name": "", "latitude": -200, "longitude": -200, "depth": -1, "magnitude": -1 },
+    "maxScale": 30,
+    "domesticTsunami": "Checking",
+    "foreignTsunami": "Unknown"
+  },
+  "points": [
+    { "addr": "熊本県天草・芦北", "isArea": true, "pref": "熊本県", "scale": 30 }
+  ],
+  "time": "2026/09/07 23:23:01.848",
+  "timestamp": { "convert": "2026/09/07 23:23:01.626", "register": "2026/09/07 23:23:01.848" },
+  "user_agent": "jmaxml-seis-parser-go, relay, register-api",
+  "ver": "20231023"
+}

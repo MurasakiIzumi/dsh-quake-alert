@@ -1,0 +1,19 @@
+{
+  "code": 551,
+  "id": "6a9ed234e72797fa8af9fa91",
+  "issue": { "type": "DetailScale", "time": "2023/09/05 06:16:32", "correct": "None", "source": "気象庁" },
+  "earthquake": {
+    "time": "2023/09/05 06:12:00",
+    "hypocenter": { "name": "福島県沖", "latitude": 37.1, "longitude": 141.7, "depth": 40, "magnitude": 4 },
+    "maxScale": 10,
+    "domesticTsunami": "None",
+    "foreignTsunami": "Unknown"
+  },
+  "points": [
+    { "addr": "白河市新白河", "isArea": false, "pref": "福島県", "scale": 10 }
+  ],
+  "time": "2026/09/08 00:03:16.886",
+  "timestamp": { "convert": "2026/09/08 00:03:16.86", "register": "2026/09/08 00:03:16.886" },
+  "user_agent": "jmaxml-seis-parser-go, relay, register-api",
+  "ver": "20220813"
+}

@@ -164,9 +164,9 @@ function saveCfg(cfg) {
 }
 
 // ---------- 解析器：P2PQuake code → Alert ----------
-// Alert = { id, code, kind, kindLabel, severity, issued, headline, second,
-//           regions:[{pref, area, scale?, grade?}], cancelled,
-//           eventKey, strength }  // eventKey 归并同一地震的多次发布，strength 用于强度升级判定
+// Alert = { id, code, kind, kindLabel, severity, issued, headline, maxScale, hypo,
+//           regions:[{pref, area, scale?, grade?}], cancelled, eventKey, strength }
+//           eventKey 归并同一地震的多次发布，strength 用于强度升级判定
 // 区域名 → 都道府县全称。
 // 551 的 points[].pref 本身就是县全称，可直接用；但 556 的 areas[].name 与 552 的
 // areas[].name 是「区域名」，其中一部分不含都道府县名（北海道用地方名、东京都用岛屿名、
@@ -231,11 +231,6 @@ function prefsOfArea(name, forecastPref) {
   }
   return []
 }
-// 单值兼容包装：无法归一时保留原名
-function prefOfName(name) {
-  const list = prefsOfArea(name)
-  return list.length ? list[0] : String(name || '')
-}
 // 把一个区域展开成 region 条目；跨县区域展开为多条，无法归一时 pref='' 并标记
 function regionsOfArea(name, forecastPref, value, valueKey) {
   const area = name || ''
@@ -251,7 +246,6 @@ function regionsOfArea(name, forecastPref, value, valueKey) {
     return region
   })
 }
-const unique = (arr) => Array.from(new Set(arr.filter(Boolean)))
 const scaleText = (v) => own(SCALE_TEXT, v) || (typeof v === 'number' && v > 0 ? '震度' + Math.floor(v / 10) : '未公布')
 const severityOfScale = (v) => {
   if (typeof v !== 'number' || v <= 0) return 'info'
@@ -274,13 +268,12 @@ function parseQuake(raw) {
   const headline = hasHypo
     ? '震源 ' + hypo.name + ' · M' + (typeof hypo.magnitude === 'number' ? hypo.magnitude : '—')
     : (own(labelMap, type) || '地震情报')
-  const second = '最大震度 ' + scaleText(eq.maxScale)
   return {
     id: String(raw.id || raw._id || ''), code: 551, kind: 'quake',
     kindLabel: own(labelMap, type) || '地震情报',
     severity: severityOfScale(eq.maxScale),
     issued: (raw.issue && raw.issue.time) || raw.time || '',
-    headline, second,
+    headline,
     maxScale: typeof eq.maxScale === 'number' ? eq.maxScale : -1,
     // 事件级去重键：同一次地震的速报 / 震源 / 详报共享 earthquake.time（551 没有 issue.eventId）
     eventKey: eq.time ? 'quake:' + eq.time : '',
@@ -304,7 +297,6 @@ function parseEew(raw) {
     severity: cancelled ? 'info' : 'red',
     issued: (raw.issue && raw.issue.time) || raw.time || '',
     headline: cancelled ? '本警报已取消' : '震源 ' + (hypo.name || '—') + ' · M' + (typeof hypo.magnitude === 'number' ? hypo.magnitude : '—'),
-    second: cancelled ? '' : '预测最大震度 ' + scaleText(maxTo) + ' · 覆盖 ' + areas.length + ' 个区域',
     maxScale: maxTo,
     // EEW 的多报共享 issue.eventId（serial 递增），用它做事件级去重
     eventKey: (raw.issue && raw.issue.eventId) ? 'eew:' + raw.issue.eventId : '',
@@ -331,7 +323,6 @@ function parseTsunami(raw) {
     severity: cancelled ? 'info' : (worst >= 2 ? 'red' : 'orange'),
     issued: (raw.issue && raw.issue.time) || raw.time || '',
     headline: cancelled ? '海啸预报已解除' : lines.join('；'),
-    second: areas.length + ' 个海啸预报区',
     maxScale: worst,
     // 海啸预报没有可归并的事件 id（issue 只有 source/time/type），保持逐条判定
     eventKey: '',
@@ -375,7 +366,14 @@ function matchAlert(alert, cfg) {
     if ((cfg.disasters || {}).earthquake === false) return { hit: false, reason: '地震提醒已关闭' }
     if (alert.cancelled) return { hit: false, reason: '取消消息不提醒' }
     // 551 的「震源情报 / 远地地震」没有 points，无从按震度判定——明确说明，避免用户误以为链路故障
-    if (alert.regions.length === 0) return { hit: false, reason: '本条为震源情报，无震度数据，无法按阈值判定' }
+    if (alert.regions.length === 0) {
+      return {
+        hit: false,
+        reason: alert.kind === 'eew'
+          ? '本条 EEW 未携带区域数据，无法按阈值判定'
+          : '本条为震源情报，无震度数据，无法按阈值判定',
+      }
+    }
     const threshold = alert.kind === 'eew' ? t.eewScale : t.quakeScale
     const hitRegion = alert.regions.find((r) => regionInWatch(r, w) && typeof r.scale === 'number' && r.scale >= threshold)
     return hitRegion
@@ -986,7 +984,7 @@ exports.apply = function apply(ctx) {
 }
 
 // 单测钩子（客户端宿主忽略额外导出）
-exports.__test = { parse, parseQuake, parseEew, parseTsunami, matchAlert, prefOfName, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, loadHistory, addEvent, handleRaw, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG }
+exports.__test = { parse, parseQuake, parseEew, parseTsunami, matchAlert, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, loadHistory, addEvent, handleRaw, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG }
 
 return module.exports;
 } });

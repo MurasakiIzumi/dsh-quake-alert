@@ -1,0 +1,36 @@
+{
+  "code": 556,
+  "id": "6a89d5c5e88ee598246bf246",
+  "cancelled": false,
+  "earthquake": {
+    "originTime": "2026/08/23 02:00:42",
+    "arrivalTime": "2026/08/23 02:00:50",
+    "condition": "",
+    "hypocenter": { "name": "茨城県南部", "latitude": 36, "longitude": 140.1, "depth": 50, "magnitude": 6.7 }
+  },
+  "issue": { "time": "2026/08/23 02:00:53", "eventId": "20260823020050", "serial": "1" },
+  "areas": [
+    { "arrivalTime": "2026/08/23 02:00:55", "kindCode": "10", "name": "茨城県南部", "pref": "茨城", "scaleFrom": 50, "scaleTo": 50 },
+    { "arrivalTime": "2026/08/23 02:00:56", "kindCode": "10", "name": "千葉県北西部", "pref": "千葉", "scaleFrom": 50, "scaleTo": 50 },
+    { "arrivalTime": "2026/08/23 02:00:57", "kindCode": "10", "name": "埼玉県南部", "pref": "埼玉", "scaleFrom": 50, "scaleTo": 50 },
+    { "arrivalTime": "2026/08/23 02:00:58", "kindCode": "10", "name": "茨城県北部", "pref": "茨城", "scaleFrom": 50, "scaleTo": 50 },
+    { "arrivalTime": "2026/08/23 02:00:58", "kindCode": "10", "name": "東京都２３区", "pref": "東京", "scaleFrom": 45, "scaleTo": 50 },
+    { "arrivalTime": "2026/08/23 02:00:58", "kindCode": "10", "name": "千葉県北東部", "pref": "千葉", "scaleFrom": 45, "scaleTo": 45 },
+    { "arrivalTime": "2026/08/23 02:00:59", "kindCode": "10", "name": "栃木県南部", "pref": "栃木", "scaleFrom": 45, "scaleTo": 45 },
+    { "arrivalTime": "2026/08/23 02:01:02", "kindCode": "10", "name": "群馬県南部", "pref": "群馬", "scaleFrom": 45, "scaleTo": 45 },
+    { "arrivalTime": "2026/08/23 02:01:03", "kindCode": "10", "name": "神奈川県東部", "pref": "神奈川", "scaleFrom": 45, "scaleTo": 45 },
+    { "arrivalTime": "2026/08/23 02:01:02", "kindCode": "10", "name": "東京都多摩東部", "pref": "東京", "scaleFrom": 40, "scaleTo": 45 },
+    { "arrivalTime": "2026/08/23 02:01:05", "kindCode": "10", "name": "東京都多摩西部", "pref": "東京", "scaleFrom": 40, "scaleTo": 40 },
+    { "arrivalTime": "2026/08/23 02:01:10", "kindCode": "10", "name": "千葉県南部", "pref": "千葉", "scaleFrom": 40, "scaleTo": 40 },
+    { "arrivalTime": "2026/08/23 02:01:26", "kindCode": "10", "name": "福島県浜通り", "pref": "福島", "scaleFrom": 40, "scaleTo": 40 },
+    { "arrivalTime": "2026/08/23 02:01:26", "kindCode": "10", "name": "福島県中通り", "pref": "福島", "scaleFrom": 40, "scaleTo": 40 },
+    { "arrivalTime": "2026/08/23 02:01:26", "kindCode": "10", "name": "福島県会津", "pref": "福島", "scaleFrom": 40, "scaleTo": 40 },
+    { "arrivalTime": "2026/08/23 02:01:34", "kindCode": "10", "name": "新潟県中越", "pref": "新潟", "scaleFrom": 40, "scaleTo": 40 },
+    { "arrivalTime": "2026/08/23 02:01:42", "kindCode": "10", "name": "宮城県南部", "pref": "宮城", "scaleFrom": 40, "scaleTo": 40 },
+    { "arrivalTime": "2026/08/23 02:01:33", "kindCode": "10", "name": "長野県北部", "pref": "長野", "scaleFrom": 40, "scaleTo": 40 }
+  ],
+  "time": "2026/08/23 02:00:53.811",
+  "timestamp": { "convert": "2026/08/23 02:00:53.754", "register": "2026/08/23 02:00:53.811" },
+  "user_agent": "jmaxml-seis-parser-go, relay, register-api",
+  "ver": "20231023"
+}

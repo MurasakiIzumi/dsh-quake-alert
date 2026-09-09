@@ -27,6 +27,7 @@
 - `notificationSupported()` 原用 `'Notification' in window` 判断，属性存在但值不是构造函数时会误判并在发送通知时抛错 → 改为 `typeof window.Notification === 'function'`
 - 删除两处死代码：`alert.kind !== 'other'`（恒为真）与 Host 半边空的 `ctx.on('dispose')` 监听
 - toast 的 z-index 由 2147483000 降为 2000：高于 DSH 前端自身层级（最高约 1100），但不再用极端值压住一切
+- EEW 未携带区域数据时提示「本条为震源情报」——措辞错（EEW 不是震源情报）→ 按 `kind` 区分：EEW 提示「本条 EEW 未携带区域数据，无法按阈值判定」
 
 ### Added
 
@@ -37,6 +38,12 @@
 
 - 回归测试从 33 项扩展到 105 项：新增気象庁 188 个 EEW 区域名与 66 个津波予報区全量归一断言、存储与原型链污染注入、事件级去重与强度升级、跨标签页去重、重连状态机等用例
 - README 修正「EEW 延迟约 70ms 级」的说法（实测样本从气象厅发布到 P2PQuake 转播约 811ms，改为「数百毫秒级」），并补充智能去重、多标签页连接数、震源情报三项说明
+- 清理死代码与未用字段：`unique()`、`prefOfName()`（区域归一改造后已无消费者）、Alert 的 `second` 字段
+- 同步 DESIGN.md：Alert 模型字段对齐实现（`issued` / `hypo` / `eventKey` / `strength`）、新增区域名归一与三层去重说明、M1 标记为已达成、修正「无需自建地理数据」的旧结论
+- README 补充说明 `samples/` / `tests/` 随仓库分发、`DESIGN.md` 不上传仓库
+- **测试组件纳入仓库**：`tests/`（`sync-test.cjs`、`area-tables.cjs`）与 `samples/`（5 个真实消息样本 + 说明）从 `.gitignore` 移出。入库前已扫描确认：无本地绝对路径、无凭据 / 密钥、无 `eval` / `child_process` / 网络请求、无编码 payload、无控制字符、无 BOM；唯一外部 URL 是注释中的 P2PQuake 规格文档链接。样本与区域表均为公开信息（P2PQuake 公开 API / 気象庁 公开区域名称），克隆仓库后可直接运行 105 项回归测试
+- `package.json` 的 `files` 补上 `CHANGELOG.md`，使变更日志随 npm 包分发
+- README 提供三语版本：英文为 `README.md`（主），新增 `README.zh.md`（中文）与 `README.ja.md`（日语），三份文档顶部互相链接；`package.json` 的 `files` 同步加入两份译文
 
 ## [0.1.0] - 2026-09-08
 
