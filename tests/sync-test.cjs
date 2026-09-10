@@ -6,6 +6,7 @@
 const fs = require('fs')
 const path = require('path')
 const vm = require('vm')
+const { pathToFileURL } = require('node:url')
 
 const ROOT = path.join(__dirname, '..')
 
@@ -530,6 +531,20 @@ console.log('== toast 颜色按命中区域强度，而非全日本最大值 =='
     points: [{ pref: '熊本県', addr: '熊本市', scale: 20 }, { pref: '福岡県', addr: '福岡市', scale: 60 }],
   }, cfg)
   assert(t.store.events[0].severity === 'info', '命中熊本（震度2）→ severity=info，而不是全日本最大 6弱 的 red')
+  // EEW 即使预测震度刚过阈值，也必须保持 red（警报本质，不能因为达标而降级）
+  const cfgEew = Object.assign({}, cfg, { watch: { prefectures: ['茨城県'] } })
+  t.handleRaw({
+    code: 556, id: 'sev-eew', cancelled: false, issue: { time: 't', eventId: 'EV-SEV', serial: '1' },
+    earthquake: { hypocenter: { name: '茨城県南部', magnitude: 6 } },
+    areas: [{ pref: '茨城', name: '茨城県南部', scaleFrom: 45, scaleTo: 45 }],
+  }, cfgEew)
+  assert(t.store.events[0].severity === 'red', 'EEW 命中（预测5弱）→ severity 仍为 red')
+  const cfgTsu = Object.assign({}, cfg, { watch: { prefectures: ['福島県'] } })
+  t.handleRaw({
+    code: 552, id: 'sev-tsu', cancelled: false, issue: { time: 't' },
+    areas: [{ grade: 'Watch', name: '福島県' }],
+  }, cfgTsu)
+  assert(t.store.events[0].severity === 'orange', '海啸注意报 → severity=orange')
 }
 console.log('== 沙箱真实推送样本纳入回归 ==')
 {
@@ -543,5 +558,366 @@ console.log('== 沙箱真实推送样本纳入回归 ==')
   assert(m.hit === true, '关注福島県时该样本命中')
 }
 
-console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败')
-process.exit(fail === 0 ? 0 : 1)
+console.log('== 静默时段：时间判定（含跨午夜） ==')
+{
+  const t = loadClient().__test
+  const cfg = (start, end, enabled, breakForSevere) => ({
+    quietHours: { enabled: enabled !== false, start, end, breakForSevere: breakForSevere !== false },
+  })
+  const at = (h, m) => new Date(2026, 8, 10, h, m, 0)
+  assert(t.inQuietHours(cfg('23:00', '07:00'), at(23, 30)) === true, '跨午夜 23:30 → 静默中')
+  assert(t.inQuietHours(cfg('23:00', '07:00'), at(6, 59)) === true, '跨午夜 06:59 → 静默中')
+  assert(t.inQuietHours(cfg('23:00', '07:00'), at(7, 0)) === false, '跨午夜 07:00 → 静默结束（右开区间）')
+  assert(t.inQuietHours(cfg('23:00', '07:00'), at(22, 59)) === false, '跨午夜 22:59 → 尚未进入')
+  assert(t.inQuietHours(cfg('09:00', '17:00'), at(12, 0)) === true, '普通区间 12:00 → 静默中')
+  assert(t.inQuietHours(cfg('09:00', '17:00'), at(18, 0)) === false, '普通区间 18:00 → 不在静默')
+  assert(t.inQuietHours(cfg('09:00', '09:00'), at(9, 0)) === false, 'start === end → 视为不静默')
+  assert(t.inQuietHours(cfg('23:00', '07:00', false), at(23, 30)) === false, '未启用 → 不静默')
+  assert(t.inQuietHours(cfg('bad', '07:00'), at(23, 30)) === false, '非法时间 → 不静默')
+}
+console.log('== 静默时段：命中不响铃 / 红色等级穿透 ==')
+{
+  const t = loadClientEx({}).exports.__test
+  const base = {
+    watch: { prefectures: [] }, disasters: { earthquake: true, tsunami: true },
+    thresholds: { quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch' },
+    notify: { sound: false, system: false, volume: 0.7 }, dedupe: { windowMinutes: 10 },
+  }
+  const quietAll = { enabled: true, start: '00:00', end: '23:59', breakForSevere: true }
+  t.handleRaw({
+    code: 551, id: 'qh-1', issue: { type: 'DetailScale', time: 't' },
+    earthquake: { time: 'qh-t1', maxScale: 40, hypocenter: { name: '熊本県熊本地方', magnitude: 4 } },
+    points: [{ pref: '熊本県', addr: '熊本市', scale: 40 }],
+  }, Object.assign({}, base, { quietHours: quietAll }))
+  assert(t.store.events[0].suppressed === true && t.store.events[0].suppressedReason.indexOf('静默时段') !== -1,
+    '静默时段内命中（yellow）→ 只记历史并标注静默')
+  const eewMsg = (id, eventId) => ({
+    code: 556, id, cancelled: false, issue: { time: 't', eventId, serial: '1' },
+    earthquake: { hypocenter: { name: '茨城県南部', magnitude: 6.7 } },
+    areas: [{ pref: '茨城', name: '茨城県南部', scaleFrom: 50, scaleTo: 50 }],
+  })
+  t.handleRaw(eewMsg('qh-2', 'EV-QH1'), Object.assign({}, base, { quietHours: quietAll }))
+  assert(t.store.events[0].suppressed !== true && t.store.events[0].hit === true, '静默时段内 EEW（red）→ 仍提醒（默认穿透）')
+  t.handleRaw(eewMsg('qh-3', 'EV-QH2'), Object.assign({}, base, {
+    quietHours: Object.assign({}, quietAll, { breakForSevere: false }),
+  }))
+  assert(t.store.events[0].suppressed === true, '关闭红色等级穿透 → EEW 也被静默')
+}
+console.log('== 静默时段：取消 / 解除不穿透 ==')
+{
+  const t = loadClientEx({}).exports.__test
+  const base = {
+    watch: { prefectures: [] }, disasters: { earthquake: true, tsunami: true },
+    thresholds: { quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch' },
+    notify: { sound: false, system: false, volume: 0.7 }, dedupe: { windowMinutes: 10 },
+  }
+  const open = { enabled: false, start: '23:00', end: '07:00', breakForSevere: true }
+  const quietAll = { enabled: true, start: '00:00', end: '23:59', breakForSevere: true }
+  const eewMsg = (id, cancelled) => ({
+    code: 556, id, cancelled, issue: { time: 't', eventId: 'EV-QC', serial: '1' },
+    earthquake: { hypocenter: { name: '茨城県南部', magnitude: 6.7 } },
+    areas: cancelled ? [] : [{ pref: '茨城', name: '茨城県南部', scaleFrom: 50, scaleTo: 50 }],
+  })
+  t.handleRaw(eewMsg('qc-1', false), Object.assign({}, base, { quietHours: open }))
+  assert(t.store.events[0].hit === true && !t.store.events[0].suppressed, '非静默时段 EEW → 提醒')
+  t.handleRaw(eewMsg('qc-2', true), Object.assign({}, base, { quietHours: quietAll }))
+  assert(t.store.events[0].suppressed === true && t.store.events[0].suppressedReason.indexOf('取消 / 解除不穿透') !== -1,
+    '静默时段内的取消消息 → 只记历史，不打扰')
+}
+console.log('== 静默时段：配置校验 ==')
+{
+  const dirty = JSON.stringify({ version: 1, quietHours: { enabled: 'yes', start: '25:99', end: 7, breakForSevere: 'nope' } })
+  const cfg = loadClient({ 'dsh.quakeAlert.v1': dirty }).__test.loadCfg()
+  assert(cfg.quietHours.enabled === false, 'enabled 非布尔 → 回退 false')
+  assert(cfg.quietHours.start === '23:00' && cfg.quietHours.end === '07:00', '非法时间 → 回退默认')
+  assert(cfg.quietHours.breakForSevere === true, 'breakForSevere 非布尔 → 回退 true')
+  const kept = loadClient({
+    'dsh.quakeAlert.v1': JSON.stringify({ version: 1, quietHours: { enabled: true, start: '1:30', end: '6:45', breakForSevere: false } }),
+  }).__test.loadCfg()
+  assert(kept.quietHours.enabled === true && kept.quietHours.start === '1:30' && kept.quietHours.end === '6:45' && kept.quietHours.breakForSevere === false,
+    '合法的 1 位小时写法保留')
+  assert(loadClient({ 'dsh.quakeAlert.v1': JSON.stringify({ version: 1 }) }).__test.loadCfg().quietHours.enabled === false,
+    '旧配置（无 quietHours 字段）→ 补默认值，不影响其它字段')
+}
+
+console.log('== 市区町村匹配：551 观测点按市收窄，区域级条目放行 ==')
+{
+  const t = loadClient().__test
+  t.setCityTable({ '福島県': ['白河市', '郡山市'] }) // 市级匹配需要表就位
+  const cfg = (cities, prefs) => ({
+    watch: { prefectures: prefs || [], cities: cities || [] },
+    disasters: { earthquake: true, tsunami: true },
+    thresholds: { quakeScale: 10, eewScale: 45, tsunamiGrade: 'Watch' },
+    notify: {}, dedupe: { windowMinutes: 10 },
+  })
+  const point = { // 观测点级（isArea: false）→ 可做市级收窄
+    code: 551, id: 'c-1', issue: { type: 'DetailScale', time: 't' },
+    earthquake: { time: 'ct-1', maxScale: 30, hypocenter: { name: '福島県沖', magnitude: 4 } },
+    points: [{ pref: '福島県', addr: '白河市新白河', isArea: false, scale: 30 }],
+  }
+  const area = { // 区域级（isArea: true）→ 对应不到市町村
+    code: 551, id: 'c-2', issue: { type: 'ScalePrompt', time: 't' },
+    earthquake: { time: 'ct-2', maxScale: 30, hypocenter: { name: '福島県沖', magnitude: 4 } },
+    points: [{ pref: '福島県', addr: '福島県中通り', isArea: true, scale: 30 }],
+  }
+  const a1 = t.parse(point)
+  const a2 = t.parse(area)
+  assert(a1.regions[0].cityKnown === true && a2.regions[0].cityKnown === false, 'parser 用 isArea 标记 cityKnown')
+  assert(t.matchAlert(a1, cfg(['白河市'], ['福島県'])).hit === true, '选中白河市 → 白河市新白河 命中')
+  assert(t.matchAlert(a1, cfg(['郡山市'], ['福島県'])).hit === false, '选中郡山市 → 白河市新白河 不命中')
+  assert(t.matchAlert(a1, cfg(['郡山市'], ['福島県'])).reason.indexOf('市区町村') !== -1, '未命中原因说明已按市区町村收窄')
+  assert(t.matchAlert(a1, cfg([], ['福島県'])).hit === true, '未选市区町村 → 县级粒度照常命中')
+  assert(t.matchAlert(a1, cfg(['白河市'], [])).hit === true, '全日本 + 选市 → 市级收窄同样生效')
+  assert(t.matchAlert(a2, cfg(['郡山市'], ['福島県'])).hit === true, '区域级条目（isArea）无法对应市町村 → 放行，不漏报')
+  assert(t.matchAlert(t.parse(eew), cfg(['架空市'], ['茨城県'])).hit === true, 'EEW 是区域级数据 → 市级选择不收窄，不漏报')
+  assert(t.matchAlert(t.parse(tsunami), cfg(['架空市'], ['福島県'])).hit === true, '海啸是予報区级数据 → 市级选择不收窄，不漏报')
+}
+
+console.log('== 市区町村表：注入 / 归一 / 配置清理 ==')
+{
+  const t = loadClientEx({}).exports.__test
+  assert(t.cityTableState() === 'idle', '初始状态 idle')
+  assert(t.setCityTable({ '福島県': ['白河市', '郡山市'], '架空県': ['X市'], '東京都': [1, null, '千代田区', '千代田区'] }) === true,
+    '注入表成功（非法县名 / 非字符串 / 重复项被过滤）')
+  assert(t.cityTableState() === 'ready', '注入后状态 ready')
+  assert(t.citiesOfPref('福島県').join() === '白河市,郡山市', '按县取市町村')
+  assert(t.citiesOfPref('架空県').length === 0, '不存在的县名被丢弃')
+  assert(t.citiesOfPref('東京都').join() === '千代田区', '非字符串与重复项被过滤')
+  assert(t.setCityTable(null) === false && t.setCityTable({}) === false, '空表 / 非法入参被拒绝')
+  const t2 = loadClientEx({
+    'dsh.quakeAlert.v1': JSON.stringify({ version: 1, watch: { prefectures: ['福島県'], cities: ['白河市', '架空市'] } }),
+  }).exports.__test
+  t2.setCityTable({ '福島県': ['白河市', '郡山市'] })
+  t2.pruneUnknownCities()
+  assert(t2.currentCfg().watch.cities.join() === '白河市', '表到位后清掉配置里不存在的市町村名')
+  assert(t2.currentCfg().watch.prefectures.join() === '福島県', '清理市町村不影响都道府县')
+}
+console.log('== 市级匹配：addr 归一（短名 / 消歧 / 支庁名 / 仮名表记） ==')
+{
+  const t = loadClient().__test
+  t.setCityTable({
+    '福島県': ['福島市', '郡山市', '白河市', '伊達市'],
+    '東京都': ['千代田区', '新宿区'],
+    '大阪府': ['大阪市北区', '大阪市中央区'],
+    '北海道': ['北斗市', '日高町', '龍ヶ崎市'],
+    '熊本県': ['熊本市南区', '熊本市北区'],
+    '沖縄県': ['宮古島市'],
+    '岩手県': ['宮古市'],
+  })
+  const look = (a) => t.lookupAddrCity(a)
+  assert(look('白河市新白河') === '白河市', '全称前缀：白河市新白河 → 白河市')
+  assert(look('大阪北区茶屋町') === '大阪市北区', '政令市短名：大阪北区茶屋町 → 大阪市北区')
+  assert(look('東京千代田区大手町') === '千代田区', '特别区带县短名：東京千代田区大手町 → 千代田区')
+  assert(look('福島伊達市') === '伊達市', '重名消歧：福島伊達市 → 伊達市')
+  assert(look('渡島北斗市') === '北斗市', '北海道支庁名：渡島北斗市 → 北斗市')
+  assert(look('日高地方日高町') === '日高町', '北海道支庁名 + 地方：日高地方日高町 → 日高町')
+  assert(look('熊本南区城南町') === '熊本市南区', '政令市短名：熊本南区城南町 → 熊本市南区')
+  assert(look('宮古市区界') === '宮古市', '宮古市区界 → 岩手県宮古市（不与宮古島市撞车）')
+  assert(look('宮古島市城辺福北') === '宮古島市', '宮古島市城辺福北 → 宮古島市')
+  assert(look('龍ケ崎市') === '龍ヶ崎市', '仮名表记差异：龍ケ崎市 → 龍ヶ崎市')
+  assert(look('新千歳空港') === null, '机场观测点归一不到市町村 → null（调用方放行）')
+  assert(look('熊本県天草・芦北') === null, '区域名归一不到市町村 → null')
+}
+console.log('== 县级匹配：551 的 pref 简写归一（此前的静默漏报） ==')
+{
+  const t = loadClient().__test
+  assert(t.normalizePref('京都') === '京都府', '「京都」→「京都府」')
+  assert(t.normalizePref('東京') === '東京都', '「東京」→「東京都」')
+  assert(t.normalizePref('茨城県') === '茨城県', '全称原样返回')
+  assert(t.normalizePref('北海道') === '北海道', '北海道原样返回')
+  assert(t.normalizePref('') === '' && t.normalizePref(null) === '', '空值返回空串')
+  const a = t.parse({
+    code: 551, id: 'k-1', issue: { type: 'DetailScale', time: 't' },
+    earthquake: { time: 'kt-1', maxScale: 30, hypocenter: { name: '京都府南部', magnitude: 4 } },
+    points: [{ pref: '京都', addr: '京都上京区薗ノ内町', isArea: false, scale: 30 }],
+  })
+  assert(a.regions[0].pref === '京都府', '解析后 region.pref 已是全称')
+  const cfg = {
+    watch: { prefectures: ['京都府'], cities: [] }, disasters: { earthquake: true, tsunami: true },
+    thresholds: { quakeScale: 10, eewScale: 45, tsunamiGrade: 'Watch' }, notify: {}, dedupe: { windowMinutes: 10 },
+  }
+  assert(t.matchAlert(a, cfg).hit === true, '关注「京都府」能命中 pref 写作「京都」的消息（此前静默漏报）')
+}
+
+console.log('== 机器级持久化：Host settings 桥 ==')
+{
+  // 与 Host schema（lib/index.js）解析结果同形的完整 section
+  const hostValue = () => JSON.parse(JSON.stringify({
+    source: 'prod', watch: { prefectures: [], cities: [] },
+    disasters: { earthquake: true, tsunami: true },
+    thresholds: { quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch' },
+    notify: { sound: true, system: true, volume: 0.7 },
+    dedupe: { windowMinutes: 10 },
+    quietHours: { enabled: false, start: '23:00', end: '07:00', breakForSevere: true },
+  }))
+  function fakeScope(state) {
+    const listeners = []
+    const writes = []
+    const snap = Object.assign({
+      status: 'ready', value: hostValue(), base: {}, user: {}, revision: 1, writable: true, mode: 'host',
+    }, state || {})
+    return {
+      snap,
+      writes,
+      getSnapshot: () => snap,
+      subscribe(fn) { listeners.push(fn); return () => {} },
+      mutate(ops) { writes.push(ops); return Promise.resolve() },
+    }
+  }
+  const localCfg = JSON.stringify({ version: 1, watch: { prefectures: ['東京都'] }, thresholds: { quakeScale: 55 } })
+  const pathOf = (o) => o.path.join('.')
+
+  // ① Host 用户层为空 + 本地已有非默认配置 → 一次性迁移
+  {
+    const t = loadClientEx({ 'dsh.quakeAlert.v1': localCfg }).exports.__test
+    const scope = fakeScope()
+    t.bindSettingsScope(scope)
+    const ops = scope.writes[0] || []
+    const setPrefs = ops.find((o) => o.op === 'set' && pathOf(o) === 'watch.prefectures')
+    const setScale = ops.find((o) => o.op === 'set' && pathOf(o) === 'thresholds.quakeScale')
+    const unsetDefault = ops.find((o) => o.op === 'unset' && pathOf(o) === 'notify.volume')
+    assert(t.settingsState().sync === 'host', 'Host 可用 → host 模式')
+    assert(setPrefs && setPrefs.value.join() === '東京都', '本地关注地区迁移到 Host（set watch.prefectures）')
+    assert(setScale && setScale.value === 55, '本地阈值迁移到 Host（set thresholds.quakeScale）')
+    assert(!!unsetDefault, '等于默认值的字段用 unset 交还 schema 默认层')
+    assert(t.currentCfg().watch.prefectures.join() === '東京都', '迁移后内存配置仍是本地值')
+  }
+  // ② Host 用户层已有内容 → 以 Host 为准，且不回写
+  {
+    const t = loadClientEx({ 'dsh.quakeAlert.v1': localCfg }).exports.__test
+    const host = hostValue()
+    host.thresholds.quakeScale = 30
+    host.watch.prefectures = ['熊本県']
+    const scope = fakeScope({ value: host, user: { thresholds: { quakeScale: 30 }, watch: { prefectures: ['熊本県'] } } })
+    t.bindSettingsScope(scope)
+    assert(t.currentCfg().thresholds.quakeScale === 30, 'Host 有用户层 → 以 Host 为准（覆盖本地 55）')
+    assert(t.currentCfg().watch.prefectures.join() === '熊本県', 'Host 的关注地区生效')
+    assert(scope.writes.length === 0, '以 Host 为准时不回写 Host')
+  }
+  // ③ Host 不可用 → 保持 localStorage
+  {
+    const t = loadClientEx({ 'dsh.quakeAlert.v1': localCfg }).exports.__test
+    const scope = fakeScope({ status: 'unavailable', value: undefined })
+    t.bindSettingsScope(scope)
+    assert(t.settingsState().sync === 'local', 'Host 不可用 → local 模式')
+    assert(t.currentCfg().watch.prefectures.join() === '東京都', '仍读 localStorage 配置')
+    assert(scope.writes.length === 0, '不回写不可用的 Host')
+  }
+  // ④ 页面不支持 Host 持久化（memory 模式）→ 只读不写
+  {
+    const t = loadClientEx({}).exports.__test
+    const scope = fakeScope({ mode: 'memory', writable: false })
+    t.bindSettingsScope(scope)
+    assert(t.settingsState().sync === 'memory', 'Host 只做进程内存储 → memory 模式')
+    assert(scope.writes.length === 0, 'memory 模式不写 Host')
+  }
+  // ⑤ 写入路径：applyCfg 立即生效并推给 Host
+  {
+    const t = loadClientEx({}).exports.__test
+    const scope = fakeScope()
+    t.bindSettingsScope(scope)
+    scope.writes.length = 0
+    const cur = t.currentCfg()
+    t.applyCfg(Object.assign({}, cur, { thresholds: Object.assign({}, cur.thresholds, { quakeScale: 60 }) }))
+    const ops = scope.writes[0] || []
+    const set = ops.find((o) => o.op === 'set' && pathOf(o) === 'thresholds.quakeScale')
+    assert(set && set.value === 60, 'applyCfg 把改动推给 Host（set thresholds.quakeScale）')
+    assert(t.currentCfg().thresholds.quakeScale === 60, 'applyCfg 内存立即生效（连接重连等同步读取可见）')
+  }
+  // ⑥ 没有 Host 时一切照旧
+  {
+    const t = loadClientEx({}).exports.__test
+    let err = ''
+    try { t.applyCfg(Object.assign({}, t.currentCfg(), { source: 'sandbox' })) } catch (e) { err = e.message }
+    assert(err === '', '没有 Host 时 applyCfg 不抛错')
+    assert(t.currentCfg().source === 'sandbox', '没有 Host 时配置仍即时生效')
+  }
+  // ⑦ scope 异常不拖垮插件
+  {
+    const t = loadClientEx({}).exports.__test
+    let err = ''
+    try { t.bindSettingsScope({ getSnapshot() { throw new Error('boom') }, subscribe() { return () => {} } }) } catch (e) { err = e.message }
+    assert(err === '', 'scope 异常时 bindSettingsScope 不抛错')
+    assert(t.currentCfg().source === 'prod', '异常后仍可读取本地配置')
+  }
+}
+
+;(async () => {
+  console.log('== Host settings schema 与 Client 默认值一致 ==')
+  try {
+    const mod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
+    const hostDefault = mod.QuakeAlertSettingsSchema({})
+    const clientDefault = T.cfgToSection(T.DEFAULT_CFG)
+    assert(JSON.stringify(hostDefault) === JSON.stringify(clientDefault), 'Host schema 默认值与 Client DEFAULT_CFG 完全一致')
+    assert(mod.SETTINGS_NAMESPACE === T.SETTINGS_NS, '两侧 namespace 名称一致（' + mod.SETTINGS_NAMESPACE + '）')
+    let rejectedScale = false
+    try { mod.QuakeAlertSettingsSchema({ thresholds: { quakeScale: 999 } }) } catch (e) { rejectedScale = true }
+    assert(rejectedScale, 'Host schema 拒绝越界震度')
+    let rejectedSource = false
+    try { mod.QuakeAlertSettingsSchema({ source: 'bogus' }) } catch (e) { rejectedSource = true }
+    assert(rejectedSource, 'Host schema 拒绝非法数据源')
+    const withCities = mod.QuakeAlertSettingsSchema({ watch: { cities: ['白河市'] } })
+    assert(withCities.watch.cities.join() === '白河市', 'Host schema 接受市区町村列表')
+  } catch (e) {
+    assert(false, 'Host schema 加载失败：' + e.message)
+  }
+
+  console.log('== 真实市区町村表与 Host /areas 路由 ==')
+  try {
+    const cities = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cities.js')).href)
+    const table = cities.CITIES_BY_PREF
+    const prefs = Object.keys(table)
+    const total = prefs.reduce((n, p) => n + table[p].length, 0)
+    assert(prefs.length === 47, '真实表覆盖 47 个都道府县')
+    assert(total >= 1700 && total <= 2100, '真实表条目数在合理区间（' + total + '）')
+    const bad = prefs.filter((p) => !Array.isArray(table[p]) || table[p].length === 0 || table[p].some((c) => typeof c !== 'string' || !c))
+    assert(bad.length === 0, '每个县都有非空数组且元素均为非空字符串')
+    assert(table['大阪府'].indexOf('大阪市北区') !== -1, '政令指定都市按区提供（大阪市北区）')
+    assert(table['沖縄県'].indexOf('北谷町') !== -1 && table['沖縄県'].indexOf('中頭郡北谷町') === -1, '郡名按気象庁写法省略（北谷町，而非中頭郡北谷町）')
+    assert(table['高知県'].indexOf('梼原町') !== -1, '郡省略同样覆盖高知県梼原町')
+    const t = loadClient().__test
+    assert(t.setCityTable(table) === true, '真实表可被 Client 注入')
+    assert(t.lookupAddrCity('白河市新白河') === '白河市', '沙箱样本 addr → 白河市')
+    assert(t.lookupAddrCity('宮古島市城辺福北') === '宮古島市', '真实观测点 addr → 宮古島市')
+    assert(t.lookupAddrCity('大阪北区茶屋町') === '大阪市北区', '真实观测点短名 → 大阪市北区')
+    assert(t.lookupAddrCity('東京千代田区大手町') === '千代田区', '真实观测点 → 千代田区')
+    const liveAddrs = ['白河市新白河', '宮古島市城辺福北', '大阪北区茶屋町', '仙台宮城野区苦竹', '熊本南区城南町',
+      '神戸東灘区住吉東町', '京都上京区薗ノ内町', '東京千代田区大手町', '成田市名古屋', '宮古市区界']
+    const missed = liveAddrs.filter((addr) => t.lookupAddrCity(addr) === null)
+    assert(missed.length === 0, '实测直播 addr 全部可归一（未命中：' + missed.join('/') + '）')
+    assert(t.citiesOfPref('架空県').length === 0, '不存在的县仍返回空')
+
+    // Host 侧：假 ctx 走一遍 apply，检查路由输出
+    const mod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
+    const routes = []
+    const registered = []
+    const fakeCtx = {
+      inject(names, cb) {
+        if (names.indexOf('settings') !== -1) {
+          cb({ settings: { register: (ns, schema) => { registered.push({ ns, schema }); return {} } } })
+        }
+        if (names.indexOf('webServer') !== -1) {
+          cb({
+            effect(fn) { fn(); return () => {} },
+            webServer: { register: (r) => { routes.push(r); return () => {} } },
+          })
+        }
+      },
+    }
+    mod.apply(fakeCtx)
+    assert(registered.length === 1 && registered[0].ns === 'quake-alert', 'Host apply 注册了 settings namespace')
+    assert(routes.length === 1 && routes[0].path === '/dsh-quake-alert/areas', 'Host apply 注册了 /dsh-quake-alert/areas 路由')
+    let status = 0
+    let body = ''
+    routes[0].handler({}, { writeHead(s) { status = s }, end(b) { body = b } })
+    const parsed = JSON.parse(body)
+    assert(status === 200, '路由返回 200')
+    assert(parsed.prefectures && Object.keys(parsed.prefectures).length === 47, '路由返回 47 个县的市町村表')
+    assert(parsed.prefectures['福島県'].indexOf('白河市') !== -1, '路由返回的表含白河市')
+  } catch (e) {
+    assert(false, '真实市区町村表 / Host 路由验证失败：' + e.message)
+  }
+
+  console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败')
+  process.exit(fail === 0 ? 0 : 1)
+})()

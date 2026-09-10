@@ -25,6 +25,7 @@ const SANDBOX_URL = 'wss://api-realtime-sandbox.p2pquake.net/v2/ws'
 const STORAGE_KEY = 'dsh.quakeAlert.v1'
 const HISTORY_KEY = 'dsh.quakeAlert.history'
 const HISTORY_MAX = 30 // 「最近预警」保留条数（内存与设置页展示）
+const MAX_WATCH_CITIES = 300 // 关注市区町村上限（防止配置与 UI 被撑爆）
 const RECONNECT_BASE = 1000 // 指数退避起点 1s
 const RECONNECT_MAX = 60000 // 封顶 60s
 
@@ -61,15 +62,29 @@ const PREFECTURES = [
   ['宮崎県', '宫崎'], ['鹿児島県', '鹿儿岛'], ['沖縄県', '冲绳'],
 ].map(([jp, zh]) => ({ jp, zh }))
 const PREF_SET = new Set(PREFECTURES.map((p) => p.jp))
+// 都道府県简写 → 全称：551 的 points[].pref 通常是全称，但实测直播数据里出现过「京都」
+// 这类简写，不归一就会与用户勾选的「京都府」永不相等（静默漏报）。
+const PREF_SHORT = {}
+for (const p of PREFECTURES) {
+  const short = p.jp.replace(/[都道府県]$/, '')
+  if (short !== p.jp && !Object.prototype.hasOwnProperty.call(PREF_SHORT, short)) PREF_SHORT[short] = p.jp
+}
+function normalizePref(raw) {
+  const s = String(raw === undefined || raw === null ? '' : raw).trim()
+  if (!s || PREF_SET.has(s)) return s
+  return Object.prototype.hasOwnProperty.call(PREF_SHORT, s) ? PREF_SHORT[s] : s
+}
 
 const DEFAULT_CFG = {
   version: 1,
   source: 'prod', // prod | sandbox（沙箱回放 2023 年历史，约30秒/条，测试用）
-  watch: { prefectures: [] }, // 空 = 关注全日本（阈值仍生效）
+  watch: { prefectures: [], cities: [] }, // 空 = 关注全日本（阈值仍生效）；cities 为可选的市区町村细化
   disasters: { earthquake: true, tsunami: true },
   thresholds: { quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch' },
   notify: { sound: true, system: true, volume: 0.7 },
   dedupe: { windowMinutes: 10 },
+  // 静默时段（0.2.0）：按浏览器本地时间判定；跨午夜用 start > end 表示（如 23:00–07:00）
+  quietHours: { enabled: false, start: '23:00', end: '07:00', breakForSevere: true },
 }
 
 // ---------- 存储（localStorage） ----------
@@ -84,6 +99,25 @@ const numOr = (v, fallback, min, max) => {
   return v
 }
 const boolOr = (v, fallback) => (typeof v === 'boolean' ? v : fallback)
+// 「HH:MM」时间字符串校验（允许 1 位小时，如 "7:05"）
+const TIME_RE = /^([01]?\d|2[0-3]):([0-5]\d)$/
+const timeOr = (v, fallback) => (typeof v === 'string' && TIME_RE.test(v.trim()) ? v.trim() : fallback)
+const minutesOfTime = (v) => {
+  const m = TIME_RE.exec(String(v === undefined || v === null ? '' : v).trim())
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null
+}
+// 静默时段判定。start > end 表示跨午夜（23:00–07:00）；start === end 视为「不静默」。
+// now 可注入，便于回归测试覆盖边界而不依赖运行时刻。
+function inQuietHours(cfg, now) {
+  const q = cfg && cfg.quietHours
+  if (!q || q.enabled !== true) return false
+  const start = minutesOfTime(q.start)
+  const end = minutesOfTime(q.end)
+  if (start === null || end === null || start === end) return false
+  const d = now || new Date()
+  const cur = d.getHours() * 60 + d.getMinutes()
+  return start < end ? (cur >= start && cur < end) : (cur >= start || cur < end)
+}
 
 function loadJSON(key, fallback) {
   try {
@@ -126,11 +160,12 @@ function loadHistory() {
 const freshCfg = () => ({
   version: DEFAULT_CFG.version,
   source: DEFAULT_CFG.source,
-  watch: { prefectures: [] },
+  watch: { prefectures: [], cities: [] },
   disasters: { ...DEFAULT_CFG.disasters },
   thresholds: { ...DEFAULT_CFG.thresholds },
   notify: { ...DEFAULT_CFG.notify },
   dedupe: { ...DEFAULT_CFG.dedupe },
+  quietHours: { ...DEFAULT_CFG.quietHours },
 })
 // 逐字段校验 + 回退默认值：任何形状的输入都归一成一份合法配置
 function normalizeCfg(stored) {
@@ -139,6 +174,7 @@ function normalizeCfg(stored) {
   const t = isPlainObject(stored.thresholds) ? stored.thresholds : {}
   const n = isPlainObject(stored.notify) ? stored.notify : {}
   const de = isPlainObject(stored.dedupe) ? stored.dedupe : {}
+  const qh = isPlainObject(stored.quietHours) ? stored.quietHours : {}
   return {
     version: DEFAULT_CFG.version,
     source: stored.source === 'sandbox' ? 'sandbox' : 'prod',
@@ -146,6 +182,10 @@ function normalizeCfg(stored) {
       // 只保留 47 县中确实存在的名字，避免脏数据在设置页渲染出幽灵按钮
       prefectures: Array.isArray(w.prefectures)
         ? Array.from(new Set(w.prefectures.filter((p) => typeof p === 'string' && PREF_SET.has(p))))
+        : [],
+      // 市区町村：这里只保证类型、去重与规模；名字是否真实存在由数据表加载后校验
+      cities: Array.isArray(w.cities)
+        ? Array.from(new Set(w.cities.filter((c) => typeof c === 'string' && c.length > 0 && c.length <= 30))).slice(0, 300)
         : [],
     },
     disasters: {
@@ -168,6 +208,12 @@ function normalizeCfg(stored) {
     dedupe: {
       windowMinutes: numOr(de.windowMinutes, DEFAULT_CFG.dedupe.windowMinutes, 1, 1440),
     },
+    quietHours: {
+      enabled: boolOr(qh.enabled, DEFAULT_CFG.quietHours.enabled),
+      start: timeOr(qh.start, DEFAULT_CFG.quietHours.start),
+      end: timeOr(qh.end, DEFAULT_CFG.quietHours.end),
+      breakForSevere: boolOr(qh.breakForSevere, DEFAULT_CFG.quietHours.breakForSevere),
+    },
   }
 }
 function loadCfg() {
@@ -187,6 +233,218 @@ function saveCfg(cfg) {
   const next = { ...cfg, version: DEFAULT_CFG.version }
   saveJSON(STORAGE_KEY, next)
   return next
+}
+
+// ---------- 机器级持久化（0.2.0）：Host settings 为主，localStorage 为回退与镜像 ----------
+// Host 半边注册了同名 namespace（lib/index.js 的 QuakeAlertSettingsSchema）。Client 经
+// `ctx.settingsScope.bind({ namespace })` 读写它：scope 快照是**同步**可读的，所以内部读取
+// （WebSocket 重连、handleRaw）仍然同步；写入先更新内存与 localStorage 镜像，再异步推给
+// Host。没有 settings 服务、页面非 loopback、或 Host 只做进程内存储时，整条链路自动退化为
+// M1 的 localStorage 行为。
+const SETTINGS_NS = 'quake-alert'
+let runtimeCfg = null // 内存中的当前配置
+let settingsScope = null // bind 成功后的 scope handle
+let settingsSync = 'local' // local（无 Host）| host（写入 settings.yaml）| memory（Host 不持久化）
+
+// Host section ⇄ 本地配置：version 是本地存储的结构版本概念，不属于 Host schema
+function cfgToSection(cfg) {
+  const out = {}
+  for (const key of Object.keys(cfg)) if (key !== 'version') out[key] = cfg[key]
+  return out
+}
+function sectionToCfg(section) {
+  return normalizeCfg(Object.assign({ version: DEFAULT_CFG.version }, isPlainObject(section) ? section : {}))
+}
+// 同步读取入口：保持 M1 的同步语义，调用方无需感知 Host 的存在
+function currentCfg() {
+  if (runtimeCfg === null) runtimeCfg = loadCfg()
+  return runtimeCfg
+}
+// 写入入口：内存立即生效 → localStorage 镜像 → Host（可用时异步持久化）
+function applyCfg(cfg) {
+  runtimeCfg = saveCfg(cfg)
+  pushCfgToHost(runtimeCfg)
+  return runtimeCfg
+}
+// 只提交与默认值不同的字段；等于默认值的字段用 unset 交还 schema 默认层，
+// 这样 settings.yaml 里只留下用户真正改过的东西。
+function settingsOpsFor(cfg) {
+  const cur = cfgToSection(cfg)
+  const def = cfgToSection(freshCfg())
+  const ops = []
+  const walk = (node, base, path) => {
+    for (const key of Object.keys(node)) {
+      const p = path.concat(key)
+      const cv = node[key]
+      const bv = base[key]
+      if (isPlainObject(cv) && isPlainObject(bv)) { walk(cv, bv, p); continue }
+      if (JSON.stringify(cv) === JSON.stringify(bv)) ops.push({ op: 'unset', path: p })
+      else ops.push({ op: 'set', path: p, value: cv })
+    }
+  }
+  walk(cur, def, [])
+  return ops
+}
+function pushCfgToHost(cfg) {
+  const scope = settingsScope
+  if (!scope || settingsSync !== 'host') return
+  try {
+    const snap = scope.getSnapshot()
+    if (!snap || snap.status !== 'ready' || snap.writable !== true || snap.mode !== 'host') return
+    const ops = settingsOpsFor(cfg)
+    if (ops.length === 0) return
+    const pending = scope.mutate(ops)
+    if (pending && typeof pending.catch === 'function') pending.catch(() => { /* 写失败不回滚本地 */ })
+  } catch (err) { /* 通道异常时本地配置仍然生效 */ }
+}
+// 绑定 Host settings。三种来源的优先关系：
+//   ① Host 用户层已有内容 → 以 Host 为准（机器级配置是 source of truth）
+//   ② Host 为空、本地已有非默认配置 → 一次性把本地配置迁移到 Host
+//   ③ Host 不可用 → 保持 localStorage（settingsSync 停留在 local / memory）
+function bindSettingsScope(scope) {
+  settingsScope = scope
+  let migrated = false
+  const sync = () => {
+    let snap = null
+    try { snap = scope.getSnapshot() } catch (err) { return }
+    if (!snap || snap.status !== 'ready' || snap.value === undefined) { settingsSync = 'local'; store.push({}); return }
+    if (snap.mode !== 'host' || snap.writable !== true) { settingsSync = 'memory'; store.push({}); return }
+    settingsSync = 'host'
+    const user = isPlainObject(snap.user) ? snap.user : {}
+    if (Object.keys(user).length === 0 && !migrated) {
+      migrated = true // 只迁移一次：之后 Host 被清空是用户的显式操作，不该被本地又推回去
+      const local = loadCfg()
+      if (JSON.stringify(cfgToSection(local)) !== JSON.stringify(cfgToSection(freshCfg()))) {
+        runtimeCfg = saveCfg(local)
+        pushCfgToHost(runtimeCfg)
+        store.push({})
+        return
+      }
+    }
+    const next = sectionToCfg(snap.value)
+    runtimeCfg = saveCfg(next) // localStorage 保持为镜像：Host 掉线时仍能工作
+    store.push({})
+  }
+  try { scope.subscribe(sync) } catch (err) { /* 订阅失败只是失去实时同步 */ }
+  sync()
+}
+
+// ---------- 市区町村表（0.2.0）：Host 路由提供，Client 拉一次并缓存 ----------
+// 全国约 1700+ 个市町村，体积不适合内联进 client bundle。Host 侧在
+// /dsh-quake-alert/areas 返回 { prefectures: { "<都道府県>": ["市町村全称", ...] } }。
+// 拉取失败时表保持为空，功能退化为「只能按都道府县关注」——不影响 M1 的任何行为。
+const AREAS_PATH = '/dsh-quake-alert/areas'
+let cityTable = null
+let cityTableState = 'idle' // idle | loading | ready | failed
+let cityNameSet = null // 全部市町村名（校验配置用）
+
+function setCityTable(table) {
+  if (!isPlainObject(table)) return false
+  const clean = {}
+  const names = new Set()
+  for (const pref of Object.keys(table)) {
+    if (!PREF_SET.has(pref)) continue
+    const list = table[pref]
+    if (!Array.isArray(list)) continue
+    const uniq = Array.from(new Set(list.filter((c) => typeof c === 'string' && c.length > 0 && c.length <= 30)))
+    if (uniq.length === 0) continue
+    clean[pref] = uniq
+    for (const c of uniq) names.add(c)
+  }
+  if (Object.keys(clean).length === 0) return false
+  cityTable = clean
+  cityNameSet = names
+  buildAddrIndex()
+  cityTableState = 'ready'
+  return true
+}
+const citiesOfPref = (pref) => (cityTable && own(cityTable, pref)) || []
+
+// ---------- addr → 市町村归一 ----------
+// 気象庁 / P2PQuake 的观测点名（551 的 points[].addr）与市町村全称有一批写法差异，
+// 匹配前先把 addr 归一到它所属的市町村全称；归一不了的（机场、区域名、未收录点）返回 null，
+// 调用方据此放行——宁可多提醒一次，也绝不因为写法差异漏报。
+//
+// 已覆盖的差异（均来自实测的直播 addr）：
+//   ① 政令市短名：大阪北区茶屋町       ← 大阪市北区
+//   ② 特别区加县短名：東京千代田区大手町 ← 千代田区
+//   ③ 重名消歧前缀：福島伊達市          ← 伊達市（福島県）
+//   ④ 北海道支庁名：渡島北斗市 / 日高地方日高町 ← 北斗市 / 日高町
+//   ⑤ 仮名表记：龍ケ崎市 ↔ 龍ヶ崎市
+const HOKKAIDO_BRANCHES = [
+  '石狩', '後志', '空知', '渡島', '檜山', '胆振', '日高', '上川', '留萌', '宗谷',
+  '網走', '北見', '紋別', '十勝', '釧路', '根室',
+]
+const normKana = (s) => String(s === undefined || s === null ? '' : s).replace(/ケ/g, 'ヶ')
+// 展开一个市町村全称的全部书写变体
+function cityAliases(city, pref) {
+  const out = [city]
+  const m = /^(.+市)(.+区)$/.exec(city)
+  if (m) out.push(m[1].slice(0, -1) + m[2])
+  else if (/区$/.test(city)) out.push('東京' + city)
+  if (pref) {
+    const short = String(pref).replace(/[都道府県]$/, '')
+    if (short && short !== pref) out.push(short + city)
+  }
+  if (pref === '北海道') {
+    for (const b of HOKKAIDO_BRANCHES) { out.push(b + city); out.push(b + '地方' + city) }
+  }
+  return out
+}
+let addrAliasIndex = null // Map<归一后的别名, 市町村全称>
+let addrAliasMax = 0
+function buildAddrIndex() {
+  const idx = new Map()
+  let max = 0
+  if (cityTable) {
+    for (const pref of Object.keys(cityTable)) {
+      for (const city of cityTable[pref]) {
+        for (const alias of cityAliases(city, pref)) {
+          const a = normKana(alias)
+          if (!idx.has(a)) idx.set(a, city)
+          if (a.length > max) max = a.length
+        }
+      }
+    }
+  }
+  addrAliasIndex = idx
+  addrAliasMax = max
+}
+// addr → 市町村全称（最长前缀命中）；无法归一返回 null
+function lookupAddrCity(area) {
+  if (!addrAliasIndex || addrAliasIndex.size === 0) return null
+  const a = normKana(area)
+  for (let len = Math.min(addrAliasMax, a.length); len >= 2; len--) {
+    const hit = addrAliasIndex.get(a.slice(0, len))
+    if (hit) return hit
+  }
+  return null
+}
+// 配置里可能残留表里不存在的市町村名（手工改过配置 / 数据表更新）→ 表到位后清掉
+function pruneUnknownCities() {
+  if (!cityNameSet) return
+  const cur = currentCfg()
+  const kept = cur.watch.cities.filter((c) => cityNameSet.has(c))
+  if (kept.length === cur.watch.cities.length) return
+  applyCfg(Object.assign({}, cur, { watch: Object.assign({}, cur.watch, { cities: kept }) }))
+}
+async function loadCityTable() {
+  if (cityTableState === 'loading' || cityTableState === 'ready') return cityTableState
+  if (typeof window === 'undefined' || typeof window.fetch !== 'function') { cityTableState = 'failed'; return cityTableState }
+  cityTableState = 'loading'
+  store.push({})
+  try {
+    const res = await window.fetch(AREAS_PATH, { headers: { accept: 'application/json' } })
+    if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : '?'))
+    const data = await res.json()
+    const payload = isPlainObject(data) && isPlainObject(data.prefectures) ? data.prefectures : data
+    if (!setCityTable(payload)) throw new Error('payload 不含市町村表')
+    pruneUnknownCities()
+  } catch (err) {
+    cityTableState = 'failed'
+  }
+  store.push({})
+  return cityTableState
 }
 
 // ---------- 解析器：P2PQuake code → Alert ----------
@@ -311,7 +569,14 @@ function parseQuake(raw) {
     eventKey: eq.time ? 'quake:' + eq.time : '',
     strength: typeof eq.maxScale === 'number' ? eq.maxScale : -1,
     hypo: { name: hypo.name || '', magnitude: typeof hypo.magnitude === 'number' ? hypo.magnitude : null },
-    regions: pts.map((p) => ({ pref: p.pref || '', area: p.addr || '', scale: typeof p.scale === 'number' ? p.scale : -1 })),
+    regions: pts.map((p) => ({
+      pref: normalizePref(p.pref),
+      area: p.addr || '',
+      scale: typeof p.scale === 'number' ? p.scale : -1,
+      // isArea=true 的条目是区域名（如「熊本県天草・芦北」），无法对应到具体市区町村；
+      // false/缺省才是观测点（如「白河市新白河」），可以做市级收窄。
+      cityKnown: p.isArea !== true,
+    })),
     cancelled: false,
     raw,
   }
@@ -374,21 +639,33 @@ function parse(raw) {
 }
 
 // ---------- 匹配引擎 ----------
-// watch.prefectures 为空 → 关注全日本
-function regionInWatch(region, watch) {
+// 关注地区匹配：县级始终生效（watch.prefectures 为空 = 全日本）；市级只在数据本身有
+// 市区町村粒度时收窄——即 551 的观测点条目（isArea=false，addr 形如「白河市新白河」）。
+// 两类情况一律放行，宁可多提醒也绝不漏报：
+//   ① 区域级数据：isArea=true 的区域名、556 的区域名、552 的津波予報区名都对应不到市町村；
+//   ② addr 归一不到任何市町村：机场观测点（新千歳空港）、未收录写法等。
+function regionInWatch(region, watch, cityLevel) {
   const list = watch && watch.prefectures
-  if (!list || list.length === 0) return true
-  return list.indexOf(region.pref) !== -1
+  const cities = (watch && watch.cities) || []
+  if (list && list.length > 0 && list.indexOf(region.pref) === -1) return false
+  if (!cityLevel || cities.length === 0) return true
+  if (region.cityKnown === false) return true
+  const addrCity = lookupAddrCity(region.area)
+  if (!addrCity) return true
+  return cities.indexOf(addrCity) !== -1
 }
 
 // 未命中原因：若存在未能识别归属县的区域名，明确提示，避免用户误以为链路故障
 function missReason(alert, watch, base) {
   const list = watch && watch.prefectures
+  const cities = (watch && watch.cities) || []
+  let reason = base
   if (list && list.length > 0) {
     const unknown = alert.regions.filter((r) => !r.pref).length
-    if (unknown > 0) return base + '（另有 ' + unknown + ' 个区域名未能识别归属县）'
+    if (unknown > 0) reason = base + '（另有 ' + unknown + ' 个区域名未能识别归属县）'
   }
-  return base
+  if (cities.length > 0) reason += '（已按所选 ' + cities.length + ' 个市区町村收窄）'
+  return reason
 }
 
 function matchAlert(alert, cfg) {
@@ -407,7 +684,7 @@ function matchAlert(alert, cfg) {
       }
     }
     const threshold = alert.kind === 'eew' ? t.eewScale : t.quakeScale
-    const hitRegion = alert.regions.find((r) => regionInWatch(r, w) && typeof r.scale === 'number' && r.scale >= threshold)
+    const hitRegion = alert.regions.find((r) => regionInWatch(r, w, alert.kind === 'quake') && typeof r.scale === 'number' && r.scale >= threshold)
     return hitRegion
       ? { hit: true, reason: alert.kind === 'eew' ? 'EEW 预测震度达标' : '观测震度达标', region: hitRegion }
       : { hit: false, reason: missReason(alert, w, '关注地区未命中或强度低于阈值') }
@@ -417,7 +694,7 @@ function matchAlert(alert, cfg) {
     if (alert.cancelled) return { hit: false, reason: '解除消息不提醒' }
     if (alert.regions.length === 0) return { hit: false, reason: '本条没有海啸预报区数据' }
     const minRank = own(TSUNAMI_RANK, t.tsunamiGrade) || 1
-    const hitRegion = alert.regions.find((r) => regionInWatch(r, w) && (own(TSUNAMI_RANK, r.grade) || 0) >= minRank)
+    const hitRegion = alert.regions.find((r) => regionInWatch(r, w, false) && (own(TSUNAMI_RANK, r.grade) || 0) >= minRank)
     return hitRegion
       ? { hit: true, reason: '海啸等级达标', region: hitRegion }
       : { hit: false, reason: missReason(alert, w, '关注地区未命中或等级低于阈值') }
@@ -681,6 +958,16 @@ function handleCancelled(alert, cfg) {
     })
     return
   }
+  // 取消 / 解除消息不穿透静默（它不是紧急警报，静默期间只记历史）
+  if (inQuietHours(cfg)) {
+    addEvent({
+      id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
+      issued: alert.issued, headline: alert.headline, hit: true,
+      suppressed: true,
+      suppressedReason: '静默时段 ' + cfg.quietHours.start + '–' + cfg.quietHours.end + '（取消 / 解除不穿透）',
+    })
+    return
+  }
   alertedEvents.delete(cancelKeyOf(alert)) // 同一条取消只提醒一次
   if (!claimAlertForTab('cancel:' + (alert.id || cancelKeyOf(alert)), '')) {
     addEvent({
@@ -722,16 +1009,29 @@ function handleRaw(raw, cfg) {
     return
   }
   const hitPref = m.region ? m.region.pref : ''
-  // 严重度按「命中区域的实际强度」判定，而不是全日本最大值——关注县震度低时颜色不该是红
-  const hitSeverity = alert.kind === 'tsunami'
-    ? alert.severity
-    : severityOfScale(m.region && typeof m.region.scale === 'number' ? m.region.scale : alert.maxScale)
+  // 严重度：地震按「命中区域的实际强度」判定（关注县震度低时颜色不该是红）；
+  // EEW 恒为 red（警报本质，不能因为预测震度刚好到阈值就降级成橙色）；
+  // 海啸用自身等级（MajorWarning / Warning → red，Watch → orange）。
+  const hitSeverity = alert.kind === 'quake'
+    ? severityOfScale(m.region && typeof m.region.scale === 'number' ? m.region.scale : alert.maxScale)
+    : alert.severity
   // 同一次地震的后续发布（速报 → 震源 → 各地震度、或 EEW 多报）强度未升级 → 只更新历史，不再响铃
   if (isEventRepeat(alert, cfg.dedupe.windowMinutes)) {
     addEvent({
       id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true, suppressedReason: '同一地震的后续发布（强度未升级）',
+    })
+    return
+  }
+  // 静默时段：命中但不响铃、不弹通知，只记历史。红色等级（EEW、大海啸警报）默认可穿透。
+  if (inQuietHours(cfg) && !(hitSeverity === 'red' && cfg.quietHours.breakForSevere !== false)) {
+    addEvent({
+      id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
+      issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
+      suppressed: true,
+      suppressedReason: '静默时段 ' + cfg.quietHours.start + '–' + cfg.quietHours.end +
+        (hitSeverity === 'red' ? '（未开启红色等级穿透）' : ''),
     })
     return
   }
@@ -788,7 +1088,7 @@ function createWsClient() {
   }
   const connect = () => {
     if (stopped) return
-    const url = loadCfg().source === 'sandbox' ? SANDBOX_URL : WS_URL
+    const url = currentCfg().source === 'sandbox' ? SANDBOX_URL : WS_URL
     store.push({ status: 'connecting', retries, detail: '正在连接 ' + url })
     try { ws = new window.WebSocket(url) } catch (err) {
       scheduleReconnect()
@@ -804,7 +1104,7 @@ function createWsClient() {
     ws.onmessage = (ev) => {
       try {
         const raw = JSON.parse(String(ev.data))
-        handleRaw(raw, loadCfg())
+        handleRaw(raw, currentCfg())
       } catch (err) { /* 单条解析失败不影响连接 */ }
     }
     ws.onerror = () => { /* onclose 统一处理 */ }
@@ -843,6 +1143,14 @@ function statusMetaOf(status, retries) {
     closed: { color: '#e5484d', text: '已停止' },
   }[status] || { color: '#7c8494', text: String(status) }
 }
+// 配置存储位置的人话说明（settings.yaml / 进程内 / localStorage）
+function settingsSyncLabel() {
+  return {
+    host: '机器级 settings.yaml（DSH settings 服务）',
+    memory: '仅本浏览器（当前页面不支持 Host 持久化）',
+    local: '浏览器 localStorage',
+  }[settingsSync] || String(settingsSync)
+}
 const s = {
   section: (title, ...children) => h('div', { style: { padding: '14px 16px', borderBottom: '1px solid rgba(148,163,184,0.14)' } },
     h('div', { style: { fontWeight: 700, fontSize: 13, marginBottom: 10, color: '#dfe3e8' } }, title), ...children),
@@ -864,38 +1172,117 @@ const s = {
 }
 
 function SettingsPanel() {
-  const [cfg, setCfgState] = useState(() => loadCfg())
+  const [cfg, setCfgState] = useState(() => currentCfg())
   const [, setTick] = useState(0)
   const [perm, setPerm] = useState(() => notificationPermission())
   const [testMsg, setTestMsg] = useState('')
   const [expanded, setExpanded] = useState(null)
+  const [cityQuery, setCityQuery] = useState({}) // 每个县的市町村搜索词
   // 音量滑块：拖动期间只改本地草稿，停手 300ms 后才落盘（避免每移动 1px 写一次 localStorage）
   const [volDraft, setVolDraft] = useState(null)
   const volTimer = useRef(null)
-  useEffect(() => store.subscribe(() => setTick((t) => t + 1)), [])
-  useEffect(() => () => { if (volTimer.current) clearTimeout(volTimer.current) }, [])
+  const volPending = useRef(null) // 尚未落盘的草稿值：卸载时补写，拖完立刻关设置页也不丢改动
+  // store 变化（新预警、Host 配置同步）都要重新读一次当前配置
+  useEffect(() => store.subscribe(() => { setTick((t) => t + 1); setCfgState(currentCfg()) }), [])
+  useEffect(() => () => {
+    if (volTimer.current) { clearTimeout(volTimer.current); volTimer.current = null }
+    const v = volPending.current
+    if (v !== null) {
+      volPending.current = null
+      // 卸载中不能 setState，只补写盘
+      saveCfg({ ...loadCfg(), notify: { ...loadCfg().notify, volume: v } })
+    }
+  }, [])
   // 其它 DSH 标签页改了配置 → 本页跟随（storage 事件只在「别的标签页」写入时触发）
   useEffect(() => {
-    const onStorage = (e) => { if (!e || e.key === STORAGE_KEY) setCfgState(loadCfg()) }
+    const onStorage = (e) => {
+      if (!e || e.key === STORAGE_KEY) { runtimeCfg = loadCfg(); setCfgState(runtimeCfg) }
+    }
     window.addEventListener('storage', onStorage)
     return () => window.removeEventListener('storage', onStorage)
   }, [])
 
-  // 立即基于最新持久配置计算并写盘，再 setState（避免 updater 内副作用时机不确定）
-  const setCfg = (fn) => { const next = saveCfg(fn(loadCfg())); setCfgState(next) }
+  // 立即基于最新配置计算（内存 + localStorage 镜像 + Host），再 setState
+  const setCfg = (fn) => { const next = applyCfg(fn(currentCfg())); setCfgState(next) }
   const togglePref = (jp) => setCfg((c) => {
     const cur = c.watch.prefectures
-    const next = cur.indexOf(jp) === -1 ? cur.concat(jp) : cur.filter((p) => p !== jp)
-    return { ...c, watch: { ...c.watch, prefectures: next } }
+    const removing = cur.indexOf(jp) !== -1
+    const next = removing ? cur.filter((p) => p !== jp) : cur.concat(jp)
+    // 取消关注某个县时，同时清掉它下面已选的市町村（避免留下永远不生效的条目）
+    const cities = removing
+      ? c.watch.cities.filter((city) => citiesOfPref(jp).indexOf(city) === -1)
+      : c.watch.cities
+    return { ...c, watch: { ...c.watch, prefectures: next, cities } }
   })
+  const toggleCity = (city) => setCfg((c) => {
+    const cur = c.watch.cities
+    let next = cur.indexOf(city) === -1 ? cur.concat(city) : cur.filter((x) => x !== city)
+    if (next.length > MAX_WATCH_CITIES) next = next.slice(0, MAX_WATCH_CITIES)
+    return { ...c, watch: { ...c.watch, cities: next } }
+  })
+  // 市区町村选择器：数据表到位后，为每个已关注的县提供「搜索 + 多选」
+  const cityPicker = () => {
+    if (cityTableState === 'failed') {
+      return h('div', { style: { fontSize: 11, color: '#d9a406', marginTop: 10 } },
+        '市区町村表加载失败 —— 当前仅支持按都道府县关注（可重启 dsh web 重试）')
+    }
+    if (cfg.watch.prefectures.length === 0) {
+      return h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 10 } },
+        '先选择都道府县，再可选地细化到市区町村')
+    }
+    if (cityTableState !== 'ready') {
+      return h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 10 } }, '正在加载市区町村表…')
+    }
+    return h('div', { style: { marginTop: 10 } },
+      h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 4 } },
+        '可选细化到市区町村（不选 = 该县全境）。只有地震情报的观测点有市町村粒度；EEW 与海啸是区域级，仍按县判定。'),
+      cfg.watch.prefectures.map((pref) => {
+        const list = citiesOfPref(pref)
+        if (list.length === 0) return null
+        const q = cityQuery[pref] || ''
+        const shown = q ? list.filter((c) => c.indexOf(q) !== -1) : list
+        const sel = list.filter((c) => cfg.watch.cities.indexOf(c) !== -1).length
+        return h('div', { key: pref, style: { border: '1px solid rgba(148,163,184,0.18)', borderRadius: 6, padding: '6px 8px', margin: '6px 0' } },
+          h('div', { style: { fontSize: 12, color: '#dfe3e8', marginBottom: 4 } },
+            pref + '：' + (sel === 0 ? '全境（未细化）' : '已选 ' + sel + ' 个市町村')),
+          h('input', {
+            type: 'text', value: q, placeholder: '搜索 ' + pref + ' 的市町村…',
+            onChange: (e) => setCityQuery((prev) => Object.assign({}, prev, { [pref]: e.target.value })),
+            style: { width: '100%', boxSizing: 'border-box', background: '#ffffff', color: '#1a1a1a', border: '1px solid #6b7280', borderRadius: 6, padding: '3px 8px', fontSize: 12, marginBottom: 5 },
+          }),
+          h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 4, maxHeight: 150, overflowY: 'auto' } },
+            shown.slice(0, 200).map((city) => {
+              const on = cfg.watch.cities.indexOf(city) !== -1
+              return h('button', {
+                key: city, onClick: () => toggleCity(city),
+                style: {
+                  fontSize: 11, padding: '2px 8px', borderRadius: 11, cursor: 'pointer',
+                  border: '1px solid ' + (on ? '#3b82f6' : 'rgba(148,163,184,0.3)'),
+                  background: on ? 'rgba(59,130,246,0.18)' : 'transparent',
+                  color: on ? '#93c5fd' : '#9aa0a6',
+                },
+              }, city)
+            }),
+            shown.length > 200
+              ? h('span', { style: { fontSize: 11, color: '#9aa0a6' } }, '…共 ' + shown.length + ' 个，请用搜索缩小范围')
+              : null),
+        )
+      }),
+    )
+  }
+  const flushVolume = () => {
+    if (volTimer.current) { clearTimeout(volTimer.current); volTimer.current = null }
+    const v = volPending.current
+    if (v === null) return
+    volPending.current = null
+    setVolDraft(null)
+    setCfg((c) => ({ ...c, notify: { ...c.notify, volume: v } }))
+  }
   const onVolumeInput = (v) => {
+    volPending.current = v
     setVolDraft(v)
     if (volTimer.current) clearTimeout(volTimer.current)
-    volTimer.current = setTimeout(() => {
-      volTimer.current = null
-      setVolDraft(null)
-      setCfg((c) => ({ ...c, notify: { ...c.notify, volume: v } }))
-    }, 300)
+    volTimer.current = setTimeout(flushVolume, 300)
   }
   const volShown = volDraft === null ? cfg.notify.volume : volDraft
 
@@ -931,10 +1318,12 @@ function SettingsPanel() {
           if (activeClient) setTimeout(() => { try { activeClient.restart() } catch (err) {} }, 80)
         }, (o) => o.label),
       ),
+      h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 6 } },
+        '配置存储：' + settingsSyncLabel()),
     ),
 
     // 关注地区
-    s.section('关注地区（都道府县）',
+    s.section('关注地区（都道府县 / 市区町村）',
       h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 8 } },
         cfg.watch.prefectures.length === 0
           ? '未选择 → 将提醒全日本（按下方阈值过滤）。建议选择你所在/关注的地区以减少打扰。'
@@ -954,6 +1343,7 @@ function SettingsPanel() {
           }, p.zh)
         }),
       ),
+      cityPicker(),
     ),
 
     // 阈值
@@ -979,9 +1369,9 @@ function SettingsPanel() {
         style: { flex: 1, minWidth: 120 },
       }), h('span', { style: { color: '#9aa0a6', fontSize: 11, width: 34 } }, Math.round(volShown * 100) + '%')),
       s.row(
-        s.btn('试听地震音', () => playSound('quake', cfg.notify.volume)),
-        s.btn('试听 EEW 音', () => playSound('eew', cfg.notify.volume)),
-        s.btn('试听海啸音', () => playSound('tsunami', cfg.notify.volume)),
+        s.btn('试听地震音', () => playSound('quake', volShown)),
+        s.btn('试听 EEW 音', () => playSound('eew', volShown)),
+        s.btn('试听海啸音', () => playSound('tsunami', volShown)),
       ),
       s.row(
         s.btn('测试系统通知', () => {
@@ -1006,6 +1396,28 @@ function SettingsPanel() {
       ),
       h('div', { style: { color: '#9aa0a6', fontSize: 11, marginTop: 6 } }, permText),
       testMsg ? h('div', { style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, testMsg) : null,
+    ),
+
+    // 静默时段（0.2.0）
+    s.section('静默时段',
+      s.row(s.checkbox(cfg.quietHours.enabled, (v) => setCfg((c) => ({ ...c, quietHours: { ...c.quietHours, enabled: v } })), '启用静默时段')),
+      s.row(
+        s.label('开始'),
+        h('input', {
+          type: 'time', value: cfg.quietHours.start,
+          onChange: (e) => setCfg((c) => ({ ...c, quietHours: { ...c.quietHours, start: e.target.value || c.quietHours.start } })),
+          style: { background: '#ffffff', color: '#1a1a1a', border: '1px solid #6b7280', borderRadius: 6, padding: '4px 8px', fontSize: 12 },
+        }),
+        s.label('结束'),
+        h('input', {
+          type: 'time', value: cfg.quietHours.end,
+          onChange: (e) => setCfg((c) => ({ ...c, quietHours: { ...c.quietHours, end: e.target.value || c.quietHours.end } })),
+          style: { background: '#ffffff', color: '#1a1a1a', border: '1px solid #6b7280', borderRadius: 6, padding: '4px 8px', fontSize: 12 },
+        }),
+      ),
+      s.row(s.checkbox(cfg.quietHours.breakForSevere, (v) => setCfg((c) => ({ ...c, quietHours: { ...c.quietHours, breakForSevere: v } })), '红色等级（EEW / 大海啸警报）仍提醒')),
+      h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 6 } },
+        '按浏览器本地时间判定；开始时间晚于结束时间表示跨午夜（如 23:00–07:00）。静默期间命中的预警仍会记入下方「最近预警记录」，只是不响铃、不弹通知。'),
     ),
 
     // 免责
@@ -1079,6 +1491,8 @@ function StatusIndicator(props) {
   const meta = statusMetaOf(store.status, store.retries)
   const wide = Boolean(props && props.wide)
   return h('div', {
+    role: 'status',
+    'aria-label': '灾害预警：' + meta.text,
     title: '灾害预警：' + meta.text + (store.detail ? ' · ' + store.detail : ''),
     style: { display: 'flex', alignItems: 'center', gap: 6, padding: wide ? '4px 8px' : '4px', fontSize: 12, color: 'inherit', cursor: 'default' },
   },
@@ -1106,6 +1520,19 @@ exports.apply = function apply(ctx) {
   ctx.effect(() => () => {
     try { if (alertChannel) { alertChannel.close(); alertChannel = null } } catch (err) { /* 忽略 */ }
   }, 'dsh-quake-alert: tab channel')
+
+  // 机器级持久化：settings 服务可用时，配置交给 DSH 的 settings.yaml（Host 侧同名 namespace）。
+  // 服务缺席（或页面非 loopback）时保持 localStorage 路径，插件照常工作。
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['settingsScope'], (settingsCtx) => {
+      try {
+        bindSettingsScope(settingsCtx.settingsScope.bind({ namespace: SETTINGS_NS }))
+      } catch (err) { /* bind 失败 → 继续用 localStorage */ }
+    })
+  }
+
+  // 市区町村表：Host 路由提供，拉一次缓存。失败只影响市级细化，不影响任何提醒。
+  loadCityTable()
 
   // WebSocket 常驻连接（与设置页是否打开无关）。
   // start() 必须写在 effect 内：若同一 apply 后面的注册抛错，连接也要随 fiber 一起收掉，
@@ -1135,7 +1562,7 @@ exports.apply = function apply(ctx) {
 }
 
 // 单测钩子（客户端宿主忽略额外导出）
-exports.__test = { parse, parseQuake, parseEew, parseTsunami, matchAlert, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG }
+exports.__test = { parse, parseQuake, parseEew, parseTsunami, matchAlert, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, inQuietHours, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState: () => ({ sync: settingsSync, bound: settingsScope !== null, runtime: runtimeCfg }), resetSettings: () => { runtimeCfg = null; settingsScope = null; settingsSync = 'local' }, setCityTable, citiesOfPref, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, pruneUnknownCities, loadCityTable, cityTableState: () => cityTableState, resetCityTable: () => { cityTable = null; cityNameSet = null; cityTableState = 'idle'; addrAliasIndex = null; addrAliasMax = 0 } }
 
 return module.exports;
 } });
