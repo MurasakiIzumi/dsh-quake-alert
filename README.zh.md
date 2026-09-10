@@ -78,24 +78,33 @@ dsh plugin --profile web add link:此仓库目录
 ## 开发
 
 ```
-client/client.js      # 全部逻辑（DSH 模块加载器格式，单文件分节）
+client/src/*.js       # 客户端源码：15 个标准 ESM 模块（显式 import/export，各文件头部写职责与依赖）
+client/client.js      # DSH 单文件 bundle —— 由 rollup 打包生成，勿手改
 lib/index.js          # Host 半边：settings 命名空间（schemastery）+ /areas 只读路由
 lib/data/cities.js    # 市区町村表（由公开数据生成；提供给浏览器端）
+scripts/build-client.mjs # 构建：rollup 把 client/src 打包成 client/client.js
+scripts/check-imports.mjs # 跨模块引用检查（用了别的模块的导出却没 import 时报错）
 cordis.patch.yml      # 插件行 insert 声明
 tests/sync-test.cjs   # 解析器/匹配引擎/区域归一回归测试（node 直接运行，无需浏览器）
 tests/area-tables.cjs # 気象庁 区域名 / 津波予報区 → 都道府县 期望值（测试数据）
 ```
 
 ```sh
-node --check client/client.js && node --check lib/index.js   # 语法检查
-node tests/sync-test.cjs                                     # 回归测试（230 项断言）
+node scripts/build-client.mjs          # 改完 client/src 后重新打包
+node scripts/check-imports.mjs         # 跨模块引用检查（漏 import）
+node scripts/build-client.mjs --check  # 校验已提交的 bundle 是否陈旧
+node tests/sync-test.cjs               # 回归测试（230 项断言）
 ```
+
+> 要改客户端代码请改 `client/src/*.js`，**不要改 `client/client.js`**——DSH 要求客户端 bundle 是单文件
+> （扁平模块图：一个 bundle 就是一个模块节点，不支持包内多文件 import），所以 ESM 模块在构建时由 rollup 打包。
+> 这也是 DSH 官方插件的形态：官方包同样只发布构建产物，源码是多文件。
 
 > `samples/` 与 `tests/` 随仓库分发（纯文本测试件，无外部依赖、无网络访问），克隆后可直接运行上面的回归测试；两者不随 npm 包分发（`package.json` 的 `files` 未包含）。`DESIGN.md` 为内部设计稿，不上传仓库。
 
 ## 更新记录
 
-当前版本 **0.2.0**。各版本的变更明细见 [CHANGELOG.md](./CHANGELOG.md)。
+当前版本 **0.2.1**。各版本的变更明细见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## 数据来源
 

@@ -78,24 +78,34 @@ dsh plugin --profile web add link:このリポジトリのパス
 ## 開発
 
 ```
-client/client.js      # すべてのロジック（DSH モジュールローダー形式、単一ファイル）
+client/src/*.js       # クライアント側ソース：標準 ESM モジュール 15 個（明示的な import/export、各先頭に役割と依存）
+client/client.js      # DSH 用の単一ファイル bundle —— rollup が生成。直接編集しない
 lib/index.js          # Host 側：settings 名前空間（schemastery）＋ /areas 読み取り専用ルート
 lib/data/cities.js    # 市区町村表（公開データから生成。ブラウザ側へ配信）
+scripts/build-client.mjs  # rollup で client/src を client/client.js にバンドル
+scripts/check-imports.mjs # モジュール間参照チェック（import 漏れを検出）
 cordis.patch.yml      # プラグイン行の insert 宣言
 tests/sync-test.cjs   # パーサー / マッチャー / 地域名正規化の回帰テスト（node で直接実行、ブラウザ不要）
 tests/area-tables.cjs # 気象庁の地域名・津波予報区 → 期待される都道府県（テストデータ）
 ```
 
 ```sh
-node --check client/client.js && node --check lib/index.js   # 構文チェック
-node tests/sync-test.cjs                                     # 回帰テスト（230 項目）
+node scripts/build-client.mjs          # client/src を編集したら再バンドル
+node scripts/check-imports.mjs         # モジュール間参照チェック
+node scripts/build-client.mjs --check  # コミット済み bundle が古い場合に失敗
+node tests/sync-test.cjs               # 回帰テスト（230 項目）
 ```
+
+> クライアント側のコードは `client/src/*.js` を編集してください。**`client/client.js` は直接編集しません**——
+> DSH はクライアント bundle を単一ファイルとして要求するため（フラットなモジュールグラフ：1 bundle = 1 モジュールノード、
+> パッケージ内の複数ファイル import は不可）、ESM モジュールはビルド時に rollup でバンドルされます。
+> これは DSH 公式プラグインと同じ形態です（配布物はビルド成果物のみ、ソースは複数ファイル）。
 
 > `samples/` と `tests/` はリポジトリに含まれます（外部依存もネットワークアクセスもないプレーンテキストのテスト資産）。クローン後すぐに上記の回帰テストを実行できます。npm パッケージには含まれません（`package.json` の `files` に未記載）。`DESIGN.md` は内部の設計資料であり、リポジトリにはアップロードしません。
 
 ## 更新履歴
 
-現在のバージョンは **0.2.0** です。各バージョンの詳細は [CHANGELOG.md](./CHANGELOG.md) を参照してください。
+現在のバージョンは **0.2.1** です。各バージョンの詳細は [CHANGELOG.md](./CHANGELOG.md) を参照してください。
 
 ## データ出典
 

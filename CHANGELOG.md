@@ -2,6 +2,23 @@
 
 本文件记录 dsh-quake-alert 的显著变更，格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.1] - 2026-09-10
+
+工程性版本：确认对 DSH 0.1.5-rc.1 的适配，并把 1,568 行的单文件 client 拆成 15 个标准 ESM 模块 + rollup 构建。
+
+### Changed
+
+- **客户端源码模块化**：`client/client.js`（1,568 行）按功能拆成 `client/src/` 下 15 个**标准 ESM 模块**（显式 `import` / `export`），每个文件头部写明该文件的作用、内容与依赖；`scripts/build-client.mjs` 用 rollup 打包回 DSH 要求的单文件 bundle。常量与默认配置集中到 `01-constants.js`，不再散落各功能文件
+  - 为什么仍需打包：DSH 的客户端 bundle 必须是**一个模块节点**（宿主提供已构建 bundle、扁平模块图），不支持包内多文件 import。这也是 DSH 官方插件的形态——官方包只发布 `lib/client.js` 构建产物，源码是多文件 TS
+  - 构建选 rollup（纯 JS 打包器，native 绑定经 napi 在进程内加载）：不 spawn 子进程、不需要下载平台二进制，受限沙箱 / CI / Windows 杀软环境都能构建——原生 esbuild 与 esbuild-wasm 在本环境都会因 spawn 子进程被拒
+  - 构建脚本把**循环依赖**升级为构建失败；新增 `scripts/check-imports.mjs` 做跨模块引用检查（用了别的模块的导出却没 import 时报错），把这类问题从运行时的 ReferenceError 提前到检查阶段
+- `package.json` 脚本：`build`（打包）、`check`（引用检查 → bundle 新鲜度 → 语法）、`test`（先打包再跑回归）；devDependencies 增加 rollup
+
+### Notes
+
+- **DSH 0.1.5-rc.1 适配确认**：本项目用到的接口在该版本均未变更，无需改动——Host `settings.register(ns, schema)`、Host `webServer.register({kind, path, handler})`、Client `settings.section` slot（`{id, order, label}`，运行时 `quake-alert` 仍 active）、Client `ctx.settingsScope.bind({ namespace })`
+- M2 剩余的泥石流 / 洪水（JMA 新数据源 + 新解析器）调整到 0.3.0
+
 ## [0.2.0] - 2026-09-10
 
 M2 主体：静默时段、机器级持久化（settings.yaml）、市区町村级匹配；并修掉 0.1.3 复审发现的一处提醒颜色回归与三处小问题。

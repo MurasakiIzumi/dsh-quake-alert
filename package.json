@@ -1,6 +1,6 @@
 {
   "name": "dsh-quake-alert",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "灾害预警 QuakeAlert：用户使用 DSH 时，实时接收日本地震/海啸预警（P2PQuake WebSocket），按关注地区与阈值匹配后以系统通知+提示音提醒。",
   "private": false,
   "type": "module",
@@ -57,12 +57,17 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "check": "node --check lib/index.js && node --check client/client.js"
+    "build": "node scripts/build-client.mjs",
+    "check": "node scripts/check-imports.mjs && node scripts/build-client.mjs --check && node --check lib/index.js && node --check client/client.js",
+    "test": "node scripts/build-client.mjs && node tests/sync-test.cjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.2"
+  },
+  "devDependencies": {
+    "rollup": "^4.63.1"
   }
 }
