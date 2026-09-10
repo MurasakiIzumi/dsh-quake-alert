@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 // dsh-quake-alert · client/src 跨模块引用检查
 //
-// 作用：ESM 化之后，某个模块引用了别的模块的导出却忘了 import，只会在**运行时**抛
-//       ReferenceError（打包器不会报错）。这个脚本把这类错误提前到构建/检查阶段：
-//       解析每个文件的 `export { ... }` 与 `import { ... } from '...'`，再检查正文里
-//       出现的「其它文件导出的名字」是否都已在 import 列表中。
+// 作用：ESM 化之后，跨模块引用一旦写错，只会在**运行时**抛 ReferenceError（打包器不会
+//       报错）。这个脚本把这类错误提前到构建/检查阶段，检查两件事：
+//       ① 正文里出现的「其它文件导出的名字」是否都已在 import 列表中（漏 import）；
+//       ② 正文里「被赋值却没有声明」的标识符——ESM 里给本文件未声明、也未 import 的名字
+//          赋值一定是错的：拆分前它可能是同作用域的模块私有变量（单文件时代），拆分后
+//          就成了自由变量，打包进 'use strict' 的 bundle 会直接抛 ReferenceError。
+//          0.2.1 拆分时 client/src/13-ui-settings.js 的 `runtimeCfg = loadCfg()` 正是这一类。
 //
 // 用法：node scripts/check-imports.mjs   （并入 pnpm check）
 
@@ -47,6 +50,21 @@ for (const [f, names] of exportsByFile) {
   }
 }
 
+/** 允许被赋值的平台/宿主全局（ESM 严格模式下赋值给未声明的名字会抛 ReferenceError，
+ *  这些名字由宿主或语言提供，不属于本检查的范围）。 */
+const GLOBALS = new Set([
+  'window', 'document', 'self', 'top', 'parent', 'frames', 'globalThis', 'console', 'navigator',
+  'location', 'history', 'localStorage', 'sessionStorage', 'performance', 'crypto',
+  'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask',
+  'requestAnimationFrame', 'cancelAnimationFrame', 'getComputedStyle', 'matchMedia',
+  'Math', 'JSON', 'Object', 'Array', 'String', 'Number', 'Boolean', 'Date', 'Set', 'Map',
+  'WeakMap', 'WeakSet', 'Promise', 'RegExp', 'Error', 'TypeError', 'RangeError', 'Symbol',
+  'Intl', 'Proxy', 'Reflect', 'Function', 'isNaN', 'parseInt', 'parseFloat', 'undefined',
+  'NaN', 'Infinity', 'encodeURIComponent', 'decodeURIComponent', 'encodeURI', 'decodeURI',
+  'TextDecoder', 'TextEncoder', 'AbortController', 'URL', 'URLSearchParams', 'Notification',
+  'AudioContext', 'fetch', 'require', 'module', 'exports', 'arguments', 'React',
+])
+
 let problems = 0
 for (const f of files) {
   const text = readFileSync(path.join(SRC, f), 'utf8')
@@ -81,6 +99,21 @@ for (const f of files) {
   if (missing.length) {
     problems += missing.length
     console.error('✗ ' + f + ' 缺少 import：' + missing.join('、'))
+  }
+
+  // ② 未声明赋值：`name = ...` 中的 name 既不是本文件声明、也不是 import、也不是已知全局。
+  //    ESM 严格模式下这行必然抛 ReferenceError（打包器不会报错），是模块化拆分最容易留下的坑。
+  //    这里只查裸赋值；`a.b = x`（属性赋值）与 `+=` 这类复合赋值不在检查范围。
+  const badAssign = new Set()
+  for (const m of body.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?<![=!<>])=(?!=)/g)) {
+    const n = m[1]
+    if (local.has(n) || imported.has(n) || owner.has(n) || GLOBALS.has(n)) continue
+    badAssign.add(n)
+  }
+  if (badAssign.size) {
+    problems += badAssign.size
+    console.error('✗ ' + f + ' 赋值未声明：' + [...badAssign].join('、') +
+      '（本文件没有声明它，也没有从别处 import —— 拆分后它已不是同作用域变量）')
   }
 }
 

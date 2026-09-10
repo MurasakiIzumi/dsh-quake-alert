@@ -2,6 +2,21 @@
 
 本文件记录 dsh-quake-alert 的显著变更，格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.2.2] - 2026-09-10
+
+0.2.1 模块化拆分留下的两处回归修复版本：跨标签页配置同步、音量兜底落盘在拆分后失效——两者都只在运行到那行代码时才暴露，既有的检查与回归全都没覆盖到。本版一并把这类错误提前到检查阶段。
+
+### Fixed
+
+- **跨标签页配置同步失效**（0.2.1 拆分引入的回归）：`13-ui-settings.js` 的 `storage` 监听器直接给 `03-settings-bridge.js` 的模块私有变量 `runtimeCfg` 赋值。拆分前两者同处一个作用域所以正常，拆分后这个名字成了自由变量，打包进带 `'use strict'` 的 bundle 会抛 `ReferenceError: runtimeCfg is not defined`，于是「其它 DSH 标签页改了配置，本页立即同步」静默失效（异常被事件监听器吞掉，用户只看到不同步）。改为经 03 新增的显式入口 `reloadFromLocal()` 回读本地镜像
+- **音量草稿在机器级持久化下仍会丢改动**：设置页卸载时的补写路径用的是 `saveCfg`——它只写 localStorage 镜像，不改内存也不推 Host；有 Host settings 时，下一次同步会被 Host 的旧值覆盖回来，所以「拖动音量后 300ms 内关闭设置页」照样丢改动（0.2.0 声称修过这个场景，实际只在无 Host 的回退路径下成立）。改走 `applyCfg`，内存 / 镜像 / Host 三处一致
+
+### Changed
+
+- `scripts/check-imports.mjs` 增加第二类检查：**赋值给本文件未声明、也未 import 的名字**。ESM 严格模式下这行必然抛 `ReferenceError`，而打包器不会报错；此前它既逃过「漏 import」检查，也逃过回归测试——0.2.1 的两处回归正属此类。当前 15 个模块 / 106 个导出名全绿
+- 回归断言从 230 项扩展到 236 项：新增音量兜底落盘必须推 Host、`reloadFromLocal` 回读其它标签页写入的配置并同步内存副本
+- 文档同步：README 三语修正「Host 半边仅保留插件装载所需的空壳」的过时描述（0.2.0 起 Host 已承担 settings namespace 与 `/areas` 只读路由）；DESIGN.md 修正 M1 验收处的断言数、0.2.1 之后的 Client 源码形态（15 个 ESM + rollup 打包、运行期单文件 bundle）与 `check-imports.mjs` 的职责说明
+
 ## [0.2.1] - 2026-09-10
 
 工程性版本：确认对 DSH 0.1.5-rc.1 的适配，并把 1,568 行的单文件 client 拆成 15 个标准 ESM 模块 + rollup 构建。

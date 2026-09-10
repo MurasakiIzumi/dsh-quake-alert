@@ -3,7 +3,8 @@
 //
 // 作用：机器级持久化桥——把配置交给 DSH 的 Host settings（settings.yaml）。
 // 内容：内存镜像 currentCfg、写入入口 applyCfg、差异计算 settingsOpsFor、
-//       异步推送 pushCfgToHost、首次迁移与降级 bindSettingsScope，
+//       异步推送 pushCfgToHost、首次迁移与降级 bindSettingsScope、
+//       本地镜像回读 reloadFromLocal（其它标签页改配置后），
 //       以及 Host section ⇄ 本地配置的转换（cfgToSection / sectionToCfg）。
 // 依赖：01-constants、02-storage（07-store 的 store.push 在运行时才用到）。
 // 降级：没有 settings 服务 / 页面非 loopback / Host 不持久化时自动退回 localStorage。
@@ -36,6 +37,14 @@ function sectionToCfg(section) {
 // 同步读取入口：保持 M1 的同步语义，调用方无需感知 Host 的存在
 function currentCfg() {
   if (runtimeCfg === null) runtimeCfg = loadCfg()
+  return runtimeCfg
+}
+// 本地镜像被**其它 DSH 标签页**改写后（storage 事件），把 localStorage 重新读回内存副本。
+// 跨模块不能直接给本模块私有的 runtimeCfg 赋值：拆分前它同处一个作用域，拆分后就成了
+// 自由变量，打包进 'use strict' 的 bundle 会抛 ReferenceError（0.2.1 拆分时漏改过一处），
+// 所以这里给出显式入口。
+function reloadFromLocal() {
+  runtimeCfg = loadCfg()
   return runtimeCfg
 }
 // 写入入口：内存立即生效 → localStorage 镜像 → Host（可用时异步持久化）
@@ -112,4 +121,4 @@ function bindSettingsScope(scope) {
 const settingsState = () => ({ sync: settingsSync, bound: settingsScope !== null, runtime: runtimeCfg })
 const resetSettings = () => { runtimeCfg = null; settingsScope = null; settingsSync = 'local' }
 
-export { SETTINGS_NS, cfgToSection, sectionToCfg, currentCfg, applyCfg, settingsOpsFor, pushCfgToHost, bindSettingsScope, settingsSync, settingsState, resetSettings }
+export { SETTINGS_NS, cfgToSection, sectionToCfg, currentCfg, applyCfg, settingsOpsFor, pushCfgToHost, bindSettingsScope, settingsSync, settingsState, resetSettings, reloadFromLocal }

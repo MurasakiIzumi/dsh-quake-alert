@@ -824,7 +824,33 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(set && set.value === 60, 'applyCfg 把改动推给 Host（set thresholds.quakeScale）')
     assert(t.currentCfg().thresholds.quakeScale === 60, 'applyCfg 内存立即生效（连接重连等同步读取可见）')
   }
-  // ⑥ 没有 Host 时一切照旧
+  // ⑥ 音量草稿兜底（设置页卸载时补写）：必须经 applyCfg，saveCfg 只写镜像会丢改动
+  {
+    const t = loadClientEx({}).exports.__test
+    const scope = fakeScope()
+    t.bindSettingsScope(scope)
+    scope.writes.length = 0
+    const cur = t.currentCfg()
+    t.applyCfg(Object.assign({}, cur, { notify: Object.assign({}, cur.notify, { volume: 0.2 }) }))
+    const ops = scope.writes[0] || []
+    const vol = ops.find((o) => o.op === 'set' && pathOf(o) === 'notify.volume')
+    assert(!!vol && vol.value === 0.2, '音量兜底落盘经 applyCfg → 同时推给 Host（saveCfg 不推）')
+    assert(t.currentCfg().notify.volume === 0.2, '音量兜底同时更新内存副本（下一次同步不会被 Host 旧值顶回）')
+  }
+  // ⑦ 跨标签页同步：reloadFromLocal 回读本地镜像（0.2.1 曾在这里跨模块给 runtimeCfg 赋值）
+  {
+    const seed = JSON.stringify({ version: 1, watch: { prefectures: ['東京都'] }, notify: { volume: 0.4 } })
+    const loaded = loadClientEx({ 'dsh.quakeAlert.v1': seed })
+    const t = loaded.exports.__test
+    assert(t.currentCfg().watch.prefectures.join() === '東京都', '初始内存配置来自本地镜像')
+    // 模拟「另一个 DSH 标签页」直接改写存储（storage 事件只在本页之外的写入时触发）
+    loaded.storage.set('dsh.quakeAlert.v1', JSON.stringify({ version: 1, watch: { prefectures: ['熊本県'] }, notify: { volume: 0.4 } }))
+    const reloaded = t.reloadFromLocal()
+    assert(reloaded.watch.prefectures.join() === '熊本県', 'reloadFromLocal 回读其它标签页写入的配置')
+    assert(t.currentCfg().watch.prefectures.join() === '熊本県', '内存副本同步更新（UI 据此重渲染）')
+    assert(typeof t.reloadFromLocal === 'function', '回读入口已导出（跨模块只能走显式入口，不能直接赋值）')
+  }
+  // ⑧ 没有 Host 时一切照旧
   {
     const t = loadClientEx({}).exports.__test
     let err = ''
@@ -832,7 +858,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(err === '', '没有 Host 时 applyCfg 不抛错')
     assert(t.currentCfg().source === 'sandbox', '没有 Host 时配置仍即时生效')
   }
-  // ⑦ scope 异常不拖垮插件
+  // ⑨ scope 异常不拖垮插件
   {
     const t = loadClientEx({}).exports.__test
     let err = ''

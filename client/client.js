@@ -306,7 +306,8 @@ function addEvent(ev) {
 //
 // 作用：机器级持久化桥——把配置交给 DSH 的 Host settings（settings.yaml）。
 // 内容：内存镜像 currentCfg、写入入口 applyCfg、差异计算 settingsOpsFor、
-//       异步推送 pushCfgToHost、首次迁移与降级 bindSettingsScope，
+//       异步推送 pushCfgToHost、首次迁移与降级 bindSettingsScope、
+//       本地镜像回读 reloadFromLocal（其它标签页改配置后），
 //       以及 Host section ⇄ 本地配置的转换（cfgToSection / sectionToCfg）。
 // 依赖：01-constants、02-storage（07-store 的 store.push 在运行时才用到）。
 // 降级：没有 settings 服务 / 页面非 loopback / Host 不持久化时自动退回 localStorage。
@@ -320,7 +321,7 @@ function addEvent(ev) {
 // Host。没有 settings 服务、页面非 loopback、或 Host 只做进程内存储时，整条链路自动退化为
 // M1 的 localStorage 行为。
 const SETTINGS_NS = 'quake-alert';
-let runtimeCfg$1 = null; // 内存中的当前配置
+let runtimeCfg = null; // 内存中的当前配置
 let settingsScope = null; // bind 成功后的 scope handle
 let settingsSync = 'local'; // local（无 Host）| host（写入 settings.yaml）| memory（Host 不持久化）
 
@@ -335,14 +336,22 @@ function sectionToCfg(section) {
 }
 // 同步读取入口：保持 M1 的同步语义，调用方无需感知 Host 的存在
 function currentCfg() {
-  if (runtimeCfg$1 === null) runtimeCfg$1 = loadCfg();
-  return runtimeCfg$1
+  if (runtimeCfg === null) runtimeCfg = loadCfg();
+  return runtimeCfg
+}
+// 本地镜像被**其它 DSH 标签页**改写后（storage 事件），把 localStorage 重新读回内存副本。
+// 跨模块不能直接给本模块私有的 runtimeCfg 赋值：拆分前它同处一个作用域，拆分后就成了
+// 自由变量，打包进 'use strict' 的 bundle 会抛 ReferenceError（0.2.1 拆分时漏改过一处），
+// 所以这里给出显式入口。
+function reloadFromLocal() {
+  runtimeCfg = loadCfg();
+  return runtimeCfg
 }
 // 写入入口：内存立即生效 → localStorage 镜像 → Host（可用时异步持久化）
 function applyCfg(cfg) {
-  runtimeCfg$1 = saveCfg(cfg);
-  pushCfgToHost(runtimeCfg$1);
-  return runtimeCfg$1
+  runtimeCfg = saveCfg(cfg);
+  pushCfgToHost(runtimeCfg);
+  return runtimeCfg
 }
 // 只提交与默认值不同的字段；等于默认值的字段用 unset 交还 schema 默认层，
 // 这样 settings.yaml 里只留下用户真正改过的东西。
@@ -393,14 +402,14 @@ function bindSettingsScope(scope) {
       migrated = true; // 只迁移一次：之后 Host 被清空是用户的显式操作，不该被本地又推回去
       const local = loadCfg();
       if (JSON.stringify(cfgToSection(local)) !== JSON.stringify(cfgToSection(freshCfg()))) {
-        runtimeCfg$1 = saveCfg(local);
-        pushCfgToHost(runtimeCfg$1);
+        runtimeCfg = saveCfg(local);
+        pushCfgToHost(runtimeCfg);
         store.push({});
         return
       }
     }
     const next = sectionToCfg(snap.value);
-    runtimeCfg$1 = saveCfg(next); // localStorage 保持为镜像：Host 掉线时仍能工作
+    runtimeCfg = saveCfg(next); // localStorage 保持为镜像：Host 掉线时仍能工作
     store.push({});
   };
   try { scope.subscribe(sync); } catch (err) { /* 订阅失败只是失去实时同步 */ }
@@ -409,8 +418,8 @@ function bindSettingsScope(scope) {
 
 
 // 供单测钩子与 UI 读取：模块作用域的私有状态不直接对外暴露写入口
-const settingsState = () => ({ sync: settingsSync, bound: settingsScope !== null, runtime: runtimeCfg$1 });
-const resetSettings = () => { runtimeCfg$1 = null; settingsScope = null; settingsSync = 'local'; };
+const settingsState = () => ({ sync: settingsSync, bound: settingsScope !== null, runtime: runtimeCfg });
+const resetSettings = () => { runtimeCfg = null; settingsScope = null; settingsSync = 'local'; };
 
 // ============================================================================
 // dsh-quake-alert · client/src/04-city-table.js
@@ -1357,14 +1366,19 @@ function SettingsPanel() {
     const v = volPending.current;
     if (v !== null) {
       volPending.current = null;
-      // 卸载中不能 setState，只补写盘
-      saveCfg({ ...loadCfg(), notify: { ...loadCfg().notify, volume: v } });
+      // 卸载中不能 setState，只补写盘。必须经 applyCfg 而不是 saveCfg：
+      // saveCfg 只写 localStorage 镜像，不改内存也不推 Host —— 有 Host settings 时
+      // 下次同步会被 Host 的旧值覆盖回来，音量改动照样丢（0.2.0 声称修过这个场景）。
+      const cur = currentCfg();
+      applyCfg({ ...cur, notify: { ...cur.notify, volume: v } });
     }
   }, []);
-  // 其它 DSH 标签页改了配置 → 本页跟随（storage 事件只在「别的标签页」写入时触发）
+  // 其它 DSH 标签页改了配置 → 本页跟随（storage 事件只在「别的标签页」写入时触发）。
+  // 回读走 03 的显式入口：跨模块不能直接给它的模块私有 runtimeCfg 赋值（0.2.1 拆分后
+  // 那行成了自由变量，在 'use strict' 的 bundle 里抛 ReferenceError，同步静默失效）。
   useEffect(() => {
     const onStorage = (e) => {
-      if (!e || e.key === STORAGE_KEY) { runtimeCfg = loadCfg(); setCfgState(runtimeCfg); }
+      if (!e || e.key === STORAGE_KEY) setCfgState(reloadFromLocal());
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage)
@@ -1750,7 +1764,7 @@ function apply(ctx) {
 }
 
 // 单测钩子（客户端宿主忽略额外导出）
-const __test = { parse, parseQuake, parseEew, parseTsunami, matchAlert, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, inQuietHours, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, pruneUnknownCities, loadCityTable, cityTableState: () => cityTableState, resetCityTable };
+const __test = { parse, parseQuake, parseEew, parseTsunami, matchAlert, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, inQuietHours, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, pruneUnknownCities, loadCityTable, cityTableState: () => cityTableState, resetCityTable };
 
 // activeClient 是 12-websocket 的模块级 let：给 12 用的赋值出口（跨模块不能写 imported binding）
 // 由 12-websocket 提供 setter；这里仅保留引用以便阅读

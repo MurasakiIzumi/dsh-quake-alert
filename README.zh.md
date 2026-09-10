@@ -39,7 +39,7 @@ P2PQuake WebSocket ──▶ 解析器（code → 统一预警对象）
                 最近预警记录（localStorage 持久化）
 ```
 
-- 全部逻辑在浏览器端（Client 半边），Host 半边仅保留插件装载所需的空壳。
+- 实时逻辑全部在浏览器端（Client 半边）：WebSocket 连接、解析、匹配、通知与历史列表。Host 半边负责注册 `quake-alert` settings namespace（机器级 `settings.yaml`），并以只读路由 `/dsh-quake-alert/areas` 提供市区町村表。
 - WebSocket 消息与 HTTP `/history` 返回内容一致，但 id 字段名不同（WS 为 `_id`），解析器两者兼容。
 - 区域名归一：EEW / 海啸消息里的区域名（如 `上川地方北部`、`東京湾内湾`）先经显式区域表、再按 47 都道府县名做前缀匹配，最后用 EEW 的府県予報区名兜底，确保关注某县即可收到该县预警；跨县区域（如 `有明・八代海`）会展开为多个县分别判定。
 - 三层去重：① 消息 id（防重连重放）② 事件键（同一地震的多次发布；强度升级时穿透，仍会再次提醒）③ 跨标签页（`BroadcastChannel`，只由一个页面播报）。
@@ -83,7 +83,7 @@ client/client.js      # DSH 单文件 bundle —— 由 rollup 打包生成，�
 lib/index.js          # Host 半边：settings 命名空间（schemastery）+ /areas 只读路由
 lib/data/cities.js    # 市区町村表（由公开数据生成；提供给浏览器端）
 scripts/build-client.mjs # 构建：rollup 把 client/src 打包成 client/client.js
-scripts/check-imports.mjs # 跨模块引用检查（用了别的模块的导出却没 import 时报错）
+scripts/check-imports.mjs # 跨模块引用检查（漏 import / 赋值给未声明的名字都报错）
 cordis.patch.yml      # 插件行 insert 声明
 tests/sync-test.cjs   # 解析器/匹配引擎/区域归一回归测试（node 直接运行，无需浏览器）
 tests/area-tables.cjs # 気象庁 区域名 / 津波予報区 → 都道府县 期望值（测试数据）
@@ -91,9 +91,9 @@ tests/area-tables.cjs # 気象庁 区域名 / 津波予報区 → 都道府县 �
 
 ```sh
 node scripts/build-client.mjs          # 改完 client/src 后重新打包
-node scripts/check-imports.mjs         # 跨模块引用检查（漏 import）
+node scripts/check-imports.mjs         # 跨模块引用检查（漏 import / 未声明赋值）
 node scripts/build-client.mjs --check  # 校验已提交的 bundle 是否陈旧
-node tests/sync-test.cjs               # 回归测试（230 项断言）
+node tests/sync-test.cjs               # 回归测试（236 项断言）
 ```
 
 > 要改客户端代码请改 `client/src/*.js`，**不要改 `client/client.js`**——DSH 要求客户端 bundle 是单文件
@@ -104,7 +104,7 @@ node tests/sync-test.cjs               # 回归测试（230 项断言）
 
 ## 更新记录
 
-当前版本 **0.2.1**。各版本的变更明细见 [CHANGELOG.md](./CHANGELOG.md)。
+当前版本 **0.2.2**。各版本的变更明细见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## 数据来源
 

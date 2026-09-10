@@ -39,7 +39,7 @@ P2PQuake WebSocket ──▶ パーサー（code → 統一アラートオブジ
            直近のアラート履歴（localStorage に保存）
 ```
 
-- すべてのロジックはブラウザ側（Client 側）で動作します。Host 側はプラグイン行を読み込むための空のシェルのみです。
+- リアルタイム処理はすべてブラウザ側（Client 側）で動作します。WebSocket 接続・解析・マッチング・通知・履歴がこれにあたります。Host 側は `quake-alert` settings 名前空間（マシン単位の `settings.yaml`）の登録と、読み取り専用ルート `/dsh-quake-alert/areas` での市区町村表の配信を担当します。
 - WebSocket のメッセージは HTTP `/history` と同じ内容ですが、id フィールド名が異なります（WS は `_id`）。パーサーは両方に対応しています。
 - 地域名の正規化：EEW / 津波メッセージの地域名（`上川地方北部` や `東京湾内湾` など）は、明示的な地域テーブル → 47 都道府県名の前方一致 → EEW の府県予報区名、の順で解決します。これにより、ある県を登録していればその県のアラートを確実に受け取れます。複数の県にまたがる地域（`有明・八代海` など）は県ごとに展開して判定します。
 - 3 層の重複排除：① メッセージ id（再接続時の再送を防止）② イベントキー（同じ地震の複数発表。震度が上がった場合は通過して再通知）③ タブ間（`BroadcastChannel` により 1 つのページだけが通知）。
@@ -83,7 +83,7 @@ client/client.js      # DSH 用の単一ファイル bundle —— rollup が生
 lib/index.js          # Host 側：settings 名前空間（schemastery）＋ /areas 読み取り専用ルート
 lib/data/cities.js    # 市区町村表（公開データから生成。ブラウザ側へ配信）
 scripts/build-client.mjs  # rollup で client/src を client/client.js にバンドル
-scripts/check-imports.mjs # モジュール間参照チェック（import 漏れを検出）
+scripts/check-imports.mjs # モジュール間参照チェック（import 漏れ・未宣言への代入を検出）
 cordis.patch.yml      # プラグイン行の insert 宣言
 tests/sync-test.cjs   # パーサー / マッチャー / 地域名正規化の回帰テスト（node で直接実行、ブラウザ不要）
 tests/area-tables.cjs # 気象庁の地域名・津波予報区 → 期待される都道府県（テストデータ）
@@ -91,9 +91,9 @@ tests/area-tables.cjs # 気象庁の地域名・津波予報区 → 期待され
 
 ```sh
 node scripts/build-client.mjs          # client/src を編集したら再バンドル
-node scripts/check-imports.mjs         # モジュール間参照チェック
+node scripts/check-imports.mjs         # モジュール間参照チェック（import 漏れ・未宣言への代入）
 node scripts/build-client.mjs --check  # コミット済み bundle が古い場合に失敗
-node tests/sync-test.cjs               # 回帰テスト（230 項目）
+node tests/sync-test.cjs               # 回帰テスト（236 項目）
 ```
 
 > クライアント側のコードは `client/src/*.js` を編集してください。**`client/client.js` は直接編集しません**——
@@ -105,7 +105,7 @@ node tests/sync-test.cjs               # 回帰テスト（230 項目）
 
 ## 更新履歴
 
-現在のバージョンは **0.2.1** です。各バージョンの詳細は [CHANGELOG.md](./CHANGELOG.md) を参照してください。
+現在のバージョンは **0.2.2** です。各バージョンの詳細は [CHANGELOG.md](./CHANGELOG.md) を参照してください。
 
 ## データ出典
 

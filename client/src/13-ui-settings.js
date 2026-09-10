@@ -9,8 +9,8 @@
 // ============================================================================
 
 import { h, useState, useEffect, useRef, PREFECTURES, SCALE_OPTIONS, TSUNAMI_OPTIONS, HISTORY_MAX, HISTORY_KEY, MAX_WATCH_CITIES, STORAGE_KEY } from './01-constants.js'
-import { saveJSON, loadCfg, saveCfg } from './02-storage.js'
-import { currentCfg, applyCfg, settingsSync } from './03-settings-bridge.js'
+import { saveJSON } from './02-storage.js'
+import { currentCfg, applyCfg, settingsSync, reloadFromLocal } from './03-settings-bridge.js'
 import { citiesOfPref, cityTableState, loadCityTable } from './04-city-table.js'
 import { store } from './07-store.js'
 import { playSound, unlockAudio } from './08-audio.js'
@@ -74,14 +74,19 @@ function SettingsPanel() {
     const v = volPending.current
     if (v !== null) {
       volPending.current = null
-      // 卸载中不能 setState，只补写盘
-      saveCfg({ ...loadCfg(), notify: { ...loadCfg().notify, volume: v } })
+      // 卸载中不能 setState，只补写盘。必须经 applyCfg 而不是 saveCfg：
+      // saveCfg 只写 localStorage 镜像，不改内存也不推 Host —— 有 Host settings 时
+      // 下次同步会被 Host 的旧值覆盖回来，音量改动照样丢（0.2.0 声称修过这个场景）。
+      const cur = currentCfg()
+      applyCfg({ ...cur, notify: { ...cur.notify, volume: v } })
     }
   }, [])
-  // 其它 DSH 标签页改了配置 → 本页跟随（storage 事件只在「别的标签页」写入时触发）
+  // 其它 DSH 标签页改了配置 → 本页跟随（storage 事件只在「别的标签页」写入时触发）。
+  // 回读走 03 的显式入口：跨模块不能直接给它的模块私有 runtimeCfg 赋值（0.2.1 拆分后
+  // 那行成了自由变量，在 'use strict' 的 bundle 里抛 ReferenceError，同步静默失效）。
   useEffect(() => {
     const onStorage = (e) => {
-      if (!e || e.key === STORAGE_KEY) { runtimeCfg = loadCfg(); setCfgState(runtimeCfg) }
+      if (!e || e.key === STORAGE_KEY) setCfgState(reloadFromLocal())
     }
     window.addEventListener('storage', onStorage)
     return () => window.removeEventListener('storage', onStorage)

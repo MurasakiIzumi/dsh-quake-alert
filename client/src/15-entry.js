@@ -10,7 +10,7 @@
 
 import { h, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, normalizePref } from './01-constants.js'
 import { loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, inQuietHours } from './02-storage.js'
-import { SETTINGS_NS, cfgToSection, sectionToCfg, currentCfg, applyCfg, settingsOpsFor, bindSettingsScope, settingsState, resetSettings } from './03-settings-bridge.js'
+import { SETTINGS_NS, cfgToSection, sectionToCfg, currentCfg, applyCfg, settingsOpsFor, bindSettingsScope, settingsState, resetSettings, reloadFromLocal } from './03-settings-bridge.js'
 import { setCityTable, citiesOfPref, cityAliases, lookupAddrCity, buildAddrIndex, pruneUnknownCities, loadCityTable, cityTableState, resetCityTable } from './04-city-table.js'
 import { parse, parseQuake, parseEew, parseTsunami, prefsOfArea, regionsOfArea, AREA_PREF } from './05-parser.js'
 import { matchAlert } from './06-matcher.js'
@@ -84,7 +84,7 @@ export function apply(ctx) {
 }
 
 // 单测钩子（客户端宿主忽略额外导出）
-export const __test = { parse, parseQuake, parseEew, parseTsunami, matchAlert, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, inQuietHours, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, pruneUnknownCities, loadCityTable, cityTableState: () => cityTableState, resetCityTable }
+export const __test = { parse, parseQuake, parseEew, parseTsunami, matchAlert, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, inQuietHours, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, pruneUnknownCities, loadCityTable, cityTableState: () => cityTableState, resetCityTable }
 
 // activeClient 是 12-websocket 的模块级 let：给 12 用的赋值出口（跨模块不能写 imported binding）
 // 由 12-websocket 提供 setter；这里仅保留引用以便阅读
