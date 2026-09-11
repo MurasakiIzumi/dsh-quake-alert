@@ -160,6 +160,27 @@ function SettingsPanel() {
       }),
     )
   }
+  // 灾害类型（0.3.0）：三个开关并列。气象灾害的操作边界写死在 L4，不给阈值旋钮——
+  // L1/L2 的正确行动不是桌面弹窗，L3 面向老年人；L4（避難指示级）才真正涉及人身财产损失。
+  // 因此这里只有"开 / 关"，没有第三档（DESIGN 10.3）。
+  const sectionDisasters = () => s.section('灾害类型',
+    s.row(
+      s.checkbox(cfg.disasters.earthquake !== false,
+        (v) => setCfg((c) => ({ ...c, disasters: { ...c.disasters, earthquake: v } })), '地震 / 紧急地震速报'),
+      s.checkbox(cfg.disasters.tsunami !== false,
+        (v) => setCfg((c) => ({ ...c, disasters: { ...c.disasters, tsunami: v } })), '海啸'),
+      s.checkbox(cfg.disasters.weather !== false,
+        (v) => setCfg((c) => ({ ...c, disasters: { ...c.disasters, weather: v } })), '气象灾害'),
+    ),
+    h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 6, lineHeight: 1.6 } },
+      '气象灾害＝泥石流 / 洪水 / 大雨 / 高潮 等。只播报警戒レベル4 以上（相当于日本的「避难指示」级：' +
+      '土砂災害警戒情報、氾濫危険情報、大雨特別警報…）；L1〜L3 仍然解析并记入下方「最近预警记录」，只是不响铃、不弹通知。'),
+    store.weatherHint
+      ? h('div', { style: { fontSize: 11, color: '#d9a406', marginTop: 4 } },
+          '当前：' + (store.weatherHint.pref || '') + (store.weatherHint.area || '') +
+          ' 有 L' + store.weatherHint.level + ' 气象警报（未达 L4，未播报）')
+      : null,
+  )
   const flushVolume = () => {
     if (volTimer.current) { clearTimeout(volTimer.current); volTimer.current = null }
     const v = volPending.current
@@ -235,6 +256,9 @@ function SettingsPanel() {
       ),
       cityPicker(),
     ),
+
+    // 灾害类型（0.3.0）
+    sectionDisasters(),
 
     // 阈值
     s.section('提醒阈值',

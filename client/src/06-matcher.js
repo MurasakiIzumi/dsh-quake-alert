@@ -29,6 +29,20 @@ function regionInWatch(region, watch, cityLevel) {
   return cities.indexOf(addrCity) !== -1
 }
 
+// 气象警报（泥石流 / 洪水 / 大雨 / 高潮…）的关注地区匹配。
+// 与 551 不同，JMA 电文的区域在解析阶段就已经归到「县 + 市町村」，不需要再做 addr 归一；
+// 两类一律放行，宁可多报绝不漏报：
+//   ① pref 为空（区域码认不出县、或名称反查不到）——无法判定，放行；
+//   ② 区域级条目（city 为空，如「宗谷地方」「○○川上流」）——对应不到市町村，放行。
+function regionInWeatherWatch(region, watch) {
+  const list = (watch && watch.prefectures) || []
+  const cities = (watch && watch.cities) || []
+  if (list.length > 0 && region.pref && list.indexOf(region.pref) === -1) return false
+  if (cities.length === 0) return true
+  if (!region.city) return true
+  return cities.indexOf(region.city) !== -1
+}
+
 // 未命中原因：若存在未能识别归属县的区域名，明确提示，避免用户误以为链路故障
 function missReason(alert, watch, base) {
   const list = watch && watch.prefectures
@@ -73,8 +87,22 @@ function matchAlert(alert, cfg) {
       ? { hit: true, reason: '海啸等级达标', region: hitRegion }
       : { hit: false, reason: missReason(alert, w, '关注地区未命中或等级低于阈值') }
   }
+  if (alert.kind === 'weather') {
+    if ((cfg.disasters || {}).weather === false) return { hit: false, reason: '气象灾害提醒已关闭' }
+    if (alert.cancelled) return { hit: false, reason: '解除消息不提醒' }
+    // 播报边界写死在 L4：L1〜L3 仍然解析、仍然进历史（灰色条目），只是不打扰。
+    // 依据见 DESIGN 10.3——L3 是「高齢者等避難」，与 DSH 用户群不匹配；L4 才是避难指示级。
+    if (!(typeof alert.level === 'number' && alert.level >= 4)) {
+      return { hit: false, reason: '警戒レベル' + (alert.level || '—') + '（未达 L4，仅记录）' }
+    }
+    if (alert.regions.length === 0) return { hit: false, reason: '本条电文未携带可判定的区域' }
+    const hitRegion = alert.regions.find((r) => regionInWeatherWatch(r, w))
+    return hitRegion
+      ? { hit: true, reason: '警戒レベル' + alert.level + '（' + (hitRegion.city || hitRegion.area) + '）', region: hitRegion }
+      : { hit: false, reason: missReason(alert, w, '关注地区未命中') }
+  }
   return { hit: false, reason: '不支持的 code' }
 }
 
 
-export { regionInWatch, missReason, matchAlert }
+export { regionInWatch, regionInWeatherWatch, missReason, matchAlert }

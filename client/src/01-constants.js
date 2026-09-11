@@ -56,6 +56,19 @@ const PREFECTURES = [
   ['宮崎県', '宫崎'], ['鹿児島県', '鹿儿岛'], ['沖縄県', '冲绳'],
 ].map(([jp, zh]) => ({ jp, zh }))
 const PREF_SET = new Set(PREFECTURES.map((p) => p.jp))
+// 都道府県コード → 都道府県名。PREFECTURES 的顺序就是 JIS 码 01..47（01 北海道 … 47 沖縄県），
+// 気象庁电文里的区域码前两位正是都道府県码：细分区 宗谷北部=011011、市町村 北九州市=4010000。
+// 判县因此优先用 code 而不是名称——名称有 25 例同名跨县（伊達市 北海道/福島県、川崎町 宮城県/福岡県…），
+// 且已改制的旧名会把历史电文里的区域认到别的县（福岡県「那珂川町」曾落到栃木県那珂川町）。
+const PREF_BY_CODE = {}
+PREFECTURES.forEach((p, i) => { PREF_BY_CODE[String(i + 1).padStart(2, '0')] = p.jp })
+/** 区域码 → 都道府県名（取前两位；认不出返回空字符串）。 */
+function prefOfCode(code) {
+  const s = String(code === undefined || code === null ? '' : code).trim()
+  if (!/^\d{4,}$/.test(s)) return ''
+  const hit = PREF_BY_CODE[s.slice(0, 2)]
+  return hit || ''
+}
 // 都道府県简写 → 全称：551 的 points[].pref 通常是全称，但实测直播数据里出现过「京都」
 // 这类简写，不归一就会与用户勾选的「京都府」永不相等（静默漏报）。
 const PREF_SHORT = {}
@@ -73,7 +86,7 @@ const DEFAULT_CFG = {
   version: 1,
   source: 'prod', // prod | sandbox（沙箱回放 2023 年历史，约30秒/条，测试用）
   watch: { prefectures: [], cities: [] }, // 空 = 关注全日本（阈值仍生效）；cities 为可选的市区町村细化
-  disasters: { earthquake: true, tsunami: true },
+  disasters: { earthquake: true, tsunami: true, weather: true }, // weather = 气象灾害（泥石流 / 洪水 / 大雨 / 高潮…），固定 L4 以上播报
   thresholds: { quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch' },
   notify: { sound: true, system: true, volume: 0.7 },
   dedupe: { windowMinutes: 10 },
@@ -82,4 +95,4 @@ const DEFAULT_CFG = {
 }
 
 
-export { React, h, useState, useEffect, useRef, WS_URL, SANDBOX_URL, STORAGE_KEY, HISTORY_KEY, HISTORY_MAX, MAX_WATCH_CITIES, RECONNECT_BASE, RECONNECT_MAX, SCALE_TEXT, SCALE_OPTIONS, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, TSUNAMI_OPTIONS, PREFECTURES, PREF_SET, PREF_SHORT, normalizePref, DEFAULT_CFG }
+export { React, h, useState, useEffect, useRef, WS_URL, SANDBOX_URL, STORAGE_KEY, HISTORY_KEY, HISTORY_MAX, MAX_WATCH_CITIES, RECONNECT_BASE, RECONNECT_MAX, SCALE_TEXT, SCALE_OPTIONS, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, TSUNAMI_OPTIONS, PREFECTURES, PREF_SET, PREF_SHORT, PREF_BY_CODE, prefOfCode, normalizePref, DEFAULT_CFG }

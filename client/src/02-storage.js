@@ -114,6 +114,8 @@ function normalizeCfg(stored) {
     disasters: {
       earthquake: boolOr(d.earthquake, DEFAULT_CFG.disasters.earthquake),
       tsunami: boolOr(d.tsunami, DEFAULT_CFG.disasters.tsunami),
+      // 0.3.0 新增。旧配置没有这个字段 → 取默认值 true，不会被清空或误关
+      weather: boolOr(d.weather, DEFAULT_CFG.disasters.weather),
     },
     thresholds: {
       quakeScale: numOr(t.quakeScale, DEFAULT_CFG.thresholds.quakeScale, 0, 70),

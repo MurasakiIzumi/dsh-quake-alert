@@ -11,19 +11,33 @@
 import { PREFECTURES } from './01-constants.js'
 import { inQuietHours } from './02-storage.js'
 import { parse, severityOfScale, sevColor } from './05-parser.js'
-import { matchAlert } from './06-matcher.js'
+import { matchAlert, regionInWeatherWatch } from './06-matcher.js'
 import { addEvent, store } from './07-store.js'
 import { playSound, playAlertSound } from './08-audio.js'
 import { showToast, showSystemNotification } from './09-notify.js'
 import { isDuplicate, isEventRepeat, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, alertedEvents } from './10-dedupe.js'
 
 // ---------- 主链：收到消息 ----------
+// 气象警报的「静默提示」：L3 命中关注地区时不弹窗、不响铃，只把当前级别记进 store，
+// 让侧边栏状态点的悬停提示多一行。理由是 L4 起才播报，L3 的提前量不该完全丢掉（DESIGN 10.3）。
+function updateWeatherHint(alert, cfg) {
+  if (alert.kind !== 'weather' || alert.cancelled) return
+  if ((cfg.disasters || {}).weather === false) return
+  if (!(typeof alert.level === 'number' && alert.level >= 3)) return
+  const hit = alert.regions.find((r) => regionInWeatherWatch(r, cfg.watch || {}))
+  if (!hit) return
+  store.push({
+    weatherHint: { level: alert.level, area: hit.city || hit.area, pref: hit.pref || '', at: Date.now() },
+  })
+}
+
 // 取消 / 解除消息：仅当此前提醒过同一事件时才补一条「已取消」，否则只记历史（避免打扰）。
 function handleCancelled(alert, cfg) {
-  if (alert.kind !== 'eew' && alert.kind !== 'tsunami') return
+  if (alert.kind !== 'eew' && alert.kind !== 'tsunami' && alert.kind !== 'weather') return
   const disasters = cfg.disasters || {}
   if (alert.kind === 'eew' && disasters.earthquake === false) return
   if (alert.kind === 'tsunami' && disasters.tsunami === false) return
+  if (alert.kind === 'weather' && disasters.weather === false) return
   if (!wasRecentlyAlerted(alert, cfg.dedupe.windowMinutes)) {
     addEvent({
       id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
@@ -54,7 +68,8 @@ function handleCancelled(alert, cfg) {
     id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
     issued: alert.issued, headline: alert.headline, hit: true,
   })
-  const title = alert.kind === 'eew' ? '✅ 紧急地震速报已取消' : '✅ 海啸预报已解除'
+  const title = alert.kind === 'eew' ? '✅ 紧急地震速报已取消'
+    : (alert.kind === 'tsunami' ? '✅ 海啸预报已解除' : '✅ ' + alert.kindLabel)
   const body = alert.headline + '\n此前发出的警报已作废。\n—— 仅供参考，请以气象厅官方发布为准'
   if (cfg.notify.sound !== false) playSound('cancel', cfg.notify.volume)
   const pageVisible = typeof document !== 'undefined' && document.visibilityState === 'visible'
@@ -69,11 +84,21 @@ function handleCancelled(alert, cfg) {
 function handleRaw(raw, cfg) {
   const alert = parse(raw)
   if (!alert) return
+  handleAlert(alert, cfg)
+}
+
+/**
+ * 处理一条已归一为 Alert 的消息——P2PQuake 的 551/552/556 与気象庁的电文最后都汇到这里，
+ * 保证去重 / 匹配 / 静默 / 跨标签页 / 通知 / 历史这六步对两者完全一致。
+ */
+function handleAlert(alert, cfg) {
   store.received += 1
   if (isDuplicate(alert.id, cfg.dedupe.windowMinutes)) return
   if (alert.cancelled) { handleCancelled(alert, cfg); return }
   const m = matchAlert(alert, cfg)
   if (!m.hit) {
+    // 气象警报：即使不播报（L3 及以下），也把"正在升级"留给侧边栏 tooltip
+    updateWeatherHint(alert, cfg)
     // 不打扰：仅在设置页历史记录里记为"未命中"，便于用户核对配置
     addEvent({
       id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
@@ -123,15 +148,18 @@ function handleRaw(raw, cfg) {
     eew: '⚠ 紧急地震速报（警报）',
     quake: '🌐 地震情报 · ' + (alert.kindLabel.indexOf('各地') !== -1 ? '各地震度' : ''),
     tsunami: '🌊 ' + alert.kindLabel,
+    weather: '🌧 ' + alert.kindLabel,
   }[alert.kind] || '灾害预警'
   const bodyLines = [alert.headline]
   if (hitPref) bodyLines.push('命中关注地区：' + prefZh + (prefZh !== hitPref ? '（' + hitPref + '）' : ''))
   if (alert.kind === 'tsunami') bodyLines.push('请立即远离海岸与河口')
+  if (alert.kind === 'weather') bodyLines.push('请确认所在市町村的避难信息')
   bodyLines.push('—— 仅供参考，请以气象厅官方发布为准')
   addEvent({
     id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
     issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
   })
+  updateWeatherHint(alert, cfg)
   const vol = cfg.notify.volume
   if (cfg.notify.sound !== false) playAlertSound(alert, vol)
   const pageVisible = typeof document !== 'undefined' && document.visibilityState === 'visible'
@@ -147,4 +175,4 @@ function handleRaw(raw, cfg) {
 }
 
 
-export { handleCancelled, handleRaw }
+export { handleCancelled, handleRaw, handleAlert, updateWeatherHint }

@@ -18,6 +18,9 @@ const store = {
   detail: '',
   received: 0, // 收到并成功解析的推送条数（诊断用）
   events: loadHistory(), // 最近预警 [{kind,label,severity,issued,headline,pref}]
+  // 气象警报的「静默提示」（0.3.0）：L3 命中关注地区时只记一笔，由侧边栏状态点的悬停提示
+  // 显示出来，不弹窗、不响铃——弥补 L4 起播报带来的提前量损失（DESIGN 10.3）
+  weatherHint: null, // { level, area, pref, at } | null
   listeners: new Set(),
   push(patch) {
     Object.assign(this, patch)

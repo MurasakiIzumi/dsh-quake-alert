@@ -23,6 +23,8 @@ const AREAS_PATH = '/dsh-quake-alert/areas'
 let cityTable = null
 let cityTableState = 'idle' // idle | loading | ready | failed
 let cityNameSet = null // 全部市町村名（校验配置用）
+let cityPrefIndex = null // Map<市町村名, 都道府県[]>：JMA 电文只给市町村名，要反查所属县
+let riverAreas = null // Map<河川予報区域コード, { name, cities }>：指定河川洪水予報用
 
 function setCityTable(table) {
   if (!isPlainObject(table)) return false
@@ -40,11 +42,46 @@ function setCityTable(table) {
   if (Object.keys(clean).length === 0) return false
   cityTable = clean
   cityNameSet = names
+  cityPrefIndex = new Map()
+  for (const pref of Object.keys(clean)) {
+    for (const c of clean[pref]) {
+      if (!cityPrefIndex.has(c)) cityPrefIndex.set(c, [])
+      cityPrefIndex.get(c).push(pref)
+    }
+  }
   buildAddrIndex()
   cityTableState = 'ready'
   return true
 }
 const citiesOfPref = (pref) => (cityTable && own(cityTable, pref)) || []
+/** 市町村名 → 所属都道府県（重名时返回多个；表未加载或未收录时返回空数组）。 */
+const prefsOfCity = (name) => {
+  if (!cityPrefIndex) return []
+  const hit = cityPrefIndex.get(String(name || ''))
+  return hit ? hit.slice() : []
+}
+
+/**
+ * 河川予報区域表（0.3.0-a 由 scripts/build-areas.mjs 生成，Host 随 /areas 一起下发）。
+ * 指定河川洪水予報的电文区域是河川名（「天塩川」），必须先映射到市町村才能与用户关注比对。
+ */
+function setRiverAreas(list) {
+  if (!Array.isArray(list)) return false
+  const idx = new Map()
+  for (const a of list) {
+    if (!a || typeof a.code !== 'string' || !Array.isArray(a.cities)) continue
+    idx.set(a.code, { name: typeof a.name === 'string' ? a.name : '', cities: a.cities.filter((c) => typeof c === 'string' && c) })
+  }
+  if (idx.size === 0) return false
+  riverAreas = idx
+  return true
+}
+/** 河川予報区域コード → 覆盖的市町村名列表（未收录时返回空数组）。 */
+const riverAreaCities = (code) => {
+  if (!riverAreas) return []
+  const hit = riverAreas.get(String(code || ''))
+  return hit ? hit.cities.slice() : []
+}
 
 // ---------- addr → 市町村归一 ----------
 // 気象庁 / P2PQuake 的观测点名（551 的 points[].addr）与市町村全称有一批写法差异，
@@ -125,6 +162,8 @@ async function loadCityTable() {
     const data = await res.json()
     const payload = isPlainObject(data) && isPlainObject(data.prefectures) ? data.prefectures : data
     if (!setCityTable(payload)) throw new Error('payload 不含市町村表')
+    // 0.3.0：河川予報区域表随同一份响应下发；缺失只影响洪水，不影响泥石流与既有功能
+    if (isPlainObject(data) && Array.isArray(data.riverAreas)) setRiverAreas(data.riverAreas)
     pruneUnknownCities()
   } catch (err) {
     cityTableState = 'failed'
@@ -135,6 +174,9 @@ async function loadCityTable() {
 
 
 // 供单测钩子重置表状态
-const resetCityTable = () => { cityTable = null; cityNameSet = null; cityTableState = 'idle'; addrAliasIndex = null; addrAliasMax = 0 }
+const resetCityTable = () => {
+  cityTable = null; cityNameSet = null; cityTableState = 'idle'
+  addrAliasIndex = null; addrAliasMax = 0; cityPrefIndex = null; riverAreas = null
+}
 
-export { AREAS_PATH, setCityTable, citiesOfPref, cityAliases, buildAddrIndex, lookupAddrCity, pruneUnknownCities, loadCityTable, cityTableState, resetCityTable }
+export { AREAS_PATH, setCityTable, citiesOfPref, prefsOfCity, setRiverAreas, riverAreaCities, cityAliases, buildAddrIndex, lookupAddrCity, pruneUnknownCities, loadCityTable, cityTableState, resetCityTable }
