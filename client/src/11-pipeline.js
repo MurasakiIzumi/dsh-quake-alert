@@ -18,16 +18,30 @@ import { showToast, showSystemNotification } from './09-notify.js'
 import { isDuplicate, isEventRepeat, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, alertedEvents } from './10-dedupe.js'
 
 // ---------- 主链：收到消息 ----------
-// 气象警报的「静默提示」：L3 命中关注地区时不弹窗、不响铃，只把当前级别记进 store，
-// 让侧边栏状态点的悬停提示多一行。理由是 L4 起才播报，L3 的提前量不该完全丢掉（DESIGN 10.3）。
+// 区域文案：府県予報区级的条目里 area 与 pref 常是同一个名字（「東京都」+「東京都」），
+// 直接拼接会显示成「東京都東京都」。
+function areaLabelOf(region) {
+  const name = region.city || region.area || ''
+  if (!name) return region.pref || ''
+  if (!region.pref || name === region.pref || name.indexOf(region.pref) === 0) return name
+  return region.pref + name
+}
+
+// 气象警报的「静默提示」：只在"命中关注地区、但未达 L4 所以没有播报"时留一笔，
+// 由侧边栏状态点的悬停提示与设置页显示。
+// 注意 L4 以上**必须清掉**它：那时已经真正播报过，再挂着这条（文案是"未达 L4，未播报"）
+// 就与事实自相矛盾——这是加测试按钮后暴露出来的问题。
 function updateWeatherHint(alert, cfg) {
   if (alert.kind !== 'weather' || alert.cancelled) return
   if ((cfg.disasters || {}).weather === false) return
-  if (!(typeof alert.level === 'number' && alert.level >= 3)) return
+  if (alert.level !== 3) {
+    if (store.weatherHint) store.push({ weatherHint: null })
+    return
+  }
   const hit = alert.regions.find((r) => regionInWeatherWatch(r, cfg.watch || {}))
   if (!hit) return
   store.push({
-    weatherHint: { level: alert.level, area: hit.city || hit.area, pref: hit.pref || '', at: Date.now() },
+    weatherHint: { level: 3, label: areaLabelOf(hit), at: Date.now() },
   })
 }
 
@@ -90,11 +104,21 @@ function handleRaw(raw, cfg) {
 /**
  * 处理一条已归一为 Alert 的消息——P2PQuake 的 551/552/556 与気象庁的电文最后都汇到这里，
  * 保证去重 / 匹配 / 静默 / 跨标签页 / 通知 / 历史这六步对两者完全一致。
+ * @param {{ skipQuietHours?: boolean }} [opts] 仅供设置页的「发送测试气象警报」使用：
+ *   测试的语义是"验证提醒链路"，不该被静默时段悄悄吞掉，否则用户会以为插件坏了。
+ * @returns {{ notified: boolean, reason?: string, detail?: string }} 如实回报这一步到底做没做播报，
+ *   以及没播报的原因——设置页的测试按钮据此给出准确提示，而不是写死一句"应看到弹窗"。
  */
-function handleAlert(alert, cfg) {
+function handleAlert(alert, cfg, opts) {
+  const options = opts || {}
   store.received += 1
-  if (isDuplicate(alert.id, cfg.dedupe.windowMinutes)) return
-  if (alert.cancelled) { handleCancelled(alert, cfg); return }
+  if (isDuplicate(alert.id, cfg.dedupe.windowMinutes)) {
+    return { notified: false, reason: 'duplicate', detail: '同一条消息刚处理过（去重窗口内）' }
+  }
+  if (alert.cancelled) {
+    handleCancelled(alert, cfg)
+    return { notified: false, reason: 'cancelled', detail: '这是取消 / 解除消息' }
+  }
   const m = matchAlert(alert, cfg)
   if (!m.hit) {
     // 气象警报：即使不播报（L3 及以下），也把"正在升级"留给侧边栏 tooltip
@@ -104,7 +128,7 @@ function handleAlert(alert, cfg) {
       id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
       issued: alert.issued, headline: alert.headline + '（未命中：' + m.reason + '）', hit: false,
     })
-    return
+    return { notified: false, reason: 'not-hit', detail: m.reason }
   }
   const hitPref = m.region ? m.region.pref : ''
   // 严重度：地震按「命中区域的实际强度」判定（关注县震度低时颜色不该是红）；
@@ -120,10 +144,10 @@ function handleAlert(alert, cfg) {
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true, suppressedReason: '同一地震的后续发布（强度未升级）',
     })
-    return
+    return { notified: false, reason: 'event-repeat', detail: '同一事件的后续发布，强度未升级' }
   }
   // 静默时段：命中但不响铃、不弹通知，只记历史。红色等级（EEW、大海啸警报）默认可穿透。
-  if (inQuietHours(cfg) && !(hitSeverity === 'red' && cfg.quietHours.breakForSevere !== false)) {
+  if (!options.skipQuietHours && inQuietHours(cfg) && !(hitSeverity === 'red' && cfg.quietHours.breakForSevere !== false)) {
     addEvent({
       id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
@@ -131,7 +155,7 @@ function handleAlert(alert, cfg) {
       suppressedReason: '静默时段 ' + cfg.quietHours.start + '–' + cfg.quietHours.end +
         (hitSeverity === 'red' ? '（未开启红色等级穿透）' : ''),
     })
-    return
+    return { notified: false, reason: 'quiet-hours', detail: '当前处于静默时段' }
   }
   // 其它 DSH 标签页已经播报过同一条消息 → 本标签页静默，避免多个页面同时响铃。
   // 用消息 id 而不是事件键：多标签页收到的是同一条消息，而同一事件的不同消息（如强度升级）不应被拦。
@@ -141,7 +165,7 @@ function handleAlert(alert, cfg) {
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true, suppressedReason: '其它 DSH 标签页已提醒',
     })
-    return
+    return { notified: false, reason: 'other-tab', detail: '其它 DSH 标签页已提醒同一条' }
   }
   const prefZh = (PREFECTURES.find((p) => p.jp === hitPref) || {}).zh || hitPref
   const title = {
@@ -172,6 +196,7 @@ function handleAlert(alert, cfg) {
     if (!ok) showToast({ title, body, color: sevColor(hitSeverity), ttlMs: 20000 })
   }
   rememberAlerted(alert)
+  return { notified: true }
 }
 
 

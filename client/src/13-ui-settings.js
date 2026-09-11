@@ -12,9 +12,11 @@ import { h, useState, useEffect, useRef, PREFECTURES, SCALE_OPTIONS, TSUNAMI_OPT
 import { saveJSON } from './02-storage.js'
 import { currentCfg, applyCfg, settingsSync, reloadFromLocal } from './03-settings-bridge.js'
 import { citiesOfPref, cityTableState, loadCityTable } from './04-city-table.js'
+import { parseJma, buildTestTelegram, TEST_SCENARIOS } from './05b-jma-parser.js'
 import { store } from './07-store.js'
 import { playSound, unlockAudio } from './08-audio.js'
 import { showToast, showSystemNotification, notificationPermission, requestNotificationPermission } from './09-notify.js'
+import { handleAlert } from './11-pipeline.js'
 import { activeClient } from './12-websocket.js'
 
 // ---------- 设置页 UI ----------
@@ -63,6 +65,8 @@ function SettingsPanel() {
   const [testMsg, setTestMsg] = useState('')
   const [expanded, setExpanded] = useState(null)
   const [cityQuery, setCityQuery] = useState({}) // 每个县的市町村搜索词
+  const [weatherTestMsg, setWeatherTestMsg] = useState('') // 「发送测试气象警报」的结果提示
+  const [weatherTestSeq, setWeatherTestSeq] = useState(0) // 测试场景轮换游标
   // 音量滑块：拖动期间只改本地草稿，停手 300ms 后才落盘（避免每移动 1px 写一次 localStorage）
   const [volDraft, setVolDraft] = useState(null)
   const volTimer = useRef(null)
@@ -177,8 +181,34 @@ function SettingsPanel() {
       '土砂災害警戒情報、氾濫危険情報、大雨特別警報…）；L1〜L3 仍然解析并记入下方「最近预警记录」，只是不响铃、不弹通知。'),
     store.weatherHint
       ? h('div', { style: { fontSize: 11, color: '#d9a406', marginTop: 4 } },
-          '当前：' + (store.weatherHint.pref || '') + (store.weatherHint.area || '') +
+          '当前：' + (store.weatherHint.label || '') +
           ' 有 L' + store.weatherHint.level + ' 气象警报（未达 L4，未播报）')
+      : null,
+    // 无灾情时也能验证整条链路：用本地构造的电文走完 解析 → 匹配 → 播报 → 历史，
+    // 不产生任何外部请求。每次点击轮换一种场景，覆盖级别落点与区域粒度的不同分支。
+    // 区域取关注列表首项，保证一定命中（否则点了没反应会让人以为坏了）。
+    s.row(s.btn('发送测试气象警报（轮换场景）', () => {
+      const pref = (cfg.watch.prefectures && cfg.watch.prefectures[0]) || '東京都'
+      const sc = TEST_SCENARIOS[weatherTestSeq % TEST_SCENARIOS.length]
+      const ms = Date.now()
+      const city = citiesOfPref(pref)[0] || '' // 市町村级场景用真实市町村名
+      const alert = parseJma(buildTestTelegram(pref, ms, sc.key, city), { id: 'test-weather-' + ms })
+      setWeatherTestSeq(weatherTestSeq + 1)
+      if (!alert) { setWeatherTestMsg('测试电文解析失败 —— 请把这个情况反馈给开发者'); return }
+      const res = handleAlert(alert, currentCfg(), { skipQuietHours: true })
+      // 提示按**实际结果**生成，不写死"应看到弹窗"——开关关闭 / 未达 L4 / 静默 / 其它标签页
+      // 已提醒时，实际就是不会响，提示必须如实说明，否则会让人以为插件坏了。
+      const outcome = res && res.notified
+        ? ' —— 已播报：应看到提示音与弹窗'
+        : ' —— 未播报（' + ((res && res.detail) || '未知原因') + '），只会记入下方「最近预警记录」'
+      setWeatherTestMsg('已发送：' + sc.label + '（' + pref + ' / 警戒レベル' + alert.level + '，' + sc.note + '）' + outcome)
+    })),
+    h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4, lineHeight: 1.6 } },
+      '测试电文在本地构造，不发任何网络请求，可反复点击。场景依次为：' +
+      TEST_SCENARIOS.map((x) => x.label).join(' / ') +
+      '。其中 L3 那条刻意不会响铃——用来演示 L1〜L3 的处理方式。'),
+    weatherTestMsg
+      ? h('div', { style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, weatherTestMsg)
       : null,
   )
   const flushVolume = () => {
@@ -286,6 +316,7 @@ function SettingsPanel() {
         s.btn('试听地震音', () => playSound('quake', volShown)),
         s.btn('试听 EEW 音', () => playSound('eew', volShown)),
         s.btn('试听海啸音', () => playSound('tsunami', volShown)),
+        s.btn('试听气象音', () => playSound('weather', volShown)),
       ),
       s.row(
         s.btn('测试系统通知', () => {

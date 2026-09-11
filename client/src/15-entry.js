@@ -8,15 +8,15 @@
 // 生命周期：所有副作用都包在 ctx.effect 内，插件停用即回收。
 // ============================================================================
 
-import { h, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, normalizePref, prefOfCode } from './01-constants.js'
+import { h, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, normalizePref, prefOfCode, prefCodeOf } from './01-constants.js'
 import { loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, inQuietHours } from './02-storage.js'
 import { SETTINGS_NS, cfgToSection, sectionToCfg, currentCfg, applyCfg, settingsOpsFor, bindSettingsScope, settingsState, resetSettings, reloadFromLocal } from './03-settings-bridge.js'
 import { setCityTable, citiesOfPref, prefsOfCity, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, pruneUnknownCities, loadCityTable, cityTableState, resetCityTable } from './04-city-table.js'
 import { parse, parseQuake, parseEew, parseTsunami, prefsOfArea, regionsOfArea, AREA_PREF } from './05-parser.js'
-import { parseJma, maxLevelIn as jmaMaxLevelIn, itemsOf as jmaItemsOf } from './05b-jma-parser.js'
+import { parseJma, buildTestTelegram, TEST_SCENARIOS, maxLevelIn as jmaMaxLevelIn, itemsOf as jmaItemsOf } from './05b-jma-parser.js'
 import { matchAlert } from './06-matcher.js'
 import { store, addEvent } from './07-store.js'
-import { unlockAudio } from './08-audio.js'
+import { unlockAudio, soundKindOf } from './08-audio.js'
 import { isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, closeAlertChannel } from './10-dedupe.js'
 import { handleRaw, handleCancelled, handleAlert, updateWeatherHint } from './11-pipeline.js'
 import { createWsClient, setActiveClient } from './12-websocket.js'
@@ -93,7 +93,7 @@ export function apply(ctx) {
 }
 
 // 单测钩子（客户端宿主忽略额外导出）
-export const __test = { parse, parseQuake, parseEew, parseTsunami, parseJma, jmaMaxLevelIn, jmaItemsOf, matchAlert, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, createFeedClient, FEED_PATH, FEED_POLL_MS, inQuietHours, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, pruneUnknownCities, loadCityTable, cityTableState: () => cityTableState, resetCityTable }
+export const __test = { parse, parseQuake, parseEew, parseTsunami, parseJma, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn, jmaItemsOf, matchAlert, soundKindOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, createFeedClient, FEED_PATH, FEED_POLL_MS, inQuietHours, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, cityTableState: () => cityTableState, resetCityTable }
 
 // activeClient 是 12-websocket 的模块级 let：给 12 用的赋值出口（跨模块不能写 imported binding）
 // 由 12-websocket 提供 setter；这里仅保留引用以便阅读

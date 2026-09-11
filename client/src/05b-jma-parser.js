@@ -18,7 +18,7 @@
 //   · 解除与发布共用同一条电文类型，靠 <Kind> 的 Status / Condition 区分。
 // ============================================================================
 
-import { prefOfCode } from './01-constants.js'
+import { prefOfCode, prefCodeOf } from './01-constants.js'
 import { own } from './02-storage.js'
 import { prefsOfCity, riverAreaCities } from './04-city-table.js'
 import { prefsOfArea } from './05-parser.js'
@@ -267,4 +267,111 @@ function parseJma(xml, entry) {
   }
 }
 
-export { parseJma, maxLevelIn, itemsOf, regionsOf, levelOf, kindLabelOf, FLOOD_KIND_LEVEL, INACTIVE_KIND }
+/**
+ * 测试电文场景。按顺序轮换，覆盖链路上不同的分支：
+ *   · 级别落点不同：Kind 名称里（大雨 / 高潮 / L3 土砂）／电文标题本身即 L4（土砂災害警戒情報）／
+ *     Headline 主文里（指定河川洪水予報）
+ *   · 区域粒度不同：市町村级 / 府県予報区级
+ *   · 边界两侧：L4（播报）与 L3（不播报，只记历史与侧边栏提示）
+ */
+export const TEST_SCENARIOS = [
+  { key: 'landslide', label: '泥石流警戒情报', note: '市町村级 / 电文本身即 L4' },
+  { key: 'flood', label: '指定河川洪水予報（氾濫危険情報）', note: '级别写在主文里' },
+  { key: 'heavyrain', label: '大雨危険警報', note: '级别写在 Kind 名称里' },
+  { key: 'stormsurge', label: '高潮危険警報', note: '级别写在 Kind 名称里' },
+  { key: 'landslide-l3', label: '泥石流警報（警戒レベル3）', note: '未达 L4：不播报' },
+]
+
+function testXml(o) {
+  const stamp = new Date(o.ms).toISOString()
+  return '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<Report xmlns="http://xml.kishou.go.jp/jmaxml1/">' +
+    '<Control><Title>' + o.controlTitle + '</Title><DateTime>' + stamp + '</DateTime>' +
+    '<Status>通常</Status><EditorialOffice>QuakeAlert テスト</EditorialOffice></Control>' +
+    '<Head xmlns="http://xml.kishou.go.jp/jmaxml1/informationBasis1/">' +
+    '<Title>' + o.headTitle + '</Title><ReportDateTime>' + stamp + '</ReportDateTime>' +
+    '<EventID>' + o.eventId + '</EventID><InfoType>発表</InfoType><Serial>' + o.ms + '</Serial>' +
+    '<Headline><Text>' + o.headlineText + '</Text>' +
+    '<Information type="' + o.infoType + '"><Item>' +
+    '<Kind><Name>' + o.kindName + '</Name><Code>' + o.kindCode + '</Code><Status>発表</Status></Kind>' +
+    '<Areas codeType="' + o.codeType + '">' +
+    '<Area><Name>' + o.areaName + '</Name><Code>' + o.areaCode + '</Code></Area>' +
+    '</Areas></Item></Information></Headline></Head><Body/></Report>'
+}
+
+/**
+ * 构造一条**测试用**电文（不联网、不经过 Host 轮询）——设置页的「发送测试气象警报」
+ * 按钮用它走完整链路，让用户在无灾情时也能确认提醒与音效长什么样。
+ *
+ * 区域挂在"用户关注的第一个都道府县"下：若写死一个县，关注别处的用户点下去会被匹配挡掉、
+ * 什么都不发生，反而以为插件坏了；用关注列表首项才能保证走通。没选任何县（全日本模式）时
+ * 退回東京都。判县只看区域码前两位，所以这里用县码拼出的码就足够。
+ *
+ * id 与 EventID 都带时间戳与场景名：否则第二条会被消息级去重挡住，或被事件级去重当成
+ * "强度未升级的重复发布"而只记历史、不播报——连点两次就没反应了。
+ *
+ * @param {string} pref 都道府县名（关注列表首项）
+ * @param {number} nowMs 时间戳
+ * @param {string} [key] TEST_SCENARIOS 里的 key，默认 landslide
+ * @param {string} [cityName] 市町村级场景用的市町村名（表未加载时可省略，退回县名）
+ */
+function buildTestTelegram(pref, nowMs, key, cityName) {
+  const p = pref || '東京都'
+  const pc = prefCodeOf(p) || '13'
+  const ms = nowMs || Date.now()
+  const scenario = key || 'landslide'
+  const eventId = 'QUAKEALERT-TEST-' + scenario + '-' + ms
+  const base = { ms, eventId }
+  const city = cityName || ''
+  if (scenario === 'flood') {
+    return testXml(Object.assign(base, {
+      controlTitle: '指定河川洪水予報',
+      headTitle: p + '指定河川洪水予報（テスト）',
+      headlineText: '【警戒レベル４相当情報［洪水］】' + p + 'のテスト川では、氾濫危険水位に到達しています' +
+        '（这是一条测试警报，不是真实灾情）。',
+      infoType: '指定河川洪水予報',
+      kindName: '氾濫危険情報', kindCode: '40',
+      codeType: '気象情報／府県予報区・細分区域等',
+      areaName: p, areaCode: pc + '0000',
+    }))
+  }
+  if (scenario === 'heavyrain' || scenario === 'stormsurge') {
+    const isSurge = scenario === 'stormsurge'
+    const kind = isSurge ? '高潮危険警報' : '大雨危険警報'
+    const field = isSurge ? '高潮' : '大雨'
+    return testXml(Object.assign(base, {
+      controlTitle: '気象警報・注意報（Ｒ０６）（' + field + '）',
+      headTitle: p + field + '警報・注意報（テスト）',
+      headlineText: p + 'にレベル４' + kind + 'を発表しています（这是一条测试警报，不是真实灾情）。',
+      infoType: '気象警報・注意報（府県予報区等）',
+      kindName: 'レベル４' + kind, kindCode: isSurge ? '48' : '43',
+      codeType: '気象情報／府県予報区・細分区域等',
+      areaName: p, areaCode: pc + '0000',
+    }))
+  }
+  if (scenario === 'landslide-l3') {
+    return testXml(Object.assign(base, {
+      controlTitle: '気象警報・注意報（Ｒ０６）（土砂）',
+      headTitle: p + '土砂災害警報・注意報（テスト）',
+      headlineText: p + 'にレベル３土砂災害警報を発表しています（这是一条测试警报，不是真实灾情）。',
+      infoType: '気象警報・注意報（府県予報区等）',
+      kindName: 'レベル３土砂災害警報', kindCode: '03',
+      codeType: '気象情報／府県予報区・細分区域等',
+      areaName: p, areaCode: pc + '0000',
+    }))
+  }
+  // 默认：土砂災害警戒情報（电文本身就是警戒レベル4 相当，区域是市町村）
+  return testXml(Object.assign(base, {
+    controlTitle: '土砂災害警戒情報',
+    headTitle: p + '土砂災害警戒情報（テスト）',
+    headlineText: '【警戒レベル４相当情報［土砂災害］】' + p + city +
+      'では、土砂災害が発生するおそれが高まっています（这是一条测试警报，不是真实灾情）。',
+    infoType: '土砂災害警戒情報',
+    kindName: '警戒', kindCode: '3',
+    codeType: '気象・地震・火山情報／市町村等',
+    areaName: city || p, areaCode: pc + '00000',
+  }))
+}
+
+
+export { parseJma, buildTestTelegram, maxLevelIn, itemsOf, regionsOf, levelOf, kindLabelOf, FLOOD_KIND_LEVEL, INACTIVE_KIND }

@@ -18,14 +18,49 @@ import path from 'node:path'
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'client', 'src')
 const files = readdirSync(SRC).filter((f) => f.endsWith('.js')).sort()
 
-/** 去掉注释与字符串字面量：它们里面的词不算「使用」。 */
+/**
+ * 去掉注释与字符串字面量：它们里面的词不算「使用」。
+ *
+ * 用状态机逐字符扫描，而不是一串 replace 正则——正则版在这里会翻车：
+ * `decode()` 里的 `.replace(/&#39;/g, "'")` 是「双引号包着单引号」，
+ * 单引号正则 `/'(?:[^'\\]|\\.)*'/` 会从那里一路吃到很远的下一处单引号，
+ * 后面整个文件的字符串边界全部错位，于是 XML 里的 `version="1.0"`、
+ * `codeType="…"` 都被当成「未声明赋值」误报。
+ */
 function stripNoise(code) {
-  return code
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/\/\/[^\n]*/g, ' ')
-    .replace(/'(?:[^'\\]|\\.)*'/g, "''")
-    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
-    .replace(/`(?:[^`\\]|\\.)*`/g, '``')
+  let out = ''
+  let i = 0
+  const n = code.length
+  while (i < n) {
+    const c = code[i]
+    const c2 = code[i + 1]
+    if (c === '/' && c2 === '*') {
+      const end = code.indexOf('*/', i + 2)
+      i = end === -1 ? n : end + 2
+      out += ' '
+      continue
+    }
+    if (c === '/' && c2 === '/') {
+      const end = code.indexOf('\n', i + 2)
+      i = end === -1 ? n : end
+      out += ' '
+      continue
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      const quote = c
+      i += 1
+      while (i < n) {
+        if (code[i] === '\\') { i += 2; continue }
+        if (code[i] === quote) { i += 1; break }
+        i += 1
+      }
+      out += quote === '`' ? '``' : "''"
+      continue
+    }
+    out += c
+    i += 1
+  }
+  return out
 }
 
 /** 每个文件的导出名（同时支持 `export { A, B }` 与 `export const/function A`）。 */

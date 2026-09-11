@@ -88,6 +88,11 @@ function prefOfCode(code) {
   const hit = PREF_BY_CODE[s.slice(0, 2)];
   return hit || ''
 }
+/** 都道府県名 → 2 位都道府県码（认不出返回空字符串）。测试电文按关注地区构造时用。 */
+function prefCodeOf(pref) {
+  const i = PREFECTURES.findIndex((p) => p.jp === pref);
+  return i === -1 ? '' : String(i + 1).padStart(2, '0')
+}
 // 都道府県简写 → 全称：551 的 points[].pref 通常是全称，但实测直播数据里出现过「京都」
 // 这类简写，不归一就会与用户勾选的「京都府」永不相等（静默漏报）。
 const PREF_SHORT = {};
@@ -1082,6 +1087,112 @@ function parseJma(xml, entry) {
   }
 }
 
+/**
+ * 测试电文场景。按顺序轮换，覆盖链路上不同的分支：
+ *   · 级别落点不同：Kind 名称里（大雨 / 高潮 / L3 土砂）／电文标题本身即 L4（土砂災害警戒情報）／
+ *     Headline 主文里（指定河川洪水予報）
+ *   · 区域粒度不同：市町村级 / 府県予報区级
+ *   · 边界两侧：L4（播报）与 L3（不播报，只记历史与侧边栏提示）
+ */
+const TEST_SCENARIOS = [
+  { key: 'landslide', label: '泥石流警戒情报', note: '市町村级 / 电文本身即 L4' },
+  { key: 'flood', label: '指定河川洪水予報（氾濫危険情報）', note: '级别写在主文里' },
+  { key: 'heavyrain', label: '大雨危険警報', note: '级别写在 Kind 名称里' },
+  { key: 'stormsurge', label: '高潮危険警報', note: '级别写在 Kind 名称里' },
+  { key: 'landslide-l3', label: '泥石流警報（警戒レベル3）', note: '未达 L4：不播报' },
+];
+
+function testXml(o) {
+  const stamp = new Date(o.ms).toISOString();
+  return '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<Report xmlns="http://xml.kishou.go.jp/jmaxml1/">' +
+    '<Control><Title>' + o.controlTitle + '</Title><DateTime>' + stamp + '</DateTime>' +
+    '<Status>通常</Status><EditorialOffice>QuakeAlert テスト</EditorialOffice></Control>' +
+    '<Head xmlns="http://xml.kishou.go.jp/jmaxml1/informationBasis1/">' +
+    '<Title>' + o.headTitle + '</Title><ReportDateTime>' + stamp + '</ReportDateTime>' +
+    '<EventID>' + o.eventId + '</EventID><InfoType>発表</InfoType><Serial>' + o.ms + '</Serial>' +
+    '<Headline><Text>' + o.headlineText + '</Text>' +
+    '<Information type="' + o.infoType + '"><Item>' +
+    '<Kind><Name>' + o.kindName + '</Name><Code>' + o.kindCode + '</Code><Status>発表</Status></Kind>' +
+    '<Areas codeType="' + o.codeType + '">' +
+    '<Area><Name>' + o.areaName + '</Name><Code>' + o.areaCode + '</Code></Area>' +
+    '</Areas></Item></Information></Headline></Head><Body/></Report>'
+}
+
+/**
+ * 构造一条**测试用**电文（不联网、不经过 Host 轮询）——设置页的「发送测试气象警报」
+ * 按钮用它走完整链路，让用户在无灾情时也能确认提醒与音效长什么样。
+ *
+ * 区域挂在"用户关注的第一个都道府县"下：若写死一个县，关注别处的用户点下去会被匹配挡掉、
+ * 什么都不发生，反而以为插件坏了；用关注列表首项才能保证走通。没选任何县（全日本模式）时
+ * 退回東京都。判县只看区域码前两位，所以这里用县码拼出的码就足够。
+ *
+ * id 与 EventID 都带时间戳与场景名：否则第二条会被消息级去重挡住，或被事件级去重当成
+ * "强度未升级的重复发布"而只记历史、不播报——连点两次就没反应了。
+ *
+ * @param {string} pref 都道府县名（关注列表首项）
+ * @param {number} nowMs 时间戳
+ * @param {string} [key] TEST_SCENARIOS 里的 key，默认 landslide
+ * @param {string} [cityName] 市町村级场景用的市町村名（表未加载时可省略，退回县名）
+ */
+function buildTestTelegram(pref, nowMs, key, cityName) {
+  const p = pref || '東京都';
+  const pc = prefCodeOf(p) || '13';
+  const ms = nowMs || Date.now();
+  const scenario = key || 'landslide';
+  const eventId = 'QUAKEALERT-TEST-' + scenario + '-' + ms;
+  const base = { ms, eventId };
+  const city = cityName || '';
+  if (scenario === 'flood') {
+    return testXml(Object.assign(base, {
+      controlTitle: '指定河川洪水予報',
+      headTitle: p + '指定河川洪水予報（テスト）',
+      headlineText: '【警戒レベル４相当情報［洪水］】' + p + 'のテスト川では、氾濫危険水位に到達しています' +
+        '（这是一条测试警报，不是真实灾情）。',
+      infoType: '指定河川洪水予報',
+      kindName: '氾濫危険情報', kindCode: '40',
+      codeType: '気象情報／府県予報区・細分区域等',
+      areaName: p, areaCode: pc + '0000',
+    }))
+  }
+  if (scenario === 'heavyrain' || scenario === 'stormsurge') {
+    const isSurge = scenario === 'stormsurge';
+    const kind = isSurge ? '高潮危険警報' : '大雨危険警報';
+    const field = isSurge ? '高潮' : '大雨';
+    return testXml(Object.assign(base, {
+      controlTitle: '気象警報・注意報（Ｒ０６）（' + field + '）',
+      headTitle: p + field + '警報・注意報（テスト）',
+      headlineText: p + 'にレベル４' + kind + 'を発表しています（这是一条测试警报，不是真实灾情）。',
+      infoType: '気象警報・注意報（府県予報区等）',
+      kindName: 'レベル４' + kind, kindCode: isSurge ? '48' : '43',
+      codeType: '気象情報／府県予報区・細分区域等',
+      areaName: p, areaCode: pc + '0000',
+    }))
+  }
+  if (scenario === 'landslide-l3') {
+    return testXml(Object.assign(base, {
+      controlTitle: '気象警報・注意報（Ｒ０６）（土砂）',
+      headTitle: p + '土砂災害警報・注意報（テスト）',
+      headlineText: p + 'にレベル３土砂災害警報を発表しています（这是一条测试警报，不是真实灾情）。',
+      infoType: '気象警報・注意報（府県予報区等）',
+      kindName: 'レベル３土砂災害警報', kindCode: '03',
+      codeType: '気象情報／府県予報区・細分区域等',
+      areaName: p, areaCode: pc + '0000',
+    }))
+  }
+  // 默认：土砂災害警戒情報（电文本身就是警戒レベル4 相当，区域是市町村）
+  return testXml(Object.assign(base, {
+    controlTitle: '土砂災害警戒情報',
+    headTitle: p + '土砂災害警戒情報（テスト）',
+    headlineText: '【警戒レベル４相当情報［土砂災害］】' + p + city +
+      'では、土砂災害が発生するおそれが高まっています（这是一条测试警报，不是真实灾情）。',
+    infoType: '土砂災害警戒情報',
+    kindName: '警戒', kindCode: '3',
+    codeType: '気象・地震・火山情報／市町村等',
+    areaName: city || p, areaCode: pc + '00000',
+  }))
+}
+
 // ============================================================================
 // dsh-quake-alert · client/src/06-matcher.js
 //
@@ -1223,6 +1334,14 @@ const SOUNDS = {
     { freq: 659, start: 0, dur: 0.18, type: 'sine' },
     { freq: 880, start: 0.2, dur: 0.3, type: 'sine' },
   ] },
+  // 气象警报（泥石流 / 洪水 / 大雨 / 高潮）：下行三音 + triangle 波形。
+  // 与地震（上行双音 sine）、EEW（急促方波）、海啸（低频长音 sawtooth）都区分开——
+  // 气象灾害与地震的应对方式不同，不该共用一个音色。
+  weather: { notes: [
+    { freq: 587, start: 0, dur: 0.22, type: 'triangle' },
+    { freq: 494, start: 0.26, dur: 0.22, type: 'triangle' },
+    { freq: 392, start: 0.52, dur: 0.6, type: 'triangle' },
+  ] },
   // 取消 / 解除：下行音，与「警报」区分开
   cancel: { notes: [
     { freq: 880, start: 0, dur: 0.16, type: 'sine' },
@@ -1260,9 +1379,16 @@ function playSound(kind, volume) {
   if (ctx.state === 'suspended') ctx.resume().then(() => { if (ctx.state === 'running') doPlay(); }).catch(() => {});
   else doPlay();
 }
+/** 按灾害类型选音色（抽成纯函数，便于断言"气象不再沿用地震音"）。 */
+function soundKindOf(alert) {
+  if (!alert) return 'test'
+  if (alert.kind === 'eew') return 'eew'
+  if (alert.kind === 'tsunami') return alert.maxScale >= 3 ? 'tsunami' : 'quake'
+  if (alert.kind === 'weather') return 'weather'
+  return 'quake'
+}
 function playAlertSound(alert, volume) {
-  const kind = alert.kind === 'eew' ? 'eew' : (alert.kind === 'tsunami' ? (alert.maxScale >= 3 ? 'tsunami' : 'quake') : 'quake');
-  playSound(kind, volume);
+  playSound(soundKindOf(alert), volume);
 }
 
 // ============================================================================
@@ -1449,16 +1575,30 @@ function showToast(opts) {
 
 
 // ---------- 主链：收到消息 ----------
-// 气象警报的「静默提示」：L3 命中关注地区时不弹窗、不响铃，只把当前级别记进 store，
-// 让侧边栏状态点的悬停提示多一行。理由是 L4 起才播报，L3 的提前量不该完全丢掉（DESIGN 10.3）。
+// 区域文案：府県予報区级的条目里 area 与 pref 常是同一个名字（「東京都」+「東京都」），
+// 直接拼接会显示成「東京都東京都」。
+function areaLabelOf(region) {
+  const name = region.city || region.area || '';
+  if (!name) return region.pref || ''
+  if (!region.pref || name === region.pref || name.indexOf(region.pref) === 0) return name
+  return region.pref + name
+}
+
+// 气象警报的「静默提示」：只在"命中关注地区、但未达 L4 所以没有播报"时留一笔，
+// 由侧边栏状态点的悬停提示与设置页显示。
+// 注意 L4 以上**必须清掉**它：那时已经真正播报过，再挂着这条（文案是"未达 L4，未播报"）
+// 就与事实自相矛盾——这是加测试按钮后暴露出来的问题。
 function updateWeatherHint(alert, cfg) {
   if (alert.kind !== 'weather' || alert.cancelled) return
   if ((cfg.disasters || {}).weather === false) return
-  if (!(typeof alert.level === 'number' && alert.level >= 3)) return
+  if (alert.level !== 3) {
+    if (store.weatherHint) store.push({ weatherHint: null });
+    return
+  }
   const hit = alert.regions.find((r) => regionInWeatherWatch(r, cfg.watch || {}));
   if (!hit) return
   store.push({
-    weatherHint: { level: alert.level, area: hit.city || hit.area, pref: hit.pref || '', at: Date.now() },
+    weatherHint: { level: 3, label: areaLabelOf(hit), at: Date.now() },
   });
 }
 
@@ -1521,11 +1661,21 @@ function handleRaw(raw, cfg) {
 /**
  * 处理一条已归一为 Alert 的消息——P2PQuake 的 551/552/556 与気象庁的电文最后都汇到这里，
  * 保证去重 / 匹配 / 静默 / 跨标签页 / 通知 / 历史这六步对两者完全一致。
+ * @param {{ skipQuietHours?: boolean }} [opts] 仅供设置页的「发送测试气象警报」使用：
+ *   测试的语义是"验证提醒链路"，不该被静默时段悄悄吞掉，否则用户会以为插件坏了。
+ * @returns {{ notified: boolean, reason?: string, detail?: string }} 如实回报这一步到底做没做播报，
+ *   以及没播报的原因——设置页的测试按钮据此给出准确提示，而不是写死一句"应看到弹窗"。
  */
-function handleAlert(alert, cfg) {
+function handleAlert(alert, cfg, opts) {
+  const options = opts || {};
   store.received += 1;
-  if (isDuplicate(alert.id, cfg.dedupe.windowMinutes)) return
-  if (alert.cancelled) { handleCancelled(alert, cfg); return }
+  if (isDuplicate(alert.id, cfg.dedupe.windowMinutes)) {
+    return { notified: false, reason: 'duplicate', detail: '同一条消息刚处理过（去重窗口内）' }
+  }
+  if (alert.cancelled) {
+    handleCancelled(alert, cfg);
+    return { notified: false, reason: 'cancelled', detail: '这是取消 / 解除消息' }
+  }
   const m = matchAlert(alert, cfg);
   if (!m.hit) {
     // 气象警报：即使不播报（L3 及以下），也把"正在升级"留给侧边栏 tooltip
@@ -1535,7 +1685,7 @@ function handleAlert(alert, cfg) {
       id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
       issued: alert.issued, headline: alert.headline + '（未命中：' + m.reason + '）', hit: false,
     });
-    return
+    return { notified: false, reason: 'not-hit', detail: m.reason }
   }
   const hitPref = m.region ? m.region.pref : '';
   // 严重度：地震按「命中区域的实际强度」判定（关注县震度低时颜色不该是红）；
@@ -1551,10 +1701,10 @@ function handleAlert(alert, cfg) {
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true, suppressedReason: '同一地震的后续发布（强度未升级）',
     });
-    return
+    return { notified: false, reason: 'event-repeat', detail: '同一事件的后续发布，强度未升级' }
   }
   // 静默时段：命中但不响铃、不弹通知，只记历史。红色等级（EEW、大海啸警报）默认可穿透。
-  if (inQuietHours(cfg) && !(hitSeverity === 'red' && cfg.quietHours.breakForSevere !== false)) {
+  if (!options.skipQuietHours && inQuietHours(cfg) && !(hitSeverity === 'red' && cfg.quietHours.breakForSevere !== false)) {
     addEvent({
       id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
@@ -1562,7 +1712,7 @@ function handleAlert(alert, cfg) {
       suppressedReason: '静默时段 ' + cfg.quietHours.start + '–' + cfg.quietHours.end +
         (hitSeverity === 'red' ? '（未开启红色等级穿透）' : ''),
     });
-    return
+    return { notified: false, reason: 'quiet-hours', detail: '当前处于静默时段' }
   }
   // 其它 DSH 标签页已经播报过同一条消息 → 本标签页静默，避免多个页面同时响铃。
   // 用消息 id 而不是事件键：多标签页收到的是同一条消息，而同一事件的不同消息（如强度升级）不应被拦。
@@ -1572,7 +1722,7 @@ function handleAlert(alert, cfg) {
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true, suppressedReason: '其它 DSH 标签页已提醒',
     });
-    return
+    return { notified: false, reason: 'other-tab', detail: '其它 DSH 标签页已提醒同一条' }
   }
   const prefZh = (PREFECTURES.find((p) => p.jp === hitPref) || {}).zh || hitPref;
   const title = {
@@ -1603,6 +1753,7 @@ function handleAlert(alert, cfg) {
     if (!ok) showToast({ title, body, color: sevColor(hitSeverity), ttlMs: 20000 });
   }
   rememberAlerted(alert);
+  return { notified: true }
 }
 
 // ============================================================================
@@ -1860,6 +2011,8 @@ function SettingsPanel() {
   const [testMsg, setTestMsg] = useState('');
   const [expanded, setExpanded] = useState(null);
   const [cityQuery, setCityQuery] = useState({}); // 每个县的市町村搜索词
+  const [weatherTestMsg, setWeatherTestMsg] = useState(''); // 「发送测试气象警报」的结果提示
+  const [weatherTestSeq, setWeatherTestSeq] = useState(0); // 测试场景轮换游标
   // 音量滑块：拖动期间只改本地草稿，停手 300ms 后才落盘（避免每移动 1px 写一次 localStorage）
   const [volDraft, setVolDraft] = useState(null);
   const volTimer = useRef(null);
@@ -1974,8 +2127,34 @@ function SettingsPanel() {
       '土砂災害警戒情報、氾濫危険情報、大雨特別警報…）；L1〜L3 仍然解析并记入下方「最近预警记录」，只是不响铃、不弹通知。'),
     store.weatherHint
       ? h('div', { style: { fontSize: 11, color: '#d9a406', marginTop: 4 } },
-          '当前：' + (store.weatherHint.pref || '') + (store.weatherHint.area || '') +
+          '当前：' + (store.weatherHint.label || '') +
           ' 有 L' + store.weatherHint.level + ' 气象警报（未达 L4，未播报）')
+      : null,
+    // 无灾情时也能验证整条链路：用本地构造的电文走完 解析 → 匹配 → 播报 → 历史，
+    // 不产生任何外部请求。每次点击轮换一种场景，覆盖级别落点与区域粒度的不同分支。
+    // 区域取关注列表首项，保证一定命中（否则点了没反应会让人以为坏了）。
+    s.row(s.btn('发送测试气象警报（轮换场景）', () => {
+      const pref = (cfg.watch.prefectures && cfg.watch.prefectures[0]) || '東京都';
+      const sc = TEST_SCENARIOS[weatherTestSeq % TEST_SCENARIOS.length];
+      const ms = Date.now();
+      const city = citiesOfPref(pref)[0] || ''; // 市町村级场景用真实市町村名
+      const alert = parseJma(buildTestTelegram(pref, ms, sc.key, city), { id: 'test-weather-' + ms });
+      setWeatherTestSeq(weatherTestSeq + 1);
+      if (!alert) { setWeatherTestMsg('测试电文解析失败 —— 请把这个情况反馈给开发者'); return }
+      const res = handleAlert(alert, currentCfg(), { skipQuietHours: true });
+      // 提示按**实际结果**生成，不写死"应看到弹窗"——开关关闭 / 未达 L4 / 静默 / 其它标签页
+      // 已提醒时，实际就是不会响，提示必须如实说明，否则会让人以为插件坏了。
+      const outcome = res && res.notified
+        ? ' —— 已播报：应看到提示音与弹窗'
+        : ' —— 未播报（' + ((res && res.detail) || '未知原因') + '），只会记入下方「最近预警记录」';
+      setWeatherTestMsg('已发送：' + sc.label + '（' + pref + ' / 警戒レベル' + alert.level + '，' + sc.note + '）' + outcome);
+    })),
+    h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4, lineHeight: 1.6 } },
+      '测试电文在本地构造，不发任何网络请求，可反复点击。场景依次为：' +
+      TEST_SCENARIOS.map((x) => x.label).join(' / ') +
+      '。其中 L3 那条刻意不会响铃——用来演示 L1〜L3 的处理方式。'),
+    weatherTestMsg
+      ? h('div', { style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, weatherTestMsg)
       : null,
   );
   const flushVolume = () => {
@@ -2083,6 +2262,7 @@ function SettingsPanel() {
         s.btn('试听地震音', () => playSound('quake', volShown)),
         s.btn('试听 EEW 音', () => playSound('eew', volShown)),
         s.btn('试听海啸音', () => playSound('tsunami', volShown)),
+        s.btn('试听气象音', () => playSound('weather', volShown)),
       ),
       s.row(
         s.btn('测试系统通知', () => {
@@ -2210,11 +2390,11 @@ function StatusIndicator(props) {
   useEffect(() => store.subscribe(() => setTick((t) => t + 1)), []);
   const meta = statusMetaOf(store.status, store.retries);
   const wide = Boolean(props && props.wide);
-  // 气象警报的「静默提示」（0.3.0）：L3 及以上命中关注地区时，只在悬停提示里加一行——
-  // 不改颜色、不弹窗、不响铃。L4 起才真正播报，L3 的提前量用这种方式保留（DESIGN 10.3）。
+  // 气象警报的「静默提示」（0.3.0）：只有"命中关注地区但未达 L4、没有播报"时才存在
+  // （L4 以上播报后会清掉，否则这里会与事实矛盾）。不改颜色、不弹窗、不响铃。
   const hint = store.weatherHint;
   const hintText = hint && typeof hint.level === 'number'
-    ? ' · 气象警报 L' + hint.level + '（' + (hint.pref || '') + (hint.area || '') + '）'
+    ? ' · 气象警报 L' + hint.level + (hint.label ? '（' + hint.label + '）' : '')
     : '';
   return h('div', {
     role: 'status',
@@ -2306,7 +2486,7 @@ function apply(ctx) {
 }
 
 // 单测钩子（客户端宿主忽略额外导出）
-const __test = { parse, parseQuake, parseEew, parseTsunami, parseJma, jmaMaxLevelIn: maxLevelIn, jmaItemsOf: itemsOf, matchAlert, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, createFeedClient, FEED_PATH, FEED_POLL_MS, inQuietHours, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, pruneUnknownCities, loadCityTable, cityTableState: () => cityTableState, resetCityTable };
+const __test = { parse, parseQuake, parseEew, parseTsunami, parseJma, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn: maxLevelIn, jmaItemsOf: itemsOf, matchAlert, soundKindOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, createFeedClient, FEED_PATH, FEED_POLL_MS, inQuietHours, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, cityTableState: () => cityTableState, resetCityTable };
 
 // activeClient 是 12-websocket 的模块级 let：给 12 用的赋值出口（跨模块不能写 imported binding）
 // 由 12-websocket 提供 setter；这里仅保留引用以便阅读

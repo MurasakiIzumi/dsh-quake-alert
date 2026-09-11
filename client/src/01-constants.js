@@ -69,6 +69,11 @@ function prefOfCode(code) {
   const hit = PREF_BY_CODE[s.slice(0, 2)]
   return hit || ''
 }
+/** 都道府県名 → 2 位都道府県码（认不出返回空字符串）。测试电文按关注地区构造时用。 */
+function prefCodeOf(pref) {
+  const i = PREFECTURES.findIndex((p) => p.jp === pref)
+  return i === -1 ? '' : String(i + 1).padStart(2, '0')
+}
 // 都道府県简写 → 全称：551 的 points[].pref 通常是全称，但实测直播数据里出现过「京都」
 // 这类简写，不归一就会与用户勾选的「京都府」永不相等（静默漏报）。
 const PREF_SHORT = {}
@@ -95,4 +100,4 @@ const DEFAULT_CFG = {
 }
 
 
-export { React, h, useState, useEffect, useRef, WS_URL, SANDBOX_URL, STORAGE_KEY, HISTORY_KEY, HISTORY_MAX, MAX_WATCH_CITIES, RECONNECT_BASE, RECONNECT_MAX, SCALE_TEXT, SCALE_OPTIONS, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, TSUNAMI_OPTIONS, PREFECTURES, PREF_SET, PREF_SHORT, PREF_BY_CODE, prefOfCode, normalizePref, DEFAULT_CFG }
+export { React, h, useState, useEffect, useRef, WS_URL, SANDBOX_URL, STORAGE_KEY, HISTORY_KEY, HISTORY_MAX, MAX_WATCH_CITIES, RECONNECT_BASE, RECONNECT_MAX, SCALE_TEXT, SCALE_OPTIONS, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, TSUNAMI_OPTIONS, PREFECTURES, PREF_SET, PREF_SHORT, PREF_BY_CODE, prefOfCode, prefCodeOf, normalizePref, DEFAULT_CFG }

@@ -1323,6 +1323,70 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(legacy.disasters.weather === true, '旧配置缺 weather 字段 → 取默认值（不误关）')
   }
 
+  console.log('== 0.3.1：设置页「发送测试气象警报」的轮换场景 ==')
+  try {
+    const citiesMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cities.js')).href)
+    const t = loadClient().__test
+    t.setCityTable(citiesMod.CITIES_BY_PREF)
+    const mk = (key, pref, ms) => t.parseJma(t.buildTestTelegram(pref, ms, key, '千代田区'), { id: 'test-' + key + ms })
+    assert(t.TEST_SCENARIOS.length === 5, '共 5 个轮换场景（' + t.TEST_SCENARIOS.map((s) => s.key).join('/') + '）')
+
+    const l4 = mk('landslide', '東京都', 1700000000000)
+    assert(l4 && l4.kind === 'weather' && l4.level === 4, '场景·泥石流警戒情报 → L4（电文标题本身就是 L4 相当）')
+    assert(l4.kindLabel === '泥石流警戒情报' && l4.regions[0].city === '千代田区', '泥石流场景是市町村级，区域名取真实市町村')
+    assert(l4.regions[0].pref === '東京都', '市町村级区域按码前两位归到東京都')
+    const fl = mk('flood', '東京都', 1700000001000)
+    assert(fl.level === 4 && fl.kindLabel === '洪水预报', '场景·洪水 → 由 Kind 名称（氾濫危険情報）映射出 L4')
+    const hr = mk('heavyrain', '東京都', 1700000002000)
+    assert(hr.level === 4 && hr.kindLabel === '大雨警报', '场景·大雨 → L4（级别写在 Kind 名称里）')
+    const ss = mk('stormsurge', '東京都', 1700000003000)
+    assert(ss.level === 4 && ss.kindLabel === '风暴潮警报', '场景·高潮 → L4')
+    const l3 = mk('landslide-l3', '東京都', 1700000004000)
+    assert(l3.level === 3 && l3.kindLabel === '泥石流警报', '场景·L3 土砂 → 级别 3（用于演示边界另一侧）')
+    assert(mk('heavyrain', '大阪府', 1700000005000).regions[0].pref === '大阪府', '换县（大阪府＝27）同样正确归县')
+    assert(mk('landslide', '東京都', 1700000006000).eventKey !== l4.eventKey, '不同时间戳的 eventKey 不同（连点两次不会被事件级去重吞掉）')
+    assert(t.buildTestTelegram('架空県', 1700000007000, 'heavyrain').indexOf('130000') !== -1, '认不出的县名退回東京都的码（不生成坏电文）')
+
+    // 音色：气象必须与地震 / 海啸分开
+    assert(t.soundKindOf(l4) === 'weather', '气象警报使用独立音色 weather（此前沿用地震音）')
+    assert(t.soundKindOf({ kind: 'eew' }) === 'eew' && t.soundKindOf({ kind: 'quake' }) === 'quake', '既有音色映射不变')
+    assert(t.soundKindOf({ kind: 'tsunami', maxScale: 3 }) === 'tsunami' && t.soundKindOf({ kind: 'tsunami', maxScale: 1 }) === 'quake', '海啸音色分支不变')
+
+    // 匹配与静默穿透
+    const cfg = Object.assign({}, t.DEFAULT_CFG, { watch: { prefectures: ['東京都'], cities: [] } })
+    assert(t.matchAlert(l4, cfg).hit === true, '测试电文能命中同县的关注设置')
+    const cfgOther = Object.assign({}, t.DEFAULT_CFG, { watch: { prefectures: ['北海道'], cities: [] } })
+    assert(t.matchAlert(l4, cfgOther).hit === false, '关注其它县时不会误命中（测试按钮取关注首项的理由）')
+    assert(t.matchAlert(l3, cfg).hit === false, 'L3 场景不播报（hit=false）')
+    const quiet = Object.assign({}, cfg, {
+      quietHours: { enabled: true, start: '00:00', end: '23:59', breakForSevere: false },
+    })
+    t.handleAlert(l4, quiet, { skipQuietHours: true })
+    assert(t.store.events[0].hit === true && t.store.events[0].suppressed !== true, 'skipQuietHours 下测试提醒不被静默吞掉')
+    assert(String(t.store.events[0].label).indexOf('泥石流') !== -1, '测试提醒记入历史且标签正确')
+
+    // 「静默提示」的语义：只在未播报（L3）时存在，L4 播报后必须清掉
+    t.updateWeatherHint(l3, cfg)
+    assert(t.store.weatherHint && t.store.weatherHint.level === 3, 'L3 命中 → 写入静默提示')
+    assert(t.store.weatherHint.label === '東京都', '提示里的地区不再重复成「東京都東京都」')
+    t.updateWeatherHint(l4, cfg)
+    assert(t.store.weatherHint === null, 'L4 播报后清除静默提示（否则与「未达 L4，未播报」文案自相矛盾）')
+
+    // handleAlert 如实回报结果：设置页的提示据此生成，不再写死"应看到弹窗"
+    const off = Object.assign({}, cfg, { disasters: { earthquake: true, tsunami: true, weather: false } })
+    const rOff = t.handleAlert(mk('heavyrain', '東京都', 1700000008000), off, { skipQuietHours: true })
+    assert(rOff.notified === false && String(rOff.detail).indexOf('关闭') !== -1,
+      '气象灾害开关关闭 → 返回未播报及原因（' + rOff.detail + '）')
+    const rL3 = t.handleAlert(l3, cfg, { skipQuietHours: true })
+    assert(rL3.notified === false && String(rL3.detail).indexOf('未达 L4') !== -1, 'L3 → 返回未播报及「未达 L4」原因')
+    const rHit = t.handleAlert(mk('heavyrain', '東京都', 1700000009000), cfg, { skipQuietHours: true })
+    assert(rHit.notified === true, '命中 L4 → 返回已播报')
+    const rDup = t.handleAlert(mk('heavyrain', '東京都', 1700000009000), cfg, { skipQuietHours: true })
+    assert(rDup.notified === false && rDup.reason === 'duplicate', '同一 id 再发 → 返回 duplicate（去重窗口内）')
+  } catch (e) {
+    assert(false, '测试电文验证失败：' + e.message)
+  }
+
   console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败')
   process.exit(fail === 0 ? 0 : 1)
 })()

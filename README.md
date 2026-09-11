@@ -13,7 +13,7 @@
 - **Disaster types**: earthquake reports (code 551), Earthquake Early Warnings (code 556), and tsunami forecasts (code 552) from P2PQuake, plus **weather alerts from the Japan Meteorological Agency** — landslides (土砂災害警戒情報, 大雨警報（土砂災害）), floods (指定河川洪水予報), heavy rain and storm surges.
 - **Watch regions**: pick any of Japan's 47 prefectures; leaving the list empty means all of Japan.
 - **Alert thresholds**: configured separately for earthquake intensity (observed), EEW intensity (predicted), and tsunami grade (advisory / warning / major warning).
-- **Notifications**: synthesized alert tones (Web Audio, one per disaster type) with adjustable volume; in-page toast when the page is visible, system notification when it is in the background. Every headline carries the intensity (observed or predicted), so the alert itself tells you how strong it is.
+- **Notifications**: synthesized alert tones (Web Audio; earthquake / EEW / tsunami / weather / cancellation each have their own tone) with adjustable volume; in-page toast when the page is visible, system notification when it is in the background. Every headline carries the intensity (observed or predicted), so the alert itself tells you how strong it is.
 - **Cancellation notices**: if an EEW you were alerted about is cancelled, or a tsunami forecast you were alerted about is cleared, a short follow-up (descending tone) tells you the earlier alert is void. A cancellation for an event you were never alerted about stays silent (history only).
 - **Quiet hours**: silence non-critical alerts during a daily window (local browser time; a start later than the end crosses midnight). Red-level alerts — EEW, major tsunami warnings, intensity 6-lower-or-above earthquakes and level-4+ weather alerts — still break through unless you turn that off. Suppressed alerts stay in the history.
 - **Weather alerts, level 4 and above**: the JMA states an explicit warning level on every weather telegram. Only level 4+ — the "evacuation instruction" grade — is announced; levels 1–3 are still fetched, parsed and listed in the history, and a level-3 hit merely adds one line to the sidebar tooltip. See [Warning levels](#warning-levels-japan).
@@ -62,8 +62,9 @@ dsh plugin --profile web add link:/path/to/this/repo
 1. Open **Settings → Disaster Alerts** (灾害预警).
 2. **Watch regions**: select the prefectures you live in or care about (leave empty for all of Japan).
 3. **Alert thresholds**: set the minimum level for earthquake / EEW / tsunami alerts to avoid unnecessary interruptions.
-4. **Notifications and sound**: enable the alert tone and/or system notifications and adjust the volume. Use the preview buttons to check the tones, and "Test system notification" to grant permission and verify delivery.
-5. **Data source**: keep "Production" for daily use; switch to "Sandbox" to verify the pipeline or see it in action (about one 2023 replay every 30 seconds).
+4. **Disaster types**: three switches — earthquake / EEW, tsunami, and weather alerts (landslides, floods, heavy rain, storm surges). Weather alerts have no threshold: the cut-off is fixed at level 4. **"Send test weather alert (rotating scenarios)"** verifies the whole path with a telegram built locally (no network request); each click rotates through landslide / flood / heavy rain / storm surge, plus an L3 case that deliberately stays silent. The result line reports what actually happened — whether it played, and the reason if it did not.
+5. **Notifications and sound**: enable the alert tone and/or system notifications and adjust the volume. Use the preview buttons to check the tones, and "Test system notification" to grant permission and verify delivery.
+6. **Data source**: keep "Production" for daily use; switch to "Sandbox" to verify the pipeline or see it in action (about one 2023 replay every 30 seconds).
 
 When an alert matches, you get a tone plus a foreground toast or a background system notification, and the event is recorded in "Recent alerts".
 
@@ -115,7 +116,7 @@ node scripts/build-client.mjs          # rebuild client/client.js after editing 
 node scripts/build-areas.mjs           # regenerate the river-area table from the JMA public zip (needs network)
 node scripts/check-imports.mjs         # cross-module reference check (missing import / undeclared assignment)
 node scripts/build-client.mjs --check  # fail when the committed bundle is stale
-node tests/sync-test.cjs               # regression tests (320 assertions)
+node tests/sync-test.cjs               # regression tests (346 assertions)
 ```
 
 > Edit `client/src/*.js`, never `client/client.js` — DSH requires a single-file client bundle (flat module
@@ -126,7 +127,7 @@ node tests/sync-test.cjs               # regression tests (320 assertions)
 
 ## Changelog
 
-Current version **0.3.0**. See [CHANGELOG.md](./CHANGELOG.md) for the details of each release.
+Current version **0.3.1**. See [CHANGELOG.md](./CHANGELOG.md) for the details of each release.
 
 ## Data sources
 

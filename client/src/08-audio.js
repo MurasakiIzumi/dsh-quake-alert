@@ -36,6 +36,14 @@ const SOUNDS = {
     { freq: 659, start: 0, dur: 0.18, type: 'sine' },
     { freq: 880, start: 0.2, dur: 0.3, type: 'sine' },
   ] },
+  // 气象警报（泥石流 / 洪水 / 大雨 / 高潮）：下行三音 + triangle 波形。
+  // 与地震（上行双音 sine）、EEW（急促方波）、海啸（低频长音 sawtooth）都区分开——
+  // 气象灾害与地震的应对方式不同，不该共用一个音色。
+  weather: { notes: [
+    { freq: 587, start: 0, dur: 0.22, type: 'triangle' },
+    { freq: 494, start: 0.26, dur: 0.22, type: 'triangle' },
+    { freq: 392, start: 0.52, dur: 0.6, type: 'triangle' },
+  ] },
   // 取消 / 解除：下行音，与「警报」区分开
   cancel: { notes: [
     { freq: 880, start: 0, dur: 0.16, type: 'sine' },
@@ -73,10 +81,17 @@ function playSound(kind, volume) {
   if (ctx.state === 'suspended') ctx.resume().then(() => { if (ctx.state === 'running') doPlay() }).catch(() => {})
   else doPlay()
 }
+/** 按灾害类型选音色（抽成纯函数，便于断言"气象不再沿用地震音"）。 */
+function soundKindOf(alert) {
+  if (!alert) return 'test'
+  if (alert.kind === 'eew') return 'eew'
+  if (alert.kind === 'tsunami') return alert.maxScale >= 3 ? 'tsunami' : 'quake'
+  if (alert.kind === 'weather') return 'weather'
+  return 'quake'
+}
 function playAlertSound(alert, volume) {
-  const kind = alert.kind === 'eew' ? 'eew' : (alert.kind === 'tsunami' ? (alert.maxScale >= 3 ? 'tsunami' : 'quake') : 'quake')
-  playSound(kind, volume)
+  playSound(soundKindOf(alert), volume)
 }
 
 
-export { ensureAudio, unlockAudio, playSound, playAlertSound }
+export { ensureAudio, unlockAudio, playSound, playAlertSound, soundKindOf, SOUNDS }

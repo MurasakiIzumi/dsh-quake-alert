@@ -16,11 +16,11 @@ function StatusIndicator(props) {
   useEffect(() => store.subscribe(() => setTick((t) => t + 1)), [])
   const meta = statusMetaOf(store.status, store.retries)
   const wide = Boolean(props && props.wide)
-  // 气象警报的「静默提示」（0.3.0）：L3 及以上命中关注地区时，只在悬停提示里加一行——
-  // 不改颜色、不弹窗、不响铃。L4 起才真正播报，L3 的提前量用这种方式保留（DESIGN 10.3）。
+  // 气象警报的「静默提示」（0.3.0）：只有"命中关注地区但未达 L4、没有播报"时才存在
+  // （L4 以上播报后会清掉，否则这里会与事实矛盾）。不改颜色、不弹窗、不响铃。
   const hint = store.weatherHint
   const hintText = hint && typeof hint.level === 'number'
-    ? ' · 气象警报 L' + hint.level + '（' + (hint.pref || '') + (hint.area || '') + '）'
+    ? ' · 气象警报 L' + hint.level + (hint.label ? '（' + hint.label + '）' : '')
     : ''
   return h('div', {
     role: 'status',
