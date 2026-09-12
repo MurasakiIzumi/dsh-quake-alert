@@ -64,6 +64,8 @@ function playSound(kind, volume) {
     master.gain.value = vol * 0.5
     master.connect(ctx.destination)
     const t0 = ctx.currentTime
+    const nodes = [] // 这次播放创建的所有节点，播完统一断开
+    let endAt = 0
     for (const n of preset.notes) {
       const osc = ctx.createOscillator()
       const g = ctx.createGain()
@@ -76,7 +78,15 @@ function playSound(kind, volume) {
       g.gain.exponentialRampToValueAtTime(0.0001, start + n.dur)
       osc.connect(g); g.connect(master)
       osc.start(start); osc.stop(start + n.dur + 0.05)
+      nodes.push(osc, g)
+      if (n.start + n.dur > endAt) endAt = n.start + n.dur
     }
+    // 播完断开：osc.stop() 只是停止发声，节点仍挂在 destination 上；
+    // 每次警报都新建 2～3 个节点，长期运行会一直累积（disconnect 后交给 GC）。
+    setTimeout(() => {
+      for (const node of nodes) { try { node.disconnect() } catch (err) { /* 已断开等忽略 */ } }
+      try { master.disconnect() } catch (err) { /* 忽略 */ }
+    }, Math.ceil((endAt + 0.3) * 1000))
   }
   if (ctx.state === 'suspended') ctx.resume().then(() => { if (ctx.state === 'running') doPlay() }).catch(() => {})
   else doPlay()

@@ -945,6 +945,12 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(status === 200, '/areas 返回 200')
     assert(parsed.prefectures && Object.keys(parsed.prefectures).length === 47, '路由返回 47 个县的市町村表')
     assert(parsed.prefectures['福島県'].indexOf('白河市') !== -1, '路由返回的表含白河市')
+    // 0.3.2（P1）：河川予報区域表必须随同一份响应下发。此前它只生成不下发，Client 侧永远为空，
+    // 洪水电文因此全部退化为"归不到市町村"而放行 —— 关注任何地区的用户都会收到无关县的警报。
+    assert(Array.isArray(parsed.riverAreas) && parsed.riverAreas.length >= 300,
+      '/areas 同时下发河川予報区域表（' + (parsed.riverAreas ? parsed.riverAreas.length : 0) + ' 个区域）')
+    assert(parsed.riverAreas.every((a) => typeof a.code === 'string' && /^\d{12}$/.test(a.code) &&
+      Array.isArray(a.cities) && a.cities.length > 0), 'riverAreas 结构可直接被 setRiverAreas 接受')
 
     // /feed：电文增量（apply 刚装载，轮询还没跑过 → 应为空快照）
     const feedRes = { status: 0, body: '' }
@@ -954,13 +960,40 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     })
     feedCall('/dsh-quake-alert/feed?since=0&stats=1')
     const feedPayload = JSON.parse(feedRes.body)
-    assert(feedRes.status === 200 && feedPayload.cursor === 0 && Array.isArray(feedPayload.entries),
-      '/feed 返回游标与增量数组')
+    assert(feedRes.status === 200 && Number.isFinite(feedPayload.cursor) && feedPayload.cursor > 0 && Array.isArray(feedPayload.entries),
+      '/feed 返回游标与增量数组（游标是时间戳基数，Host 重启后仍单调）')
     assert(feedPayload.stats && typeof feedPayload.stats.polls === 'number', '?stats=1 附带轮询统计（便于诊断）')
     feedCall('/dsh-quake-alert/feed?since=abc')
     assert(JSON.parse(feedRes.body).entries.length === 0, '非法 since 参数按 0 处理（不抛错）')
     feedCall('/dsh-quake-alert/feed')
-    assert(JSON.parse(feedRes.body).cursor === 0, '省略 since 时按 0 处理')
+    assert(JSON.parse(feedRes.body).cursor === feedPayload.cursor, '省略 since 时同样按 tail 处理（游标不变、不回历史）')
+    // 0.3.2：Client 首次启动的 tail 语义，以及 Host 重启 / 时钟回拨的 reset 标记
+    feedCall('/dsh-quake-alert/feed?since=tail')
+    const tailPayload = JSON.parse(feedRes.body)
+    assert(tailPayload.tail === true && tailPayload.entries.length === 0 && tailPayload.cursor === feedPayload.cursor,
+      '?since=tail 只回当前位置、不回条目（Client 首次启动用）')
+    feedCall('/dsh-quake-alert/feed?since=' + (feedPayload.cursor + 1))
+    assert(JSON.parse(feedRes.body).reset === true, 'since > cursor（Host 重启 / 时钟回拨）→ reset 标记')
+    // 非法游标一律按 tail：若按 0 处理，等于让任何请求者一次把整个环缓冲拿走
+    feedCall('/dsh-quake-alert/feed?since=1e999')
+    assert(JSON.parse(feedRes.body).tail === true, 'Infinity（1e999）按 tail 处理，不吐出全部缓冲')
+    feedCall('/dsh-quake-alert/feed?since=-1')
+    assert(JSON.parse(feedRes.body).tail === true, '负数 since 同样按 tail 处理')
+    // Number('') 与 Number('   ') 都是 0：空串必须显式排掉，否则 ?since= 会被当成"从 0 取"
+    feedCall('/dsh-quake-alert/feed?since=')
+    assert(JSON.parse(feedRes.body).tail === true, '空 since 按 tail 处理（不被 Number("") = 0 蒙混过去）')
+    feedCall('/dsh-quake-alert/feed?since=%20')
+    assert(JSON.parse(feedRes.body).tail === true, '纯空白 since 同样按 tail 处理')
+
+    // 单次响应条目上限（本路由无来源校验，这是唯一限制"一次能拿走多少"的地方）
+    const { capFeedEntries, MAX_FEED_ENTRIES } = mod
+    const bigPayload = { cursor: 500, entries: Array.from({ length: MAX_FEED_ENTRIES + 3 }, (_, i) => ({ seq: i + 1, id: 'e' + i })) }
+    capFeedEntries(bigPayload)
+    assert(bigPayload.entries.length === MAX_FEED_ENTRIES && bigPayload.more === true,
+      '过大的增量被截断为 ' + MAX_FEED_ENTRIES + ' 条并标记 more')
+    const smallPayload = { cursor: 2, entries: [{ seq: 1, id: 'a' }] }
+    capFeedEntries(smallPayload)
+    assert(smallPayload.more === undefined && smallPayload.entries.length === 1, '正常增量不受截断影响')
   } catch (e) {
     assert(false, '真实市区町村表 / Host 路由验证失败：' + e.message)
   }
@@ -1031,7 +1064,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
 
   console.log('== 0.3.0-b：Host 电文轮询器（冷启动 / 去重 / 增量 / 环缓冲）==')
   try {
-    const { createPoller, parseAtomEntries } = await import(pathToFileURL(path.join(ROOT, 'lib', 'poller.js')).href)
+    const { createPoller, parseAtomEntries, createFetchText } = await import(pathToFileURL(path.join(ROOT, 'lib', 'poller.js')).href)
     const FEED = 'https://example.test/feed.xml'
     const atom = (list) => '<?xml version="1.0"?><feed>' + list.map((e) =>
       '<entry><title>' + e.title + '</title><id>' + e.id + '</id><updated>' + e.updated + '</updated></entry>').join('') + '</feed>'
@@ -1064,7 +1097,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const r1 = await p1.pollOnce()
     assert(r1.coldStart === true && r1.added === 0, '冷启动不产生事件（不把 feed 里的历史当新闻）')
     assert(f1.calls.length === 1 && f1.calls[0] === FEED, '冷启动只拉 feed，不拉任何详情')
-    assert(p1.snapshot(0).entries.length === 0 && p1.snapshot(0).cursor === 0, '冷启动后缓冲为空、游标为 0')
+    const p1Base = p1.snapshot(0).cursor // 0.3.2：游标以时间戳为起点，断言一律基于这个基数
+    assert(p1.snapshot(0).entries.length === 0 && p1Base >= T0, '冷启动后缓冲为空、游标停在起点（时间戳基数）')
 
     // ③ 增量：只为新 entry 拉详情，已见过的绝不重拉
     clock += 60 * 1000
@@ -1075,7 +1109,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(f1.calls.filter((u) => u === 'detail-1' || u === 'detail-2').length === 0,
       '冷启动时已见过的 entry 永不重拉（気象庁「不重复获取同一文件」）')
     const snap1 = p1.snapshot(0)
-    assert(snap1.cursor === 1 && snap1.entries.length === 1 && snap1.entries[0].id === 'detail-3', '增量快照含新条目与其原文')
+    assert(snap1.cursor === p1Base + 1 && snap1.entries.length === 1 && snap1.entries[0].id === 'detail-3', '增量快照含新条目与其原文')
 
     // ④ feed 未变时只拉一次 feed，不碰详情
     const callsBefore = f1.calls.length
@@ -1086,9 +1120,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     clock += 60 * 1000
     feedXml = atom([entry(4, '2026-09-11T12:02:00Z'), entry(3, '2026-09-11T12:01:00Z')])
     await p1.pollOnce()
-    assert(p1.snapshot(1).entries.length === 1 && p1.snapshot(1).entries[0].id === 'detail-4', 'since=1 → 只返回 seq>1 的条目')
-    assert(p1.snapshot(2).entries.length === 0, 'since=最新游标 → 返回空')
-    assert(p1.snapshot(0).truncated === false, '游标在缓冲范围内 → 不标记截断')
+    assert(p1.snapshot(p1Base + 1).entries.length === 1 && p1.snapshot(p1Base + 1).entries[0].id === 'detail-4',
+      'since=上一条游标 → 只返回更新的条目')
+    assert(p1.snapshot(p1Base + 2).entries.length === 0, 'since=最新游标 → 返回空')
+    assert(p1.snapshot(0).truncated === false, '没发生淘汰时不标记截断')
 
     // ⑥ 详情拉取失败：不产事件、记 error，且不再重试（避免对坏 URL 反复请求）
     clock += 60 * 1000
@@ -1112,22 +1147,24 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const f3 = fakeFetch(routes7)
     const pRing = createPoller({ feedUrl: FEED, fetchText: f3.fn, now: () => clock, maxEntries: 1 })
     await pRing.pollOnce() // 冷启动：detail-40 记为已见
+    const ringBase = pRing.snapshot(0).cursor
     for (const n of [41, 42]) {
       clock += 60 * 1000
       feedRotate = atom([entry(n, new Date(clock).toISOString()), entry(n - 1, new Date(clock - 60000).toISOString())])
       await pRing.pollOnce()
     }
     const snapRing = pRing.snapshot(0)
-    assert(snapRing.cursor === 2, '游标只统计真正入缓冲的条目（冷启动不计）')
+    assert(snapRing.cursor === ringBase + 2, '游标只统计真正入缓冲的条目（冷启动不计）')
     assert(snapRing.entries.length === 1 && snapRing.entries[0].id === 'detail-42', '环缓冲按 maxEntries 淘汰最旧的')
     assert(pRing.snapshot(0).truncated === true, '有条目被淘汰后从头拉取 → 标记 truncated')
-    assert(pRing.snapshot(2).truncated === false, '游标正好等于最新 → 不标记截断')
+    assert(pRing.snapshot(ringBase + 2).truncated === false, '游标正好等于最新 → 不标记截断')
 
     // ⑧ feed 拉取失败：记 error、不抛、游标不动
     const f4 = fakeFetch({})
     const p6 = createPoller({ feedUrl: FEED, fetchText: f4.fn, now: () => clock })
     const r8 = await p6.pollOnce()
-    assert(r8.added === 0 && p6.stats().errors === 1 && p6.snapshot(0).cursor === 0, 'feed 失败时记 error、不产事件、游标不动')
+    assert(r8.added === 0 && p6.stats().errors === 1 && p6.snapshot(0).cursor >= T0 && p6.snapshot(0).entries.length === 0,
+      'feed 失败时记 error、不产事件、游标停在起点')
 
     // ⑨ 回填窗口：显式配置时才处理"启动前刚发布"的那一段
     clock = T0
@@ -1142,7 +1179,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
 
     // ⑪ 按需轮询：没人经 /feed 读取就不拉源（气象灾害关闭时 Client 不再拉 → Host 自然停下）
     clock = T0
-    const f6 = fakeFetch({ [FEED]: () => atom([entry(50, new Date(clock).toISOString())]) })
+    // entry 取"进程启动之前"的时间：这一节只验证按需轮询本身。
+    // 「启动之后发布的电文在冷启动时仍要处理」另有断言（见 0.3.2 的冷启动窗口一节）。
+    const f6 = fakeFetch({ [FEED]: () => atom([entry(50, new Date(clock - 60 * 60 * 1000).toISOString())]) })
     const pIdle = createPoller({ feedUrl: FEED, fetchText: f6.fn, now: () => clock, idleMs: 10 * 60 * 1000 })
     const rIdle = await pIdle.pollOnce()
     assert(rIdle.skipped === true && f6.calls.length === 0, '无人读取时跳过轮询（不产生任何外部请求）')
@@ -1159,6 +1198,84 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(p7.snapshot(0).frozen === false, 'start 后状态为运行中')
     p7.stop()
     assert(p7.snapshot(0).frozen === true, 'stop 后 snapshot 标记 frozen')
+
+    // ⑬ 0.3.2：snapshot 的 tail / reset 语义（Client 游标生命周期的 Host 半边）
+    let clock13 = T0
+    const f13 = fakeFetch({ [FEED]: () => atom([entry(1, new Date(clock13).toISOString())]), 'detail-1': '<Report/>' })
+    const p8 = createPoller({ feedUrl: FEED, fetchText: f13.fn, now: () => clock13, backfillMs: 60 * 60 * 1000, idleMs: 0 })
+    await p8.pollOnce()
+    assert(p8.snapshot(0).entries.length === 1, '（前置）缓冲里已有 1 条')
+    const base8 = p8.snapshot(0).cursor
+    assert(base8 > 0 && base8 >= T0, '游标以时间戳为起点（跨进程单调，Host 重启后不会与旧游标撞车）')
+    const tailSnap = p8.snapshot(0, { tail: true })
+    assert(tailSnap.tail === true && tailSnap.entries.length === 0 && tailSnap.cursor === base8,
+      'snapshot(tail) 只回当前位置、不回任何条目')
+    const resetSnap = p8.snapshot(base8 + 1)
+    assert(resetSnap.reset === true && resetSnap.entries.length === 1,
+      'since > cursor（时钟回拨等异常）→ reset 且按 0 补齐缓冲')
+    assert(p8.snapshot(base8).reset === false && p8.snapshot(0).tail === false,
+      'reset 只在游标倒退时为真，普通请求不带 reset / tail 标记')
+    assert(p8.snapshot(0).truncated === false && resetSnap.truncated === false,
+      '没发生过淘汰时不报 truncated（seq 从时间戳起算，不能拿 seq 连续编号的假设去比）')
+
+    // ⑭ 真淘汰：maxEntries=2 却拉到 3 条 → 缺口要被报出来
+    let clock14 = T0
+    const feed14 = () => atom([1, 2, 3].map((n) => entry(n, new Date(clock14 + n * 1000).toISOString())))
+    const f14 = fakeFetch({ [FEED]: feed14, 'detail-1': '<Report/>', 'detail-2': '<Report/>', 'detail-3': '<Report/>' })
+    const p9 = createPoller({ feedUrl: FEED, fetchText: f14.fn, now: () => clock14, backfillMs: 60 * 60 * 1000, idleMs: 0, maxEntries: 2 })
+    await p9.pollOnce()
+    const base9 = p9.snapshot(0).cursor - 2
+    assert(p9.snapshot(0).entries.length === 2 && p9.snapshot(0).truncated === true,
+      '环缓冲淘汰后 truncated 仍能正确报出（dropped > 0 且 from 落在缺口里）')
+    assert(p9.snapshot(base9 + 2).truncated === false, '从缺口之后取值不再报 truncated')
+
+    // ⑮ 0.3.2：冷启动只丢「进程启动之前」的历史，启动之后发布的照常处理。
+    //     真正的冷启动发生在 Host 启动约 1 分钟后（首轮被按需轮询 skip，要等 Client 首次读 /feed），
+    //     旧实现把那一轮看到的一切都当历史 → 启动后新发布的真实警报被永久记为已见。
+    const f15 = fakeFetch({
+      [FEED]: () => atom([
+        entry(60, new Date(T0 - 60 * 60 * 1000).toISOString()),
+        entry(61, new Date(T0 + 90 * 1000).toISOString()),
+      ]),
+      'detail-60': '<Report/>', 'detail-61': '<Report/>',
+    })
+    const p15 = createPoller({ feedUrl: FEED, fetchText: f15.fn, now: () => T0 + 90 * 1000, startedAt: T0 })
+    const r15 = await p15.pollOnce()
+    assert(r15.added === 1 && p15.snapshot(0).entries[0].id === 'detail-61',
+      '冷启动：进程启动之后发布的电文照常处理（旧实现会当历史永久丢掉）')
+    assert(f15.calls.indexOf('detail-60') === -1, '冷启动：启动之前的历史仍然只记已见、不拉详情')
+
+    // ⑮' 时钟容差：启动前 1 分钟发布的仍在窗口内（避免启动瞬间的边界丢失），
+    //     启动前 10 分钟的历史仍然跳过（不刷屏）
+    const f15b = fakeFetch({ [FEED]: () => atom([entry(62, new Date(T0 - 60 * 1000).toISOString())]), 'detail-62': '<Report/>' })
+    const p15b = createPoller({ feedUrl: FEED, fetchText: f15b.fn, now: () => T0, startedAt: T0 })
+    assert((await p15b.pollOnce()).added === 1, '启动前 1 分钟发布的电文仍在容差内 → 处理')
+    const f15c = fakeFetch({ [FEED]: () => atom([entry(63, new Date(T0 - 10 * 60 * 1000).toISOString())]), 'detail-63': '<Report/>' })
+    const p15c = createPoller({ feedUrl: FEED, fetchText: f15c.fn, now: () => T0, startedAt: T0 })
+    assert((await p15c.pollOnce()).added === 0, '启动前 10 分钟的历史仍然跳过（容差没有放大成刷屏）')
+
+    // ⑯ 0.3.2：默认抓取实现的超时信号与响应体上限
+    const realFetch = globalThis.fetch
+    let seenInit = null
+    globalThis.fetch = async (url, init) => {
+      seenInit = init
+      return { ok: true, status: 200, text: async () => 'x'.repeat(64) }
+    }
+    try {
+      const ft = createFetchText({ maxBodyBytes: 10, timeoutMs: 1234 })
+      let msg = ''
+      try { await ft('https://example.test/big') } catch (e) { msg = e.message }
+      assert(msg.indexOf('过大') !== -1, '响应体超过上限 → 抛错（不把内存吃满）')
+      assert(seenInit && seenInit.signal !== undefined, '默认请求带上超时信号（对端挂起不会把轮询拖停）')
+      const ft2 = createFetchText({ maxBodyBytes: 1024, timeoutMs: 1234 })
+      assert((await ft2('https://example.test/ok')) === 'x'.repeat(64), '上限内的响应正常返回')
+      globalThis.fetch = async () => ({ ok: false, status: 503, text: async () => '' })
+      let msg2 = ''
+      try { await ft2('https://example.test/bad') } catch (e) { msg2 = e.message }
+      assert(msg2.indexOf('503') !== -1, '非 2xx 仍然抛错（原有行为不变）')
+    } finally {
+      globalThis.fetch = realFetch
+    }
   } catch (e) {
     assert(false, 'Host 轮询器验证失败：' + e.message)
   }
@@ -1257,14 +1374,17 @@ console.log('== 机器级持久化：Host settings 桥 ==')
   console.log('== 0.3.0-c：Client 电文增量拉取（游标 / 容错 / 开关）==')
   try {
     const t = loadClient().__test
+    // 显式注入游标存取：0.3.2 起游标会落盘，若用默认实现，c1 写进沙箱 localStorage 的值会串到
+    // c2/c3，使它们的初始游标不再是 0 —— 用例之间不该通过存储隐式耦合。
+    const noStore = { loadCursor: () => 0, saveCursor: () => {} }
     const calls = []
     let payload = { cursor: 0, entries: [] }
     const seen = []
-    const c1 = t.createFeedClient({
+    const c1 = t.createFeedClient(Object.assign({
       fetchJson: async (url) => { calls.push(url); return payload },
       apply: (e) => { seen.push(e.id); return true },
       getCfg: () => ({ disasters: { weather: true } }),
-    })
+    }, noStore))
     payload = { cursor: 2, entries: [{ id: 'e1' }, { id: 'e2' }] }
     const r1 = await c1.pollOnce()
     assert(r1.applied === 2 && seen.join() === 'e1,e2', '增量按序应用')
@@ -1276,23 +1396,24 @@ console.log('== 机器级持久化：Host settings 桥 ==')
 
     // Host 不可达：记 error、不抛
     let fail = true
-    const c2 = t.createFeedClient({
+    const c2 = t.createFeedClient(Object.assign({
       fetchJson: async () => { if (fail) throw new Error('boom'); return { cursor: 1, entries: [] } },
       apply: () => true, getCfg: () => ({ disasters: { weather: true } }),
-    })
+    }, noStore))
     const r2 = await c2.pollOnce()
     assert(r2.applied === 0 && c2.stats().errors === 1, 'Host 不可达 → 记 error、不抛')
     fail = false
     await c2.pollOnce()
-    assert(c2.stats().errors === 1 && c2.cursor() === 1, '恢复后正常推进，错误计数不再增长')
+    assert(c2.stats().errors === 1, '恢复后错误计数不再增长（errors=' + c2.stats().errors + '）')
+    assert(c2.cursor() === 1, '恢复后游标推进到 Host 返回值（cursor=' + c2.cursor() + '）')
 
     // 单条失败不影响其余条目与游标
     const applied = []
-    const c3 = t.createFeedClient({
+    const c3 = t.createFeedClient(Object.assign({
       fetchJson: async () => ({ cursor: 3, entries: [{ id: 'ok' }, { id: 'bad' }, { id: 'ok2' }] }),
       apply: (e) => { if (e.id === 'bad') throw new Error('parse fail'); applied.push(e.id); return true },
       getCfg: () => ({ disasters: { weather: true } }),
-    })
+    }, noStore))
     const r3 = await c3.pollOnce()
     assert(r3.applied === 2 && applied.join() === 'ok,ok2', '单条失败不影响其余条目')
     assert(c3.cursor() === 3 && c3.stats().errors === 1, '单条失败不阻断游标前进')
@@ -1310,6 +1431,385 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(fetched === 0, '气象灾害关闭时不拉取（Host 侧随后也会据此停轮询）')
   } catch (e) {
     assert(false, 'Client 增量拉取验证失败：' + e.message)
+  }
+
+  console.log('== 0.3.2：feed 游标持久化（P2）与 Host 重启恢复（P3）==')
+  try {
+    const t = loadClient().__test
+
+    // ① 首次启动（本地没有游标）→ 用 tail 对齐位置，不把 Host 缓冲里的历史当新闻重放
+    const firstUrls = []
+    const firstSaved = []
+    let appliedFirst = 0
+    const c1 = t.createFeedClient({
+      fetchJson: async (url) => { firstUrls.push(url); return { cursor: 7, entries: [{ id: 'old-1' }, { id: 'old-2' }], tail: true } },
+      apply: () => { appliedFirst += 1; return true },
+      loadCursor: () => null, saveCursor: (v) => firstSaved.push(v),
+      getCfg: () => ({ disasters: { weather: true } }),
+    })
+    const r1 = await c1.pollOnce()
+    assert(firstUrls[0].indexOf('since=tail') !== -1, '首次启动（无游标）→ 请求 since=tail')
+    assert(appliedFirst === 0 && r1.applied === 0 && r1.tail === true, 'tail 响应不应用任何条目（响应里带了也不应用）')
+    assert(c1.cursor() === 7 && firstSaved.join() === '7', 'tail 对齐后立即持久化游标')
+    assert(c1.hasCursor() === true, 'tail 之后不再是"没有游标"状态')
+
+    // ①' 旧版 Host（不认 since=tail）会把整个缓冲按 0 吐回来：只对齐游标，不重放
+    const legacyApplied = []
+    let legacyCursor = null
+    const cLegacy = t.createFeedClient({
+      fetchJson: async () => ({ cursor: 7, entries: [{ id: 'old-1' }, { id: 'old-2' }] }),
+      apply: (e) => { legacyApplied.push(e.id); return true },
+      loadCursor: () => null, saveCursor: (v) => { legacyCursor = v },
+      getCfg: () => ({ disasters: { weather: true } }),
+    })
+    const rLegacy = await cLegacy.pollOnce()
+    assert(legacyApplied.length === 0 && rLegacy.legacyHost === true && legacyCursor === 7,
+      '旧版 Host（响应没有 tail 标记）也不重放历史：只取游标对齐')
+
+    // ② 有持久化游标（刷新 / 新标签页）→ 直接从该游标拉增量
+    const secondUrls = []
+    let appliedSecond = 0
+    const c2 = t.createFeedClient({
+      fetchJson: async (url) => { secondUrls.push(url); return { cursor: 9, entries: [{ id: 'new-1' }] } },
+      apply: () => { appliedSecond += 1; return true },
+      loadCursor: () => 5, saveCursor: () => {},
+      getCfg: () => ({ disasters: { weather: true } }),
+    })
+    await c2.pollOnce()
+    assert(secondUrls[0].indexOf('since=5') !== -1, '有持久化游标 → 首次请求直接带该游标（不重放）')
+    assert(appliedSecond === 1 && c2.cursor() === 9, '只应用游标之后的增量')
+
+    // ③ 端到端复现 P2：同一个"浏览器"里两次页面加载共享一个游标（模拟刷新）
+    let shared = null
+    const pageSeen = []
+    const openPage = () => t.createFeedClient({
+      // 模拟真实 Host：tail 只回位置；否则只回 seq > since 的条目
+      fetchJson: async (url) => {
+        if (url.indexOf('since=tail') !== -1) return { cursor: 12, entries: [{ id: 'hist' }], tail: true }
+        const m = /since=(\d+)/.exec(url)
+        const since = m ? Number(m[1]) : 0
+        return { cursor: 12, entries: since < 12 ? [{ id: 'hist' }] : [] }
+      },
+      apply: (e) => { pageSeen.push(e.id); return true },
+      loadCursor: () => shared, saveCursor: (v) => { shared = v },
+      getCfg: () => ({ disasters: { weather: true } }),
+    })
+    await openPage().pollOnce() // 页面 A：首次加载
+    await openPage().pollOnce() // 页面 B：模拟刷新后的第二次加载
+    assert(pageSeen.length === 0, '刷新页面不重放 Host 缓冲里的历史（P2：修复前会重放并再次响铃）')
+    assert(shared === 12, '两次加载后游标仍是 12（没有因为重放而前进）')
+
+    // ③' Host 截断（more）：游标必须停在「最后一条实际返回的 seq」，不能直接跳到 cursor，
+    //     否则被截断掉的条目会被静默跳过
+    const moreUrls = []
+    const moreSaved = []
+    const cMore = t.createFeedClient({
+      fetchJson: async (url) => {
+        moreUrls.push(url)
+        const m = /since=(\d+)/.exec(url)
+        const since = m ? Number(m[1]) : 0
+        return since === 0
+          ? { cursor: 12, entries: [{ id: 'a', seq: 3 }, { id: 'b', seq: 4 }], more: true }
+          : { cursor: 12, entries: [{ id: 'c', seq: 12 }] }
+      },
+      apply: () => true,
+      loadCursor: () => 0, saveCursor: (v) => moreSaved.push(v),
+      getCfg: () => ({ disasters: { weather: true } }),
+    })
+    const rMore = await cMore.pollOnce()
+    assert(cMore.cursor() === 4 && rMore.more === true,
+      'Host 截断（more）→ 游标停在最后一条的 seq（不跳过没拿到的条目）')
+    await cMore.pollOnce()
+    assert(moreUrls[1].indexOf('since=4') !== -1 && cMore.cursor() === 12,
+      '下一轮从截断处继续，最终追平 cursor')
+
+    // ④ P3：Host 重启 → 游标回退 → 本轮补齐缓冲并对齐
+    const p3Applied = []
+    const p3Saved = []
+    const c3 = t.createFeedClient({
+      fetchJson: async () => ({ cursor: 2, entries: [{ id: 'a' }, { id: 'b' }], reset: true }),
+      apply: (e) => { p3Applied.push(e.id); return true },
+      loadCursor: () => 37, saveCursor: (v) => p3Saved.push(v),
+      getCfg: () => ({ disasters: { weather: true } }),
+    })
+    const r3 = await c3.pollOnce()
+    assert(p3Applied.join() === 'a,b', 'Host 重启（reset）→ 本轮应用缓冲里的条目')
+    assert(c3.cursor() === 2 && p3Saved.join() === '2', 'reset 后游标对齐到 Host 当前值并持久化')
+    assert(r3.reset === true && c3.stats().resets === 1, 'reset 如实计数（诊断可见）')
+
+    // ⑤ 兜底：Host 没带 reset 标记但游标明显回退 → 同样自愈，不静默失联
+    const c4 = t.createFeedClient({
+      fetchJson: async () => ({ cursor: 1, entries: [] }),
+      apply: () => true,
+      loadCursor: () => 37, saveCursor: () => {},
+      getCfg: () => ({ disasters: { weather: true } }),
+    })
+    const r4 = await c4.pollOnce()
+    assert(r4.reset === true && c4.cursor() === 1, 'Host 未标记 reset 但游标回退 → 仍然自愈')
+
+    // ⑥ 脏游标（字符串 / 负数 / null / 对象 / 数组）→ 当作无记录，用 tail（既不重放也不卡死）
+    for (const dirty of ['abc', -5, null, undefined, {}, []]) {
+      const dirtyUrls = []
+      const c5 = loadClientEx({ 'dsh.quakeAlert.feedCursor': JSON.stringify(dirty) }).exports.__test.createFeedClient({
+        fetchJson: async (url) => { dirtyUrls.push(url); return { cursor: 0, entries: [], tail: true } },
+        apply: () => true,
+        getCfg: () => ({ disasters: { weather: true } }),
+      })
+      await c5.pollOnce()
+      assert(dirtyUrls[0].indexOf('since=tail') !== -1, '脏游标 ' + JSON.stringify(dirty) + ' → 当作无记录，用 tail')
+    }
+
+    // ⑦ 真实落盘：用默认的 loadCursor / saveCursor 走一遍 localStorage
+    const s7 = loadClientEx()
+    const c6 = s7.exports.__test.createFeedClient({
+      fetchJson: async () => ({ cursor: 4, entries: [], tail: true }),
+      apply: () => true,
+      getCfg: () => ({ disasters: { weather: true } }),
+    })
+    await c6.pollOnce()
+    assert(s7.storage.get(t.FEED_CURSOR_KEY) === '4', '游标真实写入 localStorage（键 ' + t.FEED_CURSOR_KEY + '）')
+
+    const s8 = loadClientEx({ [t.FEED_CURSOR_KEY]: 4 })
+    const reloadUrls = []
+    const c7 = s8.exports.__test.createFeedClient({
+      fetchJson: async (url) => { reloadUrls.push(url); return { cursor: 4, entries: [] } },
+      apply: () => true,
+      getCfg: () => ({ disasters: { weather: true } }),
+    })
+    await c7.pollOnce()
+    assert(reloadUrls[0].indexOf('since=4') !== -1, '重新加载后从 localStorage 读回游标（刷新不重放）')
+  } catch (e) {
+    assert(false, 'feed 游标持久化验证失败：' + e.message)
+  }
+
+  console.log('== 0.3.2：河川区域表端到端装配（P1）与地名假名归一（P4）==')
+  try {
+    const citiesMod2 = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cities.js')).href)
+    const riverMod2 = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'river-areas.js')).href)
+
+    // ① 端到端装配：模拟真实 Client —— 只经 /areas 的响应装载两张表，**不手工 setRiverAreas**。
+    //    这正是此前缺失的一环：旧断言直接 import 数据表后调用 setRiverAreas，绕过了
+    //    "Host 是否真的把表发下来"这个唯一的断点，所以 P1 逃过了 346 项回归。
+    const hostMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
+    const routes2 = []
+    hostMod.apply({
+      effect(fn) { fn(); return () => {} },
+      inject(names, cb) {
+        if (names.indexOf('settings') !== -1) cb({ settings: { register: () => ({}) } })
+        if (names.indexOf('webServer') !== -1) {
+          cb({ effect(fn) { fn(); return () => {} }, webServer: { register: (r) => { routes2.push(r); return () => {} } } })
+        }
+      },
+    })
+    const areasRoute2 = routes2.find((r) => r.path === '/dsh-quake-alert/areas')
+    let rawAreas = ''
+    areasRoute2.handler({}, { writeHead() {}, end(b) { rawAreas = b } })
+    const areasPayload = JSON.parse(rawAreas)
+    assert(areasPayload.prefectures['東京都'].join() === citiesMod2.CITIES_BY_PREF['東京都'].join(),
+      '/areas 下发的市町村表与 lib/data/cities.js 一致')
+    const fetchedUrls = []
+    const t2 = loadClientEx(undefined, {
+      window: {
+        fetch: async (url) => { fetchedUrls.push(url); return { ok: true, status: 200, json: async () => areasPayload } },
+      },
+    }).exports.__test
+    const cityTableState2 = await t2.loadCityTable()
+    assert(cityTableState2 === 'ready', 'Client 仅凭 /areas 响应即装载成功（端到端装配）')
+    assert(fetchedUrls.length === 1 && fetchedUrls[0] === '/dsh-quake-alert/areas', '只请求一次 /areas')
+    const meguro = riverMod2.RIVER_AREAS.find((a) => a.name === '目黒川')
+    assert(t2.riverAreaCities(meguro.code).length === 2,
+      '河川区域表随响应到位：目黒川 → ' + t2.riverAreaCities(meguro.code).join('/'))
+    assert(t2.citiesOfPref('東京都').indexOf('目黒区') !== -1, '市区町村表同时到位（東京都含目黒区）')
+
+    // ② 两表名称一致性（P4 根因）：河川表里每个市町村都要能反查到市区町村表的规范写法
+    const unresolved = []
+    const seenCity = new Set()
+    for (const a of riverMod2.RIVER_AREAS) {
+      for (const c of a.cities) {
+        if (seenCity.has(c)) continue
+        seenCity.add(c)
+        if (!t2.canonicalCityOf(c)) unresolved.push(c)
+      }
+    }
+    assert(unresolved.length === 0,
+      '河川表的 ' + seenCity.size + ' 个市町村全部可归一到市区町村表（未收录：' + unresolved.join('/') + '）')
+
+    // ③ 假名归一（P4）：小写法（け/ゖ ↔ ケ/ヶ）与假名种类（あるぷす ↔ アルプス）都要等价
+    assert(t2.normKana('金け崎町') === t2.normKana('金ケ崎町') && t2.normKana('金ケ崎町') === '金ヶ崎町',
+      'け / ケ / ヶ 归一到同一形式（金け崎町 ↔ 金ケ崎町）')
+    assert(t2.normKana('南あるぷす市') === t2.normKana('南アルプス市'), '平假名 ↔ 片假名归一（南あるぷす市 ↔ 南アルプス市）')
+    assert(t2.prefsOfCity('金ケ崎町').join() === '岩手県', '河川表写法也能反查到县（金ケ崎町 → 岩手県）')
+    assert(t2.prefsOfCity('南アルプス市').join() === '山梨県', '假名种类不同也能反查到县（南アルプス市 → 山梨県）')
+    assert(t2.canonicalCityOf('金ケ崎町') === '金け崎町' && t2.canonicalCityOf('南アルプス市') === '南あるぷす市',
+      '规范名取市区町村表的写法（用于与用户勾选的名字比对）')
+
+    // ④ 端到端匹配：真实 12 位河川区域码 + L4（氾濫危険情報）电文
+    const vxkoXml = (code, name) => '<?xml version="1.0" encoding="UTF-8"?>' +
+      '<Report xmlns="http://xml.kishou.go.jp/jmaxml1/"><Control><Title>指定河川洪水予報</Title>' +
+      '<DateTime>2026-09-11T11:40:00Z</DateTime></Control>' +
+      '<Head xmlns="http://xml.kishou.go.jp/jmaxml1/informationBasis1/"><Title>' + name + '氾濫危険情報</Title>' +
+      '<ReportDateTime>2026-09-11T20:40:00+09:00</ReportDateTime><EventID>TEST-' + code + '</EventID>' +
+      '<InfoType>発表</InfoType><Serial>1</Serial>' +
+      '<Headline><Text>【警戒レベル４相当情報［洪水］】' + name + 'では、氾濫危険水位に到達しています</Text>' +
+      '<Information type="指定河川洪水予報（予報区域）"><Item>' +
+      '<Kind><Name>氾濫危険情報</Name><Code>40</Code><Condition>洪水警報（発表）</Condition></Kind>' +
+      '<Areas codeType="指定河川洪水予報（予報区域）"><Area><Name>' + name + '</Name><Code>' + code + '</Code></Area></Areas>' +
+      '</Item></Information></Headline></Head><Body/></Report>'
+    const cfgOf = (prefs, cities) => ({
+      watch: { prefectures: prefs, cities: cities || [] },
+      disasters: { earthquake: true, tsunami: true, weather: true },
+      thresholds: {}, dedupe: { windowMinutes: 10 }, notify: {}, quietHours: { enabled: false },
+    })
+    const flood = t2.parseJma(vxkoXml(meguro.code, meguro.name), { id: 'p1-verify' })
+    assert(flood && flood.level === 4, '构造的 VXKO 电文解析为警戒レベル4')
+    assert(flood.regions.every((r) => r.pref === '東京都' && !!r.city), '河川区域已归到東京都的市町村（不再 prefUnknown）')
+    assert(t2.matchAlert(flood, cfgOf(['北海道'])).hit === false, '关注无关县（北海道）→ 不提醒（修复前会误报）')
+    assert(t2.matchAlert(flood, cfgOf(['東京都'])).hit === true, '关注对应县（東京都）→ 提醒')
+    assert(t2.matchAlert(flood, cfgOf(['東京都'], ['目黒区'])).hit === true, '市级收窄命中目黒区 → 提醒')
+    assert(t2.matchAlert(flood, cfgOf(['東京都'], ['札幌市'])).hit === false, '市级收窄未命中 → 不提醒（修复前收窄完全失效）')
+
+    // ⑤ 跨表假名差异的端到端匹配：河川表「金ケ崎町」vs 市区町村表「金け崎町」
+    const kin = riverMod2.RIVER_AREAS.find((a) => a.cities.indexOf('金ケ崎町') !== -1)
+    assert(!!kin, '河川表里有使用「金ケ崎町」写法的区域')
+    const kinAlert = t2.parseJma(vxkoXml(kin.code, kin.name), { id: 'p4-verify' })
+    assert(kinAlert.regions.some((r) => r.pref === '岩手県'), '「金ケ崎町」写法归到岩手県（修复前 pref 为空）')
+    assert(t2.matchAlert(kinAlert, cfgOf(['岩手県'], ['金け崎町'])).hit === true,
+      '用户勾选本表写法「金け崎町」时，河川表的「金ケ崎町」也命中（修复前漏报）')
+    assert(t2.matchAlert(kinAlert, cfgOf(['東京都'])).hit === false, '金ケ崎町（岩手県）不因写法差异误命中東京都')
+  } catch (e) {
+    assert(false, '河川区域表端到端验证失败：' + e.message)
+  }
+
+  console.log('== 0.3.2：UI 文案与配色（气象 code / severity 配色 / 标题分隔符）==')
+  try {
+    const t = loadClient().__test
+
+    // 气象电文的来源标注：此前一律落到 else 分支，展开详情会标成「code 551」（地震速报）
+    assert(t.p2pCodeTextOf('weather') === 'JMA 电文', '气象条目显示「JMA 电文」而不是 code 551')
+    assert(t.p2pCodeTextOf('quake') === 'code 551' && t.p2pCodeTextOf('eew') === 'code 556' &&
+      t.p2pCodeTextOf('tsunami') === 'code 552', 'P2PQuake 三类仍显示各自的 code')
+    assert(t.p2pCodeTextOf('constructor') === '—' && t.p2pCodeTextOf(undefined) === '—',
+      '未知 kind 不命中原型链，显示占位符')
+
+    // 灾种配色：气象此前没有键，历史条目一律落到灰色兜底
+    assert(typeof t.kindColorOf('weather') === 'string' && t.kindColorOf('weather') !== t.kindColorOf('未知'),
+      '气象条目有专属配色（不再落灰色兜底）')
+
+    // severity → 颜色：yellow 是默认阈值 40 下最常见的命中档，不能落进"信息蓝"
+    assert(t.sevColor('yellow') === '#d9a406', 'yellow 有独立配色（震度4 命中不再显示成信息蓝）')
+    assert(t.sevColor('red') === '#e5484d' && t.sevColor('orange') === '#f76b15' && t.sevColor('info') === '#3b82f6',
+      '其余档位配色不变')
+
+    // 标题：旧写法在非「各地」分支会留下悬空的「 · 」
+    assert(t.alertTitleOf({ kind: 'quake', kindLabel: '地震情报·各地震度' }) === '🌐 地震情报·各地震度',
+      'quake 标题直接用 kindLabel（没有悬空分隔符）')
+    assert(t.alertTitleOf({ kind: 'quake', kindLabel: '地震情报' }) === '🌐 地震情报', '非「各地」分支同样干净')
+    assert(t.alertTitleOf({ kind: 'weather', kindLabel: '洪水预报' }) === '🌧 洪水预报', 'weather 标题不变')
+    assert(t.alertTitleOf(null) === '灾害预警', '空输入有兜底标题')
+  } catch (e) {
+    assert(false, 'UI 文案与配色验证失败：' + e.message)
+  }
+
+  console.log('== 0.3.2：WebSocket 半开检测 / 音频节点回收 / 城市表请求可中止 ==')
+  try {
+    // P7-a：久无数据 → 主动重连（半开连接不会触发 onclose）
+    const socketsA = []
+    class FakeWSA {
+      constructor(url) { this.url = url; socketsA.push(this) }
+      close() {}
+    }
+    const exA = loadClientEx({}, { window: { WebSocket: FakeWSA } }).exports
+    const cA = exA.__test.createWsClient({ staleAfterMs: 30, staleCheckMs: 10 })
+    cA.start()
+    socketsA[0].onopen()
+    await new Promise((r) => setTimeout(r, 90))
+    assert(socketsA.length === 2, '久无数据 → 主动重连（半开连接不会触发 onclose）')
+    cA.stop()
+
+    // P7-b：持续有消息时不误判
+    const socketsB = []
+    class FakeWSB {
+      constructor(url) { this.url = url; socketsB.push(this) }
+      close() {}
+    }
+    const exB = loadClientEx({}, { window: { WebSocket: FakeWSB } }).exports
+    const cB = exB.__test.createWsClient({ staleAfterMs: 40, staleCheckMs: 10 })
+    cB.start()
+    socketsB[0].onopen()
+    const keep = setInterval(() => socketsB[0].onmessage({ data: '{"code":551}' }), 10)
+    await new Promise((r) => setTimeout(r, 90))
+    clearInterval(keep)
+    assert(socketsB.length === 1, '持续有消息时不误判为半开（不重连）')
+    cB.stop()
+
+    // P12：播完 disconnect，长期运行不再累积节点
+    const audioNodes = []
+    class FakeAudioContext {
+      constructor() { this.state = 'running'; this.currentTime = 0; this.destination = {} }
+      createGain() {
+        const g = {
+          gain: { value: 0, setValueAtTime() {}, exponentialRampToValueAtTime() {} },
+          disconnected: false, connect() {}, disconnect() { g.disconnected = true },
+        }
+        audioNodes.push(g)
+        return g
+      }
+      createOscillator() {
+        const o = { type: '', frequency: { value: 0 }, disconnected: false, connect() {}, start() {}, stop() {}, disconnect() { o.disconnected = true } }
+        audioNodes.push(o)
+        return o
+      }
+      resume() { return Promise.resolve() }
+    }
+    const exC = loadClientEx({}, { window: { AudioContext: FakeAudioContext } }).exports
+    exC.__test.playSound('quake', 0.5)
+    await new Promise((r) => setTimeout(r, 900))
+    assert(audioNodes.length > 0 && audioNodes.every((n) => n.disconnected === true),
+      '播放结束后所有音频节点都被 disconnect（共 ' + audioNodes.length + ' 个）')
+
+    // 跨标签页配置同步：监听必须常驻，不依赖设置页是否打开
+    const listeners = {}
+    const sD = loadClientEx({}, {
+      window: {
+        addEventListener: (type, fn) => { (listeners[type] = listeners[type] || []).push(fn) },
+        removeEventListener: (type, fn) => { listeners[type] = (listeners[type] || []).filter((f) => f !== fn) },
+      },
+    })
+    const effects = []
+    sD.exports.apply({
+      effect(fn) { effects.push(fn()); return () => {} },
+      inject() {},
+      slots: { inject() {}, register() {} },
+    })
+    assert((listeners.storage || []).length === 1, 'apply 时建立常驻 storage 监听（与设置页是否打开无关）')
+    sD.storage.set('dsh.quakeAlert.v1', JSON.stringify({ version: 1, watch: { prefectures: ['大阪府'] } }))
+    ;(listeners.storage || []).forEach((fn) => fn({ key: 'dsh.quakeAlert.v1' }))
+    assert(sD.exports.__test.currentCfg().watch.prefectures.join() === '大阪府',
+      '另一个标签页改了配置 → 本页 runtimeCfg 立即跟随')
+    effects.forEach((fn) => { try { if (typeof fn === 'function') fn() } catch (err) { /* 清理失败忽略 */ } })
+
+    // 城市表请求可中止：停用后不再应用数据
+    let resolveFetch = null
+    const sE = loadClientEx({}, {
+      window: {
+        AbortController,
+        fetch: (url, init) => new Promise((resolve, reject) => {
+          resolveFetch = resolve
+          if (init && init.signal && init.signal.addEventListener) {
+            init.signal.addEventListener('abort', () => reject(new Error('aborted')))
+          }
+        }),
+      },
+    })
+    const tE = sE.exports.__test
+    const pending = tE.loadCityTable()
+    tE.abortCityTableLoad()
+    resolveFetch({ ok: true, status: 200, json: async () => ({ prefectures: { '東京都': ['千代田区'] } }) })
+    const stateE = await pending
+    assert(stateE === 'idle' && tE.citiesOfPref('東京都').length === 0,
+      '插件停用中止后不应用表数据，且状态回到 idle（下次可重试）')
+  } catch (e) {
+    assert(false, 'WebSocket / 音频 / 城市表验证失败：' + e.message)
   }
 
   console.log('== 0.3.0-c：气象灾害配置字段 ==')

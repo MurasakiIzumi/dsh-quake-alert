@@ -449,11 +449,14 @@ const resetSettings = () => { runtimeCfg = null; settingsScope = null; settingsS
 //
 // 作用：市区町村表与「观测点 addr → 市町村」归一。
 // 内容：表的注入与规整（setCityTable/citiesOfPref/pruneUnknownCities）、
+//       地名假名归一（normKana）与规范写法反查（canonicalCityOf）、
 //       从 Host 只读路由拉表（loadCityTable）、写法变体展开（cityAliases）、
 //       前缀索引（buildAddrIndex）与查询（lookupAddrCity）。
 // 依赖：01-constants、02-storage、03-settings-bridge（pruneUnknownCities 会写配置）。
 // 要点：気象庁/P2PQuake 的观测点名用短名与消歧写法（大阪北区茶屋町、福島伊達市、
-//       渡島北斗市），必须先归一到市町村全称再比对，否则会大面积漏报。
+//       渡島北斗市），必须先归一到市町村全称再比对，否则会大面积漏报；
+//       河川区域表与 JMA 电文还可能与本表假名写法不同（南アルプス市 / 南あるぷす市），
+//       所以「比对」与「反查」一律经 normKana，显示仍用本表写法。
 // ============================================================================
 
 
@@ -465,8 +468,29 @@ const AREAS_PATH = '/dsh-quake-alert/areas';
 let cityTable = null;
 let cityTableState = 'idle'; // idle | loading | ready | failed
 let cityNameSet = null; // 全部市町村名（校验配置用）
-let cityPrefIndex = null; // Map<市町村名, 都道府県[]>：JMA 电文只给市町村名，要反查所属县
+let cityPrefIndex = null; // Map<归一市町村名, { name: 规范写法, prefs: 都道府県[] }>：JMA 电文只给市町村名，要反查所属县
 let riverAreas = null; // Map<河川予報区域コード, { name, cities }>：指定河川洪水予報用
+
+// ---------- 地名假名归一 ----------
+// 気象庁的不同数据源对同一个市町村写法不一致，实测三类（0.3.2）：
+//   ① 小写法不同：総務省コード表「金け崎町 / 六ゖ所村」↔ 河川区域 CSV「金ケ崎町 / 六ヶ所村」
+//   ② 假名种类不同：総務省コード表「南あるぷす市」↔ 河川区域 CSV「南アルプス市」
+//   ③ 旧写法：P2PQuake 观测点「龍ケ崎市」↔ 本表「龍け崎市」
+// 归一步骤：先「平假名 → 片假名」（け→ケ、ゖ→ヶ），再把「ケ → ヶ」（小写化）。
+// 两步都要：只做第一步的话「ケ」与「ヶ」会变得不相等，反而破坏既有的ケ/ヶ 等价。
+// 结果只用于比较与反查，绝不用于显示——界面上一律用本表的规范写法。
+const KANA_HIRA_MIN = 0x3041;
+const KANA_HIRA_MAX = 0x3096;
+const KANA_KE_RE = /\u30b1/g;
+function normKana(input) {
+  const s = String(input === undefined || input === null ? '' : input);
+  let out = '';
+  for (const ch of s) {
+    const c = ch.codePointAt(0);
+    out += (c >= KANA_HIRA_MIN && c <= KANA_HIRA_MAX) ? String.fromCodePoint(c + 0x60) : ch;
+  }
+  return out.replace(KANA_KE_RE, '\u30f6')
+}
 
 function setCityTable(table) {
   if (!isPlainObject(table)) return false
@@ -484,11 +508,14 @@ function setCityTable(table) {
   if (Object.keys(clean).length === 0) return false
   cityTable = clean;
   cityNameSet = names;
+  // 索引键走假名归一：外部写法（河川区域表 / JMA 电文）与本表写法不同时也要能查到
   cityPrefIndex = new Map();
   for (const pref of Object.keys(clean)) {
     for (const c of clean[pref]) {
-      if (!cityPrefIndex.has(c)) cityPrefIndex.set(c, []);
-      cityPrefIndex.get(c).push(pref);
+      const key = normKana(c);
+      const hit = cityPrefIndex.get(key);
+      if (hit) { if (hit.prefs.indexOf(pref) === -1) hit.prefs.push(pref); }
+      else cityPrefIndex.set(key, { name: c, prefs: [pref] });
     }
   }
   buildAddrIndex();
@@ -496,11 +523,23 @@ function setCityTable(table) {
   return true
 }
 const citiesOfPref = (pref) => (cityTable && own(cityTable, pref)) || [];
-/** 市町村名 → 所属都道府県（重名时返回多个；表未加载或未收录时返回空数组）。 */
+/** 市町村名 → 所属都道府県（写法差异已归一；重名时返回多个；表未加载或未收录时返回空数组）。 */
 const prefsOfCity = (name) => {
   if (!cityPrefIndex) return []
-  const hit = cityPrefIndex.get(String(name || ''));
-  return hit ? hit.slice() : []
+  const hit = cityPrefIndex.get(normKana(name));
+  return hit ? hit.prefs.slice() : []
+};
+/**
+ * 市町村名 → 本表里的规范写法（写法差异已归一；表未加载或未收录时返回空字符串）。
+ *
+ * 为什么需要：用户勾选的市町村名来自本表（citiesOfPref），而 JMA 电文、河川区域表给的是
+ * 外部写法。把外部写法直接写进 region.city，再与用户勾选的名字比对（indexOf）就会漏报；
+ * 所以比对前先取规范名。表未加载时返回空串，调用方回退用原写法（宁可多报绝不漏报）。
+ */
+const canonicalCityOf = (name) => {
+  if (!cityPrefIndex) return ''
+  const hit = cityPrefIndex.get(normKana(name));
+  return hit ? hit.name : ''
 };
 
 /**
@@ -535,12 +574,11 @@ const riverAreaCities = (code) => {
 //   ② 特别区加县短名：東京千代田区大手町 ← 千代田区
 //   ③ 重名消歧前缀：福島伊達市          ← 伊達市（福島県）
 //   ④ 北海道支庁名：渡島北斗市 / 日高地方日高町 ← 北斗市 / 日高町
-//   ⑤ 仮名表记：龍ケ崎市 ↔ 龍ヶ崎市
+//   ⑤ 仮名表记：龍ケ崎市 ↔ 龍け崎市（归一函数见文件上方 normKana：平假名→片假名 + ケ→ヶ）
 const HOKKAIDO_BRANCHES = [
   '石狩', '後志', '空知', '渡島', '檜山', '胆振', '日高', '上川', '留萌', '宗谷',
   '網走', '北見', '紋別', '十勝', '釧路', '根室',
 ];
-const normKana = (s) => String(s === undefined || s === null ? '' : s).replace(/ケ/g, 'ヶ');
 // 展开一个市町村全称的全部书写变体
 function cityAliases(city, pref) {
   const out = [city];
@@ -593,13 +631,19 @@ function pruneUnknownCities() {
   if (kept.length === cur.watch.cities.length) return
   applyCfg(Object.assign({}, cur, { watch: Object.assign({}, cur.watch, { cities: kept }) }));
 }
+let cityTableAbort = null; // 在途请求的取消器（插件卸载时用）
 async function loadCityTable() {
   if (cityTableState === 'loading' || cityTableState === 'ready') return cityTableState
   if (typeof window === 'undefined' || typeof window.fetch !== 'function') { cityTableState = 'failed'; return cityTableState }
   cityTableState = 'loading';
   store.push({});
+  // 经 window 取 AbortController：浏览器里就是它，沙箱测试也只需注入 window 上的实现
+  const AC = (typeof window !== 'undefined' && window) ? window.AbortController : undefined;
+  cityTableAbort = typeof AC === 'function' ? new AC() : null;
   try {
-    const res = await window.fetch(AREAS_PATH, { headers: { accept: 'application/json' } });
+    const init = { headers: { accept: 'application/json' } };
+    if (cityTableAbort) init.signal = cityTableAbort.signal;
+    const res = await window.fetch(AREAS_PATH, init);
     if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : '?'))
     const data = await res.json();
     const payload = isPlainObject(data) && isPlainObject(data.prefectures) ? data.prefectures : data;
@@ -608,15 +652,27 @@ async function loadCityTable() {
     if (isPlainObject(data) && Array.isArray(data.riverAreas)) setRiverAreas(data.riverAreas);
     pruneUnknownCities();
   } catch (err) {
-    cityTableState = 'failed';
+    // 插件卸载造成的中止不算"失败"：下次装载应当能重试
+    const aborted = !!(cityTableAbort && cityTableAbort.signal && cityTableAbort.signal.aborted);
+    cityTableState = aborted ? 'idle' : 'failed';
   }
+  cityTableAbort = null;
   store.push({});
   return cityTableState
+}
+/** 插件卸载时调用：中止在途请求，免得卸载之后还去写 store / 用户配置。 */
+function abortCityTableLoad() {
+  if (cityTableAbort) {
+    try { cityTableAbort.abort(); } catch (err) { /* 已结束等忽略 */ }
+    // 故意不在这里置空：loadCityTable 的 catch 要靠它的 signal 区分「被中止」与「真失败」，
+    // 置空由 loadCityTable 收尾时统一做（abort 幂等，重复调用无害）。
+  }
 }
 
 
 // 供单测钩子重置表状态
 const resetCityTable = () => {
+  abortCityTableLoad();
   cityTable = null; cityNameSet = null; cityTableState = 'idle';
   addrAliasIndex = null; addrAliasMax = 0; cityPrefIndex = null; riverAreas = null;
 };
@@ -719,7 +775,13 @@ const scaleText = (v) => own(SCALE_TEXT, v) || (typeof v === 'number' && v > 0 ?
 // 震度是用户判断严重性的关键信息（阈值也是按震度设的），必须出现在 headline 里。
 // prefix 例：'最大' → 「最大震度3」；'预测最大' → 「预测最大震度5强」。
 const scaleSuffix = (v, prefix) => (typeof v === 'number' && v > 0 ? ' · ' + prefix + scaleText(v) : '');
-const sevColor = (s) => (s === 'red' ? '#e5484d' : (s === 'orange' ? '#f76b15' : '#3b82f6'));
+// severity → 颜色。'yellow' 必须显式处理：默认阈值 40 下最常见的命中（震度4）就是它，
+// 落到默认分支会显示成"信息蓝"，与「中等严重度」的语义不符。
+const sevColor = (s) => (
+  s === 'red' ? '#e5484d'
+    : (s === 'orange' ? '#f76b15'
+      : (s === 'yellow' ? '#d9a406' : '#3b82f6'))
+);
 const severityOfScale = (v) => {
   if (typeof v !== 'number' || v <= 0) return 'info'
   if (v >= 55) return 'red'
@@ -987,7 +1049,13 @@ function levelOf({ title, headTitle, headlineText, items }) {
   return level
 }
 
-/** 区域展开：一律归到「都道府県 + 市町村」两层，查不到归属县就标记 prefUnknown（放行）。 */
+/**
+ * 区域展开：一律归到「都道府県 + 市町村」两层，查不到归属县就标记 prefUnknown（放行）。
+ *
+ * 市町村名必须换成**本表的规范写法**（canonicalCityOf）再放进 region.city：用户勾选的
+ * 市町村名来自市区町村表，而电文与河川区域表给的是外部写法（「南アルプス市」vs 本表
+ * 「南あるぷす市」、「金ケ崎町」vs「金け崎町」），直接比对会漏报。取不到规范名时回退原写法。
+ */
 function regionsOf(items) {
   const out = [];
   const seen = new Set();
@@ -1002,21 +1070,23 @@ function regionsOf(items) {
     for (const a of it.areas) {
       const kind = regionKindOf(a.codeType, a.code);
       if (kind === 'city' || kind === 'pref') {
+        const city = kind === 'city' ? (canonicalCityOf(a.name) || a.name) : '';
         // 判县优先用区域码前两位（准确），名称反查只在前者不可用时兜底
         const byCode = prefOfCode(a.code);
         if (byCode) {
-          push({ pref: byCode, area: a.name, city: kind === 'city' ? a.name : '' });
+          push({ pref: byCode, area: a.name, city });
           continue
         }
         const prefs = kind === 'city' ? prefsOfCity(a.name) : prefsOfArea(a.name);
-        if (prefs.length === 0) push({ pref: '', area: a.name, city: kind === 'city' ? a.name : '', prefUnknown: true });
-        else for (const p of prefs) push({ pref: p, area: a.name, city: kind === 'city' ? a.name : '' });
+        if (prefs.length === 0) push({ pref: '', area: a.name, city, prefUnknown: true });
+        else for (const p of prefs) push({ pref: p, area: a.name, city });
       } else if (kind === 'river') {
         // 河川予報区域码是 12 位，前两位与都道府県无关，只能查 river-areas 表
         const cities = riverAreaCities(a.code);
         if (cities.length === 0) push({ pref: '', area: a.name, city: '', prefUnknown: true });
         else {
-          for (const c of cities) {
+          for (const raw of cities) {
+            const c = canonicalCityOf(raw) || raw;
             const prefs = prefsOfCity(c);
             if (prefs.length === 0) push({ pref: '', area: a.name, city: c, prefUnknown: true });
             else for (const p of prefs) push({ pref: p, area: a.name, city: c });
@@ -1226,13 +1296,17 @@ function regionInWatch(region, watch, cityLevel) {
 // 两类一律放行，宁可多报绝不漏报：
 //   ① pref 为空（区域码认不出县、或名称反查不到）——无法判定，放行；
 //   ② 区域级条目（city 为空，如「宗谷地方」「○○川上流」）——对应不到市町村，放行。
+// 市町村比对走 normKana 归一等价：电文/河川区域表的假名写法可能与本表不同
+// （「金ケ崎町」vs「金け崎町」、「南アルプス市」vs「南あるぷす市」），
+// 直接 indexOf 会让勾选了该市町村的用户漏报。
 function regionInWeatherWatch(region, watch) {
   const list = (watch && watch.prefectures) || [];
   const cities = (watch && watch.cities) || [];
   if (list.length > 0 && region.pref && list.indexOf(region.pref) === -1) return false
   if (cities.length === 0) return true
   if (!region.city) return true
-  return cities.indexOf(region.city) !== -1
+  const target = normKana(region.city);
+  return cities.some((c) => normKana(c) === target)
 }
 
 // 未命中原因：若存在未能识别归属县的区域名，明确提示，避免用户误以为链路故障
@@ -1362,6 +1436,8 @@ function playSound(kind, volume) {
     master.gain.value = vol * 0.5;
     master.connect(ctx.destination);
     const t0 = ctx.currentTime;
+    const nodes = []; // 这次播放创建的所有节点，播完统一断开
+    let endAt = 0;
     for (const n of preset.notes) {
       const osc = ctx.createOscillator();
       const g = ctx.createGain();
@@ -1374,7 +1450,15 @@ function playSound(kind, volume) {
       g.gain.exponentialRampToValueAtTime(0.0001, start + n.dur);
       osc.connect(g); g.connect(master);
       osc.start(start); osc.stop(start + n.dur + 0.05);
+      nodes.push(osc, g);
+      if (n.start + n.dur > endAt) endAt = n.start + n.dur;
     }
+    // 播完断开：osc.stop() 只是停止发声，节点仍挂在 destination 上；
+    // 每次警报都新建 2～3 个节点，长期运行会一直累积（disconnect 后交给 GC）。
+    setTimeout(() => {
+      for (const node of nodes) { try { node.disconnect(); } catch (err) { /* 已断开等忽略 */ } }
+      try { master.disconnect(); } catch (err) { /* 忽略 */ }
+    }, Math.ceil((endAt + 0.3) * 1000));
   };
   if (ctx.state === 'suspended') ctx.resume().then(() => { if (ctx.state === 'running') doPlay(); }).catch(() => {});
   else doPlay();
@@ -1584,6 +1668,20 @@ function areaLabelOf(region) {
   return region.pref + name
 }
 
+/**
+ * 系统通知 / 页内 toast 的标题。抽成纯函数是为了能直接断言文案——
+ * 旧写法把「地震情报 · 」与「各地震度」分开拼，非「各地」分支会留下一个悬空的分隔符。
+ */
+function alertTitleOf(alert) {
+  if (!alert) return '灾害预警'
+  // kindLabel 本身已区分「地震速报·震度速报」「地震情报·各地震度」等，不需要再拼后缀
+  if (alert.kind === 'eew') return '⚠ 紧急地震速报（警报）'
+  if (alert.kind === 'quake') return '🌐 ' + alert.kindLabel
+  if (alert.kind === 'tsunami') return '🌊 ' + alert.kindLabel
+  if (alert.kind === 'weather') return '🌧 ' + alert.kindLabel
+  return '灾害预警'
+}
+
 // 气象警报的「静默提示」：只在"命中关注地区、但未达 L4 所以没有播报"时留一笔，
 // 由侧边栏状态点的悬停提示与设置页显示。
 // 注意 L4 以上**必须清掉**它：那时已经真正播报过，再挂着这条（文案是"未达 L4，未播报"）
@@ -1725,12 +1823,7 @@ function handleAlert(alert, cfg, opts) {
     return { notified: false, reason: 'other-tab', detail: '其它 DSH 标签页已提醒同一条' }
   }
   const prefZh = (PREFECTURES.find((p) => p.jp === hitPref) || {}).zh || hitPref;
-  const title = {
-    eew: '⚠ 紧急地震速报（警报）',
-    quake: '🌐 地震情报 · ' + (alert.kindLabel.indexOf('各地') !== -1 ? '各地震度' : ''),
-    tsunami: '🌊 ' + alert.kindLabel,
-    weather: '🌧 ' + alert.kindLabel,
-  }[alert.kind] || '灾害预警';
+  const title = alertTitleOf(alert);
   const bodyLines = [alert.headline];
   if (hitPref) bodyLines.push('命中关注地区：' + prefZh + (prefZh !== hitPref ? '（' + hitPref + '）' : ''));
   if (alert.kind === 'tsunami') bodyLines.push('请立即远离海岸与河口');
@@ -1761,18 +1854,52 @@ function handleAlert(alert, cfg, opts) {
 //
 // 作用：P2PQuake WebSocket 连接管理。
 // 内容：连接/断开状态机、指数退避重连（1s→60s 封顶）、数据源切换（正式/沙箱）、
-//       消息转交主链。
+//       「久无数据」的半开连接检测（主动重连）、消息转交主链。
 // 依赖：01-constants、02-storage（读数据源）、11-pipeline（handleRaw）。
 // 背景：P2PQuake 约每 10 分钟强制断线，重连是常态路径而非异常。
 // ============================================================================
 
 
+// 半开连接检测：NAT / 代理静默断开时 TCP 已经不通，但浏览器**不会**触发 onclose，
+// 于是状态点一直是绿色的「已连接」，实际一条推送都收不到——对预警产品这是最危险的失效模式
+// （用户以为自己在被保护）。P2PQuake 约每 10 分钟强制断线一次，正常情况下 lastActivityAt
+// 会被 onclose → 重连 → onopen 不断刷新，所以 20 分钟毫无活动只可能是连接真的死了。
+const STALE_AFTER_MS = 20 * 60 * 1000;
+const STALE_CHECK_MS = 60 * 1000;
+
 // ---------- WebSocket 客户端 ----------
-function createWsClient() {
+function createWsClient(opts) {
+  const o = opts || {};
+  const staleAfterMs = o.staleAfterMs === undefined ? STALE_AFTER_MS : o.staleAfterMs;
+  const staleCheckMs = o.staleCheckMs === undefined ? STALE_CHECK_MS : o.staleCheckMs;
   let ws = null;
   let timer = null;
+  let staleTimer = null;
   let stopped = false;
   let retries = 0;
+  let lastActivityAt = 0; // 最近一次 onopen / onmessage 的时刻
+
+  function stopStaleWatch() {
+    if (staleTimer) { clearTimeout(staleTimer); staleTimer = null; }
+  }
+  /** 排下一次「是否久无数据」的检查；检测关闭（staleAfterMs <= 0）时不排。 */
+  function armStaleWatch() {
+    stopStaleWatch();
+    if (stopped || !(staleAfterMs > 0) || !(staleCheckMs > 0)) return
+    staleTimer = setTimeout(() => {
+      staleTimer = null;
+      if (stopped) return
+      if (lastActivityAt && Date.now() - lastActivityAt > staleAfterMs) {
+        store.push({ status: 'reconnecting', retries, detail: '久无数据（疑似连接已断开），正在重连' });
+        teardown();
+        connect();
+        return
+      }
+      armStaleWatch();
+    }, staleCheckMs);
+    if (staleTimer && typeof staleTimer.unref === 'function') staleTimer.unref();
+  }
+
   const scheduleReconnect = () => {
     if (stopped) return
     retries += 1; // 从「第 1 次」开始计数，退避序列 1s → 2s → 4s → … → 60s 封顶
@@ -1790,12 +1917,15 @@ function createWsClient() {
     }
     ws.onopen = () => {
       retries = 0;
+      lastActivityAt = Date.now();
+      armStaleWatch();
       const openDetail = url.indexOf('sandbox') !== -1
         ? '沙箱源：回放 2023 年历史（约30秒/条）'
         : '已连接 P2PQuake（约每 10 分钟自动重连）';
       store.push({ status: 'open', retries: 0, detail: openDetail });
     };
     ws.onmessage = (ev) => {
+      lastActivityAt = Date.now();
       try {
         const raw = JSON.parse(String(ev.data));
         handleRaw(raw, currentCfg());
@@ -1805,6 +1935,7 @@ function createWsClient() {
     ws.onclose = () => scheduleReconnect();
   };
   const teardown = () => {
+    stopStaleWatch();
     if (timer) { clearTimeout(timer); timer = null; }
     if (ws) { try { ws.onclose = null; ws.close(); } catch (err) {} ws = null; }
   };
@@ -1835,15 +1966,24 @@ const setActiveClient = (c) => { activeClient = c; };
 //
 // 作用：从 Host 的只读路由拉気象庁电文增量，解析成 Alert 后交给主链
 //       ——与 P2PQuake 的 551/552/556 汇到同一个 handleAlert。
-// 内容：游标推进、增量应用、失败容错、启停、诊断计数。
-// 依赖：03-settings-bridge（currentCfg）、05b-jma-parser（parseJma）、11-pipeline（handleAlert）。
+// 内容：游标生命周期（持久化 / 首次对齐 / Host 重启恢复）、增量应用、失败容错、
+//       启停、诊断计数。
+// 依赖：02-storage（游标落盘）、03-settings-bridge（currentCfg）、
+//       05b-jma-parser（parseJma）、11-pipeline（handleAlert）。
 //
 // 为什么拉本地而不是浏览器直连気象庁：Host 是每台机器唯一的外部请求者，多标签页 / 多窗口
 // 不会放大请求——気象庁明文要求「一度取得したファイルを再度取得しない」，违反会被封 IP。
 // 这里只从回环地址取增量，没有外部成本。
 //
-// 游标语义：`?since=N` 返回 seq > N 的条目；Host 的环缓冲淘汰旧条目时会带 truncated，
-// 表示中间有缺口——此时仍然应用已有的条目（宁可少报几条，也不要卡住不再前进）。
+// 游标语义（0.3.2 起三种）：
+//   · `?since=N`     —— 返回 seq > N 的条目；Host 环缓冲淘汰旧条目时带 truncated，表示中间
+//                       有缺口，此时仍然应用已有条目（宁可少报几条，也不要卡住不再前进）。
+//   · `?since=tail`  —— **首次启动**（本地还没有游标）只要当前位置、不要历史。若首次就用 0，
+//                       刷新页面会把 Host 缓冲里几小时前的旧警报当新闻重放（响铃 + 弹窗）。
+//   · 响应 `reset`   —— Host 进程重启后游标从 0 重新计数，此时 Client 手里那个更大的游标会让
+//                       `entries` 永远为空（连 truncated 都不为真）→ 静默失联。Host 检出
+//                       `since > cursor` 后按 0 补齐并置 reset，Client 据此对齐游标。
+// 游标落盘后，刷新 / 新开标签页都从上次的位置继续，不会再重放。
 // ============================================================================
 
 
@@ -1853,9 +1993,26 @@ const FEED_PATH = '/dsh-quake-alert/feed';
 const FEED_POLL_MS = 15 * 1000;
 /** 启动后首轮延迟：给插件装载、城市表与 host 侧首轮轮询让路。 */
 const FEED_FIRST_DELAY_MS = 3000;
+/** 游标在 localStorage 里的键（与 history / 配置同域，风格一致）。 */
+const FEED_CURSOR_KEY = 'dsh.quakeAlert.feedCursor';
+/** 首次启动的哨兵：还没有游标 → 用 tail 语义对齐位置而不是重放历史。 */
+const FEED_TAIL = 'tail';
+/** 本地路由的单次请求超时：Host 卡住时不能让 inFlight 一直占着、把整条轮询拖停。 */
+const FEED_FETCH_TIMEOUT_MS = 10 * 1000;
+
+/** 读回持久化游标；任何脏数据（非数字 / NaN / 负数）一律当作"没有记录"。 */
+function loadFeedCursor() {
+  const v = loadJSON(FEED_CURSOR_KEY, null);
+  return (typeof v === 'number' && Number.isFinite(v) && v >= 0) ? Math.floor(v) : null
+}
+function saveFeedCursor(v) {
+  if (typeof v === 'number' && Number.isFinite(v) && v >= 0) saveJSON(FEED_CURSOR_KEY, Math.floor(v));
+}
 
 async function defaultFetchJson(url) {
-  const res = await window.fetch(url, { headers: { accept: 'application/json' } });
+  const AS = (typeof window !== 'undefined' && window) ? window.AbortSignal : undefined;
+  const signal = (AS && typeof AS.timeout === 'function') ? AS.timeout(FEED_FETCH_TIMEOUT_MS) : undefined;
+  const res = await window.fetch(url, { headers: { accept: 'application/json' }, signal });
   if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : '?'))
   return res.json()
 }
@@ -1867,6 +2024,8 @@ async function defaultFetchJson(url) {
  * @param {(url: string) => Promise<object>} [opts.fetchJson] 注入点（测试用）
  * @param {(entry: object, cfg: object) => boolean} [opts.apply] 注入点（测试用）
  * @param {() => object} [opts.getCfg] 注入点（测试用）
+ * @param {() => (number|null)} [opts.loadCursor] 注入点（测试用；默认读 localStorage）
+ * @param {(v: number) => void} [opts.saveCursor] 注入点（测试用；默认写 localStorage）
  * @param {(err: Error) => void} [opts.onError]
  */
 function createFeedClient(opts = {}) {
@@ -1875,6 +2034,8 @@ function createFeedClient(opts = {}) {
   const fetchJson = opts.fetchJson || defaultFetchJson;
   const getCfg = opts.getCfg || currentCfg;
   const onError = opts.onError || (() => {});
+  const loadCursor = opts.loadCursor || loadFeedCursor;
+  const saveCursor = opts.saveCursor || saveFeedCursor;
   const apply = opts.apply || ((entry, cfg) => {
     const alert = parseJma(entry && entry.xml, { id: entry && entry.id });
     if (!alert) return false
@@ -1882,23 +2043,56 @@ function createFeedClient(opts = {}) {
     return true
   });
 
-  let since = 0;
+  // null = 本浏览器还没有游标（首次启动）→ 首轮用 tail 对齐，不重放 Host 缓冲里的历史
+  let since = null;
+  try {
+    const stored = loadCursor();
+    if (typeof stored === 'number' && Number.isFinite(stored) && stored >= 0) since = Math.floor(stored);
+  } catch (err) { /* 读盘失败按首次启动处理 */ }
   let timer = null;
   let running = false;
   let inFlight = null;
-  const stats = { polls: 0, received: 0, applied: 0, errors: 0, truncated: 0, lastAt: 0, cursor: 0 };
+  const stats = { polls: 0, received: 0, applied: 0, errors: 0, truncated: 0, tailSync: 0, resets: 0, morePages: 0, lastAt: 0, cursor: 0 };
+
+  /** 推进游标并落盘（值没变就不写，15s 一次的轮询不必每次都碰 localStorage）。 */
+  function setCursor(next) {
+    if (!(typeof next === 'number' && Number.isFinite(next) && next >= 0)) return
+    const v = Math.floor(next);
+    if (v === since) return
+    since = v;
+    try { saveCursor(v); } catch (err) { /* 隐私模式等写盘失败：本次仍以内存游标工作 */ }
+  }
+  const cursorNow = () => (since === null ? 0 : since);
 
   async function pollOnce() {
     stats.polls += 1;
     let data;
     try {
-      data = await fetchJson(FEED_PATH + '?since=' + since);
+      data = await fetchJson(FEED_PATH + '?since=' + (since === null ? FEED_TAIL : since));
     } catch (err) {
       stats.errors += 1;
       onError(err);
-      return { applied: 0, cursor: since }
+      return { applied: 0, cursor: cursorNow() }
     }
     stats.lastAt = Date.now();
+    // 首次对齐：Host 只回当前位置。不应用任何条目（即使响应里意外带了也不应用），
+    // 否则"刷新页面"又变成了重放历史。
+    if (data && data.tail === true) {
+      stats.tailSync += 1;
+      setCursor(data.cursor);
+      stats.cursor = cursorNow();
+      return { applied: 0, cursor: cursorNow(), tail: true }
+    }
+    // 本地还没有游标、响应却没带 tail 标记 → 对面是不认 `since=tail` 的旧版 Host
+    // （它按 0 把整个环缓冲吐了回来）。这是一次全新会话，取它的游标对齐即可，
+    // 不能把这些历史当增量播一遍——否则"只刷新页面、不重启 Host"的升级路径会重放一次。
+    // 纯 0.3.2 环境下 tail 请求必定带回 tail 标记，这个分支不会触发。
+    if (since === null) {
+      stats.tailSync += 1;
+      if (data && Number.isFinite(data.cursor)) setCursor(data.cursor);
+      stats.cursor = cursorNow();
+      return { applied: 0, cursor: cursorNow(), tail: true, legacyHost: true }
+    }
     const entries = Array.isArray(data && data.entries) ? data.entries : [];
     if (data && data.truncated) stats.truncated += 1;
     let applied = 0;
@@ -1913,9 +2107,26 @@ function createFeedClient(opts = {}) {
       }
     }
     stats.applied += applied;
-    if (data && Number.isFinite(data.cursor) && data.cursor >= since) since = data.cursor;
-    stats.cursor = since;
-    return { applied, cursor: since, truncated: !!(data && data.truncated) }
+    let reset = false;
+    if (data && Number.isFinite(data.cursor)) {
+      // Host 重启过 → 它给的游标一定比 Client 手里的小（两侧同源，正常情况不会倒退）。
+      // 以 `data.cursor < since` 为准而不是只看 reset 标记：Host 漏标记时也必须自愈，
+      // 否则 Client 会卡在一个比 Host 大的游标上、entries 恒空且 truncated 不为真——静默失联。
+      const regressed = since !== null && data.cursor < since;
+      if (data.reset === true || regressed) {
+        reset = true;
+        stats.resets += 1;
+      }
+      // Host 会用 MAX_FEED_ENTRIES 截断大响应（本轮只给前 N 条）。此时不能直接跳到
+      // data.cursor，否则那 N 条之后的条目会被静默跳过；改用**最后一条实际返回的 seq**
+      // 推进，下一轮接着取。正常增量路径 entries 很短，等价于 data.cursor。
+      const last = entries.length ? entries[entries.length - 1] : null;
+      const next = last && Number.isFinite(last.seq) ? last.seq : data.cursor;
+      if (data.more === true) stats.morePages += 1;
+      setCursor(next);
+    }
+    stats.cursor = cursorNow();
+    return { applied, cursor: cursorNow(), truncated: !!(data && data.truncated), reset, more: !!(data && data.more) }
   }
 
   function pollSerial() {
@@ -1949,8 +2160,10 @@ function createFeedClient(opts = {}) {
     pollOnce,
     pollSerial,
     stats() { return Object.assign({}, stats, { running }) },
-    /** 测试与诊断用：当前游标。 */
-    cursor() { return since },
+    /** 测试与诊断用：当前游标（尚未对齐时为 0）。 */
+    cursor() { return cursorNow() },
+    /** 测试与诊断用：本客户端是否还没有游标（首轮会走 tail 对齐）。 */
+    hasCursor() { return since !== null },
   }
 }
 
@@ -1984,12 +2197,24 @@ function settingsSyncLabel() {
     local: '浏览器 localStorage',
   }[settingsSync] || String(settingsSync)
 }
+// 历史条目「类型」行显示的 P2PQuake code。气象电文不在此表里（它不是 P2PQuake 来源），
+// 索引一律经 own()，避免外部数据里的 'constructor' 之类的键命中原型链。
+const P2P_KIND_CODE = { quake: 551, eew: 556, tsunami: 552 };
+/** 历史条目「类型」行的来源标注：气象电文来自気象庁防災情報XML，没有 P2PQuake code。 */
+function p2pCodeTextOf(kind) {
+  const code = own(P2P_KIND_CODE, kind);
+  if (code) return 'code ' + code
+  return kind === 'weather' ? 'JMA 电文' : '—'
+}
+// 灾种配色：气象灾害此前没有键，历史条目一律落到灰色兜底，与另外三类不一致
+const KIND_COLORS = { eew: '#e5484d', quake: '#3b82f6', tsunami: '#f76b15', weather: '#8b5cf6' };
+const kindColorOf = (kind) => own(KIND_COLORS, kind) || '#7c8494';
 const s = {
   section: (title, ...children) => h('div', { style: { padding: '14px 16px', borderBottom: '1px solid rgba(148,163,184,0.14)' } },
     h('div', { style: { fontWeight: 700, fontSize: 13, marginBottom: 10, color: '#dfe3e8' } }, title), ...children),
   label: (text) => h('div', { style: { color: '#9aa0a6', fontSize: 12, marginBottom: 4 } }, text),
   row: (...children) => h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', margin: '4px 0' } }, ...children),
-  checkbox: (checked, onChange, text, color) => h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer', color: '#dfe3e8' } },
+  checkbox: (checked, onChange, text) => h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer', color: '#dfe3e8' } },
     h('input', { type: 'checkbox', checked, onChange: (e) => onChange(e.target.checked) }), text),
   select: (value, options, onChange, textOf) => h('select', {
     value, onChange: (e) => onChange(e.target.value),
@@ -2031,16 +2256,9 @@ function SettingsPanel() {
       applyCfg({ ...cur, notify: { ...cur.notify, volume: v } });
     }
   }, []);
-  // 其它 DSH 标签页改了配置 → 本页跟随（storage 事件只在「别的标签页」写入时触发）。
-  // 回读走 03 的显式入口：跨模块不能直接给它的模块私有 runtimeCfg 赋值（0.2.1 拆分后
-  // 那行成了自由变量，在 'use strict' 的 bundle 里抛 ReferenceError，同步静默失效）。
-  useEffect(() => {
-    const onStorage = (e) => {
-      if (!e || e.key === STORAGE_KEY) setCfgState(reloadFromLocal());
-    };
-    window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage)
-  }, []);
+  // 其它 DSH 标签页改了配置 → 由 15-entry 的常驻 storage 监听统一回读并 store.push()，
+  // 本组件通过下面的 store.subscribe 跟随。监听放在这里（组件内）的话，只有设置页打开着
+  // 才同步；没打开设置页的标签页会一直按旧配置提醒。
 
   // 立即基于最新配置计算（内存 + localStorage 镜像 + Host），再 setState
   const setCfg = (fn) => { const next = applyCfg(fn(currentCfg())); setCfgState(next); };
@@ -2176,7 +2394,6 @@ function SettingsPanel() {
   const statusMeta = statusMetaOf(store.status, store.retries);
   const dot = h('span', { style: { display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: statusMeta.color, marginRight: 8 } });
 
-  const kindColor = { eew: '#e5484d', quake: '#3b82f6', tsunami: '#f76b15' };
   const permText = {
     granted: '通知权限：已授权',
     denied: '通知权限：被拒绝（请在浏览器站点设置中允许）',
@@ -2249,8 +2466,8 @@ function SettingsPanel() {
     // 通知与声音
     s.section('通知与声音',
       s.row(
-        s.checkbox(cfg.notify.sound !== false, (v) => setCfg((c) => ({ ...c, notify: { ...c.notify, sound: v } })), '提示音', '#dfe3e8'),
-        s.checkbox(cfg.notify.system !== false, (v) => setCfg((c) => ({ ...c, notify: { ...c.notify, system: v } })), '系统通知', '#dfe3e8'),
+        s.checkbox(cfg.notify.sound !== false, (v) => setCfg((c) => ({ ...c, notify: { ...c.notify, sound: v } })), '提示音'),
+        s.checkbox(cfg.notify.system !== false, (v) => setCfg((c) => ({ ...c, notify: { ...c.notify, system: v } })), '系统通知'),
       ),
       s.row(s.label('音量'), h('input', {
         type: 'range', min: 0, max: 100,
@@ -2330,14 +2547,16 @@ function SettingsPanel() {
               const statusText = e.hit === false
                 ? '未触发提醒'
                 : (e.suppressed ? '未重复提醒' : (e.pref ? '命中 ' + e.pref : '已提醒'));
-              const codeNum = e.kind === 'eew' ? 556 : (e.kind === 'tsunami' ? 552 : 551);
+              // 气象电文来自気象庁防災情報XML，没有 P2PQuake 的 code：旧写法对 weather 落进
+              // 最后的 else 分支，展开详情时会把泥石流 / 洪水电文标成「code 551」（地震速报）。
+              const codeText = p2pCodeTextOf(e.kind);
               return h('div', {
                 key: e.key || e.id || i,
                 onClick: () => setExpanded(open ? null : (e.key || e.id || i)),
                 title: open ? '点击收起' : '点击展开详情',
                 style: Object.assign({
                   cursor: 'pointer',
-                  borderLeft: '3px solid ' + (kindColor[e.kind] || '#7c8494'),
+                  borderLeft: '3px solid ' + kindColorOf(e.kind),
                   background: open
                     ? (muted ? 'rgba(148,163,184,0.16)' : 'rgba(59,130,246,0.22)')
                     : (muted ? 'rgba(148,163,184,0.05)' : 'rgba(148,163,184,0.09)'),
@@ -2345,7 +2564,7 @@ function SettingsPanel() {
                 }, open ? { boxShadow: 'inset 0 0 0 1px rgba(148,163,184,0.55)' } : null),
               },
                 h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
-                  h('span', { style: { fontWeight: 700, fontSize: 12, color: kindColor[e.kind] || '#dfe3e8' } }, String(e.label || '')),
+                  h('span', { style: { fontWeight: 700, fontSize: 12, color: kindColorOf(e.kind) } }, String(e.label || '')),
                   h('span', { style: { fontSize: 11, border: '1px solid ' + (muted ? '#8b8f98' : '#4ade80'), color: muted ? '#8b8f98' : '#4ade80', borderRadius: 8, padding: '0 6px' } }, statusText),
                   h('span', { style: { color: '#9aa0a6', fontSize: 11, marginLeft: 'auto', whiteSpace: 'nowrap' } }, open ? '▲ 收起' : '▼ 展开')),
                 !open
@@ -2353,7 +2572,7 @@ function SettingsPanel() {
                   : h('div', { style: { fontSize: 12, marginTop: 6 } },
                       h('div', { style: { display: 'flex', gap: 6 } },
                         h('span', { style: { color: '#9aa0a6', width: 44 } }, '类型'),
-                        h('span', { style: { color: '#e6e6e8' } }, String(e.label || '') + '（code ' + codeNum + '）')),
+                        h('span', { style: { color: '#e6e6e8' } }, String(e.label || '') + '（' + codeText + '）')),
                       h('div', { style: { display: 'flex', gap: 6, marginTop: 2 } },
                         h('span', { style: { color: '#9aa0a6', width: 44 } }, '时间'),
                         h('span', { style: { color: '#e6e6e8' } }, String(e.issued || '—'))),
@@ -2448,8 +2667,27 @@ function apply(ctx) {
     });
   }
 
+  // 跨标签页配置同步（0.3.2）：storage 事件只在「别的标签页写入」时触发。监听必须常驻——
+  // 原先写在设置页组件里，于是没打开设置页的标签页不会跟随，会一直按旧配置提醒。
+  // 回读走 03 的显式入口（跨模块不能直接给它的模块私有 runtimeCfg 赋值），再 store.push()
+  // 让设置页与状态指示一起刷新。
+  ctx.effect(() => {
+    const onStorage = (e) => {
+      if (!e || e.key === null || e.key === STORAGE_KEY) {
+        reloadFromLocal();
+        store.push({});
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage)
+  }, 'dsh-quake-alert: cross-tab config');
+
   // 市区町村表：Host 路由提供，拉一次缓存。失败只影响市级细化，不影响任何提醒。
-  loadCityTable();
+  // 放进 effect：拉取是异步的，若插件在飞行中被停用，要中止请求并停止写 store / 配置。
+  ctx.effect(() => {
+    loadCityTable();
+    return () => { try { abortCityTableLoad(); } catch (err) {} }
+  }, 'dsh-quake-alert: city table');
 
   // WebSocket 常驻连接（与设置页是否打开无关）。
   // start() 必须写在 effect 内：若同一 apply 后面的注册抛错，连接也要随 fiber 一起收掉，
@@ -2486,7 +2724,7 @@ function apply(ctx) {
 }
 
 // 单测钩子（客户端宿主忽略额外导出）
-const __test = { parse, parseQuake, parseEew, parseTsunami, parseJma, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn: maxLevelIn, jmaItemsOf: itemsOf, matchAlert, soundKindOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, createFeedClient, FEED_PATH, FEED_POLL_MS, inQuietHours, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, cityTableState: () => cityTableState, resetCityTable };
+const __test = { parse, parseQuake, parseEew, parseTsunami, parseJma, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn: maxLevelIn, jmaItemsOf: itemsOf, matchAlert, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, inQuietHours, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable };
 
 // activeClient 是 12-websocket 的模块级 let：给 12 用的赋值出口（跨模块不能写 imported binding）
 // 由 12-websocket 提供 setter；这里仅保留引用以便阅读

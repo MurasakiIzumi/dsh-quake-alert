@@ -3,11 +3,14 @@
 //
 // 作用：市区町村表与「观测点 addr → 市町村」归一。
 // 内容：表的注入与规整（setCityTable/citiesOfPref/pruneUnknownCities）、
+//       地名假名归一（normKana）与规范写法反查（canonicalCityOf）、
 //       从 Host 只读路由拉表（loadCityTable）、写法变体展开（cityAliases）、
 //       前缀索引（buildAddrIndex）与查询（lookupAddrCity）。
 // 依赖：01-constants、02-storage、03-settings-bridge（pruneUnknownCities 会写配置）。
 // 要点：気象庁/P2PQuake 的观测点名用短名与消歧写法（大阪北区茶屋町、福島伊達市、
-//       渡島北斗市），必须先归一到市町村全称再比对，否则会大面积漏报。
+//       渡島北斗市），必须先归一到市町村全称再比对，否则会大面积漏报；
+//       河川区域表与 JMA 电文还可能与本表假名写法不同（南アルプス市 / 南あるぷす市），
+//       所以「比对」与「反查」一律经 normKana，显示仍用本表写法。
 // ============================================================================
 
 import { PREF_SET } from './01-constants.js'
@@ -23,8 +26,29 @@ const AREAS_PATH = '/dsh-quake-alert/areas'
 let cityTable = null
 let cityTableState = 'idle' // idle | loading | ready | failed
 let cityNameSet = null // 全部市町村名（校验配置用）
-let cityPrefIndex = null // Map<市町村名, 都道府県[]>：JMA 电文只给市町村名，要反查所属县
+let cityPrefIndex = null // Map<归一市町村名, { name: 规范写法, prefs: 都道府県[] }>：JMA 电文只给市町村名，要反查所属县
 let riverAreas = null // Map<河川予報区域コード, { name, cities }>：指定河川洪水予報用
+
+// ---------- 地名假名归一 ----------
+// 気象庁的不同数据源对同一个市町村写法不一致，实测三类（0.3.2）：
+//   ① 小写法不同：総務省コード表「金け崎町 / 六ゖ所村」↔ 河川区域 CSV「金ケ崎町 / 六ヶ所村」
+//   ② 假名种类不同：総務省コード表「南あるぷす市」↔ 河川区域 CSV「南アルプス市」
+//   ③ 旧写法：P2PQuake 观测点「龍ケ崎市」↔ 本表「龍け崎市」
+// 归一步骤：先「平假名 → 片假名」（け→ケ、ゖ→ヶ），再把「ケ → ヶ」（小写化）。
+// 两步都要：只做第一步的话「ケ」与「ヶ」会变得不相等，反而破坏既有的ケ/ヶ 等价。
+// 结果只用于比较与反查，绝不用于显示——界面上一律用本表的规范写法。
+const KANA_HIRA_MIN = 0x3041
+const KANA_HIRA_MAX = 0x3096
+const KANA_KE_RE = /\u30b1/g
+function normKana(input) {
+  const s = String(input === undefined || input === null ? '' : input)
+  let out = ''
+  for (const ch of s) {
+    const c = ch.codePointAt(0)
+    out += (c >= KANA_HIRA_MIN && c <= KANA_HIRA_MAX) ? String.fromCodePoint(c + 0x60) : ch
+  }
+  return out.replace(KANA_KE_RE, '\u30f6')
+}
 
 function setCityTable(table) {
   if (!isPlainObject(table)) return false
@@ -42,11 +66,14 @@ function setCityTable(table) {
   if (Object.keys(clean).length === 0) return false
   cityTable = clean
   cityNameSet = names
+  // 索引键走假名归一：外部写法（河川区域表 / JMA 电文）与本表写法不同时也要能查到
   cityPrefIndex = new Map()
   for (const pref of Object.keys(clean)) {
     for (const c of clean[pref]) {
-      if (!cityPrefIndex.has(c)) cityPrefIndex.set(c, [])
-      cityPrefIndex.get(c).push(pref)
+      const key = normKana(c)
+      const hit = cityPrefIndex.get(key)
+      if (hit) { if (hit.prefs.indexOf(pref) === -1) hit.prefs.push(pref) }
+      else cityPrefIndex.set(key, { name: c, prefs: [pref] })
     }
   }
   buildAddrIndex()
@@ -54,11 +81,23 @@ function setCityTable(table) {
   return true
 }
 const citiesOfPref = (pref) => (cityTable && own(cityTable, pref)) || []
-/** 市町村名 → 所属都道府県（重名时返回多个；表未加载或未收录时返回空数组）。 */
+/** 市町村名 → 所属都道府県（写法差异已归一；重名时返回多个；表未加载或未收录时返回空数组）。 */
 const prefsOfCity = (name) => {
   if (!cityPrefIndex) return []
-  const hit = cityPrefIndex.get(String(name || ''))
-  return hit ? hit.slice() : []
+  const hit = cityPrefIndex.get(normKana(name))
+  return hit ? hit.prefs.slice() : []
+}
+/**
+ * 市町村名 → 本表里的规范写法（写法差异已归一；表未加载或未收录时返回空字符串）。
+ *
+ * 为什么需要：用户勾选的市町村名来自本表（citiesOfPref），而 JMA 电文、河川区域表给的是
+ * 外部写法。把外部写法直接写进 region.city，再与用户勾选的名字比对（indexOf）就会漏报；
+ * 所以比对前先取规范名。表未加载时返回空串，调用方回退用原写法（宁可多报绝不漏报）。
+ */
+const canonicalCityOf = (name) => {
+  if (!cityPrefIndex) return ''
+  const hit = cityPrefIndex.get(normKana(name))
+  return hit ? hit.name : ''
 }
 
 /**
@@ -93,12 +132,11 @@ const riverAreaCities = (code) => {
 //   ② 特别区加县短名：東京千代田区大手町 ← 千代田区
 //   ③ 重名消歧前缀：福島伊達市          ← 伊達市（福島県）
 //   ④ 北海道支庁名：渡島北斗市 / 日高地方日高町 ← 北斗市 / 日高町
-//   ⑤ 仮名表记：龍ケ崎市 ↔ 龍ヶ崎市
+//   ⑤ 仮名表记：龍ケ崎市 ↔ 龍け崎市（归一函数见文件上方 normKana：平假名→片假名 + ケ→ヶ）
 const HOKKAIDO_BRANCHES = [
   '石狩', '後志', '空知', '渡島', '檜山', '胆振', '日高', '上川', '留萌', '宗谷',
   '網走', '北見', '紋別', '十勝', '釧路', '根室',
 ]
-const normKana = (s) => String(s === undefined || s === null ? '' : s).replace(/ケ/g, 'ヶ')
 // 展开一个市町村全称的全部书写变体
 function cityAliases(city, pref) {
   const out = [city]
@@ -151,13 +189,19 @@ function pruneUnknownCities() {
   if (kept.length === cur.watch.cities.length) return
   applyCfg(Object.assign({}, cur, { watch: Object.assign({}, cur.watch, { cities: kept }) }))
 }
+let cityTableAbort = null // 在途请求的取消器（插件卸载时用）
 async function loadCityTable() {
   if (cityTableState === 'loading' || cityTableState === 'ready') return cityTableState
   if (typeof window === 'undefined' || typeof window.fetch !== 'function') { cityTableState = 'failed'; return cityTableState }
   cityTableState = 'loading'
   store.push({})
+  // 经 window 取 AbortController：浏览器里就是它，沙箱测试也只需注入 window 上的实现
+  const AC = (typeof window !== 'undefined' && window) ? window.AbortController : undefined
+  cityTableAbort = typeof AC === 'function' ? new AC() : null
   try {
-    const res = await window.fetch(AREAS_PATH, { headers: { accept: 'application/json' } })
+    const init = { headers: { accept: 'application/json' } }
+    if (cityTableAbort) init.signal = cityTableAbort.signal
+    const res = await window.fetch(AREAS_PATH, init)
     if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : '?'))
     const data = await res.json()
     const payload = isPlainObject(data) && isPlainObject(data.prefectures) ? data.prefectures : data
@@ -166,17 +210,29 @@ async function loadCityTable() {
     if (isPlainObject(data) && Array.isArray(data.riverAreas)) setRiverAreas(data.riverAreas)
     pruneUnknownCities()
   } catch (err) {
-    cityTableState = 'failed'
+    // 插件卸载造成的中止不算"失败"：下次装载应当能重试
+    const aborted = !!(cityTableAbort && cityTableAbort.signal && cityTableAbort.signal.aborted)
+    cityTableState = aborted ? 'idle' : 'failed'
   }
+  cityTableAbort = null
   store.push({})
   return cityTableState
+}
+/** 插件卸载时调用：中止在途请求，免得卸载之后还去写 store / 用户配置。 */
+function abortCityTableLoad() {
+  if (cityTableAbort) {
+    try { cityTableAbort.abort() } catch (err) { /* 已结束等忽略 */ }
+    // 故意不在这里置空：loadCityTable 的 catch 要靠它的 signal 区分「被中止」与「真失败」，
+    // 置空由 loadCityTable 收尾时统一做（abort 幂等，重复调用无害）。
+  }
 }
 
 
 // 供单测钩子重置表状态
 const resetCityTable = () => {
+  abortCityTableLoad()
   cityTable = null; cityNameSet = null; cityTableState = 'idle'
   addrAliasIndex = null; addrAliasMax = 0; cityPrefIndex = null; riverAreas = null
 }
 
-export { AREAS_PATH, setCityTable, citiesOfPref, prefsOfCity, setRiverAreas, riverAreaCities, cityAliases, buildAddrIndex, lookupAddrCity, pruneUnknownCities, loadCityTable, cityTableState, resetCityTable }
+export { AREAS_PATH, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, buildAddrIndex, lookupAddrCity, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState, resetCityTable }

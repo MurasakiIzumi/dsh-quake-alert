@@ -9,7 +9,7 @@
 ## Features
 
 - **Real-time push**: a persistent WebSocket connection to P2PQuake; alerts are parsed as soon as they arrive (EEW typically reaches P2PQuake a few hundred milliseconds after the JMA issues it).
-- **Automatic reconnection**: exponential backoff (1s → capped at 60s). P2PQuake force-closes connections about every 10 minutes, so reconnecting is normal and needs no intervention.
+- **Automatic reconnection**: exponential backoff (1s → capped at 60s). P2PQuake force-closes connections about every 10 minutes, so reconnecting is normal and needs no intervention. A connection that goes silent (half-open — no `onclose`, no data) is detected and re-established.
 - **Disaster types**: earthquake reports (code 551), Earthquake Early Warnings (code 556), and tsunami forecasts (code 552) from P2PQuake, plus **weather alerts from the Japan Meteorological Agency** — landslides (土砂災害警戒情報, 大雨警報（土砂災害）), floods (指定河川洪水予報), heavy rain and storm surges.
 - **Watch regions**: pick any of Japan's 47 prefectures; leaving the list empty means all of Japan.
 - **Alert thresholds**: configured separately for earthquake intensity (observed), EEW intensity (predicted), and tsunami grade (advisory / warning / major warning).
@@ -41,8 +41,8 @@ JMA Atom feed ───────┘              │
                       recent alert history (persisted in localStorage)
 ```
 
-- All realtime logic runs in the browser (the Client half): the WebSocket connection, parsing, matching, notifications and the history list. The Host half registers the `quake-alert` settings namespace (machine-level `settings.yaml`), serves the read-only municipality table at `/dsh-quake-alert/areas`, and polls the JMA feed.
-- **Weather alerts take a different path on purpose.** The Host half polls the JMA's Atom feed about once a minute, remembers which entries it has already fetched, and exposes the increment on a local read-only route (`/dsh-quake-alert/feed?since=N`). The Client polls that route every 15 s and hands each telegram to the very same `handleAlert` used by P2PQuake messages. Keeping the only external requester on the Host means several DSH tabs or windows never multiply the requests — the JMA explicitly asks consumers not to re-download a file it has already served, and blocks IPs that do.
+- All realtime logic runs in the browser (the Client half): the WebSocket connection, parsing, matching, notifications and the history list. The Host half registers the `quake-alert` settings namespace (machine-level `settings.yaml`), serves the read-only municipality and river-forecast-area tables at `/dsh-quake-alert/areas`, and polls the JMA feed.
+- **Weather alerts take a different path on purpose.** The Host half polls the JMA's Atom feed about once a minute, remembers which entries it has already fetched, and exposes the increment on a local read-only route (`/dsh-quake-alert/feed?since=N`). The Client polls that route every 15 s and hands each telegram to the very same `handleAlert` used by P2PQuake messages. Keeping the only external requester on the Host means several DSH tabs or windows never multiply the requests — the JMA explicitly asks consumers not to re-download a file it has already served, and blocks IPs that do. The Client persists its cursor, so a refresh resumes where it left off instead of replaying the buffer; a first run (no cursor yet) uses `?since=tail` to align to the current position without replaying anything.
 - WebSocket messages carry the same payload as the HTTP `/history` endpoint, but the id field name differs (WS uses `_id`); the parser accepts both.
 - Region normalization: area names in EEW / tsunami messages (such as `上川地方北部` or `東京湾内湾`) are resolved through an explicit area table, then by prefix-matching the 47 prefecture names, and finally by the EEW prefecture forecast name. For JMA telegrams the prefecture is taken from the first two digits of the area code (which *is* the prefecture code) — more reliable than names, which collide across prefectures. River forecast areas are mapped to their municipalities through a generated table. Areas spanning several prefectures (such as `有明・八代海`) are expanded and evaluated per prefecture.
 - Three-layer de-duplication: ① message id (guards against replay after a reconnect) ② event key (multiple releases of the same earthquake; an intensity upgrade still breaks through and alerts again) ③ cross-tab (`BroadcastChannel`, so only one page plays the alert).
@@ -116,7 +116,7 @@ node scripts/build-client.mjs          # rebuild client/client.js after editing 
 node scripts/build-areas.mjs           # regenerate the river-area table from the JMA public zip (needs network)
 node scripts/check-imports.mjs         # cross-module reference check (missing import / undeclared assignment)
 node scripts/build-client.mjs --check  # fail when the committed bundle is stale
-node tests/sync-test.cjs               # regression tests (346 assertions)
+node tests/sync-test.cjs               # regression tests (433 assertions)
 ```
 
 > Edit `client/src/*.js`, never `client/client.js` — DSH requires a single-file client bundle (flat module
@@ -127,7 +127,7 @@ node tests/sync-test.cjs               # regression tests (346 assertions)
 
 ## Changelog
 
-Current version **0.3.1**. See [CHANGELOG.md](./CHANGELOG.md) for the details of each release.
+Current version **0.3.2**. See [CHANGELOG.md](./CHANGELOG.md) for the details of each release.
 
 ## Data sources
 

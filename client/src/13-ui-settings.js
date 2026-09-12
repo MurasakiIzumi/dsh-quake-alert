@@ -8,9 +8,9 @@
 // 约定：所有写入都经 applyCfg，保证内存/镜像/Host 三处一致。
 // ============================================================================
 
-import { h, useState, useEffect, useRef, PREFECTURES, SCALE_OPTIONS, TSUNAMI_OPTIONS, HISTORY_MAX, HISTORY_KEY, MAX_WATCH_CITIES, STORAGE_KEY } from './01-constants.js'
-import { saveJSON } from './02-storage.js'
-import { currentCfg, applyCfg, settingsSync, reloadFromLocal } from './03-settings-bridge.js'
+import { h, useState, useEffect, useRef, PREFECTURES, SCALE_OPTIONS, TSUNAMI_OPTIONS, HISTORY_MAX, HISTORY_KEY, MAX_WATCH_CITIES } from './01-constants.js'
+import { saveJSON, own } from './02-storage.js'
+import { currentCfg, applyCfg, settingsSync } from './03-settings-bridge.js'
 import { citiesOfPref, cityTableState, loadCityTable } from './04-city-table.js'
 import { parseJma, buildTestTelegram, TEST_SCENARIOS } from './05b-jma-parser.js'
 import { store } from './07-store.js'
@@ -38,12 +38,24 @@ function settingsSyncLabel() {
     local: '浏览器 localStorage',
   }[settingsSync] || String(settingsSync)
 }
+// 历史条目「类型」行显示的 P2PQuake code。气象电文不在此表里（它不是 P2PQuake 来源），
+// 索引一律经 own()，避免外部数据里的 'constructor' 之类的键命中原型链。
+const P2P_KIND_CODE = { quake: 551, eew: 556, tsunami: 552 }
+/** 历史条目「类型」行的来源标注：气象电文来自気象庁防災情報XML，没有 P2PQuake code。 */
+function p2pCodeTextOf(kind) {
+  const code = own(P2P_KIND_CODE, kind)
+  if (code) return 'code ' + code
+  return kind === 'weather' ? 'JMA 电文' : '—'
+}
+// 灾种配色：气象灾害此前没有键，历史条目一律落到灰色兜底，与另外三类不一致
+const KIND_COLORS = { eew: '#e5484d', quake: '#3b82f6', tsunami: '#f76b15', weather: '#8b5cf6' }
+const kindColorOf = (kind) => own(KIND_COLORS, kind) || '#7c8494'
 const s = {
   section: (title, ...children) => h('div', { style: { padding: '14px 16px', borderBottom: '1px solid rgba(148,163,184,0.14)' } },
     h('div', { style: { fontWeight: 700, fontSize: 13, marginBottom: 10, color: '#dfe3e8' } }, title), ...children),
   label: (text) => h('div', { style: { color: '#9aa0a6', fontSize: 12, marginBottom: 4 } }, text),
   row: (...children) => h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', margin: '4px 0' } }, ...children),
-  checkbox: (checked, onChange, text, color) => h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer', color: '#dfe3e8' } },
+  checkbox: (checked, onChange, text) => h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer', color: '#dfe3e8' } },
     h('input', { type: 'checkbox', checked, onChange: (e) => onChange(e.target.checked) }), text),
   select: (value, options, onChange, textOf) => h('select', {
     value, onChange: (e) => onChange(e.target.value),
@@ -85,16 +97,9 @@ function SettingsPanel() {
       applyCfg({ ...cur, notify: { ...cur.notify, volume: v } })
     }
   }, [])
-  // 其它 DSH 标签页改了配置 → 本页跟随（storage 事件只在「别的标签页」写入时触发）。
-  // 回读走 03 的显式入口：跨模块不能直接给它的模块私有 runtimeCfg 赋值（0.2.1 拆分后
-  // 那行成了自由变量，在 'use strict' 的 bundle 里抛 ReferenceError，同步静默失效）。
-  useEffect(() => {
-    const onStorage = (e) => {
-      if (!e || e.key === STORAGE_KEY) setCfgState(reloadFromLocal())
-    }
-    window.addEventListener('storage', onStorage)
-    return () => window.removeEventListener('storage', onStorage)
-  }, [])
+  // 其它 DSH 标签页改了配置 → 由 15-entry 的常驻 storage 监听统一回读并 store.push()，
+  // 本组件通过下面的 store.subscribe 跟随。监听放在这里（组件内）的话，只有设置页打开着
+  // 才同步；没打开设置页的标签页会一直按旧配置提醒。
 
   // 立即基于最新配置计算（内存 + localStorage 镜像 + Host），再 setState
   const setCfg = (fn) => { const next = applyCfg(fn(currentCfg())); setCfgState(next) }
@@ -230,7 +235,6 @@ function SettingsPanel() {
   const statusMeta = statusMetaOf(store.status, store.retries)
   const dot = h('span', { style: { display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: statusMeta.color, marginRight: 8 } })
 
-  const kindColor = { eew: '#e5484d', quake: '#3b82f6', tsunami: '#f76b15' }
   const permText = {
     granted: '通知权限：已授权',
     denied: '通知权限：被拒绝（请在浏览器站点设置中允许）',
@@ -303,8 +307,8 @@ function SettingsPanel() {
     // 通知与声音
     s.section('通知与声音',
       s.row(
-        s.checkbox(cfg.notify.sound !== false, (v) => setCfg((c) => ({ ...c, notify: { ...c.notify, sound: v } })), '提示音', '#dfe3e8'),
-        s.checkbox(cfg.notify.system !== false, (v) => setCfg((c) => ({ ...c, notify: { ...c.notify, system: v } })), '系统通知', '#dfe3e8'),
+        s.checkbox(cfg.notify.sound !== false, (v) => setCfg((c) => ({ ...c, notify: { ...c.notify, sound: v } })), '提示音'),
+        s.checkbox(cfg.notify.system !== false, (v) => setCfg((c) => ({ ...c, notify: { ...c.notify, system: v } })), '系统通知'),
       ),
       s.row(s.label('音量'), h('input', {
         type: 'range', min: 0, max: 100,
@@ -384,14 +388,16 @@ function SettingsPanel() {
               const statusText = e.hit === false
                 ? '未触发提醒'
                 : (e.suppressed ? '未重复提醒' : (e.pref ? '命中 ' + e.pref : '已提醒'))
-              const codeNum = e.kind === 'eew' ? 556 : (e.kind === 'tsunami' ? 552 : 551)
+              // 气象电文来自気象庁防災情報XML，没有 P2PQuake 的 code：旧写法对 weather 落进
+              // 最后的 else 分支，展开详情时会把泥石流 / 洪水电文标成「code 551」（地震速报）。
+              const codeText = p2pCodeTextOf(e.kind)
               return h('div', {
                 key: e.key || e.id || i,
                 onClick: () => setExpanded(open ? null : (e.key || e.id || i)),
                 title: open ? '点击收起' : '点击展开详情',
                 style: Object.assign({
                   cursor: 'pointer',
-                  borderLeft: '3px solid ' + (kindColor[e.kind] || '#7c8494'),
+                  borderLeft: '3px solid ' + kindColorOf(e.kind),
                   background: open
                     ? (muted ? 'rgba(148,163,184,0.16)' : 'rgba(59,130,246,0.22)')
                     : (muted ? 'rgba(148,163,184,0.05)' : 'rgba(148,163,184,0.09)'),
@@ -399,7 +405,7 @@ function SettingsPanel() {
                 }, open ? { boxShadow: 'inset 0 0 0 1px rgba(148,163,184,0.55)' } : null),
               },
                 h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
-                  h('span', { style: { fontWeight: 700, fontSize: 12, color: kindColor[e.kind] || '#dfe3e8' } }, String(e.label || '')),
+                  h('span', { style: { fontWeight: 700, fontSize: 12, color: kindColorOf(e.kind) } }, String(e.label || '')),
                   h('span', { style: { fontSize: 11, border: '1px solid ' + (muted ? '#8b8f98' : '#4ade80'), color: muted ? '#8b8f98' : '#4ade80', borderRadius: 8, padding: '0 6px' } }, statusText),
                   h('span', { style: { color: '#9aa0a6', fontSize: 11, marginLeft: 'auto', whiteSpace: 'nowrap' } }, open ? '▲ 收起' : '▼ 展开')),
                 !open
@@ -407,7 +413,7 @@ function SettingsPanel() {
                   : h('div', { style: { fontSize: 12, marginTop: 6 } },
                       h('div', { style: { display: 'flex', gap: 6 } },
                         h('span', { style: { color: '#9aa0a6', width: 44 } }, '类型'),
-                        h('span', { style: { color: '#e6e6e8' } }, String(e.label || '') + '（code ' + codeNum + '）')),
+                        h('span', { style: { color: '#e6e6e8' } }, String(e.label || '') + '（' + codeText + '）')),
                       h('div', { style: { display: 'flex', gap: 6, marginTop: 2 } },
                         h('span', { style: { color: '#9aa0a6', width: 44 } }, '时间'),
                         h('span', { style: { color: '#e6e6e8' } }, String(e.issued || '—'))),
@@ -430,4 +436,4 @@ function SettingsPanel() {
 }
 
 
-export { statusMetaOf, SettingsPanel }
+export { statusMetaOf, SettingsPanel, p2pCodeTextOf, kindColorOf, P2P_KIND_CODE, KIND_COLORS }

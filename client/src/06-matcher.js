@@ -10,7 +10,7 @@
 
 import { TSUNAMI_RANK } from './01-constants.js'
 import { own } from './02-storage.js'
-import { lookupAddrCity } from './04-city-table.js'
+import { lookupAddrCity, normKana } from './04-city-table.js'
 
 // ---------- 匹配引擎 ----------
 // 关注地区匹配：县级始终生效（watch.prefectures 为空 = 全日本）；市级只在数据本身有
@@ -34,13 +34,17 @@ function regionInWatch(region, watch, cityLevel) {
 // 两类一律放行，宁可多报绝不漏报：
 //   ① pref 为空（区域码认不出县、或名称反查不到）——无法判定，放行；
 //   ② 区域级条目（city 为空，如「宗谷地方」「○○川上流」）——对应不到市町村，放行。
+// 市町村比对走 normKana 归一等价：电文/河川区域表的假名写法可能与本表不同
+// （「金ケ崎町」vs「金け崎町」、「南アルプス市」vs「南あるぷす市」），
+// 直接 indexOf 会让勾选了该市町村的用户漏报。
 function regionInWeatherWatch(region, watch) {
   const list = (watch && watch.prefectures) || []
   const cities = (watch && watch.cities) || []
   if (list.length > 0 && region.pref && list.indexOf(region.pref) === -1) return false
   if (cities.length === 0) return true
   if (!region.city) return true
-  return cities.indexOf(region.city) !== -1
+  const target = normKana(region.city)
+  return cities.some((c) => normKana(c) === target)
 }
 
 // 未命中原因：若存在未能识别归属县的区域名，明确提示，避免用户误以为链路故障

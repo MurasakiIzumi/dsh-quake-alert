@@ -98,7 +98,13 @@ const scaleText = (v) => own(SCALE_TEXT, v) || (typeof v === 'number' && v > 0 ?
 // 震度是用户判断严重性的关键信息（阈值也是按震度设的），必须出现在 headline 里。
 // prefix 例：'最大' → 「最大震度3」；'预测最大' → 「预测最大震度5强」。
 const scaleSuffix = (v, prefix) => (typeof v === 'number' && v > 0 ? ' · ' + prefix + scaleText(v) : '')
-const sevColor = (s) => (s === 'red' ? '#e5484d' : (s === 'orange' ? '#f76b15' : '#3b82f6'))
+// severity → 颜色。'yellow' 必须显式处理：默认阈值 40 下最常见的命中（震度4）就是它，
+// 落到默认分支会显示成"信息蓝"，与「中等严重度」的语义不符。
+const sevColor = (s) => (
+  s === 'red' ? '#e5484d'
+    : (s === 'orange' ? '#f76b15'
+      : (s === 'yellow' ? '#d9a406' : '#3b82f6'))
+)
 const severityOfScale = (v) => {
   if (typeof v !== 'number' || v <= 0) return 'info'
   if (v >= 55) return 'red'

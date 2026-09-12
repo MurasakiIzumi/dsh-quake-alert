@@ -27,6 +27,20 @@ function areaLabelOf(region) {
   return region.pref + name
 }
 
+/**
+ * 系统通知 / 页内 toast 的标题。抽成纯函数是为了能直接断言文案——
+ * 旧写法把「地震情报 · 」与「各地震度」分开拼，非「各地」分支会留下一个悬空的分隔符。
+ */
+function alertTitleOf(alert) {
+  if (!alert) return '灾害预警'
+  // kindLabel 本身已区分「地震速报·震度速报」「地震情报·各地震度」等，不需要再拼后缀
+  if (alert.kind === 'eew') return '⚠ 紧急地震速报（警报）'
+  if (alert.kind === 'quake') return '🌐 ' + alert.kindLabel
+  if (alert.kind === 'tsunami') return '🌊 ' + alert.kindLabel
+  if (alert.kind === 'weather') return '🌧 ' + alert.kindLabel
+  return '灾害预警'
+}
+
 // 气象警报的「静默提示」：只在"命中关注地区、但未达 L4 所以没有播报"时留一笔，
 // 由侧边栏状态点的悬停提示与设置页显示。
 // 注意 L4 以上**必须清掉**它：那时已经真正播报过，再挂着这条（文案是"未达 L4，未播报"）
@@ -168,12 +182,7 @@ function handleAlert(alert, cfg, opts) {
     return { notified: false, reason: 'other-tab', detail: '其它 DSH 标签页已提醒同一条' }
   }
   const prefZh = (PREFECTURES.find((p) => p.jp === hitPref) || {}).zh || hitPref
-  const title = {
-    eew: '⚠ 紧急地震速报（警报）',
-    quake: '🌐 地震情报 · ' + (alert.kindLabel.indexOf('各地') !== -1 ? '各地震度' : ''),
-    tsunami: '🌊 ' + alert.kindLabel,
-    weather: '🌧 ' + alert.kindLabel,
-  }[alert.kind] || '灾害预警'
+  const title = alertTitleOf(alert)
   const bodyLines = [alert.headline]
   if (hitPref) bodyLines.push('命中关注地区：' + prefZh + (prefZh !== hitPref ? '（' + hitPref + '）' : ''))
   if (alert.kind === 'tsunami') bodyLines.push('请立即远离海岸与河口')
@@ -200,4 +209,4 @@ function handleAlert(alert, cfg, opts) {
 }
 
 
-export { handleCancelled, handleRaw, handleAlert, updateWeatherHint }
+export { handleCancelled, handleRaw, handleAlert, updateWeatherHint, alertTitleOf }

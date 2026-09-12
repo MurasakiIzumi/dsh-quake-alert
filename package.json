@@ -1,6 +1,6 @@
 {
   "name": "dsh-quake-alert",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "灾害预警 QuakeAlert：用户使用 DSH 时，实时接收日本地震/海啸预警（P2PQuake WebSocket），按关注地区与阈值匹配后以系统通知+提示音提醒。",
   "private": false,
   "type": "module",

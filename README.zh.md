@@ -9,7 +9,7 @@
 ## 功能特性
 
 - **实时推送**：WebSocket 长连接 P2PQuake，收到预警第一时间解析（EEW 从气象厅发布到 P2PQuake 转播通常为数百毫秒级）
-- **断线自动重连**：指数退避（1s → 60s 封顶），P2PQuake 每约 10 分钟强制断线属常态，无需干预
+- **断线自动重连**：指数退避（1s → 60s 封顶），P2PQuake 每约 10 分钟强制断线属常态，无需干预；连接长时间毫无数据（半开：没有 `onclose` 也没有消息）也会被检测到并主动重连
 - **灾害类型**：来自 P2PQuake 的地震情报（551）、紧急地震速报 EEW（556）、海啸预报（552），以及来自**日本气象厅的灾害预警** —— 泥石流（土砂災害警戒情報、大雨警報（土砂災害））、洪水（指定河川洪水予報）、大雨、高潮等
 - **关注地区**：日本 47 都道府县多选；未选择时默认提醒全日本
 - **提醒阈值**：地震按实测震度、EEW 按预测震度、海啸按等级（注意报 / 警报 / 大海啸警报）分别设置
@@ -41,8 +41,8 @@ P2PQuake WebSocket ──┐
                       最近预警记录（localStorage 持久化）
 ```
 
-- 实时逻辑全部在浏览器端（Client 半边）：WebSocket 连接、解析、匹配、通知与历史列表。Host 半边负责注册 `quake-alert` settings namespace（机器级 `settings.yaml`）、以只读路由 `/dsh-quake-alert/areas` 提供市区町村表，以及轮询気象庁的电文 feed。
-- **气象灾害刻意走另一条路**：Host 半边约每分钟拉一次気象庁的 Atom feed，记住已经取过哪些 entry，并把增量暴露在本地只读路由 `/dsh-quake-alert/feed?since=N`；Client 每 15 秒读一次，把每条电文交给**与 P2PQuake 消息同一个** `handleAlert`。把唯一的外部请求者放在 Host，意味着多开标签页 / 窗口不会放大请求——気象庁明确要求不要重复下载已取过的文件，并对违规 IP 做封禁。
+- 实时逻辑全部在浏览器端（Client 半边）：WebSocket 连接、解析、匹配、通知与历史列表。Host 半边负责注册 `quake-alert` settings namespace（机器级 `settings.yaml`）、以只读路由 `/dsh-quake-alert/areas` 提供市区町村表与河川予報区域表，以及轮询気象庁的电文 feed。
+- **气象灾害刻意走另一条路**：Host 半边约每分钟拉一次気象庁的 Atom feed，记住已经取过哪些 entry，并把增量暴露在本地只读路由 `/dsh-quake-alert/feed?since=N`；Client 每 15 秒读一次，把每条电文交给**与 P2PQuake 消息同一个** `handleAlert`。把唯一的外部请求者放在 Host，意味着多开标签页 / 窗口不会放大请求——気象庁明确要求不要重复下载已取过的文件，并对违规 IP 做封禁。Client 会把游标落盘，刷新后从上次位置继续，不会重放缓冲里的旧警报；首次运行（还没有游标）用 `?since=tail` 只对齐当前位置、不回历史。
 - WebSocket 消息与 HTTP `/history` 返回内容一致，但 id 字段名不同（WS 为 `_id`），解析器两者兼容。
 - 区域名归一：EEW / 海啸消息里的区域名（如 `上川地方北部`、`東京湾内湾`）先经显式区域表、再按 47 都道府县名做前缀匹配，最后用 EEW 的府県予報区名兜底；跨县区域（如 `有明・八代海`）会展开为多个县分别判定。気象庁电文的县则直接取自**区域码前两位**（前两位就是都道府県码），比名称可靠——名称有 25 例同名跨县；河川予報区域另经生成的映射表归到市町村。
 - 三层去重：① 消息 id（防重连重放）② 事件键（同一地震的多次发布；强度升级时穿透，仍会再次提醒）③ 跨标签页（`BroadcastChannel`，只由一个页面播报）。
@@ -116,7 +116,7 @@ node scripts/build-client.mjs          # 改完 client/src 后重新打包
 node scripts/build-areas.mjs           # 从気象庁公开 zip 重新生成河川区域表（需联网）
 node scripts/check-imports.mjs         # 跨模块引用检查（漏 import / 未声明赋值）
 node scripts/build-client.mjs --check  # 校验已提交的 bundle 是否陈旧
-node tests/sync-test.cjs               # 回归测试（346 项断言）
+node tests/sync-test.cjs               # 回归测试（433 项断言）
 ```
 
 > 要改客户端代码请改 `client/src/*.js`，**不要改 `client/client.js`**——DSH 要求客户端 bundle 是单文件
@@ -127,7 +127,7 @@ node tests/sync-test.cjs               # 回归测试（346 项断言）
 
 ## 更新记录
 
-当前版本 **0.3.1**。各版本的变更明细见 [CHANGELOG.md](./CHANGELOG.md)。
+当前版本 **0.3.2**。各版本的变更明细见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## 数据来源
 

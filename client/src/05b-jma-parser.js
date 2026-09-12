@@ -20,7 +20,7 @@
 
 import { prefOfCode, prefCodeOf } from './01-constants.js'
 import { own } from './02-storage.js'
-import { prefsOfCity, riverAreaCities } from './04-city-table.js'
+import { prefsOfCity, canonicalCityOf, riverAreaCities } from './04-city-table.js'
 import { prefsOfArea } from './05-parser.js'
 
 const LEVEL_DIGITS = { '１': 1, '２': 2, '３': 3, '４': 4, '５': 5, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5 }
@@ -167,7 +167,13 @@ function levelOf({ title, headTitle, headlineText, items }) {
   return level
 }
 
-/** 区域展开：一律归到「都道府県 + 市町村」两层，查不到归属县就标记 prefUnknown（放行）。 */
+/**
+ * 区域展开：一律归到「都道府県 + 市町村」两层，查不到归属县就标记 prefUnknown（放行）。
+ *
+ * 市町村名必须换成**本表的规范写法**（canonicalCityOf）再放进 region.city：用户勾选的
+ * 市町村名来自市区町村表，而电文与河川区域表给的是外部写法（「南アルプス市」vs 本表
+ * 「南あるぷす市」、「金ケ崎町」vs「金け崎町」），直接比对会漏报。取不到规范名时回退原写法。
+ */
 function regionsOf(items) {
   const out = []
   const seen = new Set()
@@ -182,21 +188,23 @@ function regionsOf(items) {
     for (const a of it.areas) {
       const kind = regionKindOf(a.codeType, a.code)
       if (kind === 'city' || kind === 'pref') {
+        const city = kind === 'city' ? (canonicalCityOf(a.name) || a.name) : ''
         // 判县优先用区域码前两位（准确），名称反查只在前者不可用时兜底
         const byCode = prefOfCode(a.code)
         if (byCode) {
-          push({ pref: byCode, area: a.name, city: kind === 'city' ? a.name : '' })
+          push({ pref: byCode, area: a.name, city })
           continue
         }
         const prefs = kind === 'city' ? prefsOfCity(a.name) : prefsOfArea(a.name)
-        if (prefs.length === 0) push({ pref: '', area: a.name, city: kind === 'city' ? a.name : '', prefUnknown: true })
-        else for (const p of prefs) push({ pref: p, area: a.name, city: kind === 'city' ? a.name : '' })
+        if (prefs.length === 0) push({ pref: '', area: a.name, city, prefUnknown: true })
+        else for (const p of prefs) push({ pref: p, area: a.name, city })
       } else if (kind === 'river') {
         // 河川予報区域码是 12 位，前两位与都道府県无关，只能查 river-areas 表
         const cities = riverAreaCities(a.code)
         if (cities.length === 0) push({ pref: '', area: a.name, city: '', prefUnknown: true })
         else {
-          for (const c of cities) {
+          for (const raw of cities) {
+            const c = canonicalCityOf(raw) || raw
             const prefs = prefsOfCity(c)
             if (prefs.length === 0) push({ pref: '', area: a.name, city: c, prefUnknown: true })
             else for (const p of prefs) push({ pref: p, area: a.name, city: c })
