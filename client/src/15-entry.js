@@ -8,19 +8,20 @@
 // 生命周期：所有副作用都包在 ctx.effect 内，插件停用即回收。
 // ============================================================================
 
-import { h, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, STORAGE_KEY, normalizePref, prefOfCode, prefCodeOf } from './01-constants.js'
-import { loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, inQuietHours } from './02-storage.js'
+import { h, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, STORAGE_KEY, EMSC_WS_URL, normalizePref, prefOfCode, prefCodeOf } from './01-constants.js'
+import { loadCfg, normalizeCfg, normalizePlaces, loadHistory, normalizeHistoryEntry, inQuietHours } from './02-storage.js'
 import { SETTINGS_NS, cfgToSection, sectionToCfg, currentCfg, applyCfg, settingsOpsFor, bindSettingsScope, settingsState, resetSettings, reloadFromLocal } from './03-settings-bridge.js'
 import { setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState, resetCityTable } from './04-city-table.js'
 import { parse, parseQuake, parseEew, parseTsunami, prefsOfArea, regionsOfArea, AREA_PREF, sevColor } from './05-parser.js'
 import { parseJma, buildTestTelegram, TEST_SCENARIOS, maxLevelIn as jmaMaxLevelIn, itemsOf as jmaItemsOf } from './05b-jma-parser.js'
-import { matchAlert } from './06-matcher.js'
+import { parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage } from './05c-global-parsers.js'
+import { matchAlert, matchPointAlert, distanceKm, validGeo } from './06-matcher.js'
 import { store, addEvent } from './07-store.js'
 import { unlockAudio, playSound, soundKindOf } from './08-audio.js'
 import { isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, closeAlertChannel } from './10-dedupe.js'
-import { handleRaw, handleCancelled, handleAlert, updateWeatherHint, alertTitleOf } from './11-pipeline.js'
+import { handleRaw, handleCancelled, handleAlert, updateWeatherHint, alertTitleOf, watchlessPoint } from './11-pipeline.js'
 import { createWsClient, setActiveClient } from './12-websocket.js'
-import { createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL } from './12b-feed-poll.js'
+import { createFeedClient, feedStatsOf, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL } from './12b-feed-poll.js'
 import { SettingsPanel, p2pCodeTextOf, kindColorOf } from './13-ui-settings.js'
 import { StatusIndicator } from './14-ui-status.js'
 
@@ -89,10 +90,62 @@ export function apply(ctx) {
 
   // 気象庁电文增量（0.3.0）：Host 侧负责轮询与去重，这里只拉本地增量并交给主链。
   const feed = createFeedClient()
+  // 全球地震（USGS，0.4.0）：Host 轮询 GeoJSON（单级），Client 只拉本地增量。
+  // 与 EMSC 是互补关系——EMSC 是实时推送，USGS 目录更完整、还带修订版（updated 刷新）。
+  // 两者的同类地震靠 geoEventKey 归并，不会重复提醒。
+  const usgsFeed = createFeedClient({
+    id: 'usgs',
+    path: FEED_PATH + '?source=usgs',
+    cursorKey: FEED_CURSOR_KEY + '.usgs',
+    enabled: (cfg) => (cfg.disasters || {}).earthquake !== false,
+    apply: (entry, cfg) => {
+      let feature
+      try { feature = JSON.parse(entry && entry.xml) } catch (err) { return false }
+      const alert = parseUsgsFeature(feature)
+      if (!alert) return false
+      handleAlert(alert, cfg)
+      return true
+    },
+  })
+  // 海啸（NOAA，0.4.0）：Host 拉事件列表再取 CAP 详情，Client 解析 CAP。
+  const noaaFeed = createFeedClient({
+    id: 'noaa',
+    path: FEED_PATH + '?source=noaa',
+    cursorKey: FEED_CURSOR_KEY + '.noaa',
+    intervalMs: 5 * 60 * 1000,
+    enabled: (cfg) => (cfg.disasters || {}).tsunami !== false,
+    apply: (entry, cfg) => {
+      const alert = parseNoaaCap(entry && entry.xml, { id: entry && entry.id })
+      if (!alert) return false
+      handleAlert(alert, cfg)
+      return true
+    },
+  })
+  const feeds = [feed, usgsFeed, noaaFeed]
   ctx.effect(() => {
-    feed.start()
-    return () => { try { feed.stop() } catch (err) {} }
-  }, 'dsh-quake-alert: JMA feed client')
+    for (const f of feeds) f.start()
+    return () => { for (const f of feeds) { try { f.stop() } catch (err) {} } }
+  }, 'dsh-quake-alert: feed clients')
+
+  // 全球地震（0.4.0）：EMSC 的 WebSocket，复用与 P2PQuake 同一套连接管理（退避、建连看门狗、
+  // 生命周期归还 fiber）。但**关掉「久无数据」检测**（staleAfterMs=0）：全球 M4+ 大约每 30 分钟
+  // 才有一次推送，拿消息间隔判断连接死活会把一条完全正常的连接反复掐断重连。真正的断开
+  // 浏览器会给 onclose，建连看门狗也仍然生效，所以这两种静默失效并没有被放过。
+  const emsc = createWsClient({
+    sourceId: 'emsc',
+    label: 'EMSC',
+    urlOf: () => EMSC_WS_URL,
+    staleAfterMs: 0,
+    openDetail: () => '已连接 EMSC（全球地震实时推送）',
+    onRaw: (raw, cfg) => {
+      const alert = parseEmsc(raw)
+      if (alert) handleAlert(alert, cfg)
+    },
+  })
+  ctx.effect(() => {
+    emsc.start()
+    return () => { try { emsc.stop() } catch (err) {} }
+  }, 'dsh-quake-alert: EMSC ws client')
 
   // 设置页：设置 → 灾害预警
   ctx.slots.inject('settings.section', () => ctx.slots.register({
@@ -112,7 +165,7 @@ export function apply(ctx) {
 }
 
 // 单测钩子（客户端宿主忽略额外导出）
-export const __test = { parse, parseQuake, parseEew, parseTsunami, parseJma, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn, jmaItemsOf, matchAlert, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, inQuietHours, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable }
+export const __test = { parse, parseQuake, parseEew, parseTsunami, parseJma, parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage, feedStatsOf, watchlessPoint, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn, jmaItemsOf, matchAlert, matchPointAlert, distanceKm, validGeo, normalizePlaces, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, inQuietHours, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable }
 
 // activeClient 是 12-websocket 的模块级 let：给 12 用的赋值出口（跨模块不能写 imported binding）
 // 由 12-websocket 提供 setter；这里仅保留引用以便阅读

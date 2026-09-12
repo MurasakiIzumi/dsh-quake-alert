@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?><alert xmlns="urn:oasis:names:tc:emergency:cap:1.2">
+  <identifier>PHEB-1-26234000</identifier>
+  <sender>ntwc@noaa.gov</sender>
+  <sent>2026-08-22T08:30:40-00:00</sent>
+  <status>Actual</status>
+  <msgType>Alert</msgType>
+  <source>PTWC</source>
+  <scope>Public</scope>
+  <code>IPAWSv1.0</code>
+  <incidents>26234000</incidents>
+  <info>
+    <category>Geo</category>
+    <event>Tsunami Information</event>
+    <responseType>None</responseType>
+    <urgency>Unknown</urgency>
+    <severity>Minor</severity>
+    <certainty>Unlikely</certainty>
+    <expires>2026-08-22T09:30:40-00:00</expires>
+    <senderName>NWS PACIFIC TSUNAMI WARNING CENTER HONOLULU HI</senderName>
+    <headline>PTWC TSUNAMI INFORMATION STATEMENT</headline>
+    <description>PTWC TSUNAMI INFORMATION STATEMENT - Event details: Preliminary magnitude 6.7 (Mwp) earthquake / Lat: -60.481, Lon: -47.185 at 2026-08-22T08:22:36Z </description>
+    <instruction>  N/A </instruction>
+    <web>http://www.tsunami.gov/events/PHEB/2026/08/22/26234000/1/WEPA42/WEPA42.txt</web>
+    <parameter>
+      <valueName>EventLocationName</valueName>
+      <value>SCOTIA SEA</value>
+    </parameter>
+    <parameter>
+      <valueName>EventPreliminaryMagnitude</valueName>
+      <value>6.7</value>
+    </parameter>
+    <parameter>
+      <valueName>EventPreliminaryMagnitudeType</valueName>
+      <value>Mwp</value>
+    </parameter>
+    <parameter>
+      <valueName>EventOriginTime</valueName>
+      <value>2026-08-22T08:22:36-00:00</value>
+    </parameter>
+    <parameter>
+      <valueName>EventDepth</valueName>
+      <value>10 kilometers</value>
+    </parameter>
+    <parameter>
+      <valueName>EventLatLon</valueName>
+      <value>-60.481,-47.185 0.000</value>
+    </parameter>
+    <parameter>
+      <valueName>WEPA42</valueName>
+      <value>Tsunami information Bulletin issued by PTWC to its U.S. and international AOR for large earthquakes in the Pacific Basin that are evaluated not to have destructive teletsunamigenic potential, or for large earthquakes with tsunamigenic potential located in the Pacific region but outside the Pacific Basin.</value>
+    </parameter>
+    <parameter>
+      <valueName>EAS-ORG</valueName>
+      <value>WXR</value>
+    </parameter>
+    <resource>
+      <resourceDesc>Energy Map</resourceDesc>
+      <mimeType>image/jpeg</mimeType>
+      <uri>http://www.tsunami.gov/events/PHEB/2026/08/22/26234000/1/WEPA42/ </uri>
+    </resource>
+    <resource>
+      <resourceDesc>Event Data as a JSON document</resourceDesc>
+      <mimeType>application/json</mimeType>
+      <uri>http://www.tsunami.gov/events/PHEB/2026/08/22/26234000/1/WEPA42/PHEB.json</uri>
+    </resource>
+    <area>
+      <areaDesc>SCOTIA SEA</areaDesc>
+      <circle>-60.481,-47.185 0.0</circle>
+    </area>
+  </info>
+<Signature xmlns="http://www.w3.org/2000/09/xmldsig#"><SignedInfo><CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments"/><SignatureMethod Algorithm="http://www.w3.org/2000/09/xmldsig#dsa-sha1"/><Reference URI=""><Transforms><Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/></Transforms><DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha1"/><DigestValue>nyWxrbccgIMq5W8rcAnI801aIrk=</DigestValue></Reference></SignedInfo><SignatureValue>ADgasqHlkpCCkJ/PjOdesNwebrczF/hyOG4ochy/FivnLlu6L81RPA==</SignatureValue><KeyInfo><KeyValue><DSAKeyValue><P>/X9TgR11EilS30qcLuzk5/YRt1I870QAwx4/gLZRJmlFXUAiUftZPY1Y+r/F9bow9subVWzXgTuA&#13;
+HTRv8mZgt2uZUKWkn5/oBHsQIsJPu6nX/rfGG/g7V+fGqKYVDwT7g/bTxR7DAjVUE1oWkTL2dfOu&#13;
+K2HXKu/yIgMZndFIAcc=</P><Q>l2BQjxUjC8yykrmCouuEC/BYHPU=</Q><G>9+GghdabPd7LvKtcNrhXuXmUr7v6OuqC+VdMCz0HgmdRWVeOutRZT+ZxBxCBgLRJFnEj6EwoFhO3&#13;
+zwkyjMim4TwWeotUfI0o4KOuHiuzpnWRbqN/C/ohNWLx+2J6ASQ7zKTxvqhRkImog9/hWuWfBpKL&#13;
+Zl6Ae1UlZAFMO/7PSSo=</G><Y>XonR3Yg1PO+Hpheh7NMm5UHT3amv+Z0OpCibPuHTwnyyfTUJQLaX249PGVvgM/CPS8MTN24lqbYx&#13;
+NI9dXJLAvIb16cW6eJx+kivl9ObemdndlUkM15quv7dN94sP5GF9RtppDXuq9BD/4lv3ya/TGxjX&#13;
+iMTf93pJwabei82X7Fs=</Y></DSAKeyValue></KeyValue></KeyInfo></Signature></alert>

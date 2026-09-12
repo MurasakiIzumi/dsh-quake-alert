@@ -47,9 +47,73 @@ function regionInWeatherWatch(region, watch) {
   return cities.some((c) => normKana(c) === target)
 }
 
+// ---------- 坐标匹配（全球源：EMSC / USGS / NOAA CAP） ----------
+// 全球源给的是「震中坐标 + 震级」，没有日本那样的都道府县 / 市町村。用户的关注表达因此是
+// 「我所在的位置 + 可接受半径」，由这里做球面距离判定（Haversine，误差 <0.5%）。
+// 与行政区匹配同一条原则：宁可多报绝不漏报；但坐标缺失时**不猜**——如实说明无法判定，
+// 而不是默默放行（放行会让"配错了关注点"看起来像"根本没有地震"）。
+const EARTH_RADIUS_KM = 6371
+function distanceKm(lat1, lon1, lat2, lon2) {
+  const toRad = (d) => (d * Math.PI) / 180
+  const dLat = toRad(lat2 - lat1)
+  const dLon = toRad(lon2 - lon1)
+  const a = Math.pow(Math.sin(dLat / 2), 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.pow(Math.sin(dLon / 2), 2)
+  return 2 * EARTH_RADIUS_KM * Math.asin(Math.min(1, Math.sqrt(a)))
+}
+/** 坐标是否可用于计算：数值、有限、且在合法范围内（-200 这类"未知"哨兵值会被挡下）。 */
+function validGeo(geo) {
+  return !!geo && typeof geo.lat === 'number' && Number.isFinite(geo.lat) &&
+    typeof geo.lon === 'number' && Number.isFinite(geo.lon) &&
+    Math.abs(geo.lat) <= 90 && Math.abs(geo.lon) <= 180
+}
+/**
+ * 坐标型警报的匹配：震中落在任一关注点的半径内即命中。
+ * 震级阈值单独判断（globalMagnitude）——全球源给出的是震级，与日本的震度不可换算，
+ * 用一个独立旋钮比"假装能换算"诚实。
+ * @returns {{ hit: boolean, reason: string, place?: object, distanceKm?: number }}
+ */
+function matchPointAlert(alert, cfg) {
+  const places = (cfg.watch && cfg.watch.places) || []
+  if (places.length === 0) {
+    return { hit: false, reason: '未设置全球关注点（设置 → 灾害预警 → 全球关注点）' }
+  }
+  if (!validGeo(alert.geo)) {
+    return { hit: false, reason: '本条消息未携带可用坐标，无法判定震中距' }
+  }
+  const minMag = (cfg.thresholds || {}).globalMagnitude
+  const mag = typeof alert.magnitude === 'number' && Number.isFinite(alert.magnitude) ? alert.magnitude : null
+  // 震级阈值只作用于地震。海啸的严重性由它自己的等级决定（警报 / 注意报 / 信息），
+  // 不该被"引发它的那次地震有多大"过滤掉：NOAA 电文里那个前震震级只是参考值，而且用同一个
+  // 阈值卡海啸是危险的——用户把全球阈值调到 M7.0 时，一场 M6.7 引发的海啸警报会被静默丢掉，
+  // 而海啸恰恰是这里最不能漏的一类。
+  const quakeLike = alert.kind === 'quake' || alert.kind === 'eew'
+  if (quakeLike && mag !== null && typeof minMag === 'number' && mag < minMag) {
+    return { hit: false, reason: 'M' + mag + ' 低于全球震级阈值 M' + minMag }
+  }
+  let nearest = null
+  for (const p of places) {
+    const d = distanceKm(alert.geo.lat, alert.geo.lon, p.lat, p.lon)
+    if (!nearest || d < nearest.d) nearest = { p, d }
+    if (d <= p.radiusKm) {
+      return {
+        hit: true,
+        reason: (mag === null ? '' : 'M' + mag + ' · ') + '距 ' + p.name + ' 约 ' + Math.round(d) +
+          ' km（半径 ' + p.radiusKm + ' km）',
+        place: p,
+        distanceKm: d,
+      }
+    }
+  }
+  return {
+    hit: false,
+    reason: '震中距最近的关注点（' + nearest.p.name + '）约 ' + Math.round(nearest.d) +
+      ' km，超过设定半径 ' + nearest.p.radiusKm + ' km',
+  }
+}
+
 // 未命中原因：若存在未能识别归属县的区域名，明确提示，避免用户误以为链路故障
-function missReason(alert, watch, base) {
-  const list = watch && watch.prefectures
+function missReason(alert, watch, base) {  const list = watch && watch.prefectures
   const cities = (watch && watch.cities) || []
   let reason = base
   if (list && list.length > 0) {
@@ -66,6 +130,8 @@ function matchAlert(alert, cfg) {
   if (alert.kind === 'eew' || alert.kind === 'quake') {
     if ((cfg.disasters || {}).earthquake === false) return { hit: false, reason: '地震提醒已关闭' }
     if (alert.cancelled) return { hit: false, reason: '取消消息不提醒' }
+    // 全球源（EMSC / USGS）只有震中坐标、没有行政区区域 → 走坐标匹配
+    if (alert.locator === 'point') return matchPointAlert(alert, cfg)
     // 551 的「震源情报 / 远地地震」没有 points，无从按震度判定——明确说明，避免用户误以为链路故障
     if (alert.regions.length === 0) {
       return {
@@ -84,6 +150,8 @@ function matchAlert(alert, cfg) {
   if (alert.kind === 'tsunami') {
     if ((cfg.disasters || {}).tsunami === false) return { hit: false, reason: '海啸提醒已关闭' }
     if (alert.cancelled) return { hit: false, reason: '解除消息不提醒' }
+    // NOAA CAP 的海啸同样是坐标型（CAP 里给的是 circle / polygon，不是日本的津波予報区）
+    if (alert.locator === 'point') return matchPointAlert(alert, cfg)
     if (alert.regions.length === 0) return { hit: false, reason: '本条没有海啸预报区数据' }
     const minRank = own(TSUNAMI_RANK, t.tsunamiGrade) || 1
     const hitRegion = alert.regions.find((r) => regionInWatch(r, w, false) && (own(TSUNAMI_RANK, r.grade) || 0) >= minRank)
@@ -109,4 +177,4 @@ function matchAlert(alert, cfg) {
 }
 
 
-export { regionInWatch, regionInWeatherWatch, missReason, matchAlert }
+export { regionInWatch, regionInWeatherWatch, missReason, matchAlert, matchPointAlert, distanceKm, validGeo, EARTH_RADIUS_KM }

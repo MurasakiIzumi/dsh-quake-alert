@@ -128,8 +128,12 @@ for (const f of files) {
   const missing = []
   for (const [name, defFile] of owner) {
     if (defFile === f || imported.has(name) || local.has(name)) continue
-    // (?<!\.) 排除属性访问（JSON.parse、hypo.name 这类不算「使用」模块导出）
-    if (new RegExp('(?<!\\.)\\b' + name + '\\b').test(body)) missing.push(name + '（定义于 ' + defFile + '）')
+    // (?<!\.) 排除属性访问（JSON.parse、hypo.name 这类不算「使用」模块导出）；
+    // (?!\s*:) 排除对象字面量的键——`{ name: ... }` 里的 name 是键名不是引用。
+    // 后者是 0.4.0 加坐标模型时暴露的误报：02-storage 的 normalizePlaces 返回
+    // `{ name, lat, lon, radiusKm }`，而 15-entry 恰好导出了一个叫 name 的常量。
+    // 取舍：三元 `cond ? name : other` 这种写法会漏检，本项目不使用该形式。
+    if (new RegExp('(?<!\\.)\\b' + name + '\\b(?!\\s*:)').test(body)) missing.push(name + '（定义于 ' + defFile + '）')
   }
   if (missing.length) {
     problems += missing.length

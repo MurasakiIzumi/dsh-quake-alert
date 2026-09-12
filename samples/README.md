@@ -1,9 +1,11 @@
 # samples — P2PQuake / 気象庁 真实消息样本库
 
-本目录存放两类真实消息样本，用于开发、模拟回放与单元测试：
+本目录存放四类真实消息样本，用于开发、模拟回放与单元测试：
 
-- **P2PQuake JSON**（地震 / EEW / 海啸）：开发期的实时链路与匹配回归
+- **P2PQuake JSON**（地震 / EEW / 海啸）：实时链路与匹配回归
 - **気象庁防災情報XML**（泥石流 / 洪水 / 大雨 / 高潮）：0.3.0 起的气象警报链路
+- **特别警报电文**（旧格式 / 报知）：0.4.0 修复最高级警报漏报的回归 fixture
+- **全球源样本**（EMSC / USGS / NOAA）：0.4.0 全球化链路的回归 fixture
 
 > 数据来自 P2PQuake 公开 API 与気象庁公开信息，均为公开信息，仅用于本项目的开发与回归测试。
 > 気象庁のコンテンツは政府標準利用規約に準拠（出典明記のうえ利用可）。
@@ -44,3 +46,34 @@
 - **判县优先用区域码前两位**（`宗谷北部=011011` → 北海道、`北九州市=4010000` → 福岡県），名称反查只作兜底——名称有 25 例同名跨县，且已改制的旧名会认到别的县。
 - 気象庁在 `Body` 的 `<Warning>` 里会把区域写成**裸 `<Area>`**（不带 `<Areas codeType="…">` 包裹），且市町村清单常只在 `Head` 的 `<Information>` 里——两处都要取，否则会"解析成功但区域为空"。
 - 区域码位数：市町村 7 位 / 府県予報区・細分区域 6 位 / 河川予報区域 12 位。
+
+## 特别警报电文（0.4.0）
+
+2026-09-07 **東京都「大雨特別警報」**——气象厅最高级别的气象警报。同一次发布在 feed 里同时存在
+三份**格式副本**，这正是当时漏报的根因：旧格式的 Kind 名称不带「レベルＮ」字样，被 `levelOf()`
+判为"与预警无关"而整条丢弃（而同一时刻的 R06 电文只有「その他注意報 / 暴風 / 波浪」，不含这条警报）。
+
+| 文件 | 电文 | Kind.Name | 说明 |
+|---|---|---|---|
+| `jma-vpww53-tokyo-special-20260907.xml` | 気象特別警報・警報・注意報（VPWW53） | 大雨特別警報 / 大雨警報 / 大雨注意報 … | 级别必须按名称语义映射 |
+| `jma-vpww54-tokyo-special-20260907.xml` | 気象警報・注意報（Ｈ２７）（VPWW54） | 同上 | 与 VPWW53 内容重复的另一份格式 |
+| `jma-vpno50-tokyo-special-20260907.xml` | 気象特別警報報知（VPNO50） | 大雨特別警報 | 气象厅为特别警报专发的最高优先级报知 |
+| `jma-vpno50-tokyo-cancel-20260907.xml` | 気象特別警報報知（VPNO50） | 解除 | 同日 19:01 的解除报知，Kind 只有「解除」 |
+
+回归断言覆盖：三份副本必须算出**同一个事件键**（否则同一条警报连响三次）、解除报知不能被
+「気象特別警報報知」的标题兜底误抬成 L5、旧格式的「大雨警報」应按 L3 解析、旧格式的注意報
+仍不产生 Alert（同一份注意報有 VPWW53 / Ｈ２７ 两份副本，抬升会把历史刷屏）。
+
+## 全球源样本（0.4.0）
+
+`global/` 子目录，全部为 2026-09-12 实测抓取（非构造）：
+
+| 文件 | 来源 | 解析要点 |
+|---|---|---|
+| `global/emsc-ws-sample.json` | EMSC `standing_order` WebSocket 实收 | 顶层 `{action, data}`，data 是 GeoJSON **Feature**（不是 FeatureCollection）；区域字段是 `flynn_region`（**没有** `region`）；`time` 是 ISO 字符串；`lat/lon` 在 properties 里 |
+| `global/usgs-all-hour.geojson` | USGS `all_hour.geojson` | FeatureCollection；`geometry.coordinates = [经度, 纬度, 深度km]`；`time/updated` 是 epoch 毫秒；实测 11 条，`alert` 全为 null |
+| `global/noaa-pheb-atom.xml` | NOAA `tsunami.gov/events/xml/PHEBAtom.xml` | 事件列表；`<id>` 是 `urn:uuid`（**不是**详情地址），CAP 详情地址在 `<link rel="related" title="CapXML document" href>` |
+| `global/noaa-pheb-cap.xml` | NOAA `PHEBCAP.xml` | CAP 1.2；震中在 `alert > info > area > circle`（`"纬,经 半径"`），震级与震源另有 `info > parameter`（`EventPreliminaryMagnitude` / `EventLatLon`） |
+
+> 注意：`noaa-pheb-atom.xml` 抓到的是 2026-08-22 的一次事件（Tsunami Information），**不是**
+> 抓取时刻的最新海啸。用它做 fixture 时不要假设"当前最新"。

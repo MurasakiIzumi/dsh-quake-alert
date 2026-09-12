@@ -1280,6 +1280,107 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, 'Host 轮询器验证失败：' + e.message)
   }
 
+  console.log('== 0.4.0：Host 侧全球源（USGS 单级 / NOAA 两级）==')
+  try {
+    const pollerMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'poller.js')).href)
+    const gs = await import(pathToFileURL(path.join(ROOT, 'lib', 'global-sources.js')).href)
+    const { createPoller } = pollerMod
+    const { parseUsgsEntries, parseNoaaEntries, USGS_FEED_URL, NOAA_FEED_URL } = gs
+
+    // ① USGS：GeoJSON → entry（单级，entry 自带 payload）
+    const usgsText = fs.readFileSync(path.join(ROOT, 'samples', 'global', 'usgs-all-hour.geojson'), 'utf8')
+    const usgsEntries = parseUsgsEntries(usgsText)
+    assert(usgsEntries.length >= 3, 'USGS feed → 解析出 ' + usgsEntries.length + ' 条 entry')
+    assert(usgsEntries.every((e) => e.id && e.payload && e.updated), 'USGS entry 自带 id / payload / updated')
+    assert(parseUsgsEntries('not json').length === 0 && parseUsgsEntries('{}').length === 0,
+      'USGS → 非 JSON / 空对象返回空数组')
+    assert(USGS_FEED_URL.indexOf('earthquake.usgs.gov') !== -1, 'USGS feed 常量指向官方域名')
+
+    const callsU = []
+    const clockU = Date.parse('2026-09-12T03:00:00Z')
+    const pUsgs = createPoller({
+      feedUrl: USGS_FEED_URL, parseFeed: parseUsgsEntries, singleStage: true,
+      fetchText: async (url) => { callsU.push(url); return usgsText },
+      now: () => clockU, idleMs: 0, startedAt: clockU - 25 * 3600 * 1000,
+    })
+    await pUsgs.pollOnce()
+    assert(callsU.length === 1, 'USGS 单级源只请求 1 次（不拉详情）')
+    const snapU = pUsgs.snapshot(0)
+    assert(snapU.entries.length === usgsEntries.length, 'USGS 条目全部进入环缓冲')
+    assert(snapU.entries[0].xml.indexOf('"mag"') !== -1, 'USGS 缓冲里存的是 feature 的 JSON 正文')
+    assert(pUsgs.stats().detailsFetched === 0, 'USGS 不增加详情抓取计数')
+
+    // ② NOAA：Atom → entry（详情 URL 在 link 里，不是 urn:uuid 形式的 id）
+    const noaaText = fs.readFileSync(path.join(ROOT, 'samples', 'global', 'noaa-pheb-atom.xml'), 'utf8')
+    const noaaEntries = parseNoaaEntries(noaaText)
+    assert(noaaEntries.length === 1, 'NOAA 事件列表 → 1 条 entry')
+    assert(noaaEntries[0].detailUrl.indexOf('PHEBCAP.xml') !== -1,
+      'NOAA → 详情 URL 取自 link[title=CapXML document]（entry 的 id 是 urn:uuid，不是地址）')
+    assert(noaaEntries[0].id === noaaEntries[0].detailUrl, 'NOAA → 去重键用详情 URL（修订即换 URL，符合不重拉原则）')
+    assert(parseNoaaEntries('<feed></feed>').length === 0, 'NOAA → 空 feed 返回空数组')
+    assert(parseNoaaEntries('<entry><title>x</title><id>urn:uuid:1</id></entry>').length === 0,
+      'NOAA → 没有 CAP 链接的条目被跳过')
+
+    const callsN = []
+    const clockN = Date.parse('2026-08-22T09:00:00Z')
+    const pNoaa = createPoller({
+      feedUrl: NOAA_FEED_URL, parseFeed: parseNoaaEntries,
+      fetchText: async (url) => { callsN.push(url); return url.indexOf('Atom') !== -1 ? noaaText : '<alert>cap</alert>' },
+      now: () => clockN, idleMs: 0, startedAt: clockN - 3600 * 1000,
+    })
+    await pNoaa.pollOnce()
+    assert(callsN.length === 2, 'NOAA 两级源请求 2 次（事件列表 + CAP 详情）')
+    assert(pNoaa.snapshot(0).entries[0].xml === '<alert>cap</alert>', 'NOAA 缓冲里存的是 CAP 原文')
+    assert(NOAA_FEED_URL.indexOf('tsunami.gov') !== -1, 'NOAA feed 常量指向 tsunami.gov')
+
+    // ③ 多源并存：各源独立缓冲，互不影响（一个源被限流不能拖住另一个）
+    assert(pUsgs.snapshot(0).entries.length !== pNoaa.snapshot(0).entries.length ||
+      pUsgs.snapshot(0).cursor !== pNoaa.snapshot(0).cursor, '两个源的缓冲 / 游标互相独立')
+    const hostMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
+    assert(hostMod.FEED_PATH === '/dsh-quake-alert/feed', 'FEED_PATH 未变（旧版 Client 不带 source 参数仍可用）')
+    assert(typeof hostMod.apply === 'function', 'lib/index.js 仍导出 apply')
+  } catch (err) {
+    assert(false, 'Host 全球源验证失败：' + err.message)
+  }
+
+  console.log('== 0.4.0：/feed 多源分派（不触网）==')
+  try {
+    const hostMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
+    const routes = []
+    // 假 ctx：顶层 effect（poller.start）**故意不执行**，否则轮询器会在测试里真的发外部请求；
+    // webServer 的 effect 必须执行，路由才注册得上。
+    const fakeCtx = {
+      effect() { return () => {} },
+      inject(names, cb) {
+        if (names.indexOf('settings') !== -1) cb({ settings: { register() {} } })
+        else if (names.indexOf('webServer') !== -1) {
+          cb({ effect(fn) { fn() }, webServer: { register(r) { routes.push(r) } } })
+        }
+      },
+    }
+    hostMod.apply(fakeCtx)
+    const feedRoute = routes.filter((r) => r.path === hostMod.FEED_PATH)[0]
+    assert(!!feedRoute, 'apply 注册了 /feed 路由')
+    assert(!!routes.filter((r) => r.path === hostMod.AREAS_PATH)[0], 'apply 注册了 /areas 路由')
+
+    const call = (query) => {
+      let body = ''
+      feedRoute.handler({ url: '/dsh-quake-alert/feed' + query }, { writeHead() {}, end(s) { body = s } })
+      return JSON.parse(body)
+    }
+    assert(call('?since=tail').source === 'jma', '不带 source 参数 → 默认 jma（旧版 Client 仍兼容）')
+    assert(call('?since=tail').tail === true, 'since=tail → 只对齐位置、不回历史')
+    assert(call('?source=usgs&since=tail').source === 'usgs', '?source=usgs 分派到 USGS 轮询器')
+    assert(call('?source=noaa&since=tail').source === 'noaa', '?source=noaa 分派到 NOAA 轮询器')
+    assert(call('?source=constructor&since=tail').source === 'jma',
+      '原型链键（constructor）退回默认源，不发生 TypeError')
+    assert(call('?source=%3BDROP&since=tail').source === 'jma', '未知 source 退回默认源')
+    const empty = call('?source=usgs&since=0')
+    assert(Array.isArray(empty.entries) && empty.reset === false, '各源在未启动时也能安全返回空增量')
+  } catch (err) {
+    assert(false, '/feed 分派验证失败：' + err.message)
+  }
+
   console.log('== 0.3.0-c：JMA 电文解析（泥石流 / 洪水 / 大雨 / 高潮）==')
   try {
     const riverMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'river-areas.js')).href)
@@ -1336,6 +1437,56 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, 'JMA 解析验证失败：' + e.message)
   }
 
+  console.log('== 0.3.4：旧格式 / 报知电文的级别识别（特別警報漏报修复）==')
+  try {
+    const citiesMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cities.js')).href)
+    const t = loadClient().__test
+    t.setCityTable(citiesMod.CITIES_BY_PREF)
+    const jma = (n) => fs.readFileSync(path.join(ROOT, 'samples', n), 'utf8')
+    const cfg = () => ({
+      watch: { prefectures: [], cities: [] },
+      disasters: { earthquake: true, tsunami: true, weather: true },
+      thresholds: {}, dedupe: { windowMinutes: 10 }, notify: {}, quietHours: { enabled: false },
+    })
+
+    // 2026-09-07 東京都「大雨特別警報」的三份格式副本 + 一条解除报知（均为真实电文）
+    const s53 = t.parseJma(jma('jma-vpww53-tokyo-special-20260907.xml'), { id: 'https://x/20260907135754_0_VPWW53_130000.xml' })
+    const s54 = t.parseJma(jma('jma-vpww54-tokyo-special-20260907.xml'), { id: 'https://x/20260907135754_0_VPWW54_130000.xml' })
+    const s50 = t.parseJma(jma('jma-vpno50-tokyo-special-20260907.xml'), { id: 'https://x/20260907135752_0_VPNO50_130000.xml' })
+    assert(s53 && s53.level === 5 && s53.severity === 'red',
+      'VPWW53 旧格式「大雨特別警報」→ L5 / red（修复前整体丢弃、该事件完全静默）')
+    assert(s54 && s54.level === 5, 'VPWW54（Ｈ２７）同一警报 → L5')
+    assert(s50 && s50.level === 5, 'VPNO50 気象特別警報報知 → L5')
+    assert(s53.regions.some((r) => r.pref === '東京都'), '特別警報展开出東京都（市町村按区域码前两位判县）')
+    assert(t.matchAlert(s53, cfg()).hit === true, 'L5 特別警報 → 命中播报')
+    assert(s53.eventKey === s54.eventKey && s54.eventKey === s50.eventKey,
+      '三份格式副本归并为同一事件键（否则同一条警报连响三次）')
+    assert(t.isEventRepeat(s53, 10) === false && t.isEventRepeat(s54, 10) === true && t.isEventRepeat(s50, 10) === true,
+      '副本先后到达时只有第一条播报，其余按同事件重复只记历史')
+
+    const cxl = t.parseJma(jma('jma-vpno50-tokyo-cancel-20260907.xml'), { id: 'https://x/20260907190104_0_VPNO50_130000.xml' })
+    assert(cxl && cxl.cancelled === true && cxl.level === 0,
+      'VPNO50 解除报知 → cancelled=true 且 level=0（不被「気象特別警報報知」标题兜底误抬成 L5）')
+    assert(cxl.kindLabel.indexOf('已解除') !== -1, '解除报知 → 标签标注已解除')
+
+    const legacyXml = (kindName, text) => '<?xml version="1.0"?><Report><Control>' +
+      '<Title>気象特別警報・警報・注意報</Title><DateTime>2026-09-12T00:00:00Z</DateTime></Control>' +
+      '<Head xmlns="http://xml.kishou.go.jp/jmaxml1/informationBasis1/">' +
+      '<Title>東京都' + (text || '') + '</Title><ReportDateTime>2026-09-12T09:00:00+09:00</ReportDateTime>' +
+      '<Headline><Text>' + (text || '東京都では、大雨に警戒してください。') + '</Text>' +
+      '<Information type="気象警報・注意報（府県予報区等）"><Item>' +
+      '<Kind><Name>' + kindName + '</Name><Code>03</Code><Status>発表</Status></Kind>' +
+      '<Areas codeType="気象情報／府県予報区・細分区域等"><Area><Name>東京都</Name><Code>130000</Code></Area></Areas>' +
+      '</Item></Information></Headline></Head><Body/></Report>'
+    const l3 = t.parseJma(legacyXml('大雨警報'), { id: 'https://x/20260912000000_0_VPWW53_130000.xml' })
+    assert(l3 && l3.level === 3,
+      '旧格式「大雨警報」→ L3（此前同样被整体丢弃，L3 入历史与侧边栏提示因此缺失）')
+    assert(t.parseJma(legacyXml('大雨注意報'), { id: 'https://x/20260912000001_0_VPWW53_130000.xml' }) === null,
+      '旧格式「大雨注意報」→ 仍不产生 Alert（同一份注意報有 VPWW53 / Ｈ２７ 两份副本，抬升会把历史刷屏）')
+  } catch (e) {
+    assert(false, '旧格式电文解析验证失败：' + e.message)
+  }
+
   console.log('== 0.3.0-c：气象警报的匹配与播报边界（L4 起）==')
   try {
     const riverMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'river-areas.js')).href)
@@ -1369,6 +1520,297 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.matchAlert(sAlert, prefOnly).hit === true, '区域级条目（宗谷地方）在市町村收窄下放行 → 提醒')
   } catch (e) {
     assert(false, '气象警报匹配验证失败：' + e.message)
+  }
+
+  console.log('== 0.4.0：全球源的坐标匹配（震中距 + 震级阈值）==')
+  try {
+    const t = loadClient().__test
+    const cfgWith = (places, mag) => ({
+      watch: { prefectures: [], cities: [], places },
+      disasters: { earthquake: true, tsunami: true, weather: true },
+      thresholds: { globalMagnitude: mag === undefined ? 4.5 : mag },
+      dedupe: { windowMinutes: 10 }, notify: {}, quietHours: { enabled: false },
+    })
+    const tokyo = { name: '东京', lat: 35.6812, lon: 139.7671, radiusKm: 300 }
+
+    // ① Haversine：用已知城市对校验量级（东京—大阪约 400km，东京—札幌约 830km）
+    const dOsaka = t.distanceKm(35.6812, 139.7671, 34.6937, 135.5023)
+    assert(Math.abs(dOsaka - 400) < 25, '东京→大阪距离约 400km（实测 ' + Math.round(dOsaka) + 'km）')
+    const dSapporo = t.distanceKm(35.6812, 139.7671, 43.0618, 141.3545)
+    assert(Math.abs(dSapporo - 830) < 40, '东京→札幌距离约 830km（实测 ' + Math.round(dSapporo) + 'km）')
+    assert(t.distanceKm(35.6812, 139.7671, 35.6812, 139.7671) === 0, '同点距离为 0')
+
+    // ② 坐标合法性：-200 是 P2PQuake/部分源表示「未知」的哨兵值，必须挡下
+    assert(t.validGeo({ lat: -200, lon: -200 }) === false, '哨兵坐标 -200 判为不可用')
+    assert(t.validGeo({ lat: NaN, lon: 139 }) === false, 'NaN 判为不可用')
+    assert(t.validGeo({ lat: 91, lon: 0 }) === false, '越界纬度判为不可用')
+    assert(t.validGeo({ lat: 35.68, lon: 139.77 }) === true, '正常坐标判为可用')
+
+    const point = (lat, lon, mag) => ({
+      id: 'emsc-1', code: 'emsc', kind: 'quake', kindLabel: '地震（EMSC）', severity: 'orange',
+      issued: '', headline: '', maxScale: -1, level: 0, locator: 'point', source: 'emsc',
+      geo: { lat, lon }, magnitude: mag, hypo: { name: '', magnitude: mag },
+      regions: [], eventKey: '', strength: mag, cancelled: false,
+    })
+
+    // ③ 半径内命中 / 半径外不命中 / 震级不足
+    const near = point(35.0, 140.0, 5.2) // 距东京约 90km
+    const m1 = t.matchPointAlert(near, cfgWith([tokyo]))
+    assert(m1.hit === true && m1.place.name === '东京' && m1.distanceKm < tokyo.radiusKm,
+      '震中在关注点半径内 → 命中（距东京 ' + Math.round(m1.distanceKm) + 'km）')
+    const far = point(43.0618, 141.3545, 6.0) // 札幌，距东京约 830km
+    const m2 = t.matchPointAlert(far, cfgWith([tokyo]))
+    assert(m2.hit === false && m2.reason.indexOf('超过设定半径') !== -1, '震中在半径外 → 不命中，原因写明超出半径')
+    const weak = point(35.0, 140.0, 4.4)
+    const m3 = t.matchPointAlert(weak, cfgWith([tokyo]))
+    assert(m3.hit === false && m3.reason.indexOf('低于全球震级阈值') !== -1, '震级低于阈值 → 不命中')
+    assert(t.matchPointAlert(point(35.0, 140.0, 4.5), cfgWith([tokyo])).hit === true, '震级恰好等于阈值 → 命中')
+
+    // ④ 没配关注点 / 坐标缺失：如实说明，不能默默放行（那会让"配错了"看起来像"没有地震"）
+    const m4 = t.matchPointAlert(near, cfgWith([]))
+    assert(m4.hit === false && m4.reason.indexOf('未设置全球关注点') !== -1, '未设置全球关注点 → 不命中并提示去哪配')
+    const m5 = t.matchPointAlert(Object.assign({}, near, { geo: null }), cfgWith([tokyo]))
+    assert(m5.hit === false && m5.reason.indexOf('未携带可用坐标') !== -1, '坐标缺失 → 不命中并说明原因')
+
+    // ⑤ 多关注点：任一命中即可，且报出最近的那个
+    const osaka = { name: '大阪', lat: 34.6937, lon: 135.5023, radiusKm: 100 }
+    const m6 = t.matchPointAlert(point(34.7, 135.5, 5.0), cfgWith([tokyo, osaka]))
+    assert(m6.hit === true && m6.place.name === '大阪', '多个关注点时任一点命中即提醒')
+
+    // ⑥ matchAlert 应按 locator 分派：point 型走坐标，area 型仍走行政区
+    const pointCfg = cfgWith([tokyo])
+    assert(t.matchAlert(point(35.0, 140.0, 5.5), pointCfg).hit === true, 'matchAlert → point 型地震走坐标匹配')
+    const quakeArea = loadClient().__test.parse(JSON.parse(fs.readFileSync(
+      path.join(ROOT, 'samples', 'quake-kumamoto-detailscale-20260907.json'), 'utf8')))
+    assert(t.matchAlert(quakeArea, pointCfg).hit === false,
+      'matchAlert → 日本行政区型地震不受全球关注点影响（未关注熊本県）')
+    const jpCfg = cfgWith([])
+    jpCfg.watch.prefectures = ['熊本県']
+    jpCfg.thresholds.quakeScale = 30 // 样本最大震度3；行政区模式的阈值是震度，与全球震级是两套旋钮
+    assert(t.matchAlert(quakeArea, jpCfg).hit === true, 'matchAlert → 行政区模式仍然照旧工作（震度阈值那套）')
+
+    // ⑦ places 归一化：脏数据不能进配置，重复点合并，半径夹取，数量封顶
+    const dirty = [
+      { name: '东京', lat: 35.6812, lon: 139.7671, radiusKm: 300 },
+      { name: '重复的东京', lat: 35.6812, lon: 139.7671, radiusKm: 500 },
+      { name: '缺索引', lat: 'abc', lon: 139 },
+      { name: '越界', lat: 99, lon: 200 },
+      null, 'oops',
+      { name: '', lat: 34.69, lon: 135.5, radiusKm: 99999 },
+    ]
+    const places = t.normalizePlaces(dirty)
+    assert(places.length === 2, '脏数据被过滤、重复点合并（7 项 → 2 项）')
+    assert(places[0].name === '东京' && places[1].name === '34.69, 135.50', '缺名字时用坐标生成默认名')
+    assert(places[1].radiusKm === 2000, '半径超上限被夹到 2000km')
+    assert(t.normalizePlaces(new Array(30).fill(0).map((_, i) => ({ lat: i, lon: 0, radiusKm: 100 }))).length === 20,
+      '关注点数量封顶 20 个')
+  } catch (e) {
+    assert(false, '坐标匹配验证失败：' + e.message)
+  }
+
+  console.log('== 0.4.0：全球源解析（EMSC / USGS / NOAA CAP）==')
+  try {
+    const t = loadClient().__test
+    const gf = (n) => fs.readFileSync(path.join(ROOT, 'samples', 'global', n), 'utf8')
+
+    // ① EMSC：顶层 { action, data }，data 是 GeoJSON **Feature**（不是 FeatureCollection）
+    const e = t.parseEmsc(JSON.parse(gf('emsc-ws-sample.json')))
+    assert(e && e.kind === 'quake' && e.source === 'emsc' && e.locator === 'point', 'EMSC → 坐标型地震 Alert')
+    assert(e.geo.lat === 37.9921 && e.geo.lon === 22.2789, 'EMSC → 从 properties.lat/lon 取到震中')
+    assert(e.magnitude === 3.3 && e.magType === 'ml', 'EMSC → 震级 3.3 / 震级类型 ml')
+    assert(e.regions.length === 0, 'EMSC → 没有行政区区域（flynn_region 只作显示）')
+    assert(e.headline.indexOf('SOUTHERN GREECE') !== -1, 'EMSC → headline 用 flynn_region（该源没有 region 字段）')
+    assert(e.eventKey === 'geo:2026-09-12T02:15@38.0,22.3', 'EMSC → 跨源事件键 = 分钟 + 震中（0.1 度）')
+    assert(t.parseEmsc({ action: 'delete' }) === null, 'EMSC → 没有 data 的消息返回 null')
+    assert(t.parseEmsc(null) === null && t.parseEmsc('x') === null, 'EMSC → 脏输入不抛错')
+
+    // ② USGS：FeatureCollection，geometry.coordinates = [经度, 纬度, 深度km]
+    const us = t.parseUsgsFeed(JSON.parse(gf('usgs-all-hour.geojson')))
+    assert(us.length >= 3, 'USGS → 解析出 ' + us.length + ' 条事件')
+    const u0 = us[0]
+    assert(u0.kind === 'quake' && u0.source === 'usgs' && u0.locator === 'point', 'USGS → 坐标型地震 Alert')
+    assert(Math.abs(u0.geo.lat) <= 90 && Math.abs(u0.geo.lon) <= 180 && typeof u0.geo.lat === 'number',
+      'USGS → 经纬度没写反（coordinates 顺序是 lon,lat）')
+    assert(u0.issued.indexOf('T') !== -1 && u0.issued.indexOf('Z') !== -1, 'USGS → epoch 毫秒已转成 ISO 字符串')
+    assert(us.every((a) => a.regions.length === 0), 'USGS → 全部没有行政区区域')
+    assert(t.parseUsgsFeed({}).length === 0 && t.parseUsgsFeed(null).length === 0, 'USGS → 空 / 脏输入返回空数组')
+
+    // 两个全球源对同一场地震 → 同一个事件键（否则接了第二个源就会响两次）
+    const sameTime = '2026-09-12T02:15:12.43Z'
+    const emscTwin = t.parseEmsc({ data: { properties: { mag: 3.3, lat: 37.99, lon: 22.27, time: sameTime } } })
+    const usgsTwin = t.parseUsgsFeature({ id: 'x', geometry: { coordinates: [22.28, 37.99, 10] }, properties: { mag: 3.4, time: Date.parse(sameTime) } })
+    assert(emscTwin.eventKey === usgsTwin.eventKey, 'EMSC 与 USGS 对同一场地震给出同一个事件键（跨源归并）')
+
+    // ③ NOAA CAP：海啸；位置在 area.circle（"纬,经 半径"），震级在 parameter 里
+    const n = t.parseNoaaCap(gf('noaa-pheb-cap.xml'), { id: 'e1' })
+    assert(n && n.kind === 'tsunami' && n.source === 'noaa' && n.locator === 'point', 'NOAA CAP → 坐标型海啸 Alert')
+    assert(n.cancelled === false, 'NOAA CAP → msgType=Alert 不是解除')
+    assert(n.geo.lat === -60.481 && n.geo.lon === -47.185, 'NOAA CAP → 从 area.circle 取到震中')
+    assert(n.magnitude === 6.7 && n.magType === 'Mwp', 'NOAA CAP → 从 parameter 取到前震震级与类型')
+    assert(n.eventKey === 'noaa:PHEB-26234000', 'NOAA CAP → 事件键去掉消息版本号（同一事件多版归并）')
+    assert(n.kindLabel.indexOf('海啸信息') !== -1 && n.severity === 'info',
+      'NOAA CAP → Tsunami Information 映射为海啸信息 / info（不是警报）')
+    const cancelCap = '<?xml version="1.0"?><alert><identifier>PHEB-2-26234000</identifier>' +
+      '<msgType>Cancel</msgType><info><event>Tsunami Warning</event><headline>PTWC TSUNAMI WARNING</headline>' +
+      '<area><areaDesc>COASTAL AREAS</areaDesc><circle>10.5,20.5 0.0</circle></area></info></alert>'
+    const nc = t.parseNoaaCap(cancelCap, {})
+    assert(nc && nc.cancelled === true && nc.kindLabel.indexOf('已解除') !== -1, 'NOAA CAP → msgType=Cancel 判为解除、标签标注已解除')
+    assert(nc.eventKey === 'noaa:PHEB-26234000', 'NOAA CAP → 解除与发布归并到同一个事件键（取消链路才找得到原事件）')
+    assert(t.parseNoaaCap('not xml', {}) === null, 'NOAA CAP → 非 CAP 文本返回 null')
+    assert(t.parseUsgsFeed([{ properties: { mag: 5 } }]).length === 0, 'USGS → 非 FeatureCollection 输入返回空数组')
+
+    // ④ 端到端：全球源 Alert 走坐标匹配，震级阈值独立于日本的震度阈值
+    const gcfg = {
+      watch: { prefectures: [], cities: [], places: [{ name: '雅典', lat: 37.98, lon: 23.73, radiusKm: 500 }] },
+      disasters: { earthquake: true, tsunami: true, weather: true },
+      thresholds: { globalMagnitude: 3.0 }, dedupe: { windowMinutes: 10 }, notify: {}, quietHours: { enabled: false },
+    }
+    const dAthens = Math.round(t.distanceKm(37.9921, 22.2789, 37.98, 23.73))
+    assert(t.matchAlert(e, gcfg).hit === true, '端到端：EMSC M3.3 命中雅典关注点（距 ' + dAthens + 'km）')
+    const strict = JSON.parse(JSON.stringify(gcfg))
+    strict.thresholds.globalMagnitude = 4.5
+    assert(t.matchAlert(e, strict).hit === false, '端到端：M3.3 低于默认全球阈值 M4.5 → 不打扰')
+    const tsunamiCfg = JSON.parse(JSON.stringify(gcfg))
+    tsunamiCfg.watch.places = [{ name: ' Scotia 海', lat: -60.48, lon: -47.19, radiusKm: 300 }]
+    assert(t.matchAlert(n, tsunamiCfg).hit === true, '端到端：NOAA 海啸信息命中 Scotia 海关注点')
+    assert(t.matchAlert(n, JSON.parse(JSON.stringify(gcfg))).hit === false, '端到端：海啸没命中任何关注点 → 不提醒')
+  } catch (err) {
+    assert(false, '全球源解析验证失败：' + err.message)
+  }
+
+  console.log('== 0.4.0：多源连接状态与全球链路装配 ==')
+  try {
+    // ① 多源状态聚合：任一源异常，整体就不该显示成"一切正常"
+    const sockets = []
+    class FakeWS {
+      constructor(url) { this.url = url; sockets.push(this) }
+      close() {}
+    }
+    const ex = loadClientEx({}, { window: { WebSocket: FakeWS } }).exports
+    const t = ex.__test
+    const jp = t.createWsClient({ sourceId: 'p2pquake', label: 'P2PQuake' })
+    jp.start()
+    sockets[0].onopen()
+    assert(t.store.sources.p2pquake.status === 'open', '日本源连上 → 该源状态 open')
+    assert(t.store.status === 'open', '只有一个源时聚合状态 = open')
+
+    const emscSeen = []
+    const emsc = t.createWsClient({
+      sourceId: 'emsc', label: 'EMSC',
+      urlOf: () => 'wss://emsc.test/ws',
+      staleAfterMs: 0,
+      onRaw: (raw, cfg) => { const a = t.parseEmsc(raw); if (a) { emscSeen.push(a); t.handleAlert(a, cfg) } },
+    })
+    emsc.start()
+    const emscSock = sockets[sockets.length - 1]
+    assert(emscSock.url === 'wss://emsc.test/ws', '全球源使用注入的地址（与日本源各自独立连接）')
+    emscSock.onopen()
+    assert(t.store.status === 'open', '两个源都连上 → 聚合仍为 open')
+    assert(t.store.detail.indexOf('EMSC') !== -1 && t.store.detail.indexOf('P2PQuake') !== -1,
+      '聚合详情逐个列出源（悬停时能看出是哪条链路）')
+
+    // 消息经注入的 onRaw 走完整链路（parseEmsc → handleAlert）
+    const placesCfg = {
+      watch: { prefectures: [], cities: [], places: [{ name: '雅典', lat: 37.98, lon: 23.73, radiusKm: 500 }] },
+      disasters: { earthquake: true, tsunami: true, weather: true },
+      thresholds: { globalMagnitude: 3 }, dedupe: { windowMinutes: 10 },
+      notify: { sound: false, system: false, volume: 0 }, quietHours: { enabled: false },
+    }
+    ex.__test.applyCfg(placesCfg) // onRaw 内部读 currentCfg()
+    emscSock.onmessage({ data: fs.readFileSync(path.join(ROOT, 'samples', 'global', 'emsc-ws-sample.json'), 'utf8') })
+    assert(emscSeen.length === 1 && emscSeen[0].source === 'emsc', 'EMSC 推送经 parseEmsc 解析成 Alert')
+    assert(t.store.events.length >= 1 && t.store.events[0].kind === 'quake', 'EMSC 命中关注点后写入历史')
+
+    emscSock.onclose()
+    assert(t.store.status === 'reconnecting', '全球源掉线 → 聚合转黄（不假装一切正常）')
+    assert(t.store.sources.p2pquake.status === 'open', '掉线的只是 EMSC，日本源状态不受影响')
+    emsc.stop(); jp.stop()
+    assert(t.store.status === 'closed', '所有源停止 → 聚合状态为 closed')
+
+    // ② 未配置全球关注点时，坐标型消息整条丢弃（连历史都不记）
+    const t2 = loadClientEx({}, {}).exports.__test
+    const emscAlert = t2.parseEmsc(JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'global', 'emsc-ws-sample.json'), 'utf8')))
+    const noPlaces = {
+      watch: { prefectures: [], cities: [], places: [] },
+      disasters: { earthquake: true, tsunami: true, weather: true },
+      thresholds: { globalMagnitude: 3 }, dedupe: { windowMinutes: 10 },
+      notify: { sound: false, system: false, volume: 0 }, quietHours: { enabled: false },
+    }
+    assert(t2.watchlessPoint(emscAlert, noPlaces) === true, '未配置关注点 → 坐标型消息判为应丢弃')
+    assert(t2.watchlessPoint(t2.parse(JSON.parse(fs.readFileSync(
+      path.join(ROOT, 'samples', 'quake-kumamoto-detailscale-20260907.json'), 'utf8'))), noPlaces) === false,
+      '日本行政区型消息不受这条过滤影响')
+    const before = t2.store.events.length
+    const r = t2.handleAlert(emscAlert, noPlaces)
+    assert(r.notified === false && r.reason === 'no-watch-point', 'handleAlert → 返回 no-watch-point')
+    assert(t2.store.events.length === before, '未配置关注点时不写历史（否则历史会被全球地震刷屏）')
+    assert(t2.store.received === 0, '未配置关注点时不计入接收计数')
+    const withPlaces = JSON.parse(JSON.stringify(noPlaces))
+    withPlaces.watch.places = [{ name: '雅典', lat: 37.98, lon: 23.73, radiusKm: 500 }]
+    const r2 = t2.handleAlert(emscAlert, withPlaces)
+    assert(r2.notified === true, '配置关注点后同一条消息立即命中（不需要重连或重启）')
+    assert(t2.store.events.length === before + 1 && t2.store.events[0].headline.indexOf('SOUTHERN GREECE') !== -1,
+      '命中后写入历史，标题来自全球源')
+  } catch (err) {
+    assert(false, '多源装配验证失败：' + err.message)
+  }
+
+  console.log('== 0.4.0：全球链路的本地测试消息 + 海啸不受震级阈值限制 ==')
+  try {
+    const t = loadClient().__test
+    const place = { name: '测试点', lat: 35.6812, lon: 139.7671, radiusKm: 300 }
+    const gcfg = (mag, radius) => ({
+      watch: { prefectures: [], cities: [], places: [Object.assign({}, place, { radiusKm: radius === undefined ? 300 : radius })] },
+      disasters: { earthquake: true, tsunami: true, weather: true },
+      thresholds: { globalMagnitude: mag === undefined ? 4.5 : mag },
+      dedupe: { windowMinutes: 10 }, notify: {}, quietHours: { enabled: false },
+    })
+    assert(t.TEST_GEO_SCENARIOS.length === 4, '测试场景 4 个（覆盖 EMSC / USGS / NOAA 与"半径外"）')
+
+    // 每个场景都必须经**真实解析器**得到坐标型 Alert —— 这正是测试按钮的意义：
+    // 它走的是与线上完全相同的代码路径，而不是直接构造一个 Alert 绕开解析器。
+    const srcs = []
+    for (const sc of t.TEST_GEO_SCENARIOS) {
+      const msg = t.buildTestGlobalMessage(place, 1700000000000, sc.key)
+      srcs.push(msg.source)
+      const a = t.parseTestGlobalMessage(msg)
+      assert(!!a && a.locator === 'point' && Number.isFinite(a.geo.lat) && Number.isFinite(a.geo.lon),
+        '场景 ' + sc.key + ' → 经 ' + msg.source + ' 解析器得到坐标型 Alert')
+    }
+    assert(srcs.join(',') === 'emsc,usgs,noaa,emsc', '四个场景覆盖三个源（远地场景复用 EMSC 格式）')
+
+    // 前三个在半径内命中，第四个刻意落在半径外
+    for (const k of ['emsc', 'usgs', 'noaa']) {
+      const a = t.parseTestGlobalMessage(t.buildTestGlobalMessage(place, 1700000000001, k))
+      const m = t.matchAlert(a, gcfg())
+      assert(m.hit === true, '场景 ' + k + ' → 命中（距 ' + Math.round(m.distanceKm) + 'km）')
+    }
+    const farMsg = t.parseTestGlobalMessage(t.buildTestGlobalMessage(place, 1700000000002, 'emsc-far'))
+    const mFar = t.matchAlert(farMsg, gcfg())
+    assert(mFar.hit === false && mFar.reason.indexOf('超过设定半径') !== -1, '远地场景 → 半径外不命中')
+    assert(t.matchAlert(farMsg, gcfg(4.5, 1500)).hit === true,
+      '把半径调到 1500km → 同一条远地消息命中（证明是半径在起作用，不是消息无效）')
+
+    // 连点两次不会被去重吞掉，且**两次都会播报**——测试事件键必须每次不同，
+    // 否则第二次会被判成"同一场地震的重复发布"而静默，用户会以为按钮坏了。
+    const g1 = t.parseTestGlobalMessage(t.buildTestGlobalMessage(place, 1700000000010, 'emsc'))
+    const g2 = t.parseTestGlobalMessage(t.buildTestGlobalMessage(place, 1700000000011, 'emsc'))
+    assert(g1.id !== g2.id && g1.eventKey !== g2.eventKey, '两次点击的 id 与事件键都不同（不会被去重吞掉）')
+    assert(t.isEventRepeat(g1, 10) === false && t.isEventRepeat(g2, 10) === false,
+      '连点两次都能播报（不会被事件级去重判成重复发布）')
+
+    // 海啸不受全球震级阈值限制（本次 0.4.0 修掉的隐患）：NOAA 电文里的前震震级只是参考值，
+    // 用同一个阈值卡海啸，会让"把全球阈值调到 M9 的用户"连海啸警报一起静默掉。
+    const noaaTest = t.parseTestGlobalMessage(t.buildTestGlobalMessage(place, 1700000000003, 'noaa'))
+    assert(t.matchAlert(noaaTest, gcfg(9)).hit === true, '海啸不受 globalMagnitude 限制（阈值 M9.0 时仍命中）')
+    const quakeTest = t.parseTestGlobalMessage(t.buildTestGlobalMessage(place, 1700000000004, 'emsc'))
+    assert(t.matchAlert(quakeTest, gcfg(9)).hit === false, '地震仍然受 globalMagnitude 限制（阈值 M9.0 时不命中）')
+    const realCap = t.parseNoaaCap(fs.readFileSync(path.join(ROOT, 'samples', 'global', 'noaa-pheb-cap.xml'), 'utf8'), { id: 'x' })
+    const capCfg = gcfg(9)
+    capCfg.watch.places = [{ name: 'Scotia', lat: -60.48, lon: -47.19, radiusKm: 300 }]
+    assert(t.matchAlert(realCap, capCfg).hit === true, '真实 NOAA CAP 样本在 M9.0 阈值下仍命中')
+  } catch (err) {
+    assert(false, '全球测试消息验证失败：' + err.message)
   }
 
   console.log('== 0.3.0-c：Client 电文增量拉取（游标 / 容错 / 开关）==')

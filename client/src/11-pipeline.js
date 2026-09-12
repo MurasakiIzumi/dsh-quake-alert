@@ -123,8 +123,23 @@ function handleRaw(raw, cfg) {
  * @returns {{ notified: boolean, reason?: string, detail?: string }} 如实回报这一步到底做没做播报，
  *   以及没播报的原因——设置页的测试按钮据此给出准确提示，而不是写死一句"应看到弹窗"。
  */
+/**
+ * 全球源（坐标型）在用户**没有配置任何「全球关注点」**时整条丢弃，连历史都不记。
+ * 理由：EMSC 实测每天推送几十条 M3.8+ 的全球地震。若按"未命中"记入历史，历史列表会被
+ * 与用户毫无关系的远地地震刷屏，真正该看见的提醒反而被挤掉。配置了关注点后立即生效
+ * （不需要重连或重启），状态点与设置页会提示"全球源已连接但未设置关注点"。
+ */
+function watchlessPoint(alert, cfg) {
+  if (!alert || alert.locator !== 'point') return false
+  const places = (cfg.watch && cfg.watch.places) || []
+  return places.length === 0
+}
+
 function handleAlert(alert, cfg, opts) {
   const options = opts || {}
+  if (watchlessPoint(alert, cfg)) {
+    return { notified: false, reason: 'no-watch-point', detail: '全球源消息，但未设置全球关注点' }
+  }
   store.received += 1
   if (isDuplicate(alert.id, cfg.dedupe.windowMinutes)) {
     return { notified: false, reason: 'duplicate', detail: '同一条消息刚处理过（去重窗口内）' }
@@ -137,11 +152,15 @@ function handleAlert(alert, cfg, opts) {
   if (!m.hit) {
     // 气象警报：即使不播报（L3 及以下），也把"正在升级"留给侧边栏 tooltip
     updateWeatherHint(alert, cfg)
-    // 不打扰：仅在设置页历史记录里记为"未命中"，便于用户核对配置
-    addEvent({
-      id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
-      issued: alert.issued, headline: alert.headline + '（未命中：' + m.reason + '）', hit: false,
-    })
+    // 全球源（坐标型）的"未命中"不进历史：USGS 的 24 小时目录有近百条 M2.5+，
+    // 逐条记"未命中"会把历史列表刷满与用户无关的地震，真正该看的提醒反而被挤掉。
+    // 命中项仍然照常记录；设置页的源统计里能看到拉取与解析条数。
+    if (alert.locator !== 'point') {
+      addEvent({
+        id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
+        issued: alert.issued, headline: alert.headline + '（未命中：' + m.reason + '）', hit: false,
+      })
+    }
     return { notified: false, reason: 'not-hit', detail: m.reason }
   }
   const hitPref = m.region ? m.region.pref : ''
@@ -185,6 +204,9 @@ function handleAlert(alert, cfg, opts) {
   const title = alertTitleOf(alert)
   const bodyLines = [alert.headline]
   if (hitPref) bodyLines.push('命中关注地区：' + prefZh + (prefZh !== hitPref ? '（' + hitPref + '）' : ''))
+  // 全球源没有行政区，命中依据是「距某个关注点多少公里」——把距离说出来，
+  // 用户才能判断这条提醒是否可信（半径是自己设的）
+  else if (m.place) bodyLines.push('命中关注点：' + m.place.name + '（距震中约 ' + Math.round(m.distanceKm) + ' km）')
   if (alert.kind === 'tsunami') bodyLines.push('请立即远离海岸与河口')
   if (alert.kind === 'weather') bodyLines.push('请确认所在市町村的避难信息')
   bodyLines.push('—— 仅供参考，请以气象厅官方发布为准')
@@ -209,4 +231,4 @@ function handleAlert(alert, cfg, opts) {
 }
 
 
-export { handleCancelled, handleRaw, handleAlert, updateWeatherHint, alertTitleOf }
+export { handleCancelled, handleRaw, handleAlert, updateWeatherHint, alertTitleOf, watchlessPoint }

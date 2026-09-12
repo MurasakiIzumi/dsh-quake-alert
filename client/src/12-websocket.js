@@ -30,11 +30,28 @@ const STALE_AFTER_MS = 20 * 60 * 1000
 const STALE_CHECK_MS = 60 * 1000
 
 // ---------- WebSocket 客户端 ----------
+/**
+ * @param {object} [opts] 不传即 P2PQuake（日本链路），行为与 0.3.x 完全一致。
+ * @param {string} [opts.sourceId] 状态汇报用的源标识（多源聚合，见 07-store 的 pushSource）
+ * @param {string} [opts.label] 状态文案里的源名
+ * @param {() => string} [opts.urlOf] 当前应连的地址（P2PQuake 会在正式源 / 沙箱源之间切换）
+ * @param {number} [opts.staleAfterMs] 「久无数据」判据；0 = 关闭（消息稀疏的源必须关掉）
+ * @param {(url: string) => string} [opts.openDetail] 连上后的状态文案
+ * @param {(raw: object, cfg: object) => void} [opts.onRaw] 消息处理入口
+ */
 function createWsClient(opts) {
   const o = opts || {}
+  const sourceId = o.sourceId || 'p2pquake'
+  const label = o.label || 'P2PQuake'
   const staleAfterMs = o.staleAfterMs === undefined ? STALE_AFTER_MS : o.staleAfterMs
   const staleCheckMs = o.staleCheckMs === undefined ? STALE_CHECK_MS : o.staleCheckMs
   const connectTimeoutMs = o.connectTimeoutMs === undefined ? CONNECT_TIMEOUT_MS : o.connectTimeoutMs
+  const urlOf = o.urlOf || (() => (currentCfg().source === 'sandbox' ? SANDBOX_URL : WS_URL))
+  const openDetailOf = o.openDetail || ((url) => (url.indexOf('sandbox') !== -1
+    ? '沙箱源：回放 2023 年历史（约30秒/条）'
+    : '已连接 P2PQuake（约每 10 分钟自动重连）'))
+  const onRaw = o.onRaw || ((raw, cfg) => handleRaw(raw, cfg))
+  const report = (patch) => store.pushSource(sourceId, Object.assign({ label }, patch))
   let ws = null
   let timer = null
   let staleTimer = null
@@ -71,7 +88,7 @@ function createWsClient(opts) {
       if (stopped) return
       if (lastActivityAt && Date.now() - lastActivityAt > staleAfterMs) {
         // 这条连接确实已经死了，不必再等退避：立刻换一条，onopen 会刷新 lastActivityAt
-        store.push({ status: 'reconnecting', retries, detail: '久无数据（疑似连接已断开），正在重连' })
+        report({ status: 'reconnecting', retries, detail: '久无数据（疑似连接已断开），正在重连' })
         teardown()
         connect()
         return
@@ -85,7 +102,7 @@ function createWsClient(opts) {
   const scheduleReconnect = (reason) => {
     if (stopped) return
     retries += 1 // 从「第 1 次」开始计数，退避序列 1s → 2s → 4s → … → 60s 封顶
-    store.push({
+    report({
       status: 'reconnecting',
       retries,
       detail: (reason || '连接断开') + '，正在重连（第 ' + retries + ' 次）',
@@ -95,8 +112,8 @@ function createWsClient(opts) {
   }
   const connect = () => {
     if (stopped) return
-    const url = currentCfg().source === 'sandbox' ? SANDBOX_URL : WS_URL
-    store.push({ status: 'connecting', retries, detail: '正在连接 ' + url })
+    const url = urlOf()
+    report({ status: 'connecting', retries, detail: '正在连接 ' + url })
     try { ws = new window.WebSocket(url) } catch (err) {
       scheduleReconnect()
       return
@@ -107,16 +124,13 @@ function createWsClient(opts) {
       retries = 0
       lastActivityAt = Date.now()
       armStaleWatch()
-      const openDetail = url.indexOf('sandbox') !== -1
-        ? '沙箱源：回放 2023 年历史（约30秒/条）'
-        : '已连接 P2PQuake（约每 10 分钟自动重连）'
-      store.push({ status: 'open', retries: 0, detail: openDetail })
+      report({ status: 'open', retries: 0, detail: openDetailOf(url) })
     }
     ws.onmessage = (ev) => {
       lastActivityAt = Date.now()
       try {
         const raw = JSON.parse(String(ev.data))
-        handleRaw(raw, currentCfg())
+        onRaw(raw, currentCfg())
       } catch (err) { /* 单条解析失败不影响连接 */ }
     }
     ws.onerror = () => { /* onclose 统一处理 */ }
@@ -136,7 +150,7 @@ function createWsClient(opts) {
     stop() {
       stopped = true
       teardown()
-      store.push({ status: 'closed', retries, detail: '已停止（插件停用）' })
+      report({ status: 'closed', retries, detail: '已停止（插件停用）' })
     },
     restart() {
       stopped = false

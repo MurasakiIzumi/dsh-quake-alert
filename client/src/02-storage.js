@@ -8,7 +8,7 @@
 // 依赖：01-constants。
 // ============================================================================
 
-import { PREF_SET, PREFECTURES, TSUNAMI_OPTIONS, DEFAULT_CFG, STORAGE_KEY, HISTORY_KEY, HISTORY_MAX } from './01-constants.js'
+import { PREF_SET, PREFECTURES, TSUNAMI_OPTIONS, DEFAULT_CFG, STORAGE_KEY, HISTORY_KEY, HISTORY_MAX, MAX_WATCH_PLACES } from './01-constants.js'
 
 // ---------- 存储（localStorage） ----------
 // 读入的数据可能被旧版本、其它脚本或用户手工改坏。所有读入都做类型校验，
@@ -83,16 +83,41 @@ function loadHistory() {
 const freshCfg = () => ({
   version: DEFAULT_CFG.version,
   source: DEFAULT_CFG.source,
-  watch: { prefectures: [], cities: [] },
+  watch: { prefectures: [], cities: [], places: [] },
   disasters: { ...DEFAULT_CFG.disasters },
   thresholds: { ...DEFAULT_CFG.thresholds },
   notify: { ...DEFAULT_CFG.notify },
   dedupe: { ...DEFAULT_CFG.dedupe },
   quietHours: { ...DEFAULT_CFG.quietHours },
 })
+// 全球关注点：[{ name, lat, lon, radiusKm }]。坐标必须落在合法范围——脏数据里的 NaN 或
+// 越界值会让距离计算得出无意义的结果，表现为"看起来配好了却永远不提醒"（静默漏报）。
+// 半径夹在 1–2000 km；同一个点重复添加是常见操作，按经纬度（三位小数）去重。
+function normalizePlaces(list) {
+  const out = []
+  const seen = new Set()
+  for (const p of list) {
+    if (!isPlainObject(p)) continue
+    // 用显式范围判断而不是 numOr：numOr 对越界值是**夹取**，而经纬度越界意味着这份数据本身
+    // 是坏的（例如把半径填进了纬度列）。夹到边界会造出一个"看起来合法"的错误关注点。
+    const lat = (typeof p.lat === 'number' && Number.isFinite(p.lat) && Math.abs(p.lat) <= 90) ? p.lat : null
+    const lon = (typeof p.lon === 'number' && Number.isFinite(p.lon) && Math.abs(p.lon) <= 180) ? p.lon : null
+    if (lat === null || lon === null) continue
+    const key = lat.toFixed(3) + ',' + lon.toFixed(3)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({
+      name: strOr(p.name, '').slice(0, 30).trim() || (lat.toFixed(2) + ', ' + lon.toFixed(2)),
+      lat,
+      lon,
+      radiusKm: numOr(p.radiusKm, 300, 1, 2000),
+    })
+    if (out.length >= MAX_WATCH_PLACES) break
+  }
+  return out
+}
 // 逐字段校验 + 回退默认值：任何形状的输入都归一成一份合法配置
-function normalizeCfg(stored) {
-  const w = isPlainObject(stored.watch) ? stored.watch : {}
+function normalizeCfg(stored) {  const w = isPlainObject(stored.watch) ? stored.watch : {}
   const d = isPlainObject(stored.disasters) ? stored.disasters : {}
   const t = isPlainObject(stored.thresholds) ? stored.thresholds : {}
   const n = isPlainObject(stored.notify) ? stored.notify : {}
@@ -110,6 +135,8 @@ function normalizeCfg(stored) {
       cities: Array.isArray(w.cities)
         ? Array.from(new Set(w.cities.filter((c) => typeof c === 'string' && c.length > 0 && c.length <= 30))).slice(0, 300)
         : [],
+      // 全球关注点（0.4.0 新增）。旧配置没有这个字段 → 归一成空数组，不影响日本模式
+      places: Array.isArray(w.places) ? normalizePlaces(w.places) : [],
     },
     disasters: {
       earthquake: boolOr(d.earthquake, DEFAULT_CFG.disasters.earthquake),
@@ -124,6 +151,8 @@ function normalizeCfg(stored) {
       tsunamiGrade: TSUNAMI_OPTIONS.some((o) => o.g === t.tsunamiGrade)
         ? t.tsunamiGrade
         : DEFAULT_CFG.thresholds.tsunamiGrade,
+      // 全球源的最低震级（0.4.0）。0 是有意义的取值（来者不拒），所以下界是 0 而不是 1
+      globalMagnitude: numOr(t.globalMagnitude, DEFAULT_CFG.thresholds.globalMagnitude, 0, 10),
     },
     notify: {
       sound: boolOr(n.sound, DEFAULT_CFG.notify.sound),
@@ -166,4 +195,4 @@ function saveCfg(cfg) {
 // （原在 05-parser，因被 city-table / parser / matcher 共用而移到这里）
 const own = (map, key) => (Object.prototype.hasOwnProperty.call(map, key) ? map[key] : undefined)
 
-export { own, isPlainObject, numOr, boolOr, timeOr, minutesOfTime, inQuietHours, loadJSON, saveJSON, normalizeHistoryEntry, loadHistory, freshCfg, normalizeCfg, loadCfg, saveCfg }
+export { own, isPlainObject, numOr, boolOr, timeOr, minutesOfTime, inQuietHours, loadJSON, saveJSON, normalizeHistoryEntry, loadHistory, freshCfg, normalizePlaces, normalizeCfg, loadCfg, saveCfg }

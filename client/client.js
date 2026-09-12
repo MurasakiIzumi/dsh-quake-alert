@@ -35,10 +35,16 @@ const { useState, useEffect, useRef } = React;
 // ---------- 常量 ----------
 const WS_URL = 'wss://api.p2pquake.net/v2/ws';
 const SANDBOX_URL = 'wss://api-realtime-sandbox.p2pquake.net/v2/ws';
+// 全球地震（0.4.0）：EMSC 的实时推送通道。它是少数提供 WebSocket 的全球地震源
+// （USGS / GDACS 都只有轮询），因此在全球链路上复用与 P2PQuake 相同的连接管理。
+const EMSC_WS_URL = 'wss://www.seismicportal.eu/standing_order/websocket';
 const STORAGE_KEY = 'dsh.quakeAlert.v1';
 const HISTORY_KEY = 'dsh.quakeAlert.history';
 const HISTORY_MAX = 30; // 「最近预警」保留条数（内存与设置页展示）
 const MAX_WATCH_CITIES = 300; // 关注市区町村上限（防止配置与 UI 被撑爆）
+// 全球关注点上限：每个点带名字、经纬度与半径，几十个点就足够覆盖"我住哪、家人在哪"，
+// 再多说明用法不对（那是一张地图，不是一份关注列表）。
+const MAX_WATCH_PLACES = 20;
 const RECONNECT_BASE = 1000; // 指数退避起点 1s
 const RECONNECT_MAX = 60000; // 封顶 60s
 
@@ -57,6 +63,13 @@ const TSUNAMI_RANK = { Watch: 1, Warning: 2, MajorWarning: 3 };
 const TSUNAMI_GRADE_TEXT = { Watch: '津波注意报', Warning: '海啸警报', MajorWarning: '大海啸警报' };
 const TSUNAMI_OPTIONS = [
   { g: 'Watch', label: '注意报及以上' }, { g: 'Warning', label: '警报及以上' }, { g: 'MajorWarning', label: '仅大海啸警报' },
+];
+// 全球源（EMSC / USGS）的最低震级。全球目录里 M2.5+ 每天近百条，而用户真正关心的是
+// "我这附近有没有明显晃动"——M4.5 是全球速报的常用门槛，默认取它。
+const GLOBAL_MAG_OPTIONS = [
+  { v: 3, label: 'M3.0 以上' }, { v: 3.5, label: 'M3.5 以上' }, { v: 4, label: 'M4.0 以上' },
+  { v: 4.5, label: 'M4.5 以上（默认）' }, { v: 5, label: 'M5.0 以上' }, { v: 5.5, label: 'M5.5 以上' },
+  { v: 6, label: 'M6.0 以上' }, { v: 6.5, label: 'M6.5 以上' }, { v: 7, label: 'M7.0 以上' },
 ];
 
 // 日本 47 都道府县：jp 为匹配用日文全称（P2PQuake pref 格式），zh 为界面显示
@@ -109,9 +122,15 @@ function normalizePref(raw) {
 const DEFAULT_CFG = {
   version: 1,
   source: 'prod', // prod | sandbox（沙箱回放 2023 年历史，约30秒/条，测试用）
-  watch: { prefectures: [], cities: [] }, // 空 = 关注全日本（阈值仍生效）；cities 为可选的市区町村细化
+  // 两种关注模式并存：
+  //   · 行政区（prefectures / cities）——日本源（P2PQuake、気象庁）用，粒度到市区町村
+  //   · 坐标点（places）——全球源（EMSC / USGS / NOAA）用，判定方式是「震中距 ≤ radiusKm」
+  // 两者互不影响：日本用户不用配 places，全球用户不用配 prefectures。
+  watch: { prefectures: [], cities: [], places: [] },
   disasters: { earthquake: true, tsunami: true, weather: true }, // weather = 气象灾害（泥石流 / 洪水 / 大雨 / 高潮…），固定 L4 以上播报
-  thresholds: { quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch' },
+  // globalMagnitude：全球源（EMSC / USGS）的最低震级。日本源用的是震度（quakeScale），
+  // 全球源只有震级——实测 EMSC 会推 M3.8 级别的事件，若沿用"来什么报什么"会明显吵闹。
+  thresholds: { quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch', globalMagnitude: 4.5 },
   notify: { sound: true, system: true, volume: 0.7 },
   dedupe: { windowMinutes: 10 },
   // 静默时段（0.2.0）：按浏览器本地时间判定；跨午夜用 start > end 表示（如 23:00–07:00）
@@ -202,16 +221,41 @@ function loadHistory() {
 const freshCfg = () => ({
   version: DEFAULT_CFG.version,
   source: DEFAULT_CFG.source,
-  watch: { prefectures: [], cities: [] },
+  watch: { prefectures: [], cities: [], places: [] },
   disasters: { ...DEFAULT_CFG.disasters },
   thresholds: { ...DEFAULT_CFG.thresholds },
   notify: { ...DEFAULT_CFG.notify },
   dedupe: { ...DEFAULT_CFG.dedupe },
   quietHours: { ...DEFAULT_CFG.quietHours },
 });
+// 全球关注点：[{ name, lat, lon, radiusKm }]。坐标必须落在合法范围——脏数据里的 NaN 或
+// 越界值会让距离计算得出无意义的结果，表现为"看起来配好了却永远不提醒"（静默漏报）。
+// 半径夹在 1–2000 km；同一个点重复添加是常见操作，按经纬度（三位小数）去重。
+function normalizePlaces(list) {
+  const out = [];
+  const seen = new Set();
+  for (const p of list) {
+    if (!isPlainObject(p)) continue
+    // 用显式范围判断而不是 numOr：numOr 对越界值是**夹取**，而经纬度越界意味着这份数据本身
+    // 是坏的（例如把半径填进了纬度列）。夹到边界会造出一个"看起来合法"的错误关注点。
+    const lat = (typeof p.lat === 'number' && Number.isFinite(p.lat) && Math.abs(p.lat) <= 90) ? p.lat : null;
+    const lon = (typeof p.lon === 'number' && Number.isFinite(p.lon) && Math.abs(p.lon) <= 180) ? p.lon : null;
+    if (lat === null || lon === null) continue
+    const key = lat.toFixed(3) + ',' + lon.toFixed(3);
+    if (seen.has(key)) continue
+    seen.add(key);
+    out.push({
+      name: strOr(p.name, '').slice(0, 30).trim() || (lat.toFixed(2) + ', ' + lon.toFixed(2)),
+      lat,
+      lon,
+      radiusKm: numOr(p.radiusKm, 300, 1, 2000),
+    });
+    if (out.length >= MAX_WATCH_PLACES) break
+  }
+  return out
+}
 // 逐字段校验 + 回退默认值：任何形状的输入都归一成一份合法配置
-function normalizeCfg(stored) {
-  const w = isPlainObject(stored.watch) ? stored.watch : {};
+function normalizeCfg(stored) {  const w = isPlainObject(stored.watch) ? stored.watch : {};
   const d = isPlainObject(stored.disasters) ? stored.disasters : {};
   const t = isPlainObject(stored.thresholds) ? stored.thresholds : {};
   const n = isPlainObject(stored.notify) ? stored.notify : {};
@@ -229,6 +273,8 @@ function normalizeCfg(stored) {
       cities: Array.isArray(w.cities)
         ? Array.from(new Set(w.cities.filter((c) => typeof c === 'string' && c.length > 0 && c.length <= 30))).slice(0, 300)
         : [],
+      // 全球关注点（0.4.0 新增）。旧配置没有这个字段 → 归一成空数组，不影响日本模式
+      places: Array.isArray(w.places) ? normalizePlaces(w.places) : [],
     },
     disasters: {
       earthquake: boolOr(d.earthquake, DEFAULT_CFG.disasters.earthquake),
@@ -243,6 +289,8 @@ function normalizeCfg(stored) {
       tsunamiGrade: TSUNAMI_OPTIONS.some((o) => o.g === t.tsunamiGrade)
         ? t.tsunamiGrade
         : DEFAULT_CFG.thresholds.tsunamiGrade,
+      // 全球源的最低震级（0.4.0）。0 是有意义的取值（来者不拒），所以下界是 0 而不是 1
+      globalMagnitude: numOr(t.globalMagnitude, DEFAULT_CFG.thresholds.globalMagnitude, 0, 10),
     },
     notify: {
       sound: boolOr(n.sound, DEFAULT_CFG.notify.sound),
@@ -297,10 +345,14 @@ const own = (map, key) => (Object.prototype.hasOwnProperty.call(map, key) ? map[
 
 
 // ---------- 全局 store：连接状态 + 最近预警（设置页订阅） ----------
+// 0.4.0 起「连接状态」是**多源聚合**的：日本链路是 P2PQuake WebSocket，全球链路是 EMSC
+// WebSocket，将来还会有 Host 侧轮询的源。每个源各自汇报，主状态按
+// 「任一源红 → 红；否则任一源黄 → 黄；否则绿」聚合——只要有一条链路断了就不该显示成一切正常。
 const store = {
-  status: 'idle', // idle | connecting | open | reconnecting | closed
+  status: 'idle', // idle | connecting | open | reconnecting | closed（多源聚合结果）
   retries: 0,
   detail: '',
+  sources: {}, // { [id]: { label, status, retries, detail } }
   received: 0, // 收到并成功解析的推送条数（诊断用）
   events: loadHistory(), // 最近预警 [{kind,label,severity,issued,headline,pref}]
   // 气象警报的「静默提示」（0.3.0）：L3 命中关注地区时只记一笔，由侧边栏状态点的悬停提示
@@ -310,6 +362,32 @@ const store = {
   push(patch) {
     Object.assign(this, patch);
     this.listeners.forEach((fn) => fn());
+  },
+  /** 某个连接源汇报自己的状态；主状态由 recomputeStatus 聚合得出。 */
+  pushSource(id, patch) {
+    const cur = this.sources[id] || { label: id, status: 'idle', retries: 0, detail: '' };
+    this.sources[id] = Object.assign({}, cur, patch);
+    this.recomputeStatus();
+    this.push({});
+  },
+  /** 插件停用 / 重建时把源清空，避免残留的旧状态把新会话显示成"已连接"。 */
+  clearSources() {
+    this.sources = {};
+    this.recomputeStatus();
+    this.push({});
+  },
+  recomputeStatus() {
+    const list = Object.keys(this.sources).map((k) => this.sources[k]);
+    if (list.length === 0) {
+      this.status = 'idle'; this.retries = 0; this.detail = '';
+      return
+    }
+    const pick = (s) => list.filter((x) => x.status === s)[0];
+    // 红优先：任一链路停了 / 断了，整体就不是"正常"
+    const chosen = pick('closed') || pick('reconnecting') || pick('connecting') || pick('open') || list[0];
+    this.status = chosen.status;
+    this.retries = typeof chosen.retries === 'number' ? chosen.retries : 0;
+    this.detail = list.map((x) => (x.label || '') + '：' + (x.detail || x.status)).join(' · ');
   },
   subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn) },
 };
@@ -915,6 +993,31 @@ const FLOOD_KIND_LEVEL = {
 };
 // 解除 / 无内容：这些 Kind 不代表"正在发布某种警报"
 const INACTIVE_KIND = /^(解除|なし|発表警報・注意報はなし)$/;
+
+/**
+ * 旧格式电文的 Kind 名称 → 警戒レベル（0.3.4 修复漏报）。
+ *
+ * R06 新格式把级别写在名称里（「レベル４大雨危険警報」），旧格式只写名称
+ * （「大雨特別警報」「大雨警報」「大雨注意報」）。此前 levelOf() 只认「レベルＮ」字样，
+ * 于是**不带级别数字的旧格式电文被整体丢弃**（parseJma 返回 null）——包括最高级别的特别警报。
+ * 实测证据（2026-09-07 東京都「大雨特別警報」，见 samples/jma-vpww53-tokyo-special-20260907.xml）：
+ * 同一事件的三条电文 VPWW53 / VPWW54 / VPNO50 全部返回 null，插件该事件完全静默；
+ * 而同一时刻的 R06 电文只有「その他注意報 / 暴風 / 波浪」，不含这条特别警报。
+ * 也就是说：旧格式不是"迟早会被 R06 覆盖的副本"，它是部分时刻唯一的内容载体。
+ *
+ * 语义依据：気象庁的警报体系里 特別警報 > 危険警報(=L4) > 警報(=L3) > 注意報(=L2)。
+ * 注意報级（2）**刻意不返回**：同一次发布往往同时以 VPWW53 与（Ｈ２７）两份副本出现，
+ * 把 L2 也抬升等于让历史被同一份注意報的两份副本刷屏；而 L2 本就不播报。
+ * R06 的「レベル２」仍照旧解析入历史，行为不变。
+ */
+function legacyKindLevel(name) {
+  const s = String(name || '');
+  if (!s) return 0
+  if (/特別警報/.test(s)) return 5
+  if (/危険警報/.test(s)) return 4
+  if (/警報/.test(s) && !/注意報/.test(s)) return 3
+  return 0
+}
 // 电文标题 → 中文标签（M3 才做 i18n，这里与既有 kindLabel 一样先硬编码中文）
 const KIND_LABELS = [
   [/土砂災害警戒情報/, '泥石流警戒情报'],
@@ -1034,18 +1137,25 @@ function itemsOf(scope) {
 function levelOf({ title, headTitle, headlineText, items }) {
   let level = 0;
   for (const it of items) {
+    if (INACTIVE_KIND.test(it.kindName)) continue
     const inName = maxLevelIn(it.kindName);
     if (inName > level) level = inName;
-    if (!INACTIVE_KIND.test(it.kindName)) {
-      const mapped = own(FLOOD_KIND_LEVEL, it.kindName) || 0;
-      if (mapped > level) level = mapped;
-    }
+    const mapped = own(FLOOD_KIND_LEVEL, it.kindName) || 0;
+    if (mapped > level) level = mapped;
+    const legacy = legacyKindLevel(it.kindName);
+    if (legacy > level) level = legacy;
   }
   for (const s of [headlineText, headTitle, title]) {
     const n = maxLevelIn(s);
     if (n > level) level = n;
   }
   if (level === 0 && /土砂災害警戒情報/.test(title)) level = 4;
+  // 「気象特別警報報知」是气象厅为特別警報专发的最高优先级报知电文；正常情况它的 Kind 名称
+  // 就是「大雨特別警報」（已被上面的映射接住），这里只是 Kind 缺失时的兜底。
+  // 必须排除"整条电文都是解除"的情况：解除报知的 Kind 是「解除」（循环里被 continue 跳过），
+  // 若不排除，标题兜底会把一条解除消息抬成 L5，headline 会显示成「警戒レベル5（已解除）」。
+  const allInactive = items.length > 0 && items.every((it) => INACTIVE_KIND.test(it.kindName));
+  if (level === 0 && !allInactive && /気象特別警報報知/.test(title)) level = 5;
   return level
 }
 
@@ -1105,6 +1215,33 @@ function kindLabelOf(title) {
 }
 
 /**
+ * 汇总型电文：同一次发布会有 2〜3 份**不同格式的副本**同时出现在 feed 里
+ * （实测 2026-09-07 東京都特別警報：VPWW53「気象特別警報・警報・注意報」、
+ * VPWW54「気象警報・注意報（Ｈ２７）」、VPNO50「気象特別警報報知」，时间戳 13:57:52〜54）。
+ * 它们的 title / headTitle 各不相同，而気象警報・注意報 的 EventID 又是空的——
+ * 若沿用「标题」做事件键，同一条警报会被当成三个事件、连响三次铃。
+ */
+const SUMMARY_TITLE = /気象特別警報・警報・注意報|気象警報・注意報（Ｈ２７）|気象特別警報報知/;
+// 灾种关键词（顺序 = 优先级无关，按最高级别的 Kind 名称匹配具体灾种）
+const HAZARD_KEYS = [
+  [/大雨|浸水/, '大雨'], [/土砂/, '土砂'], [/洪水|氾濫/, '洪水'], [/高潮/, '高潮'],
+  [/暴風/, '暴風'], [/波浪/, '波浪'], [/雷/, '雷'], [/濃霧/, '濃霧'],
+  [/乾燥/, '乾燥'], [/なだれ/, 'なだれ'], [/大雪|着雪/, '大雪'],
+];
+/** 取级别最高的那条 Kind 名称，再从中提取灾种——副本之间只要最高级条目相同就会得到同一个键。 */
+function hazardKeyOf(items) {
+  let name = '';
+  let best = -1;
+  for (const it of items) {
+    if (INACTIVE_KIND.test(it.kindName)) continue
+    const lv = Math.max(legacyKindLevel(it.kindName), own(FLOOD_KIND_LEVEL, it.kindName) || 0, maxLevelIn(it.kindName));
+    if (lv > best) { best = lv; name = it.kindName; }
+  }
+  for (const [re, key] of HAZARD_KEYS) if (re.test(name)) return key
+  return name || '气象'
+}
+
+/**
  * 解析一条 JMA 电文。返回 null 表示这条电文与本插件无关（天气预报、地震火山、观测资料等）。
  * @param {string} xml 详情电文原文
  * @param {{ id?: string }} [entry] Host 侧 feed 条目（用于给 Alert 一个稳定 id）
@@ -1136,6 +1273,17 @@ function parseJma(xml, entry) {
   const first = String(headlineText || '').split(/[。\n]/)[0].trim();
   const levelText = level > 0 ? '（警戒レベル' + level + '）' : '';
   const headline = (kindLabel + levelText + (first ? ' · ' + first : '')).slice(0, 180);
+  // 事件键：优先 EventID，其次 Head 标题。汇总型电文（同时存在多份格式副本）改用**内容指纹**
+  // ——「灾种 + 发布时刻(分钟) + 府县码」——否则同一条警报会因副本标题不同而被当成三个事件、连响三次。
+  // 指纹里的府县码取电文 id 的后缀，而不是 regions[0]：解除电文的 regions 恒为空，
+  // 用 regions 会让解除与发布算出不同的键，handleCancelled 就找不到"此前提醒过的事件"，
+  // 解除提醒会静默丢失（与 0.1.3 加入的取消链路冲突）。
+  const idSuffix = /([0-9]{6})\.xml$/.exec(String((entry && entry.id) || ''));
+  const eventKey = SUMMARY_TITLE.test(title)
+    ? 'jma:summary:' + hazardKeyOf(items) + ':' +
+      String(tag(control, 'DateTime') || tag(head, 'ReportDateTime') || '').slice(0, 16) + ':' +
+      (idSuffix ? idSuffix[1] : '')
+    : 'jma:' + (eventId || headTitle || title);
 
   return {
     id: (entry && entry.id) || eventId || title,
@@ -1149,8 +1297,7 @@ function parseJma(xml, entry) {
     maxScale: level,
     hypo: { name: '', magnitude: null },
     regions: regions.length ? regions : [],
-    // 同一事件的多报归并：优先 EventID；気象警報・注意報 的 EventID 为空，用 Head 标题（含县名）
-    eventKey: 'jma:' + (eventId || headTitle || title),
+    eventKey,
     strength: level,
     cancelled,
     raw: { title, headTitle, eventId, infoType: tag(head, 'InfoType'), serial: tag(head, 'Serial') },
@@ -1264,6 +1411,386 @@ function buildTestTelegram(pref, nowMs, key, cityName) {
 }
 
 // ============================================================================
+// dsh-quake-alert · client/src/05c-global-parsers.js
+//
+// 作用：把三个全球源的消息解析成与日本源同一套内部模型（Alert）。
+// 内容：EMSC standing_order WebSocket（GeoJSON Feature）、USGS summary feed
+//       （FeatureCollection）、NOAA tsunami.gov 的 CAP 1.2 电文。
+// 依赖：02-storage（isPlainObject）。
+//
+// 与日本源的差别，也是本文件引入的新字段：
+//   · 全球源只给「震中坐标 + 震级」，没有都道府县 / 市町村 → `locator: 'point'`、
+//     `regions` 恒为空数组，匹配交给 06-matcher 的 matchPointAlert 用 Haversine 距离完成。
+//   · 震级（M）与日本的震度是两套不可换算的体系，所以阈值也是独立旋钮
+//     （thresholds.globalMagnitude），而不是复用 quakeScale。
+//
+// 字段差异全部来自实测样本（见 samples/global/），踩过的坑写在各自函数上方：
+//   · EMSC：顶层 { action, data }，data 是 GeoJSON **Feature**（不是 FeatureCollection）；
+//     区域字段叫 flynn_region（没有 region）；time 是 ISO8601 字符串；lat/lon 在 properties 里。
+//   · USGS：FeatureCollection；geometry.coordinates = [lon, lat, depthKm]；time/updated 是 epoch 毫秒。
+//   · NOAA CAP：alert > info > area > circle "lat,lon 半径"；震级与位置同时也在 info 的
+//     parameter 里（EventPreliminaryMagnitude / EventLatLon）。
+// ============================================================================
+
+
+/** 取第一个有限数值（全球源的坐标/震级可能同时存在于两三个地方，按优先级回退）。 */
+function firstNumber(...vals) {
+  for (const v of vals) {
+    if (typeof v === 'number' && Number.isFinite(v)) return v
+  }
+  return null
+}
+/** 字符串（CAP 的 parameter 里全是字符串）→ 数值；空串与垃圾值一律给 null。
+ *  注意不能用 Number('')——它等于 0，会把"没有震级"变成"震级 0"。 */
+function toNumOrNull(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  const s = String(v === undefined || v === null ? '' : v).trim();
+  if (!s) return null
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null
+}
+function decodeXml(s) {
+  return String(s)
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+}
+/** 单个标签的文本（取首个匹配；CAP 的 info/area 都是单层，够用）。 */
+function tagText(scope, name) {
+  const m = new RegExp('<' + name + '(?:\\s[^>]*)?>([\\s\\S]*?)</' + name + '>').exec(String(scope));
+  return m ? decodeXml(m[1]).trim() : ''
+}
+
+/**
+ * 震级 → severity。日本源按震度分级（10..70），全球源只有震级，所以这里单独一套边界。
+ * 取值依据：M7 以上是「需要跨区域响应」的大地震，M6 以上可能造成局部破坏，
+ * M5 以上普遍有感——与 EMSC/USGS 的公众提示口径一致。
+ */
+function severityOfMagnitude(mag) {
+  if (typeof mag !== 'number' || !Number.isFinite(mag)) return 'info'
+  if (mag >= 7) return 'red'
+  if (mag >= 6) return 'orange'
+  if (mag >= 5) return 'yellow'
+  return 'info'
+}
+
+/**
+ * 跨源事件键：同一场地震 EMSC 与 USGS 都会推，两边机构、编号、震级都可能不同，
+ * 但「发震时刻（分钟）+ 震中（0.1 度 ≈ 11km）」是一致的。用它把两个全球源的同一次地震
+ * 归并成一个事件，避免同一场地震因为接了第二个源而响两次。
+ * 代价：跨分钟边界（两边测定的发震时刻差过一分钟）时归并会失败——宁可多响一次，不漏报。
+ */
+function geoEventKey(timeIso, lat, lon) {
+  const min = String(timeIso || '').slice(0, 16); // 2026-09-12T02:15
+  const la = (typeof lat === 'number' && Number.isFinite(lat)) ? lat.toFixed(1) : '?';
+  const lo = (typeof lon === 'number' && Number.isFinite(lon)) ? lon.toFixed(1) : '?';
+  return 'geo:' + min + '@' + la + ',' + lo
+}
+
+/** epoch 毫秒或 ISO 字符串 → ISO 字符串（USGS 给毫秒，EMSC 给字符串，统一到后者）。 */
+function toIso(v) {
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    const d = new Date(v);
+    return Number.isFinite(d.getTime()) ? d.toISOString() : ''
+  }
+  return typeof v === 'string' ? v : ''
+}
+
+/**
+ * EMSC standing_order WebSocket 消息 → Alert。
+ * 消息形如 { action: 'create'|'update'|'delete', data: Feature }；非地震事件（爆炸等）由
+ * properties.evtype 区分，实测 'ke' = known earthquake。
+ */
+function parseEmsc(raw) {
+  if (!isPlainObject(raw)) return null
+  const d = isPlainObject(raw.data) ? raw.data : null;
+  const p = d && isPlainObject(d.properties) ? d.properties : null;
+  if (!p) return null
+  const coords = (d.geometry && Array.isArray(d.geometry.coordinates)) ? d.geometry.coordinates : [];
+  const lon = firstNumber(p.lon, coords[0]);
+  const lat = firstNumber(p.lat, coords[1]);
+  const depth = firstNumber(p.depth, coords[2]);
+  const mag = firstNumber(p.mag, null);
+  const region = String(p.flynn_region || '').trim();
+  const time = toIso(p.time);
+  const unid = String(p.unid || p.source_id || d.id || '').trim();
+  const headline = 'M' + (mag === null ? '—' : mag) + (region ? ' · ' + region : '') +
+    (depth === null ? '' : ' · 深 ' + Math.round(depth) + 'km');
+  return {
+    id: 'emsc:' + (unid || (lat + ',' + lon + ',' + time)),
+    code: 'emsc',
+    kind: 'quake',
+    kindLabel: '全球地震（EMSC）',
+    source: 'emsc',
+    locator: 'point',
+    severity: severityOfMagnitude(mag),
+    issued: time,
+    headline,
+    maxScale: -1,
+    level: 0,
+    geo: { lat, lon, depthKm: depth },
+    magnitude: mag,
+    magType: String(p.magtype || ''),
+    hypo: { name: region, magnitude: mag },
+    regions: [],
+    eventKey: geoEventKey(time, lat, lon),
+    strength: mag === null ? 0 : mag,
+    cancelled: false,
+    raw,
+  }
+}
+
+/** USGS summary feed 的单个 Feature → Alert。coordinates 顺序是 [经度, 纬度, 深度 km]。 */
+function parseUsgsFeature(f) {
+  if (!isPlainObject(f)) return null
+  const p = isPlainObject(f.properties) ? f.properties : null;
+  if (!p) return null
+  const coords = (isPlainObject(f.geometry) && Array.isArray(f.geometry.coordinates)) ? f.geometry.coordinates : [];
+  const lon = firstNumber(coords[0], p.lon);
+  const lat = firstNumber(coords[1], p.lat);
+  const depth = firstNumber(coords[2], null);
+  const mag = firstNumber(p.mag, null);
+  const place = String(p.place || '').trim();
+  const time = toIso(p.time);
+  const headline = 'M' + (mag === null ? '—' : mag) + (place ? ' · ' + place : '') +
+    (depth === null ? '' : ' · 深 ' + Math.round(depth) + 'km');
+  return {
+    id: 'usgs:' + String(f.id || p.code || (lat + ',' + lon + ',' + time)),
+    code: 'usgs',
+    kind: 'quake',
+    kindLabel: '全球地震（USGS）',
+    source: 'usgs',
+    locator: 'point',
+    severity: severityOfMagnitude(mag),
+    issued: time,
+    headline,
+    maxScale: -1,
+    level: 0,
+    geo: { lat, lon, depthKm: depth },
+    magnitude: mag,
+    magType: String(p.magType || ''),
+    // USGS 的 alert 字段（green/yellow/orange/red）是 PAGER 的损失评估，11 条实测里全是 null；
+    // 这里不做映射，severity 统一按震级判定，避免"两个源对同一地震给出不同颜色"。
+    hypo: { name: place, magnitude: mag },
+    regions: [],
+    eventKey: geoEventKey(time, lat, lon),
+    strength: mag === null ? 0 : mag,
+    cancelled: false,
+    raw: f,
+  }
+}
+
+/** USGS summary feed（FeatureCollection）→ Alert[]。 */
+function parseUsgsFeed(json) {
+  const feats = (isPlainObject(json) && Array.isArray(json.features)) ? json.features : [];
+  return feats.map(parseUsgsFeature).filter(Boolean)
+}
+
+// NOAA tsunami.gov 的事件分级。CAP 的 <severity>（Minor/Moderate/…）对海啸不够具体，
+// 真正决定行动的是 <event> 名称，实测样本是 "Tsunami Information"（Minor）。
+const NOAA_EVENT_RULES = [
+  [/Tsunami Warning/i, '大海啸警报（NOAA）', 3, 'red'],
+  [/Tsunami Advisory/i, '海啸注意报（NOAA）', 2, 'orange'],
+  [/Tsunami Watch/i, '海啸注意报（NOAA）', 2, 'orange'],
+  [/Tsunami Information/i, '海啸信息（NOAA）', 1, 'info'],
+];
+
+/**
+ * NOAA tsunami.gov 的 CAP 1.2 电文 → Alert。
+ * 结构：alert > info > area > circle（"纬度,经度 半径"），震级与震中另有 parameter 备份。
+ * msgType=Cancel 表示解除——走与日本源相同的取消 / 解除链路。
+ * @param {string} xml CAP 原文
+ * @param {{ id?: string }} [entry] 事件列表里的条目（用于给 Alert 一个稳定 id）
+ */
+function parseNoaaCap(xml, entry) {
+  const text = String(xml || '');
+  if (text.indexOf('<alert') === -1) return null
+  const identifier = tagText(text, 'identifier');
+  if (!identifier) return null
+  const msgType = tagText(text, 'msgType');
+  const event = tagText(text, 'event');
+  const sent = tagText(text, 'sent');
+  const capHeadline = tagText(text, 'headline');
+  const areaDesc = tagText(text, 'areaDesc');
+  // parameter 是成对出现的 valueName / value，可能有多个，逐个收进字典
+  const params = {};
+  for (const m of text.matchAll(/<parameter>([\s\S]*?)<\/parameter>/g)) {
+    const n = tagText(m[1], 'valueName');
+    if (n) params[n] = tagText(m[1], 'value');
+  }
+  // 震中优先取 area 的 circle（"纬,经 半径"），它才是配信覆盖范围；EventLatLon 是备份
+  let lat = null;
+  let lon = null;
+  const circle = tagText(text, 'circle');
+  const cm = /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/.exec(circle);
+  if (cm) { lat = Number(cm[1]); lon = Number(cm[2]); }
+  if (lat === null || lon === null) {
+    const em = /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/.exec(String(params.EventLatLon || ''));
+    if (em) { lat = Number(em[1]); lon = Number(em[2]); }
+  }
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) { lat = null; lon = null; }
+  const mag = toNumOrNull(params.EventPreliminaryMagnitude);
+  const rule = NOAA_EVENT_RULES.find(([re]) => re.test(event)) ||
+    [/./, '海啸信息（NOAA）', 1, 'info'];
+  const cancelled = msgType === 'Cancel';
+  const origin = String(params.EventOriginTime || sent || '');
+  const eventName = String(params.EventLocationName || areaDesc || '').trim();
+  const headline = (capHeadline || event || 'NOAA 海啸信息') + (eventName ? ' · ' + eventName : '') +
+    (mag === null ? '' : ' · 前震 M' + mag);
+  // identifier 形如 PHEB-1-26234000，中间的数字是消息版本号——同一事件的多版要归并成一个键
+  const eventKey = 'noaa:' + identifier.replace(/-\d+-/, '-');
+  return {
+    id: 'noaa:' + (identifier || (entry && entry.id) || eventKey),
+    code: 'noaa',
+    kind: 'tsunami',
+    kindLabel: cancelled ? rule[1] + '（已解除）' : rule[1],
+    source: 'noaa',
+    locator: 'point',
+    severity: cancelled ? 'info' : rule[3],
+    issued: sent || origin,
+    headline,
+    maxScale: rule[2],
+    level: 0,
+    geo: { lat, lon },
+    magnitude: mag,
+    magType: String(params.EventPreliminaryMagnitudeType || ''),
+    hypo: { name: eventName, magnitude: mag },
+    regions: [],
+    eventKey,
+    strength: rule[2],
+    cancelled,
+    raw: { identifier, msgType, event, sent, areaDesc, params },
+  }
+}
+
+
+/**
+ * 测试场景（0.4.0）。全球源的地震不是随时都有，用户没法"等一条"来验证链路——
+ * 日本气象链路早有「发送测试气象警报」按钮，这里补上对应的东西。
+ *
+ * 与气象按钮同样的做法：**构造源格式的原文**（EMSC 的 WebSocket 帧、USGS 的 GeoJSON feature、
+ * NOAA 的 CAP 电文），再交给真正的解析器与匹配引擎。因此点一次就同时验证了
+ * 「解析器 → 坐标匹配 → 通知 → 历史」整条链路，而且不发任何网络请求。
+ *
+ * 四个场景覆盖两个维度：三个源各自的解析路径，以及"半径内命中 / 半径外不命中"。
+ */
+const TEST_GEO_SCENARIOS = [
+  { key: 'emsc', label: 'EMSC 地震（震中就在关注点）', note: 'M6.2', source: 'emsc' },
+  { key: 'usgs', label: 'USGS 地震（约 80km 外）', note: 'M5.6 · 仍在默认半径内', source: 'usgs' },
+  { key: 'noaa', label: 'NOAA 海啸注意报', note: 'Tsunami Advisory', source: 'noaa' },
+  { key: 'emsc-far', label: 'EMSC 远地地震（约 550km 外）', note: 'M7.0 · 超出默认 300km 半径，刻意不命中', source: 'emsc' },
+];
+
+// 纬度偏移 1 度约 111km；夹在 ±89.5 以内，避免极端位置把纬度推到界外
+const shiftLat = (lat, deg) => Math.max(-89.5, Math.min(89.5, lat + deg));
+
+function capTestXml(identifier, event, headline, name, lat, lon, mag, stamp) {
+  return '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<alert xmlns="urn:oasis:names:tc:emergency:cap:1.2">' +
+    '<identifier>' + identifier + '</identifier><sender>quakealert-test</sender>' +
+    '<sent>' + stamp + '</sent><status>Actual</status><msgType>Alert</msgType>' +
+    '<info><category>Geo</category><event>' + event + '</event>' +
+    '<severity>Moderate</severity><urgency>Expected</urgency><certainty>Likely</certainty>' +
+    '<headline>' + headline + '</headline>' +
+    '<parameter><valueName>EventLocationName</valueName><value>' + name + '</value></parameter>' +
+    '<parameter><valueName>EventPreliminaryMagnitude</valueName><value>' + mag + '</value></parameter>' +
+    '<area><areaDesc>' + name + '</areaDesc><circle>' + lat + ',' + lon + ' 0.0</circle></area>' +
+    '</info></alert>'
+}
+
+/**
+ * 按场景构造一条**测试用**的源原文。
+ * @param {{name?: string, lat: number, lon: number}} place 用户的第一个全球关注点
+ * @param {number} nowMs 时间戳（id 里带上它，连点两次不会被消息级去重吞掉）
+ * @param {string} key TEST_GEO_SCENARIOS 里的 key
+ * @returns {{ source: string, payload: object|string, label: string, note: string }}
+ */
+function buildTestGlobalMessage(place, nowMs, key) {
+  const ms = nowMs || Date.now();
+  const p = place || {};
+  const lat = (typeof p.lat === 'number' && Number.isFinite(p.lat)) ? p.lat : 0;
+  const lon = (typeof p.lon === 'number' && Number.isFinite(p.lon)) ? p.lon : 0;
+  const name = String(p.name || '关注点');
+  const stamp = new Date(ms).toISOString();
+  const scenario = TEST_GEO_SCENARIOS.filter((s) => s.key === key)[0] || TEST_GEO_SCENARIOS[0];
+
+  if (scenario.key === 'usgs') {
+    const shifted = shiftLat(lat, 0.7); // 约 78km
+    return {
+      source: 'usgs',
+      label: scenario.label,
+      note: scenario.note,
+      payload: {
+        type: 'FeatureCollection',
+        features: [{
+          type: 'Feature',
+          id: 'QUAKEALERT-TEST-usgs-' + ms,
+          geometry: { type: 'Point', coordinates: [lon, shifted, 25] },
+          properties: {
+            mag: 5.6, place: name + ' 附近（测试）', time: ms, updated: ms,
+            magType: 'mww', tsunami: 0, alert: null, title: 'M 5.6 - QuakeAlert test',
+          },
+        }],
+      },
+    }
+  }
+  if (scenario.key === 'noaa') {
+    return {
+      source: 'noaa',
+      label: scenario.label,
+      note: scenario.note,
+      payload: capTestXml('QUAKEALERT-TEST-NOAA-' + ms, 'Tsunami Advisory', 'TEST TSUNAMI ADVISORY',
+        name, lat, lon, 7.1, stamp),
+    }
+  }
+  const far = scenario.key === 'emsc-far';
+  const shifted = far ? shiftLat(lat, 5) : lat; // 5 度约 555km
+  const mag = far ? 7.0 : 6.2;
+  return {
+    source: 'emsc',
+    label: scenario.label,
+    note: scenario.note,
+    payload: {
+      action: 'update',
+      data: {
+        type: 'Feature',
+        id: 'QUAKEALERT-TEST-' + scenario.key + '-' + ms,
+        geometry: { type: 'Point', coordinates: [lon, shifted, 10] },
+        properties: {
+          source_id: 'test', unid: 'QUAKEALERT-TEST-' + scenario.key + '-' + ms,
+          source_catalog: 'QuakeAlert-TEST', auth: 'QuakeAlert',
+          time: stamp, lastupdate: stamp,
+          flynn_region: name + ' 附近（测试）',
+          lat: shifted, lon, depth: 10,
+          mag, magtype: 'mw', evtype: 'ke',
+        },
+      },
+    },
+  }
+}
+
+/** 测试消息 → Alert：按 source 走对应的真实解析器（与线上链路完全同一条代码路径）。 */
+function parseTestGlobalMessage(msg) {
+  if (!msg) return null
+  let alert = null;
+  if (msg.source === 'usgs') {
+    const json = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload;
+    const feats = (json && json.features) || [];
+    alert = feats.length ? parseUsgsFeature(feats[0]) : null;
+  } else if (msg.source === 'noaa') {
+    alert = parseNoaaCap(String(msg.payload), { id: 'test-noaa' });
+  } else {
+    alert = parseEmsc(msg.payload);
+  }
+  if (!alert) return null
+  // 测试消息的事件键必须每次不同，否则第二次点击会被判成"同一场地震的重复发布"而静默——
+  // 用户会以为按钮坏了。生产的事件键按「分钟 + 震中」归并（那是为了让同一场地震只响一次），
+  // 连点两次必然落在同一分钟；这里换成带毫秒的 id，语义也成立：每次点击本来就是一次独立演示。
+  alert.eventKey = 'test:' + alert.id;
+  return alert
+}
+
+// ============================================================================
 // dsh-quake-alert · client/src/06-matcher.js
 //
 // 作用：匹配引擎——决定一条 Alert 是否该提醒用户。
@@ -1309,9 +1836,73 @@ function regionInWeatherWatch(region, watch) {
   return cities.some((c) => normKana(c) === target)
 }
 
+// ---------- 坐标匹配（全球源：EMSC / USGS / NOAA CAP） ----------
+// 全球源给的是「震中坐标 + 震级」，没有日本那样的都道府县 / 市町村。用户的关注表达因此是
+// 「我所在的位置 + 可接受半径」，由这里做球面距离判定（Haversine，误差 <0.5%）。
+// 与行政区匹配同一条原则：宁可多报绝不漏报；但坐标缺失时**不猜**——如实说明无法判定，
+// 而不是默默放行（放行会让"配错了关注点"看起来像"根本没有地震"）。
+const EARTH_RADIUS_KM = 6371;
+function distanceKm(lat1, lon1, lat2, lon2) {
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.pow(Math.sin(dLat / 2), 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.pow(Math.sin(dLon / 2), 2);
+  return 2 * EARTH_RADIUS_KM * Math.asin(Math.min(1, Math.sqrt(a)))
+}
+/** 坐标是否可用于计算：数值、有限、且在合法范围内（-200 这类"未知"哨兵值会被挡下）。 */
+function validGeo(geo) {
+  return !!geo && typeof geo.lat === 'number' && Number.isFinite(geo.lat) &&
+    typeof geo.lon === 'number' && Number.isFinite(geo.lon) &&
+    Math.abs(geo.lat) <= 90 && Math.abs(geo.lon) <= 180
+}
+/**
+ * 坐标型警报的匹配：震中落在任一关注点的半径内即命中。
+ * 震级阈值单独判断（globalMagnitude）——全球源给出的是震级，与日本的震度不可换算，
+ * 用一个独立旋钮比"假装能换算"诚实。
+ * @returns {{ hit: boolean, reason: string, place?: object, distanceKm?: number }}
+ */
+function matchPointAlert(alert, cfg) {
+  const places = (cfg.watch && cfg.watch.places) || [];
+  if (places.length === 0) {
+    return { hit: false, reason: '未设置全球关注点（设置 → 灾害预警 → 全球关注点）' }
+  }
+  if (!validGeo(alert.geo)) {
+    return { hit: false, reason: '本条消息未携带可用坐标，无法判定震中距' }
+  }
+  const minMag = (cfg.thresholds || {}).globalMagnitude;
+  const mag = typeof alert.magnitude === 'number' && Number.isFinite(alert.magnitude) ? alert.magnitude : null;
+  // 震级阈值只作用于地震。海啸的严重性由它自己的等级决定（警报 / 注意报 / 信息），
+  // 不该被"引发它的那次地震有多大"过滤掉：NOAA 电文里那个前震震级只是参考值，而且用同一个
+  // 阈值卡海啸是危险的——用户把全球阈值调到 M7.0 时，一场 M6.7 引发的海啸警报会被静默丢掉，
+  // 而海啸恰恰是这里最不能漏的一类。
+  const quakeLike = alert.kind === 'quake' || alert.kind === 'eew';
+  if (quakeLike && mag !== null && typeof minMag === 'number' && mag < minMag) {
+    return { hit: false, reason: 'M' + mag + ' 低于全球震级阈值 M' + minMag }
+  }
+  let nearest = null;
+  for (const p of places) {
+    const d = distanceKm(alert.geo.lat, alert.geo.lon, p.lat, p.lon);
+    if (!nearest || d < nearest.d) nearest = { p, d };
+    if (d <= p.radiusKm) {
+      return {
+        hit: true,
+        reason: (mag === null ? '' : 'M' + mag + ' · ') + '距 ' + p.name + ' 约 ' + Math.round(d) +
+          ' km（半径 ' + p.radiusKm + ' km）',
+        place: p,
+        distanceKm: d,
+      }
+    }
+  }
+  return {
+    hit: false,
+    reason: '震中距最近的关注点（' + nearest.p.name + '）约 ' + Math.round(nearest.d) +
+      ' km，超过设定半径 ' + nearest.p.radiusKm + ' km',
+  }
+}
+
 // 未命中原因：若存在未能识别归属县的区域名，明确提示，避免用户误以为链路故障
-function missReason(alert, watch, base) {
-  const list = watch && watch.prefectures;
+function missReason(alert, watch, base) {  const list = watch && watch.prefectures;
   const cities = (watch && watch.cities) || [];
   let reason = base;
   if (list && list.length > 0) {
@@ -1328,6 +1919,8 @@ function matchAlert(alert, cfg) {
   if (alert.kind === 'eew' || alert.kind === 'quake') {
     if ((cfg.disasters || {}).earthquake === false) return { hit: false, reason: '地震提醒已关闭' }
     if (alert.cancelled) return { hit: false, reason: '取消消息不提醒' }
+    // 全球源（EMSC / USGS）只有震中坐标、没有行政区区域 → 走坐标匹配
+    if (alert.locator === 'point') return matchPointAlert(alert, cfg)
     // 551 的「震源情报 / 远地地震」没有 points，无从按震度判定——明确说明，避免用户误以为链路故障
     if (alert.regions.length === 0) {
       return {
@@ -1346,6 +1939,8 @@ function matchAlert(alert, cfg) {
   if (alert.kind === 'tsunami') {
     if ((cfg.disasters || {}).tsunami === false) return { hit: false, reason: '海啸提醒已关闭' }
     if (alert.cancelled) return { hit: false, reason: '解除消息不提醒' }
+    // NOAA CAP 的海啸同样是坐标型（CAP 里给的是 circle / polygon，不是日本的津波予報区）
+    if (alert.locator === 'point') return matchPointAlert(alert, cfg)
     if (alert.regions.length === 0) return { hit: false, reason: '本条没有海啸预报区数据' }
     const minRank = own(TSUNAMI_RANK, t.tsunamiGrade) || 1;
     const hitRegion = alert.regions.find((r) => regionInWatch(r, w, false) && (own(TSUNAMI_RANK, r.grade) || 0) >= minRank);
@@ -1764,8 +2359,23 @@ function handleRaw(raw, cfg) {
  * @returns {{ notified: boolean, reason?: string, detail?: string }} 如实回报这一步到底做没做播报，
  *   以及没播报的原因——设置页的测试按钮据此给出准确提示，而不是写死一句"应看到弹窗"。
  */
+/**
+ * 全球源（坐标型）在用户**没有配置任何「全球关注点」**时整条丢弃，连历史都不记。
+ * 理由：EMSC 实测每天推送几十条 M3.8+ 的全球地震。若按"未命中"记入历史，历史列表会被
+ * 与用户毫无关系的远地地震刷屏，真正该看见的提醒反而被挤掉。配置了关注点后立即生效
+ * （不需要重连或重启），状态点与设置页会提示"全球源已连接但未设置关注点"。
+ */
+function watchlessPoint(alert, cfg) {
+  if (!alert || alert.locator !== 'point') return false
+  const places = (cfg.watch && cfg.watch.places) || [];
+  return places.length === 0
+}
+
 function handleAlert(alert, cfg, opts) {
   const options = opts || {};
+  if (watchlessPoint(alert, cfg)) {
+    return { notified: false, reason: 'no-watch-point', detail: '全球源消息，但未设置全球关注点' }
+  }
   store.received += 1;
   if (isDuplicate(alert.id, cfg.dedupe.windowMinutes)) {
     return { notified: false, reason: 'duplicate', detail: '同一条消息刚处理过（去重窗口内）' }
@@ -1778,11 +2388,15 @@ function handleAlert(alert, cfg, opts) {
   if (!m.hit) {
     // 气象警报：即使不播报（L3 及以下），也把"正在升级"留给侧边栏 tooltip
     updateWeatherHint(alert, cfg);
-    // 不打扰：仅在设置页历史记录里记为"未命中"，便于用户核对配置
-    addEvent({
-      id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
-      issued: alert.issued, headline: alert.headline + '（未命中：' + m.reason + '）', hit: false,
-    });
+    // 全球源（坐标型）的"未命中"不进历史：USGS 的 24 小时目录有近百条 M2.5+，
+    // 逐条记"未命中"会把历史列表刷满与用户无关的地震，真正该看的提醒反而被挤掉。
+    // 命中项仍然照常记录；设置页的源统计里能看到拉取与解析条数。
+    if (alert.locator !== 'point') {
+      addEvent({
+        id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
+        issued: alert.issued, headline: alert.headline + '（未命中：' + m.reason + '）', hit: false,
+      });
+    }
     return { notified: false, reason: 'not-hit', detail: m.reason }
   }
   const hitPref = m.region ? m.region.pref : '';
@@ -1826,6 +2440,9 @@ function handleAlert(alert, cfg, opts) {
   const title = alertTitleOf(alert);
   const bodyLines = [alert.headline];
   if (hitPref) bodyLines.push('命中关注地区：' + prefZh + (prefZh !== hitPref ? '（' + hitPref + '）' : ''));
+  // 全球源没有行政区，命中依据是「距某个关注点多少公里」——把距离说出来，
+  // 用户才能判断这条提醒是否可信（半径是自己设的）
+  else if (m.place) bodyLines.push('命中关注点：' + m.place.name + '（距震中约 ' + Math.round(m.distanceKm) + ' km）');
   if (alert.kind === 'tsunami') bodyLines.push('请立即远离海岸与河口');
   if (alert.kind === 'weather') bodyLines.push('请确认所在市町村的避难信息');
   bodyLines.push('—— 仅供参考，请以气象厅官方发布为准');
@@ -1877,11 +2494,28 @@ const STALE_AFTER_MS = 20 * 60 * 1000;
 const STALE_CHECK_MS = 60 * 1000;
 
 // ---------- WebSocket 客户端 ----------
+/**
+ * @param {object} [opts] 不传即 P2PQuake（日本链路），行为与 0.3.x 完全一致。
+ * @param {string} [opts.sourceId] 状态汇报用的源标识（多源聚合，见 07-store 的 pushSource）
+ * @param {string} [opts.label] 状态文案里的源名
+ * @param {() => string} [opts.urlOf] 当前应连的地址（P2PQuake 会在正式源 / 沙箱源之间切换）
+ * @param {number} [opts.staleAfterMs] 「久无数据」判据；0 = 关闭（消息稀疏的源必须关掉）
+ * @param {(url: string) => string} [opts.openDetail] 连上后的状态文案
+ * @param {(raw: object, cfg: object) => void} [opts.onRaw] 消息处理入口
+ */
 function createWsClient(opts) {
   const o = opts || {};
+  const sourceId = o.sourceId || 'p2pquake';
+  const label = o.label || 'P2PQuake';
   const staleAfterMs = o.staleAfterMs === undefined ? STALE_AFTER_MS : o.staleAfterMs;
   const staleCheckMs = o.staleCheckMs === undefined ? STALE_CHECK_MS : o.staleCheckMs;
   const connectTimeoutMs = o.connectTimeoutMs === undefined ? CONNECT_TIMEOUT_MS : o.connectTimeoutMs;
+  const urlOf = o.urlOf || (() => (currentCfg().source === 'sandbox' ? SANDBOX_URL : WS_URL));
+  const openDetailOf = o.openDetail || ((url) => (url.indexOf('sandbox') !== -1
+    ? '沙箱源：回放 2023 年历史（约30秒/条）'
+    : '已连接 P2PQuake（约每 10 分钟自动重连）'));
+  const onRaw = o.onRaw || ((raw, cfg) => handleRaw(raw, cfg));
+  const report = (patch) => store.pushSource(sourceId, Object.assign({ label }, patch));
   let ws = null;
   let timer = null;
   let staleTimer = null;
@@ -1918,7 +2552,7 @@ function createWsClient(opts) {
       if (stopped) return
       if (lastActivityAt && Date.now() - lastActivityAt > staleAfterMs) {
         // 这条连接确实已经死了，不必再等退避：立刻换一条，onopen 会刷新 lastActivityAt
-        store.push({ status: 'reconnecting', retries, detail: '久无数据（疑似连接已断开），正在重连' });
+        report({ status: 'reconnecting', retries, detail: '久无数据（疑似连接已断开），正在重连' });
         teardown();
         connect();
         return
@@ -1932,7 +2566,7 @@ function createWsClient(opts) {
   const scheduleReconnect = (reason) => {
     if (stopped) return
     retries += 1; // 从「第 1 次」开始计数，退避序列 1s → 2s → 4s → … → 60s 封顶
-    store.push({
+    report({
       status: 'reconnecting',
       retries,
       detail: (reason || '连接断开') + '，正在重连（第 ' + retries + ' 次）',
@@ -1942,8 +2576,8 @@ function createWsClient(opts) {
   };
   const connect = () => {
     if (stopped) return
-    const url = currentCfg().source === 'sandbox' ? SANDBOX_URL : WS_URL;
-    store.push({ status: 'connecting', retries, detail: '正在连接 ' + url });
+    const url = urlOf();
+    report({ status: 'connecting', retries, detail: '正在连接 ' + url });
     try { ws = new window.WebSocket(url); } catch (err) {
       scheduleReconnect();
       return
@@ -1954,16 +2588,13 @@ function createWsClient(opts) {
       retries = 0;
       lastActivityAt = Date.now();
       armStaleWatch();
-      const openDetail = url.indexOf('sandbox') !== -1
-        ? '沙箱源：回放 2023 年历史（约30秒/条）'
-        : '已连接 P2PQuake（约每 10 分钟自动重连）';
-      store.push({ status: 'open', retries: 0, detail: openDetail });
+      report({ status: 'open', retries: 0, detail: openDetailOf(url) });
     };
     ws.onmessage = (ev) => {
       lastActivityAt = Date.now();
       try {
         const raw = JSON.parse(String(ev.data));
-        handleRaw(raw, currentCfg());
+        onRaw(raw, currentCfg());
       } catch (err) { /* 单条解析失败不影响连接 */ }
     };
     ws.onerror = () => { /* onclose 统一处理 */ };
@@ -1983,7 +2614,7 @@ function createWsClient(opts) {
     stop() {
       stopped = true;
       teardown();
-      store.push({ status: 'closed', retries, detail: '已停止（插件停用）' });
+      report({ status: 'closed', retries, detail: '已停止（插件停用）' });
     },
     restart() {
       stopped = false;
@@ -2036,16 +2667,22 @@ const FEED_FIRST_DELAY_MS = 3000;
 const FEED_CURSOR_KEY = 'dsh.quakeAlert.feedCursor';
 /** 首次启动的哨兵：还没有游标 → 用 tail 语义对齐位置而不是重放历史。 */
 const FEED_TAIL = 'tail';
+/**
+ * 各源最近一次轮询结果的**只读快照**（id → stats）。放在模块级对象而不是 store：
+ * 轮询每 15 秒一轮，若每轮都 store.push，设置页与侧边栏会被无意义地反复重渲。
+ * 设置页自己定时读它（见 13-ui-settings 的「全球源状态」）。
+ */
+const feedStatsOf = {};
 /** 本地路由的单次请求超时：Host 卡住时不能让 inFlight 一直占着、把整条轮询拖停。 */
 const FEED_FETCH_TIMEOUT_MS = 10 * 1000;
 
 /** 读回持久化游标；任何脏数据（非数字 / NaN / 负数）一律当作"没有记录"。 */
-function loadFeedCursor() {
-  const v = loadJSON(FEED_CURSOR_KEY, null);
+function loadFeedCursor(key) {
+  const v = loadJSON(key, null);
   return (typeof v === 'number' && Number.isFinite(v) && v >= 0) ? Math.floor(v) : null
 }
-function saveFeedCursor(v) {
-  if (typeof v === 'number' && Number.isFinite(v) && v >= 0) saveJSON(FEED_CURSOR_KEY, Math.floor(v));
+function saveFeedCursor(v, key) {
+  if (typeof v === 'number' && Number.isFinite(v) && v >= 0) saveJSON(key, Math.floor(v));
 }
 
 async function defaultFetchJson(url) {
@@ -2058,6 +2695,10 @@ async function defaultFetchJson(url) {
 
 /**
  * @param {object} [opts]
+ * @param {string} [opts.id] 源标识（诊断用）
+ * @param {string} [opts.path] Host 增量路由；全球源用 `?source=usgs` 这类分派参数
+ * @param {string} [opts.cursorKey] 该源自己的游标存储键——多源共用一条键会互相顶掉游标
+ * @param {(cfg: object) => boolean} [opts.enabled] 该源当前是否需要拉取（按灾种开关判断）
  * @param {number} [opts.intervalMs]
  * @param {number} [opts.firstDelayMs]
  * @param {(url: string) => Promise<object>} [opts.fetchJson] 注入点（测试用）
@@ -2068,13 +2709,19 @@ async function defaultFetchJson(url) {
  * @param {(err: Error) => void} [opts.onError]
  */
 function createFeedClient(opts = {}) {
+  const id = opts.id || 'jma';
+  const path = opts.path || FEED_PATH;
+  const cursorKey = opts.cursorKey || FEED_CURSOR_KEY;
   const intervalMs = opts.intervalMs || FEED_POLL_MS;
   const firstDelayMs = opts.firstDelayMs === undefined ? FEED_FIRST_DELAY_MS : opts.firstDelayMs;
   const fetchJson = opts.fetchJson || defaultFetchJson;
   const getCfg = opts.getCfg || currentCfg;
   const onError = opts.onError || (() => {});
-  const loadCursor = opts.loadCursor || loadFeedCursor;
-  const saveCursor = opts.saveCursor || saveFeedCursor;
+  // 该源此轮要不要拉：气象源跟 weather 开关，全球地震跟 earthquake 开关，海啸跟 tsunami 开关。
+  // 关掉之后 Client 不再拉增量，Host 侧对应的轮询器也会因 idle 自然停下。
+  const enabled = opts.enabled || ((cfg) => (cfg.disasters || {}).weather !== false);
+  const loadCursor = opts.loadCursor || (() => loadFeedCursor(cursorKey));
+  const saveCursor = opts.saveCursor || ((v) => saveFeedCursor(v, cursorKey));
   const apply = opts.apply || ((entry, cfg) => {
     const alert = parseJma(entry && entry.xml, { id: entry && entry.id });
     if (!alert) return false
@@ -2107,7 +2754,9 @@ function createFeedClient(opts = {}) {
     stats.polls += 1;
     let data;
     try {
-      data = await fetchJson(FEED_PATH + '?since=' + (since === null ? FEED_TAIL : since));
+      // path 可能自带查询串（全球源用 `?source=usgs` 分派），所以要按需选分隔符
+      const sep = path.indexOf('?') === -1 ? '?' : '&';
+      data = await fetchJson(path + sep + 'since=' + (since === null ? FEED_TAIL : since));
     } catch (err) {
       stats.errors += 1;
       onError(err);
@@ -2170,7 +2819,11 @@ function createFeedClient(opts = {}) {
 
   function pollSerial() {
     if (inFlight) return inFlight
-    inFlight = pollOnce().finally(() => { inFlight = null; });
+    inFlight = pollOnce().finally(() => {
+      inFlight = null;
+      // 给设置页的「全球源状态」留一份快照（不触发 store 重渲）
+      feedStatsOf[id] = Object.assign({}, stats, { running });
+    });
     return inFlight
   }
 
@@ -2178,8 +2831,8 @@ function createFeedClient(opts = {}) {
     if (!running) return
     timer = setTimeout(async () => {
       timer = null;
-      // 气象灾害关闭时不必拉增量（Host 侧随后也会据此停轮询）
-      if ((getCfg().disasters || {}).weather !== false) {
+      // 该源的灾种开关关闭时不必拉增量（Host 侧随后也会据此停轮询）
+      if (enabled(getCfg())) {
         try { await pollSerial(); } catch (err) { onError(err); }
       }
       schedule(intervalMs);
@@ -2187,6 +2840,9 @@ function createFeedClient(opts = {}) {
   }
 
   return {
+    id,
+    path,
+    cursorKey,
     start() {
       if (running) return
       running = true;
@@ -2277,6 +2933,18 @@ function SettingsPanel() {
   const [cityQuery, setCityQuery] = useState({}); // 每个县的市町村搜索词
   const [weatherTestMsg, setWeatherTestMsg] = useState(''); // 「发送测试气象警报」的结果提示
   const [weatherTestSeq, setWeatherTestSeq] = useState(0); // 测试场景轮换游标
+  // 全球关注点的输入草稿与反馈（0.4.0）：校验失败必须给出文字原因，不能静默吞掉用户输入
+  const [placeDraft, setPlaceDraft] = useState({ name: '', lat: '', lon: '', radiusKm: '300' });
+  const [placeMsg, setPlaceMsg] = useState('');
+  // 全球链路的测试（0.4.0）：场景轮换游标与结果提示
+  const [geTestSeq, setGeTestSeq] = useState(0);
+  const [geTestMsg, setGeTestMsg] = useState('');
+  // 「全球源状态」里的相对时间要自己走（feedStatsOf 不经过 store，避免每 15 秒重渲整个设置页）
+  const [, setFeedTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setFeedTick((x) => x + 1), 5000);
+    return () => clearInterval(t)
+  }, []);
   // 音量滑块：拖动期间只改本地草稿，停手 300ms 后才落盘（避免每移动 1px 写一次 localStorage）
   const [volDraft, setVolDraft] = useState(null);
   const volTimer = useRef(null);
@@ -2317,6 +2985,93 @@ function SettingsPanel() {
     if (next.length > MAX_WATCH_CITIES) next = next.slice(0, MAX_WATCH_CITIES);
     return { ...c, watch: { ...c.watch, cities: next } }
   });
+
+  // ---------- 全球关注点（0.4.0）----------
+  // 全球源给的是震中坐标，没有都道府县，所以关注表达是「位置 + 半径」。
+  // 校验放在这里而不是只靠 normalizeCfg：用户需要看到"为什么没加上"，静默吞掉输入最糟。
+  const addPlace = () => {
+    const places = cfg.watch.places || [];
+    const lat = Number(String(placeDraft.lat).trim());
+    const lon = Number(String(placeDraft.lon).trim());
+    const radiusKm = Number(String(placeDraft.radiusKm).trim());
+    if (String(placeDraft.lat).trim() === '' || !Number.isFinite(lat) || Math.abs(lat) > 90) {
+      setPlaceMsg('纬度需要是 -90 ~ 90 之间的数字'); return
+    }
+    if (String(placeDraft.lon).trim() === '' || !Number.isFinite(lon) || Math.abs(lon) > 180) {
+      setPlaceMsg('经度需要是 -180 ~ 180 之间的数字'); return
+    }
+    if (!Number.isFinite(radiusKm) || radiusKm < 1 || radiusKm > 2000) {
+      setPlaceMsg('半径需要是 1 ~ 2000 km 之间的数字'); return
+    }
+    if (places.length >= MAX_WATCH_PLACES) {
+      setPlaceMsg('最多 ' + MAX_WATCH_PLACES + ' 个关注点'); return
+    }
+    const name = String(placeDraft.name || '').trim() || (lat.toFixed(2) + ', ' + lon.toFixed(2));
+    setCfg((c) => ({ ...c, watch: { ...c.watch, places: (c.watch.places || []).concat([{ name, lat, lon, radiusKm }]) } }));
+    setPlaceDraft({ name: '', lat: '', lon: '', radiusKm: String(radiusKm) });
+    setPlaceMsg('已添加「' + name + '」（坐标相同的重复点会被自动合并）');
+  };
+  const removePlace = (idx) => setCfg((c) => ({
+    ...c, watch: { ...c.watch, places: (c.watch.places || []).filter((_, i) => i !== idx) },
+  }));
+  const useMyLocation = () => {
+    const geo = (typeof navigator !== 'undefined') ? navigator.geolocation : null;
+    if (!geo || typeof geo.getCurrentPosition !== 'function') { setPlaceMsg('当前浏览器不支持定位，请手动填写坐标'); return }
+    setPlaceMsg('正在获取当前位置…');
+    geo.getCurrentPosition(
+      (pos) => {
+        const c = pos && pos.coords;
+        if (!c) { setPlaceMsg('定位失败：没有返回坐标'); return }
+        setPlaceDraft((d) => ({
+          ...d,
+          name: d.name || '我的位置',
+          lat: String(c.latitude.toFixed(4)),
+          lon: String(c.longitude.toFixed(4)),
+        }));
+        setPlaceMsg('已填入当前位置，确认半径后点「添加关注点」');
+      },
+      (err) => setPlaceMsg('定位失败：' + ((err && err.message) || '被拒绝或不可用')),
+      { timeout: 10000 },
+    );
+  };
+  /** 关注点输入框（受控）：四个字段共用一份草稿。 */
+  const placeField = (label, key, placeholder, width) => h('label', {
+    style: { display: 'flex', flexDirection: 'column', gap: 2, fontSize: 11, color: '#9aa0a6' },
+  }, label, h('input', {
+    type: 'text',
+    value: placeDraft[key],
+    placeholder,
+    onChange: (e) => setPlaceDraft((d) => Object.assign({}, d, { [key]: e.target.value })),
+    style: {
+      width, boxSizing: 'border-box', background: '#ffffff', color: '#1a1a1a',
+      border: '1px solid #6b7280', borderRadius: 6, padding: '3px 6px', fontSize: 12,
+    },
+  }));
+  // 全球源状态（0.4.0）：用户看不出"链路到底在不在拉"，这是最常见的困惑来源——
+  // 尤其全球地震本来就不频繁。feedStatsOf 不经过 store（见 12b 的注释），所以这里自己每 5 秒重读。
+  const feedStatusBlock = () => {
+    const rows = [];
+    const emsc = (store.sources || {}).emsc;
+    rows.push('EMSC（全球地震，实时推送）：' + (emsc
+      ? statusMetaOf(emsc.status, emsc.retries).text + (emsc.detail ? ' · ' + emsc.detail : '')
+      : '未启动'));
+    const sourceLabel = {
+      jma: '気象庁（气象灾害，Host 轮询）',
+      usgs: 'USGS（全球地震目录，Host 轮询）',
+      noaa: 'NOAA（海啸，Host 轮询）',
+    };
+    for (const id of ['jma', 'usgs', 'noaa']) {
+      const st = feedStatsOf[id];
+      if (!st) { rows.push(sourceLabel[id] + '：尚未拉取'); continue }
+      const ago = st.lastAt ? Math.max(0, Math.round((Date.now() - st.lastAt) / 1000)) + ' 秒前' : '—';
+      rows.push(sourceLabel[id] + '：已收到 ' + st.received + ' 条增量' +
+        (st.errors ? '，' + st.errors + ' 次失败' : '') + ' · 最近拉取 ' + ago);
+    }
+    return h('div', { style: { marginTop: 10, fontSize: 11, color: '#9aa0a6', lineHeight: 1.7 } },
+      h('div', { style: { marginBottom: 2 } }, '全球源状态'),
+      rows.map((t, i) => h('div', { key: 'feedstat-' + i }, t)),
+    )
+  };
   // 市区町村选择器：数据表到位后，为每个已关注的县提供「搜索 + 多选」
   const cityPicker = () => {
     if (cityTableState === 'failed') {
@@ -2492,6 +3247,58 @@ function SettingsPanel() {
     // 灾害类型（0.3.0）
     sectionDisasters(),
 
+    // 全球关注点（0.4.0）：全球源是坐标型，关注表达是「位置 + 半径」
+    s.section('全球关注点（坐标 + 半径）',
+      h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 8 } },
+        (cfg.watch.places || []).length === 0
+          ? '未设置时，全球源（EMSC / USGS 地震、NOAA 海啸）的消息不会打扰你。添加你所在或关心的位置即可生效，不需要重启。'
+          : '已设置 ' + cfg.watch.places.length + ' 个位置：震中落在半径内才提醒。日本的地震 / 海啸不受这里影响，仍按上面的都道府县判定。'),
+      ...(cfg.watch.places || []).map((p, i) => h('div', {
+        key: 'place-' + i,
+        style: { display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0', fontSize: 12 },
+      },
+        h('span', { style: { flex: 1 } },
+          p.name + ' · ' + Number(p.lat).toFixed(3) + ', ' + Number(p.lon).toFixed(3) + ' · 半径 ' + p.radiusKm + ' km'),
+        s.btn('删除', () => removePlace(i)),
+      )),
+      h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'flex-end', marginTop: 8 } },
+        placeField('名称', 'name', '如 东京 / 家', 120),
+        placeField('纬度', 'lat', '35.6812', 90),
+        placeField('经度', 'lon', '139.7671', 90),
+        placeField('半径 km', 'radiusKm', '300', 80),
+        s.btn('添加关注点', addPlace),
+        s.btn('用当前位置', useMyLocation),
+      ),
+      placeMsg ? h('div', { style: { fontSize: 11, color: '#93c5fd', marginTop: 6 } }, placeMsg) : null,
+      // 全球源的地震不是随时都有，没法"等一条"来验证链路 —— 与气象链路一样给一个本地测试按钮。
+      // 构造的是**源格式原文**（EMSC / USGS / NOAA 各一种），因此解析器与匹配引擎都被真实走过。
+      h('div', { style: { marginTop: 10, borderTop: '1px solid rgba(148,163,184,0.18)', paddingTop: 8 } },
+        s.row(s.btn('发送测试全球警报（轮换场景）', () => {
+          const places = cfg.watch.places || [];
+          if (places.length === 0) { setGeTestMsg('请先添加一个全球关注点 —— 测试消息需要一个位置来放震中'); return }
+          const sc = TEST_GEO_SCENARIOS[geTestSeq % TEST_GEO_SCENARIOS.length];
+          const ms = Date.now();
+          const msg = buildTestGlobalMessage(places[0], ms, sc.key);
+          setGeTestSeq(geTestSeq + 1);
+          const alert = parseTestGlobalMessage(msg);
+          if (!alert) { setGeTestMsg('测试消息解析失败 —— 请把这个情况反馈给开发者'); return }
+          const res = handleAlert(alert, currentCfg(), { skipQuietHours: true });
+          // 提示按**实际结果**生成：开关关闭 / 半径外 / 静默 / 其它标签页已提醒时就是不会响，
+          // 必须如实说明，否则用户会以为插件坏了
+          const outcome = res && res.notified
+            ? ' —— 已播报：应看到提示音与弹窗'
+            : ' —— 未播报（' + ((res && res.detail) || '未知原因') + '），只会记入下方「最近预警记录」';
+          setGeTestMsg('已发送：' + sc.label + '（' + sc.note + '）' + outcome);
+        })),
+        h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4, lineHeight: 1.6 } },
+          '测试消息在本地构造（EMSC / USGS / NOAA 三种源格式轮换），不发任何网络请求，可反复点击。场景依次为：' +
+          TEST_GEO_SCENARIOS.map((x) => x.label).join(' / ') +
+          '。最后一条刻意落在半径之外——用来演示半径是怎么起作用的。'),
+        geTestMsg ? h('div', { style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, geTestMsg) : null,
+      ),
+      feedStatusBlock(),
+    ),
+
     // 阈值
     s.section('提醒阈值',
       s.label('地震（实测震度最低值）'),
@@ -2500,6 +3307,10 @@ function SettingsPanel() {
       s.row(s.select(cfg.thresholds.eewScale, SCALE_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, eewScale: Number(v) } })), (o) => o.label)),
       s.label('海啸'),
       s.row(s.select(cfg.thresholds.tsunamiGrade, TSUNAMI_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, tsunamiGrade: v } })), (o) => o.label)),
+      s.label('全球地震（最低震级，EMSC / USGS）'),
+      s.row(s.select(cfg.thresholds.globalMagnitude, GLOBAL_MAG_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, globalMagnitude: Number(v) } })), (o) => o.label)),
+      h('div', { style: { fontSize: 11, color: '#9aa0a6' } },
+        '全球源给的是震级、日本源给的是震度，两者不可换算，所以是两个独立旋钮。'),
     ),
 
     // 通知与声音
@@ -2740,10 +3551,62 @@ function apply(ctx) {
 
   // 気象庁电文增量（0.3.0）：Host 侧负责轮询与去重，这里只拉本地增量并交给主链。
   const feed = createFeedClient();
+  // 全球地震（USGS，0.4.0）：Host 轮询 GeoJSON（单级），Client 只拉本地增量。
+  // 与 EMSC 是互补关系——EMSC 是实时推送，USGS 目录更完整、还带修订版（updated 刷新）。
+  // 两者的同类地震靠 geoEventKey 归并，不会重复提醒。
+  const usgsFeed = createFeedClient({
+    id: 'usgs',
+    path: FEED_PATH + '?source=usgs',
+    cursorKey: FEED_CURSOR_KEY + '.usgs',
+    enabled: (cfg) => (cfg.disasters || {}).earthquake !== false,
+    apply: (entry, cfg) => {
+      let feature;
+      try { feature = JSON.parse(entry && entry.xml); } catch (err) { return false }
+      const alert = parseUsgsFeature(feature);
+      if (!alert) return false
+      handleAlert(alert, cfg);
+      return true
+    },
+  });
+  // 海啸（NOAA，0.4.0）：Host 拉事件列表再取 CAP 详情，Client 解析 CAP。
+  const noaaFeed = createFeedClient({
+    id: 'noaa',
+    path: FEED_PATH + '?source=noaa',
+    cursorKey: FEED_CURSOR_KEY + '.noaa',
+    intervalMs: 5 * 60 * 1000,
+    enabled: (cfg) => (cfg.disasters || {}).tsunami !== false,
+    apply: (entry, cfg) => {
+      const alert = parseNoaaCap(entry && entry.xml, { id: entry && entry.id });
+      if (!alert) return false
+      handleAlert(alert, cfg);
+      return true
+    },
+  });
+  const feeds = [feed, usgsFeed, noaaFeed];
   ctx.effect(() => {
-    feed.start();
-    return () => { try { feed.stop(); } catch (err) {} }
-  }, 'dsh-quake-alert: JMA feed client');
+    for (const f of feeds) f.start();
+    return () => { for (const f of feeds) { try { f.stop(); } catch (err) {} } }
+  }, 'dsh-quake-alert: feed clients');
+
+  // 全球地震（0.4.0）：EMSC 的 WebSocket，复用与 P2PQuake 同一套连接管理（退避、建连看门狗、
+  // 生命周期归还 fiber）。但**关掉「久无数据」检测**（staleAfterMs=0）：全球 M4+ 大约每 30 分钟
+  // 才有一次推送，拿消息间隔判断连接死活会把一条完全正常的连接反复掐断重连。真正的断开
+  // 浏览器会给 onclose，建连看门狗也仍然生效，所以这两种静默失效并没有被放过。
+  const emsc = createWsClient({
+    sourceId: 'emsc',
+    label: 'EMSC',
+    urlOf: () => EMSC_WS_URL,
+    staleAfterMs: 0,
+    openDetail: () => '已连接 EMSC（全球地震实时推送）',
+    onRaw: (raw, cfg) => {
+      const alert = parseEmsc(raw);
+      if (alert) handleAlert(alert, cfg);
+    },
+  });
+  ctx.effect(() => {
+    emsc.start();
+    return () => { try { emsc.stop(); } catch (err) {} }
+  }, 'dsh-quake-alert: EMSC ws client');
 
   // 设置页：设置 → 灾害预警
   ctx.slots.inject('settings.section', () => ctx.slots.register({
@@ -2763,7 +3626,7 @@ function apply(ctx) {
 }
 
 // 单测钩子（客户端宿主忽略额外导出）
-const __test = { parse, parseQuake, parseEew, parseTsunami, parseJma, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn: maxLevelIn, jmaItemsOf: itemsOf, matchAlert, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, inQuietHours, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable };
+const __test = { parse, parseQuake, parseEew, parseTsunami, parseJma, parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage, feedStatsOf, watchlessPoint, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn: maxLevelIn, jmaItemsOf: itemsOf, matchAlert, matchPointAlert, distanceKm, validGeo, normalizePlaces, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, inQuietHours, isDuplicate, isEventRepeat, claimAlertForTab, ensureAlertChannel, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable };
 
 // activeClient 是 12-websocket 的模块级 let：给 12 用的赋值出口（跨模块不能写 imported binding）
 // 由 12-websocket 提供 setter；这里仅保留引用以便阅读

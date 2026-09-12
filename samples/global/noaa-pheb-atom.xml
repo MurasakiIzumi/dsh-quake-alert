@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom" xmlns:geo="http://www.w3.org/2003/01/geo/wgs84_pos#" xmlns:georss="http://www.georss.org/georss">
+    <id>urn:uuid:31a5761b-9fcb-48a9-9193-15623333b26f</id><title>        TSUNAMI INFORMATION STATEMENT NUMBER   1        </title>
+    <updated>2026-08-22T08:30:40Z</updated>
+    <author>
+      <name>NWS PACIFIC TSUNAMI WARNING CENTER HONOLULU HI</name>
+<uri>https://www.tsunami.gov/</uri>
+     <email>ntwc@noaa.gov</email>
+    </author>
+<icon>https://www.tsunami.gov/images/favicon.ico</icon>
+<link type="application/atom+xml" rel="self" title="self" href="https://www.tsunami.gov/events/xml/PAAQAtom.xml"/>
+ <link rel="related" title="Energy Map" href="https://www.tsunami.gov/events/PHEB/2026/08/22/26234000/1/WEPA42/ " type="image/jpeg" /> 
+
+   <entry>
+
+    <title>SCOTIA SEA</title><updated>2026-08-22T08:30:40Z</updated>
+<geo:lat>-60.481</geo:lat>
+<geo:long>-47.185</geo:long>
+<summary type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml">
+     <strong>Category:</strong> Information<br/><strong>Bulletin Issue Time: </strong> 2026.08.22 08:30:40 UTC <br/><strong>Preliminary Magnitude: </strong>6.7(Mwp)<br/><strong>Lat/Lon: </strong>-60.481 / -47.185<br/><strong>Affected Region: </strong>SCOTIA SEA<br/><b>Note:</b>  <br/><strong>Definition: </strong><a href="https://www.tsunami.gov/events/PHEB/2026/08/22/26234000/1/WEPA42/WEPA42.txt">View bulletin</a><img src="https://www.tsunami.gov/events/PHEB/2026/08/22/26234000/1/WEPA42/ " alt="Energy Map" /> 
+ </div></summary>
+    <id>urn:uuid:603f5e36-477e-4138-aa30-85f222584624</id><link rel="related" title="CapXML document" href="https://www.tsunami.gov/events/PHEB/2026/08/22/26234000/1/WEPA42/PHEBCAP.xml" type="application/cap+xml" />
+<link rel="alternate" title="Bulletin" href="https://www.tsunami.gov/events/PHEB/2026/08/22/26234000/1/WEPA42/WEPA42.txt" type="application/xml" />
+</entry>
+</feed>

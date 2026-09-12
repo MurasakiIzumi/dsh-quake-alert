@@ -16,10 +16,16 @@ const { useState, useEffect, useRef } = React
 // ---------- 常量 ----------
 const WS_URL = 'wss://api.p2pquake.net/v2/ws'
 const SANDBOX_URL = 'wss://api-realtime-sandbox.p2pquake.net/v2/ws'
+// 全球地震（0.4.0）：EMSC 的实时推送通道。它是少数提供 WebSocket 的全球地震源
+// （USGS / GDACS 都只有轮询），因此在全球链路上复用与 P2PQuake 相同的连接管理。
+const EMSC_WS_URL = 'wss://www.seismicportal.eu/standing_order/websocket'
 const STORAGE_KEY = 'dsh.quakeAlert.v1'
 const HISTORY_KEY = 'dsh.quakeAlert.history'
 const HISTORY_MAX = 30 // 「最近预警」保留条数（内存与设置页展示）
 const MAX_WATCH_CITIES = 300 // 关注市区町村上限（防止配置与 UI 被撑爆）
+// 全球关注点上限：每个点带名字、经纬度与半径，几十个点就足够覆盖"我住哪、家人在哪"，
+// 再多说明用法不对（那是一张地图，不是一份关注列表）。
+const MAX_WATCH_PLACES = 20
 const RECONNECT_BASE = 1000 // 指数退避起点 1s
 const RECONNECT_MAX = 60000 // 封顶 60s
 
@@ -38,6 +44,13 @@ const TSUNAMI_RANK = { Watch: 1, Warning: 2, MajorWarning: 3 }
 const TSUNAMI_GRADE_TEXT = { Watch: '津波注意报', Warning: '海啸警报', MajorWarning: '大海啸警报' }
 const TSUNAMI_OPTIONS = [
   { g: 'Watch', label: '注意报及以上' }, { g: 'Warning', label: '警报及以上' }, { g: 'MajorWarning', label: '仅大海啸警报' },
+]
+// 全球源（EMSC / USGS）的最低震级。全球目录里 M2.5+ 每天近百条，而用户真正关心的是
+// "我这附近有没有明显晃动"——M4.5 是全球速报的常用门槛，默认取它。
+const GLOBAL_MAG_OPTIONS = [
+  { v: 3, label: 'M3.0 以上' }, { v: 3.5, label: 'M3.5 以上' }, { v: 4, label: 'M4.0 以上' },
+  { v: 4.5, label: 'M4.5 以上（默认）' }, { v: 5, label: 'M5.0 以上' }, { v: 5.5, label: 'M5.5 以上' },
+  { v: 6, label: 'M6.0 以上' }, { v: 6.5, label: 'M6.5 以上' }, { v: 7, label: 'M7.0 以上' },
 ]
 
 // 日本 47 都道府县：jp 为匹配用日文全称（P2PQuake pref 格式），zh 为界面显示
@@ -90,9 +103,15 @@ function normalizePref(raw) {
 const DEFAULT_CFG = {
   version: 1,
   source: 'prod', // prod | sandbox（沙箱回放 2023 年历史，约30秒/条，测试用）
-  watch: { prefectures: [], cities: [] }, // 空 = 关注全日本（阈值仍生效）；cities 为可选的市区町村细化
+  // 两种关注模式并存：
+  //   · 行政区（prefectures / cities）——日本源（P2PQuake、気象庁）用，粒度到市区町村
+  //   · 坐标点（places）——全球源（EMSC / USGS / NOAA）用，判定方式是「震中距 ≤ radiusKm」
+  // 两者互不影响：日本用户不用配 places，全球用户不用配 prefectures。
+  watch: { prefectures: [], cities: [], places: [] },
   disasters: { earthquake: true, tsunami: true, weather: true }, // weather = 气象灾害（泥石流 / 洪水 / 大雨 / 高潮…），固定 L4 以上播报
-  thresholds: { quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch' },
+  // globalMagnitude：全球源（EMSC / USGS）的最低震级。日本源用的是震度（quakeScale），
+  // 全球源只有震级——实测 EMSC 会推 M3.8 级别的事件，若沿用"来什么报什么"会明显吵闹。
+  thresholds: { quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch', globalMagnitude: 4.5 },
   notify: { sound: true, system: true, volume: 0.7 },
   dedupe: { windowMinutes: 10 },
   // 静默时段（0.2.0）：按浏览器本地时间判定；跨午夜用 start > end 表示（如 23:00–07:00）
@@ -100,4 +119,4 @@ const DEFAULT_CFG = {
 }
 
 
-export { React, h, useState, useEffect, useRef, WS_URL, SANDBOX_URL, STORAGE_KEY, HISTORY_KEY, HISTORY_MAX, MAX_WATCH_CITIES, RECONNECT_BASE, RECONNECT_MAX, SCALE_TEXT, SCALE_OPTIONS, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, TSUNAMI_OPTIONS, PREFECTURES, PREF_SET, PREF_SHORT, PREF_BY_CODE, prefOfCode, prefCodeOf, normalizePref, DEFAULT_CFG }
+export { React, h, useState, useEffect, useRef, WS_URL, SANDBOX_URL, EMSC_WS_URL, STORAGE_KEY, HISTORY_KEY, HISTORY_MAX, MAX_WATCH_CITIES, MAX_WATCH_PLACES, RECONNECT_BASE, RECONNECT_MAX, SCALE_TEXT, SCALE_OPTIONS, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, PREFECTURES, PREF_SET, PREF_SHORT, PREF_BY_CODE, prefOfCode, prefCodeOf, normalizePref, DEFAULT_CFG }

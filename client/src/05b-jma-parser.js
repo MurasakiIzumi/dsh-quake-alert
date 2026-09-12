@@ -33,6 +33,31 @@ const FLOOD_KIND_LEVEL = {
 }
 // 解除 / 无内容：这些 Kind 不代表"正在发布某种警报"
 const INACTIVE_KIND = /^(解除|なし|発表警報・注意報はなし)$/
+
+/**
+ * 旧格式电文的 Kind 名称 → 警戒レベル（0.3.4 修复漏报）。
+ *
+ * R06 新格式把级别写在名称里（「レベル４大雨危険警報」），旧格式只写名称
+ * （「大雨特別警報」「大雨警報」「大雨注意報」）。此前 levelOf() 只认「レベルＮ」字样，
+ * 于是**不带级别数字的旧格式电文被整体丢弃**（parseJma 返回 null）——包括最高级别的特别警报。
+ * 实测证据（2026-09-07 東京都「大雨特別警報」，见 samples/jma-vpww53-tokyo-special-20260907.xml）：
+ * 同一事件的三条电文 VPWW53 / VPWW54 / VPNO50 全部返回 null，插件该事件完全静默；
+ * 而同一时刻的 R06 电文只有「その他注意報 / 暴風 / 波浪」，不含这条特别警报。
+ * 也就是说：旧格式不是"迟早会被 R06 覆盖的副本"，它是部分时刻唯一的内容载体。
+ *
+ * 语义依据：気象庁的警报体系里 特別警報 > 危険警報(=L4) > 警報(=L3) > 注意報(=L2)。
+ * 注意報级（2）**刻意不返回**：同一次发布往往同时以 VPWW53 与（Ｈ２７）两份副本出现，
+ * 把 L2 也抬升等于让历史被同一份注意報的两份副本刷屏；而 L2 本就不播报。
+ * R06 的「レベル２」仍照旧解析入历史，行为不变。
+ */
+function legacyKindLevel(name) {
+  const s = String(name || '')
+  if (!s) return 0
+  if (/特別警報/.test(s)) return 5
+  if (/危険警報/.test(s)) return 4
+  if (/警報/.test(s) && !/注意報/.test(s)) return 3
+  return 0
+}
 // 电文标题 → 中文标签（M3 才做 i18n，这里与既有 kindLabel 一样先硬编码中文）
 const KIND_LABELS = [
   [/土砂災害警戒情報/, '泥石流警戒情报'],
@@ -152,18 +177,25 @@ function itemsOf(scope) {
 function levelOf({ title, headTitle, headlineText, items }) {
   let level = 0
   for (const it of items) {
+    if (INACTIVE_KIND.test(it.kindName)) continue
     const inName = maxLevelIn(it.kindName)
     if (inName > level) level = inName
-    if (!INACTIVE_KIND.test(it.kindName)) {
-      const mapped = own(FLOOD_KIND_LEVEL, it.kindName) || 0
-      if (mapped > level) level = mapped
-    }
+    const mapped = own(FLOOD_KIND_LEVEL, it.kindName) || 0
+    if (mapped > level) level = mapped
+    const legacy = legacyKindLevel(it.kindName)
+    if (legacy > level) level = legacy
   }
   for (const s of [headlineText, headTitle, title]) {
     const n = maxLevelIn(s)
     if (n > level) level = n
   }
   if (level === 0 && /土砂災害警戒情報/.test(title)) level = 4
+  // 「気象特別警報報知」是气象厅为特別警報专发的最高优先级报知电文；正常情况它的 Kind 名称
+  // 就是「大雨特別警報」（已被上面的映射接住），这里只是 Kind 缺失时的兜底。
+  // 必须排除"整条电文都是解除"的情况：解除报知的 Kind 是「解除」（循环里被 continue 跳过），
+  // 若不排除，标题兜底会把一条解除消息抬成 L5，headline 会显示成「警戒レベル5（已解除）」。
+  const allInactive = items.length > 0 && items.every((it) => INACTIVE_KIND.test(it.kindName))
+  if (level === 0 && !allInactive && /気象特別警報報知/.test(title)) level = 5
   return level
 }
 
@@ -223,6 +255,33 @@ function kindLabelOf(title) {
 }
 
 /**
+ * 汇总型电文：同一次发布会有 2〜3 份**不同格式的副本**同时出现在 feed 里
+ * （实测 2026-09-07 東京都特別警報：VPWW53「気象特別警報・警報・注意報」、
+ * VPWW54「気象警報・注意報（Ｈ２７）」、VPNO50「気象特別警報報知」，时间戳 13:57:52〜54）。
+ * 它们的 title / headTitle 各不相同，而気象警報・注意報 的 EventID 又是空的——
+ * 若沿用「标题」做事件键，同一条警报会被当成三个事件、连响三次铃。
+ */
+const SUMMARY_TITLE = /気象特別警報・警報・注意報|気象警報・注意報（Ｈ２７）|気象特別警報報知/
+// 灾种关键词（顺序 = 优先级无关，按最高级别的 Kind 名称匹配具体灾种）
+const HAZARD_KEYS = [
+  [/大雨|浸水/, '大雨'], [/土砂/, '土砂'], [/洪水|氾濫/, '洪水'], [/高潮/, '高潮'],
+  [/暴風/, '暴風'], [/波浪/, '波浪'], [/雷/, '雷'], [/濃霧/, '濃霧'],
+  [/乾燥/, '乾燥'], [/なだれ/, 'なだれ'], [/大雪|着雪/, '大雪'],
+]
+/** 取级别最高的那条 Kind 名称，再从中提取灾种——副本之间只要最高级条目相同就会得到同一个键。 */
+function hazardKeyOf(items) {
+  let name = ''
+  let best = -1
+  for (const it of items) {
+    if (INACTIVE_KIND.test(it.kindName)) continue
+    const lv = Math.max(legacyKindLevel(it.kindName), own(FLOOD_KIND_LEVEL, it.kindName) || 0, maxLevelIn(it.kindName))
+    if (lv > best) { best = lv; name = it.kindName }
+  }
+  for (const [re, key] of HAZARD_KEYS) if (re.test(name)) return key
+  return name || '气象'
+}
+
+/**
  * 解析一条 JMA 电文。返回 null 表示这条电文与本插件无关（天气预报、地震火山、观测资料等）。
  * @param {string} xml 详情电文原文
  * @param {{ id?: string }} [entry] Host 侧 feed 条目（用于给 Alert 一个稳定 id）
@@ -254,6 +313,17 @@ function parseJma(xml, entry) {
   const first = String(headlineText || '').split(/[。\n]/)[0].trim()
   const levelText = level > 0 ? '（警戒レベル' + level + '）' : ''
   const headline = (kindLabel + levelText + (first ? ' · ' + first : '')).slice(0, 180)
+  // 事件键：优先 EventID，其次 Head 标题。汇总型电文（同时存在多份格式副本）改用**内容指纹**
+  // ——「灾种 + 发布时刻(分钟) + 府县码」——否则同一条警报会因副本标题不同而被当成三个事件、连响三次。
+  // 指纹里的府县码取电文 id 的后缀，而不是 regions[0]：解除电文的 regions 恒为空，
+  // 用 regions 会让解除与发布算出不同的键，handleCancelled 就找不到"此前提醒过的事件"，
+  // 解除提醒会静默丢失（与 0.1.3 加入的取消链路冲突）。
+  const idSuffix = /([0-9]{6})\.xml$/.exec(String((entry && entry.id) || ''))
+  const eventKey = SUMMARY_TITLE.test(title)
+    ? 'jma:summary:' + hazardKeyOf(items) + ':' +
+      String(tag(control, 'DateTime') || tag(head, 'ReportDateTime') || '').slice(0, 16) + ':' +
+      (idSuffix ? idSuffix[1] : '')
+    : 'jma:' + (eventId || headTitle || title)
 
   return {
     id: (entry && entry.id) || eventId || title,
@@ -267,8 +337,7 @@ function parseJma(xml, entry) {
     maxScale: level,
     hypo: { name: '', magnitude: null },
     regions: regions.length ? regions : [],
-    // 同一事件的多报归并：优先 EventID；気象警報・注意報 的 EventID 为空，用 Head 标题（含县名）
-    eventKey: 'jma:' + (eventId || headTitle || title),
+    eventKey,
     strength: level,
     cancelled,
     raw: { title, headTitle, eventId, infoType: tag(head, 'InfoType'), serial: tag(head, 'Serial') },

@@ -38,16 +38,22 @@ export const FEED_FIRST_DELAY_MS = 3000
 export const FEED_CURSOR_KEY = 'dsh.quakeAlert.feedCursor'
 /** 首次启动的哨兵：还没有游标 → 用 tail 语义对齐位置而不是重放历史。 */
 export const FEED_TAIL = 'tail'
+/**
+ * 各源最近一次轮询结果的**只读快照**（id → stats）。放在模块级对象而不是 store：
+ * 轮询每 15 秒一轮，若每轮都 store.push，设置页与侧边栏会被无意义地反复重渲。
+ * 设置页自己定时读它（见 13-ui-settings 的「全球源状态」）。
+ */
+export const feedStatsOf = {}
 /** 本地路由的单次请求超时：Host 卡住时不能让 inFlight 一直占着、把整条轮询拖停。 */
 export const FEED_FETCH_TIMEOUT_MS = 10 * 1000
 
 /** 读回持久化游标；任何脏数据（非数字 / NaN / 负数）一律当作"没有记录"。 */
-function loadFeedCursor() {
-  const v = loadJSON(FEED_CURSOR_KEY, null)
+function loadFeedCursor(key) {
+  const v = loadJSON(key || FEED_CURSOR_KEY, null)
   return (typeof v === 'number' && Number.isFinite(v) && v >= 0) ? Math.floor(v) : null
 }
-function saveFeedCursor(v) {
-  if (typeof v === 'number' && Number.isFinite(v) && v >= 0) saveJSON(FEED_CURSOR_KEY, Math.floor(v))
+function saveFeedCursor(v, key) {
+  if (typeof v === 'number' && Number.isFinite(v) && v >= 0) saveJSON(key || FEED_CURSOR_KEY, Math.floor(v))
 }
 
 async function defaultFetchJson(url) {
@@ -60,6 +66,10 @@ async function defaultFetchJson(url) {
 
 /**
  * @param {object} [opts]
+ * @param {string} [opts.id] 源标识（诊断用）
+ * @param {string} [opts.path] Host 增量路由；全球源用 `?source=usgs` 这类分派参数
+ * @param {string} [opts.cursorKey] 该源自己的游标存储键——多源共用一条键会互相顶掉游标
+ * @param {(cfg: object) => boolean} [opts.enabled] 该源当前是否需要拉取（按灾种开关判断）
  * @param {number} [opts.intervalMs]
  * @param {number} [opts.firstDelayMs]
  * @param {(url: string) => Promise<object>} [opts.fetchJson] 注入点（测试用）
@@ -70,13 +80,19 @@ async function defaultFetchJson(url) {
  * @param {(err: Error) => void} [opts.onError]
  */
 export function createFeedClient(opts = {}) {
+  const id = opts.id || 'jma'
+  const path = opts.path || FEED_PATH
+  const cursorKey = opts.cursorKey || FEED_CURSOR_KEY
   const intervalMs = opts.intervalMs || FEED_POLL_MS
   const firstDelayMs = opts.firstDelayMs === undefined ? FEED_FIRST_DELAY_MS : opts.firstDelayMs
   const fetchJson = opts.fetchJson || defaultFetchJson
   const getCfg = opts.getCfg || currentCfg
   const onError = opts.onError || (() => {})
-  const loadCursor = opts.loadCursor || loadFeedCursor
-  const saveCursor = opts.saveCursor || saveFeedCursor
+  // 该源此轮要不要拉：气象源跟 weather 开关，全球地震跟 earthquake 开关，海啸跟 tsunami 开关。
+  // 关掉之后 Client 不再拉增量，Host 侧对应的轮询器也会因 idle 自然停下。
+  const enabled = opts.enabled || ((cfg) => (cfg.disasters || {}).weather !== false)
+  const loadCursor = opts.loadCursor || (() => loadFeedCursor(cursorKey))
+  const saveCursor = opts.saveCursor || ((v) => saveFeedCursor(v, cursorKey))
   const apply = opts.apply || ((entry, cfg) => {
     const alert = parseJma(entry && entry.xml, { id: entry && entry.id })
     if (!alert) return false
@@ -109,7 +125,9 @@ export function createFeedClient(opts = {}) {
     stats.polls += 1
     let data
     try {
-      data = await fetchJson(FEED_PATH + '?since=' + (since === null ? FEED_TAIL : since))
+      // path 可能自带查询串（全球源用 `?source=usgs` 分派），所以要按需选分隔符
+      const sep = path.indexOf('?') === -1 ? '?' : '&'
+      data = await fetchJson(path + sep + 'since=' + (since === null ? FEED_TAIL : since))
     } catch (err) {
       stats.errors += 1
       onError(err)
@@ -172,7 +190,11 @@ export function createFeedClient(opts = {}) {
 
   function pollSerial() {
     if (inFlight) return inFlight
-    inFlight = pollOnce().finally(() => { inFlight = null })
+    inFlight = pollOnce().finally(() => {
+      inFlight = null
+      // 给设置页的「全球源状态」留一份快照（不触发 store 重渲）
+      feedStatsOf[id] = Object.assign({}, stats, { running })
+    })
     return inFlight
   }
 
@@ -180,8 +202,8 @@ export function createFeedClient(opts = {}) {
     if (!running) return
     timer = setTimeout(async () => {
       timer = null
-      // 气象灾害关闭时不必拉增量（Host 侧随后也会据此停轮询）
-      if ((getCfg().disasters || {}).weather !== false) {
+      // 该源的灾种开关关闭时不必拉增量（Host 侧随后也会据此停轮询）
+      if (enabled(getCfg())) {
         try { await pollSerial() } catch (err) { onError(err) }
       }
       schedule(intervalMs)
@@ -189,6 +211,9 @@ export function createFeedClient(opts = {}) {
   }
 
   return {
+    id,
+    path,
+    cursorKey,
     start() {
       if (running) return
       running = true

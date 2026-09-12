@@ -8,16 +8,18 @@
 // 约定：所有写入都经 applyCfg，保证内存/镜像/Host 三处一致。
 // ============================================================================
 
-import { h, useState, useEffect, useRef, PREFECTURES, SCALE_OPTIONS, TSUNAMI_OPTIONS, HISTORY_MAX, HISTORY_KEY, MAX_WATCH_CITIES } from './01-constants.js'
+import { h, useState, useEffect, useRef, PREFECTURES, SCALE_OPTIONS, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, HISTORY_MAX, HISTORY_KEY, MAX_WATCH_CITIES, MAX_WATCH_PLACES } from './01-constants.js'
 import { saveJSON, own } from './02-storage.js'
 import { currentCfg, applyCfg, settingsSync } from './03-settings-bridge.js'
 import { citiesOfPref, cityTableState, loadCityTable } from './04-city-table.js'
 import { parseJma, buildTestTelegram, TEST_SCENARIOS } from './05b-jma-parser.js'
+import { TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage } from './05c-global-parsers.js'
 import { store } from './07-store.js'
 import { playSound, unlockAudio } from './08-audio.js'
 import { showToast, showSystemNotification, notificationPermission, requestNotificationPermission } from './09-notify.js'
 import { handleAlert } from './11-pipeline.js'
 import { activeClient } from './12-websocket.js'
+import { feedStatsOf } from './12b-feed-poll.js'
 
 // ---------- 设置页 UI ----------
 // 连接状态 → 颜色 / 文案（设置页与侧边栏状态指示共用）
@@ -79,6 +81,18 @@ function SettingsPanel() {
   const [cityQuery, setCityQuery] = useState({}) // 每个县的市町村搜索词
   const [weatherTestMsg, setWeatherTestMsg] = useState('') // 「发送测试气象警报」的结果提示
   const [weatherTestSeq, setWeatherTestSeq] = useState(0) // 测试场景轮换游标
+  // 全球关注点的输入草稿与反馈（0.4.0）：校验失败必须给出文字原因，不能静默吞掉用户输入
+  const [placeDraft, setPlaceDraft] = useState({ name: '', lat: '', lon: '', radiusKm: '300' })
+  const [placeMsg, setPlaceMsg] = useState('')
+  // 全球链路的测试（0.4.0）：场景轮换游标与结果提示
+  const [geTestSeq, setGeTestSeq] = useState(0)
+  const [geTestMsg, setGeTestMsg] = useState('')
+  // 「全球源状态」里的相对时间要自己走（feedStatsOf 不经过 store，避免每 15 秒重渲整个设置页）
+  const [, setFeedTick] = useState(0)
+  useEffect(() => {
+    const t = setInterval(() => setFeedTick((x) => x + 1), 5000)
+    return () => clearInterval(t)
+  }, [])
   // 音量滑块：拖动期间只改本地草稿，停手 300ms 后才落盘（避免每移动 1px 写一次 localStorage）
   const [volDraft, setVolDraft] = useState(null)
   const volTimer = useRef(null)
@@ -119,6 +133,93 @@ function SettingsPanel() {
     if (next.length > MAX_WATCH_CITIES) next = next.slice(0, MAX_WATCH_CITIES)
     return { ...c, watch: { ...c.watch, cities: next } }
   })
+
+  // ---------- 全球关注点（0.4.0）----------
+  // 全球源给的是震中坐标，没有都道府县，所以关注表达是「位置 + 半径」。
+  // 校验放在这里而不是只靠 normalizeCfg：用户需要看到"为什么没加上"，静默吞掉输入最糟。
+  const addPlace = () => {
+    const places = cfg.watch.places || []
+    const lat = Number(String(placeDraft.lat).trim())
+    const lon = Number(String(placeDraft.lon).trim())
+    const radiusKm = Number(String(placeDraft.radiusKm).trim())
+    if (String(placeDraft.lat).trim() === '' || !Number.isFinite(lat) || Math.abs(lat) > 90) {
+      setPlaceMsg('纬度需要是 -90 ~ 90 之间的数字'); return
+    }
+    if (String(placeDraft.lon).trim() === '' || !Number.isFinite(lon) || Math.abs(lon) > 180) {
+      setPlaceMsg('经度需要是 -180 ~ 180 之间的数字'); return
+    }
+    if (!Number.isFinite(radiusKm) || radiusKm < 1 || radiusKm > 2000) {
+      setPlaceMsg('半径需要是 1 ~ 2000 km 之间的数字'); return
+    }
+    if (places.length >= MAX_WATCH_PLACES) {
+      setPlaceMsg('最多 ' + MAX_WATCH_PLACES + ' 个关注点'); return
+    }
+    const name = String(placeDraft.name || '').trim() || (lat.toFixed(2) + ', ' + lon.toFixed(2))
+    setCfg((c) => ({ ...c, watch: { ...c.watch, places: (c.watch.places || []).concat([{ name, lat, lon, radiusKm }]) } }))
+    setPlaceDraft({ name: '', lat: '', lon: '', radiusKm: String(radiusKm) })
+    setPlaceMsg('已添加「' + name + '」（坐标相同的重复点会被自动合并）')
+  }
+  const removePlace = (idx) => setCfg((c) => ({
+    ...c, watch: { ...c.watch, places: (c.watch.places || []).filter((_, i) => i !== idx) },
+  }))
+  const useMyLocation = () => {
+    const geo = (typeof navigator !== 'undefined') ? navigator.geolocation : null
+    if (!geo || typeof geo.getCurrentPosition !== 'function') { setPlaceMsg('当前浏览器不支持定位，请手动填写坐标'); return }
+    setPlaceMsg('正在获取当前位置…')
+    geo.getCurrentPosition(
+      (pos) => {
+        const c = pos && pos.coords
+        if (!c) { setPlaceMsg('定位失败：没有返回坐标'); return }
+        setPlaceDraft((d) => ({
+          ...d,
+          name: d.name || '我的位置',
+          lat: String(c.latitude.toFixed(4)),
+          lon: String(c.longitude.toFixed(4)),
+        }))
+        setPlaceMsg('已填入当前位置，确认半径后点「添加关注点」')
+      },
+      (err) => setPlaceMsg('定位失败：' + ((err && err.message) || '被拒绝或不可用')),
+      { timeout: 10000 },
+    )
+  }
+  /** 关注点输入框（受控）：四个字段共用一份草稿。 */
+  const placeField = (label, key, placeholder, width) => h('label', {
+    style: { display: 'flex', flexDirection: 'column', gap: 2, fontSize: 11, color: '#9aa0a6' },
+  }, label, h('input', {
+    type: 'text',
+    value: placeDraft[key],
+    placeholder,
+    onChange: (e) => setPlaceDraft((d) => Object.assign({}, d, { [key]: e.target.value })),
+    style: {
+      width, boxSizing: 'border-box', background: '#ffffff', color: '#1a1a1a',
+      border: '1px solid #6b7280', borderRadius: 6, padding: '3px 6px', fontSize: 12,
+    },
+  }))
+  // 全球源状态（0.4.0）：用户看不出"链路到底在不在拉"，这是最常见的困惑来源——
+  // 尤其全球地震本来就不频繁。feedStatsOf 不经过 store（见 12b 的注释），所以这里自己每 5 秒重读。
+  const feedStatusBlock = () => {
+    const rows = []
+    const emsc = (store.sources || {}).emsc
+    rows.push('EMSC（全球地震，实时推送）：' + (emsc
+      ? statusMetaOf(emsc.status, emsc.retries).text + (emsc.detail ? ' · ' + emsc.detail : '')
+      : '未启动'))
+    const sourceLabel = {
+      jma: '気象庁（气象灾害，Host 轮询）',
+      usgs: 'USGS（全球地震目录，Host 轮询）',
+      noaa: 'NOAA（海啸，Host 轮询）',
+    }
+    for (const id of ['jma', 'usgs', 'noaa']) {
+      const st = feedStatsOf[id]
+      if (!st) { rows.push(sourceLabel[id] + '：尚未拉取'); continue }
+      const ago = st.lastAt ? Math.max(0, Math.round((Date.now() - st.lastAt) / 1000)) + ' 秒前' : '—'
+      rows.push(sourceLabel[id] + '：已收到 ' + st.received + ' 条增量' +
+        (st.errors ? '，' + st.errors + ' 次失败' : '') + ' · 最近拉取 ' + ago)
+    }
+    return h('div', { style: { marginTop: 10, fontSize: 11, color: '#9aa0a6', lineHeight: 1.7 } },
+      h('div', { style: { marginBottom: 2 } }, '全球源状态'),
+      rows.map((t, i) => h('div', { key: 'feedstat-' + i }, t)),
+    )
+  }
   // 市区町村选择器：数据表到位后，为每个已关注的县提供「搜索 + 多选」
   const cityPicker = () => {
     if (cityTableState === 'failed') {
@@ -294,6 +395,58 @@ function SettingsPanel() {
     // 灾害类型（0.3.0）
     sectionDisasters(),
 
+    // 全球关注点（0.4.0）：全球源是坐标型，关注表达是「位置 + 半径」
+    s.section('全球关注点（坐标 + 半径）',
+      h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 8 } },
+        (cfg.watch.places || []).length === 0
+          ? '未设置时，全球源（EMSC / USGS 地震、NOAA 海啸）的消息不会打扰你。添加你所在或关心的位置即可生效，不需要重启。'
+          : '已设置 ' + cfg.watch.places.length + ' 个位置：震中落在半径内才提醒。日本的地震 / 海啸不受这里影响，仍按上面的都道府县判定。'),
+      ...(cfg.watch.places || []).map((p, i) => h('div', {
+        key: 'place-' + i,
+        style: { display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0', fontSize: 12 },
+      },
+        h('span', { style: { flex: 1 } },
+          p.name + ' · ' + Number(p.lat).toFixed(3) + ', ' + Number(p.lon).toFixed(3) + ' · 半径 ' + p.radiusKm + ' km'),
+        s.btn('删除', () => removePlace(i)),
+      )),
+      h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'flex-end', marginTop: 8 } },
+        placeField('名称', 'name', '如 东京 / 家', 120),
+        placeField('纬度', 'lat', '35.6812', 90),
+        placeField('经度', 'lon', '139.7671', 90),
+        placeField('半径 km', 'radiusKm', '300', 80),
+        s.btn('添加关注点', addPlace),
+        s.btn('用当前位置', useMyLocation),
+      ),
+      placeMsg ? h('div', { style: { fontSize: 11, color: '#93c5fd', marginTop: 6 } }, placeMsg) : null,
+      // 全球源的地震不是随时都有，没法"等一条"来验证链路 —— 与气象链路一样给一个本地测试按钮。
+      // 构造的是**源格式原文**（EMSC / USGS / NOAA 各一种），因此解析器与匹配引擎都被真实走过。
+      h('div', { style: { marginTop: 10, borderTop: '1px solid rgba(148,163,184,0.18)', paddingTop: 8 } },
+        s.row(s.btn('发送测试全球警报（轮换场景）', () => {
+          const places = cfg.watch.places || []
+          if (places.length === 0) { setGeTestMsg('请先添加一个全球关注点 —— 测试消息需要一个位置来放震中'); return }
+          const sc = TEST_GEO_SCENARIOS[geTestSeq % TEST_GEO_SCENARIOS.length]
+          const ms = Date.now()
+          const msg = buildTestGlobalMessage(places[0], ms, sc.key)
+          setGeTestSeq(geTestSeq + 1)
+          const alert = parseTestGlobalMessage(msg)
+          if (!alert) { setGeTestMsg('测试消息解析失败 —— 请把这个情况反馈给开发者'); return }
+          const res = handleAlert(alert, currentCfg(), { skipQuietHours: true })
+          // 提示按**实际结果**生成：开关关闭 / 半径外 / 静默 / 其它标签页已提醒时就是不会响，
+          // 必须如实说明，否则用户会以为插件坏了
+          const outcome = res && res.notified
+            ? ' —— 已播报：应看到提示音与弹窗'
+            : ' —— 未播报（' + ((res && res.detail) || '未知原因') + '），只会记入下方「最近预警记录」'
+          setGeTestMsg('已发送：' + sc.label + '（' + sc.note + '）' + outcome)
+        })),
+        h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4, lineHeight: 1.6 } },
+          '测试消息在本地构造（EMSC / USGS / NOAA 三种源格式轮换），不发任何网络请求，可反复点击。场景依次为：' +
+          TEST_GEO_SCENARIOS.map((x) => x.label).join(' / ') +
+          '。最后一条刻意落在半径之外——用来演示半径是怎么起作用的。'),
+        geTestMsg ? h('div', { style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, geTestMsg) : null,
+      ),
+      feedStatusBlock(),
+    ),
+
     // 阈值
     s.section('提醒阈值',
       s.label('地震（实测震度最低值）'),
@@ -302,6 +455,10 @@ function SettingsPanel() {
       s.row(s.select(cfg.thresholds.eewScale, SCALE_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, eewScale: Number(v) } })), (o) => o.label)),
       s.label('海啸'),
       s.row(s.select(cfg.thresholds.tsunamiGrade, TSUNAMI_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, tsunamiGrade: v } })), (o) => o.label)),
+      s.label('全球地震（最低震级，EMSC / USGS）'),
+      s.row(s.select(cfg.thresholds.globalMagnitude, GLOBAL_MAG_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, globalMagnitude: Number(v) } })), (o) => o.label)),
+      h('div', { style: { fontSize: 11, color: '#9aa0a6' } },
+        '全球源给的是震级、日本源给的是震度，两者不可换算，所以是两个独立旋钮。'),
     ),
 
     // 通知与声音
