@@ -1812,6 +1812,69 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, 'WebSocket / 音频 / 城市表验证失败：' + e.message)
   }
 
+  console.log('== 0.3.3：WebSocket 建连看门狗 ==')
+  try {
+    // ① 建连阶段既无 onopen 也无 onclose（浏览器半开时不给任何事件）→ 超时后放弃并重连
+    const socketsKA = []
+    class FakeWSA {
+      constructor(url) { this.url = url; socketsKA.push(this) }
+      close() { this.closed = true }
+    }
+    const exKA = loadClientEx({}, { window: { WebSocket: FakeWSA } }).exports
+    const tKA = exKA.__test
+    const cKA = tKA.createWsClient({ connectTimeoutMs: 30 })
+    cKA.start()
+    await new Promise((r) => setTimeout(r, 90))
+    assert(socketsKA[0].closed === true, '超时后立即关闭卡住的连接（不留下无人回收的 socket）')
+    assert(tKA.store.detail.indexOf('连接超时') !== -1 && tKA.store.retries === 1, '状态文案写明「连接超时」并计入退避')
+    await new Promise((r) => setTimeout(r, 1100)) // 退避 1s 后才真正重连
+    assert(socketsKA.length === 2, '退避结束后重新发起连接（此前会永远卡在「连接中…」）')
+    cKA.stop()
+
+    // ② 正常 onopen → 看门狗解除
+    const socketsKB = []
+    class FakeWSB {
+      constructor(url) { this.url = url; socketsKB.push(this) }
+      close() {}
+    }
+    const exKB = loadClientEx({}, { window: { WebSocket: FakeWSB } }).exports
+    const cKB = exKB.__test.createWsClient({ connectTimeoutMs: 30 })
+    cKB.start()
+    socketsKB[0].onopen()
+    await new Promise((r) => setTimeout(r, 90))
+    assert(socketsKB.length === 1 && exKB.__test.store.status === 'open', '正常建连后看门狗解除，不误触发重连')
+    cKB.stop()
+
+    // ③ onclose 先到 → 只按一次退避重连，看门狗不重复计数
+    const socketsKC = []
+    class FakeWSC {
+      constructor(url) { this.url = url; socketsKC.push(this) }
+      close() {}
+    }
+    const exKC = loadClientEx({}, { window: { WebSocket: FakeWSC } }).exports
+    const cKC = exKC.__test.createWsClient({ connectTimeoutMs: 30 })
+    cKC.start()
+    socketsKC[0].onclose()
+    await new Promise((r) => setTimeout(r, 90))
+    assert(exKC.__test.store.retries === 1 && socketsKC.length === 1, 'onclose 先到 → 看门狗解除，不重复触发')
+    cKC.stop()
+
+    // ④ connectTimeoutMs=0 关闭看门狗（回到 0.3.2 行为）
+    const socketsKD = []
+    class FakeWSD {
+      constructor(url) { this.url = url; socketsKD.push(this) }
+      close() {}
+    }
+    const exKD = loadClientEx({}, { window: { WebSocket: FakeWSD } }).exports
+    const cKD = exKD.__test.createWsClient({ connectTimeoutMs: 0 })
+    cKD.start()
+    await new Promise((r) => setTimeout(r, 90))
+    assert(socketsKD.length === 1, 'connectTimeoutMs=0 可关掉看门狗')
+    cKD.stop()
+  } catch (e) {
+    assert(false, '建连看门狗验证失败：' + e.message)
+  }
+
   console.log('== 0.3.0-c：气象灾害配置字段 ==')
   {
     const dirty = loadClient({
