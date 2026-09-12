@@ -43,15 +43,15 @@ JMA Atom feed ───────┘              │
 - All realtime logic runs in the browser (the Client half): the WebSocket connection, parsing, matching, notifications and the history list. The Host half registers the `quake-alert` settings namespace (machine-level `settings.yaml`), serves the read-only municipality and river-forecast-area tables at `/dsh-quake-alert/areas`, and polls the JMA feed.
 - **Weather alerts take a different path on purpose.** The Host half polls the JMA's Atom feed about once a minute, remembers which entries it has already fetched, and exposes the increment on a local read-only route (`/dsh-quake-alert/feed?since=N`). The Client polls that route every 15 s and hands each telegram to the very same `handleAlert` used by P2PQuake messages. Keeping the only external requester on the Host means several DSH tabs or windows never multiply the requests — the JMA explicitly asks consumers not to re-download a file it has already served, and blocks IPs that do. The Client persists its cursor, so a refresh resumes where it left off instead of replaying the buffer; a first run (no cursor yet) uses `?since=tail` to align to the current position without replaying anything.
 - WebSocket messages carry the same payload as the HTTP `/history` endpoint, but the id field name differs (WS uses `_id`); the parser accepts both.
-- Region normalization: area names in EEW / tsunami messages (such as `上川地方北部` or `東京湾内湾`) are resolved through an explicit area table, then by prefix-matching the 47 prefecture names, and finally by the EEW prefecture forecast name. For JMA telegrams the prefecture is taken from the first two digits of the area code (which *is* the prefecture code) — more reliable than names, which collide across prefectures. River forecast areas are mapped to their municipalities through a generated table. Areas spanning several prefectures (such as `有明・八代海`) are expanded and evaluated per prefecture.
+- Region normalization: area names in EEW / tsunami messages (such as `上川地方北部` or `東京湾内湾`) are resolved through an explicit area table, then by prefix-matching the 47 prefecture names, and finally by the EEW prefecture forecast name. For JMA telegrams the prefecture is taken from the first two digits of the area code (which _is_ the prefecture code) — more reliable than names, which collide across prefectures. River forecast areas are mapped to their municipalities through a generated table. Areas spanning several prefectures (such as `有明・八代海`) are expanded and evaluated per prefecture.
 - Three-layer de-duplication: ① message id (guards against replay after a reconnect) ② event key (multiple releases of the same earthquake; an intensity upgrade still breaks through and alerts again) ③ cross-tab (`BroadcastChannel`, so only one page plays the alert).
 - Quiet hours are evaluated after a match: a suppressed alert is still recorded in the history with the reason, and red-level alerts break through by default.
 
 ## Installation
 
 ```sh
-# Install from a local directory (development mode: no reinstall needed after code changes)
-dsh plugin --profile web add link:/path/to/this/repo
+# Straight from GitHub
+dsh plugin --profile web add github:MurasakiIzumi/dsh-quake-alert
 
 # Restart dsh web to activate the plugin
 ```
@@ -86,13 +86,13 @@ When an alert matches, you get a tone plus a foreground toast or a background sy
 
 The JMA states an explicit warning level (警戒レベル) on every weather telegram. This plugin announces **level 4 and above only**:
 
-| Level | What it means in Japan | Typical products | What this plugin does |
-|---|---|---|---|
-| 1 | Be aware | 早期注意情報 | history only |
-| 2 | Check your hazard map | 大雨注意報、洪水注意報（レベル２…） | history only |
-| 3 | Elderly and vulnerable residents evacuate | 大雨警報（土砂災害）、洪水警報（レベル３…） | **sidebar tooltip only** — no sound, no popup |
-| **4** | **Evacuation instruction** | 土砂災害警戒情報、氾濫危険情報、大雨危険警報、高潮危険警報 | **announced** — tone + toast / system notification |
-| **5** | Emergency safety measures | 大雨特別警報、氾濫発生情報 | **announced** |
+| Level | What it means in Japan                    | Typical products                                           | What this plugin does                              |
+| ----- | ----------------------------------------- | ---------------------------------------------------------- | -------------------------------------------------- |
+| 1     | Be aware                                  | 早期注意情報                                               | history only                                       |
+| 2     | Check your hazard map                     | 大雨注意報、洪水注意報（レベル２…）                        | history only                                       |
+| 3     | Elderly and vulnerable residents evacuate | 大雨警報（土砂災害）、洪水警報（レベル３…）                | **sidebar tooltip only** — no sound, no popup      |
+| **4** | **Evacuation instruction**                | 土砂災害警戒情報、氾濫危険情報、大雨危険警報、高潮危険警報 | **announced** — tone + toast / system notification |
+| **5** | Emergency safety measures                 | 大雨特別警報、氾濫発生情報                                 | **announced**                                      |
 
 Why the cut-off sits at 4: levels 1–2 call for "check the hazard map", which a desktop popup cannot act on, and level 3 is aimed at elderly and vulnerable residents — neither matches how DSH is used. Level 4 is the grade that actually threatens life and property, and it is the grade the JMA labels 「避難指示」. Levels 1–3 are still fetched, parsed and listed under "Recent alerts", so you can always verify the plugin saw them.
 
