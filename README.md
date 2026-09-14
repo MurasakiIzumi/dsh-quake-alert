@@ -19,7 +19,7 @@
 - **Cancellation notices**: if an EEW you were alerted about is cancelled, or a tsunami forecast you were alerted about is cleared, a short follow-up (descending tone) tells you the earlier alert is void. A cancellation for an event you were never alerted about stays silent (history only).
 - **Quiet hours**: silence non-critical alerts during a daily window (local browser time; a start later than the end crosses midnight). Red-level alerts — EEW, tsunami warnings (Warning and above), intensity 6-lower-or-above earthquakes, and level-4+ weather alerts — still break through unless you turn that off. Suppressed alerts stay in the history.
 - **Weather alerts, level 4 and above**: the JMA states an explicit warning level on every weather telegram. Only level 4+ — the "evacuation instruction" grade — is announced; levels 1–3 are still fetched, parsed and listed in the history, and a level-3 hit merely adds one line to the sidebar tooltip. See [Warning levels](#warning-levels-japan).
-- **Connection indicator**: a status dot at the sidebar foot — green connected, amber connecting/reconnecting, red stopped — with details on hover.
+- **Connection indicator**: a status dot at the sidebar foot — green connected, amber connecting/reconnecting/degraded, mid-grey data stale, blue data-format error (wait for a plugin update), red stopped or unreachable, hollow grey disabled by you — with per-source details on hover. Settings → Source status additionally lists increments, failures, gaps, last poll and upstream staleness (0.4.1).
 - **Machine-level persistence**: configuration is stored in DSH's `settings.yaml` through the Host settings service, so it survives across browsers and machines. A browser `localStorage` copy stays as a mirror, and as the fallback when the settings service is unavailable; existing local settings migrate to the Host once, on first run.
 - **Municipality-level watch**: narrow earthquake reports down to individual cities / wards / towns / villages, chosen from a searchable per-prefecture list (1,917 entries). Observed-intensity point names are resolved to their municipality first, so the many official spellings all match (大阪北区茶屋町 → 大阪市北区, 福島伊達市 → 伊達市, 渡島北斗市 → 北斗市). Only observed-intensity points carry that granularity; EEW and tsunami stay prefecture-level, and a point that cannot be resolved is treated as a match rather than dropped.
 - **Data source switch**: production (live) or sandbox (replays 2023 history, roughly one message every 30 seconds, for testing).
@@ -80,6 +80,46 @@ dsh plugin --profile web add github:MurasakiIzumi/dsh-quake-alert
 
 When an alert matches, you get a tone plus a foreground toast or a background system notification, and the event is recorded in "Recent alerts".
 
+## A source is unreachable? (mainland-China networks)
+
+Under mainland-China networks a data source may become unreachable, stop updating, or alerts may stay
+silent. Those failures only reproduce there — this project's dev machine exits from Japan — so the
+approach is to make every failure **visible** and ship a troubleshooting document written **for an AI
+assistant** (Chinese only, since mainland users are its only audience):
+
+> **Hand [`TROUBLESHOOTING.zh.md`](./TROUBLESHOOTING.zh.md) to your AI assistant and let it work
+> through it step by step.**
+
+That document explains no theory and asks nobody to "open a menu and look": every section is
+"trigger → command you can actually run / state you can actually read → what the result means".
+The AI cannot fix the network; its job is to **classify** the failure, **state the blast radius**
+(which links still work), and pick a downgrade path where one exists — and to say plainly when the
+conclusion is "not something you can fix".
+
+For day-to-day self-checks you do not need the document: **Settings → Disaster alerts → Source status**
+lists each source's state, how many increments arrived, failure counts, gap counts and the time of the
+last poll; hovering the sidebar status dot shows the same (abnormal sources first).
+
+## Behaviour changes in 0.4.1
+
+- **Weather events are merged per (forecast office, hazard) with a 3-hour event window.** Updates,
+  area extensions and continuations of the same hazard from the same office alert once; an intensity
+  escalation (L3→L4) still alerts again. Crossing an hour boundary, or the same event issued by two
+  offices, may still alert twice — we prefer one extra chime over a missed alert.
+- **The L4 gate now looks at the level of the region that matched**, not the telegram maximum. In one
+  real telegram (Hyogo, 2026-09-14) Himeji is L4 while Aioi is L3 and Nishiwaki is L2; watching only
+  Nishiwaki no longer produces an overstated "evacuation-level" alert.
+- **A tsunami cancellation only matches when the telegram lists the forecast areas.** A cancellation
+  without a list is recorded in history but does not notify — that avoids "some other sea area's
+  cancellation is presented as your event" (a false all-clear is the worst kind of wrong for tsunamis).
+- **Global earthquakes are graded by magnitude** (EMSC/USGS have no intensity scale), so the red-level
+  quiet-hours bypass applies to M7+ global quakes too.
+- **"Source is responding but data is old" is a separate state** (mid-grey): JMA's feed update time or
+  USGS's feed generation time beyond the threshold shows as upstream staleness, distinct from
+  "no news". A data-format problem is shown in blue — that is not the user's network to fix.
+- **P2PQuake timestamps are converted from JST to your local time zone** in history details (previously
+  the raw JST string was shown, an hour off with no label for mainland-China users).
+
 ## Known limitations
 
 - The plugin runs with the DSH page: closing the page stops it, and browsers may throttle background tabs, delaying notifications.
@@ -113,7 +153,7 @@ Why the cut-off sits at 4: levels 1–2 call for "check the hazard map", which a
 ## Development
 
 ```
-client/src/*.js       # client sources: 18 standard ESM modules (explicit import/export; each header states job + deps)
+client/src/*.js       # client sources: 19 standard ESM modules (explicit import/export; each header states job + deps)
 client/client.js      # DSH single-file bundle — GENERATED by rollup, do not edit
 lib/index.js          # Host half: settings namespace (schemastery) + the /areas and /feed read-only routes
 lib/poller.js         # Host half: generic feed poller (entry de-duplication, ring buffer, cursor; single-stage and two-stage sources)
@@ -134,8 +174,16 @@ node scripts/build-client.mjs          # rebuild client/client.js after editing 
 node scripts/build-areas.mjs           # regenerate the river-area table from the JMA public zip (needs network)
 node scripts/check-imports.mjs         # cross-module reference check (missing import / undeclared assignment)
 node scripts/build-client.mjs --check  # fail when the committed bundle is stale
-node tests/sync-test.cjs               # regression tests (561 assertions)
+node tests/sync-test.cjs               # regression tests (627 assertions)
 ```
+
+> **Note**: `tests/sync-test.cjs` loads the **built** `client/client.js`. After editing `client/src/`
+> always run `node scripts/build-client.mjs` first, otherwise you are looking at the previous build.
+> One-liner: `node scripts/build-client.mjs && node tests/sync-test.cjs`.
+>
+> On Windows, if `pnpm` fails with "cannot be loaded because running scripts is disabled", use
+> `pnpm.cmd check` / `pnpm.cmd test` (or `npx pnpm check`). `pnpm check` only verifies the bundle is
+> current; `pnpm test` rebuilds and then runs the regression suite.
 
 > Edit `client/src/*.js`, never `client/client.js` — DSH requires a single-file client bundle (flat module
 > graph: one bundle is one module node, no in-package multi-file imports), so the ESM modules are bundled by
@@ -145,7 +193,9 @@ node tests/sync-test.cjs               # regression tests (561 assertions)
 
 ## Changelog
 
-Current version **0.4.0** (global phase one: global earthquakes and tsunamis, including local test buttons and a source-status panel). See [CHANGELOG.md](./CHANGELOG.md) for the details of each release.
+Current version **0.4.1** (review and fixes for 0.4.0: several missed-alert and silent-failure bugs
+fixed, validation contracts completed for the five existing sources, and an AI-facing mainland-network
+troubleshooting guide added). See [CHANGELOG.md](./CHANGELOG.md) for the details of each release.
 
 ## Data sources
 

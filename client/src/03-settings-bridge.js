@@ -11,7 +11,7 @@
 // ============================================================================
 
 import { DEFAULT_CFG } from './01-constants.js'
-import { isPlainObject, normalizeCfg, loadCfg, saveCfg, freshCfg } from './02-storage.js'
+import { isPlainObject, normalizeCfg, loadCfg, saveCfg, freshCfg, loadJSON, saveJSON } from './02-storage.js'
 import { store } from './07-store.js'
 
 // ---------- 机器级持久化（0.2.0）：Host settings 为主，localStorage 为回退与镜像 ----------
@@ -21,6 +21,8 @@ import { store } from './07-store.js'
 // Host。没有 settings 服务、页面非 loopback、或 Host 只做进程内存储时，整条链路自动退化为
 // M1 的 localStorage 行为。
 const SETTINGS_NS = 'quake-alert'
+/** 「本地配置已迁移到 Host」的落盘标记：迁移只能发生一次，见 bindSettingsScope。 */
+const MIGRATED_KEY = 'dsh.quakeAlert.hostMigrated'
 let runtimeCfg = null // 内存中的当前配置
 let settingsScope = null // bind 成功后的 scope handle
 let settingsSync = 'local' // local（无 Host）| host（写入 settings.yaml）| memory（Host 不持久化）
@@ -49,7 +51,10 @@ function reloadFromLocal() {
 }
 // 写入入口：内存立即生效 → localStorage 镜像 → Host（可用时异步持久化）
 function applyCfg(cfg) {
-  runtimeCfg = saveCfg(cfg)
+  // 写入路径也归一（0.4.1）：此前只有读取路径（loadCfg / sectionToCfg）归一，于是
+  // 「坐标相同的关注点自动合并」「name 截断到 30 字」这类不变量在内存与 localStorage 里
+  // 都不成立——同一次会话里重复添加同一个点会真的存两份，直到下次加载才被悄悄合并。
+  runtimeCfg = saveCfg(normalizeCfg(cfg))
   pushCfgToHost(runtimeCfg)
   return runtimeCfg
 }
@@ -99,21 +104,35 @@ function bindSettingsScope(scope) {
     settingsSync = 'host'
     const user = isPlainObject(snap.user) ? snap.user : {}
     if (Object.keys(user).length === 0 && !migrated) {
-      migrated = true // 只迁移一次：之后 Host 被清空是用户的显式操作，不该被本地又推回去
+      migrated = true
+      // 迁移**只能发生一次**，而且这个"一次"必须落盘（0.4.1 修正）。
+      // 原来只在本次 bind 里记一个局部标志，于是每次重载页面 / Host settings 重建都会重新判断，
+      // 结果是"用户显式清空 Host"会被本地镜像静默恢复——Host 作为 source of truth 的优先级
+      // 被本地反超（实测可复现：清空 Host 后重新 bind，Host 又变回 {quakeScale:55}）。
+      const already = loadJSON(MIGRATED_KEY, null) === 1
       const local = loadCfg()
-      if (JSON.stringify(cfgToSection(local)) !== JSON.stringify(cfgToSection(freshCfg()))) {
+      if (!already && JSON.stringify(cfgToSection(local)) !== JSON.stringify(cfgToSection(freshCfg()))) {
+        saveJSON(MIGRATED_KEY, 1)
         runtimeCfg = saveCfg(local)
         pushCfgToHost(runtimeCfg)
         store.push({})
         return
       }
+      if (!already) saveJSON(MIGRATED_KEY, 1)
     }
     const next = sectionToCfg(snap.value)
     runtimeCfg = saveCfg(next) // localStorage 保持为镜像：Host 掉线时仍能工作
     store.push({})
   }
-  try { scope.subscribe(sync) } catch (err) { /* 订阅失败只是失去实时同步 */ }
+  let disposer = null
+  try { disposer = scope.subscribe(sync) } catch (err) { /* 订阅失败只是失去实时同步 */ }
   sync()
+  // 返回解除函数（0.4.1）：调用方要把它注册进 ctx.effect，否则同一页面内停用 → 启用 N 次
+  // 会累积 N 个订阅，此后 Host 每一次配置变更都会触发 N 次写盘与 N 次重渲。
+  return () => {
+    try { if (typeof disposer === 'function') disposer() } catch (err) { /* 忽略 */ }
+    if (settingsScope === scope) settingsScope = null
+  }
 }
 
 
@@ -121,4 +140,4 @@ function bindSettingsScope(scope) {
 const settingsState = () => ({ sync: settingsSync, bound: settingsScope !== null, runtime: runtimeCfg })
 const resetSettings = () => { runtimeCfg = null; settingsScope = null; settingsSync = 'local' }
 
-export { SETTINGS_NS, cfgToSection, sectionToCfg, currentCfg, applyCfg, settingsOpsFor, pushCfgToHost, bindSettingsScope, settingsSync, settingsState, resetSettings, reloadFromLocal }
+export { SETTINGS_NS, MIGRATED_KEY, cfgToSection, sectionToCfg, currentCfg, applyCfg, settingsOpsFor, pushCfgToHost, bindSettingsScope, settingsSync, settingsState, resetSettings, reloadFromLocal }

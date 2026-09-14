@@ -59,6 +59,36 @@ function createWsClient(opts) {
   let stopped = false
   let retries = 0
   let lastActivityAt = 0 // 最近一次 onopen / onmessage 的时刻
+  let processFails = 0 // 连续的消息处理失败次数（0.4.1：主链异常必须可见）
+  let visibilityBound = false
+
+  /**
+   * 页面从冻结 / 休眠中恢复时刷新活动时刻（0.4.1）。
+   *
+   * 后台标签页被冻结、系统休眠期间，消息事件根本不会被派发；恢复后如果立刻用「20 分钟无活动」
+   * 判死，就会把一条本来健康的连接拆掉重连（P2PQuake 没有回放，冻结期间缓冲里的 551/556
+   * 就此永久丢失——EEW 的有效窗口只有几十秒，等价漏报）。恢复可见时给一个完整的新窗口。
+   */
+  function onVisibilityChange() {
+    if (stopped) return
+    const doc = typeof document !== 'undefined' ? document : null
+    if (!doc || doc.visibilityState !== 'visible') return
+    if (!ws || ws.readyState !== 1) return
+    lastActivityAt = Date.now()
+    armStaleWatch()
+  }
+  function bindVisibility() {
+    const doc = typeof document !== 'undefined' ? document : null
+    if (!doc || visibilityBound || typeof doc.addEventListener !== 'function') return
+    doc.addEventListener('visibilitychange', onVisibilityChange)
+    visibilityBound = true
+  }
+  function unbindVisibility() {
+    const doc = typeof document !== 'undefined' ? document : null
+    if (!doc || !visibilityBound || typeof doc.removeEventListener !== 'function') return
+    doc.removeEventListener('visibilitychange', onVisibilityChange)
+    visibilityBound = false
+  }
 
   function stopStaleWatch() {
     if (staleTimer) { clearTimeout(staleTimer); staleTimer = null }
@@ -122,20 +152,34 @@ function createWsClient(opts) {
     ws.onopen = () => {
       clearConnectWatch()
       retries = 0
+      processFails = 0
       lastActivityAt = Date.now()
       armStaleWatch()
       report({ status: 'open', retries: 0, detail: openDetailOf(url) })
     }
     ws.onmessage = (ev) => {
       lastActivityAt = Date.now()
+      let raw
+      try { raw = JSON.parse(String(ev.data)) } catch (err) { return } // 单条 JSON 坏掉不影响连接
+      // 主链**必须单独 try**（0.4.1）。此前 JSON.parse 与 onRaw 共用一个空 catch，
+      // 于是 parse / match / handleAlert 里任何确定性异常都被吞掉：socket 正常、状态常绿、
+      // 零提醒、无计数——这是比断线更难发现的静默失效（断线至少会变红）。
       try {
-        const raw = JSON.parse(String(ev.data))
         onRaw(raw, currentCfg())
-      } catch (err) { /* 单条解析失败不影响连接 */ }
+        processFails = 0
+      } catch (err) {
+        processFails += 1
+        report({
+          status: 'degraded',
+          retries,
+          detail: '消息处理连续失败 ' + processFails + ' 次：' + String((err && err.message) || err),
+        })
+      }
     }
     ws.onerror = () => { /* onclose 统一处理 */ }
     ws.onclose = () => {
       clearConnectWatch()
+      stopStaleWatch() // stale 链必须随这条 socket 结束，否则它会脱离连接继续存活
       scheduleReconnect()
     }
   }
@@ -146,15 +190,17 @@ function createWsClient(opts) {
     if (ws) { try { ws.onclose = null; ws.close() } catch (err) {} ws = null }
   }
   return {
-    start() { connect() },
+    start() { bindVisibility(); connect() },
     stop() {
       stopped = true
       teardown()
+      unbindVisibility()
       report({ status: 'closed', retries, detail: '已停止（插件停用）' })
     },
     restart() {
       stopped = false
       retries = 0 // 切数据源后立即从 1s 退避重新开始，而不是沿用上一条连接的退避进度
+      processFails = 0
       teardown()
       connect()
     },

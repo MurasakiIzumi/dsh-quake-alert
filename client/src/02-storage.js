@@ -63,6 +63,10 @@ function normalizeHistoryEntry(e, i) {
   return {
     key: key || 'legacy-' + i, // 早期版本可能没有 key，补一个稳定兜底键，保证 React key 与去重都可用
     id: strOr(e.id, ''),
+    // code：区分来源用（'emsc'/'usgs'/'noaa'/'jma'/551…）。只看 kind 会把全球地震
+    // （kind 也是 'quake'）标成「code 551」——与 0.3.2 修过的"气象条目被标成 code 551"同类。
+    // 旧历史条目没有这个字段 → 空串，展示层回退到 kind 映射。
+    code: strOr(e.code, ''),
     kind: strOr(e.kind, ''),
     label: strOr(e.label, ''),
     severity: strOr(e.severity, ''),
@@ -79,17 +83,14 @@ function loadHistory() {
   if (!Array.isArray(v)) return []
   return v.filter((e) => isPlainObject(e)).slice(0, HISTORY_MAX).map(normalizeHistoryEntry)
 }
-// 每次都返回全新对象：避免调用方改动嵌套字段时污染 DEFAULT_CFG 常量
-const freshCfg = () => ({
-  version: DEFAULT_CFG.version,
-  source: DEFAULT_CFG.source,
-  watch: { prefectures: [], cities: [], places: [] },
-  disasters: { ...DEFAULT_CFG.disasters },
-  thresholds: { ...DEFAULT_CFG.thresholds },
-  notify: { ...DEFAULT_CFG.notify },
-  dedupe: { ...DEFAULT_CFG.dedupe },
-  quietHours: { ...DEFAULT_CFG.quietHours },
-})
+// 每次都返回全新对象：避免调用方改动嵌套字段时污染 DEFAULT_CFG 常量。
+// 由 DEFAULT_CFG **深拷贝派生**（而不是手抄字段清单）：freshCfg 是 settingsOpsFor 判断
+// "某字段是否等于默认值"的唯一基准，手抄的话以后给 DEFAULT_CFG 加字段而漏改这里，
+// 新字段会被永久判为"非默认"，永远写进 settings.yaml 而永不 unset。
+const cloneCfg = (v) => (Array.isArray(v)
+  ? v.map(cloneCfg)
+  : (isPlainObject(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, cloneCfg(x)])) : v))
+const freshCfg = () => cloneCfg(DEFAULT_CFG)
 // 全球关注点：[{ name, lat, lon, radiusKm }]。坐标必须落在合法范围——脏数据里的 NaN 或
 // 越界值会让距离计算得出无意义的结果，表现为"看起来配好了却永远不提醒"（静默漏报）。
 // 半径夹在 1–2000 km；同一个点重复添加是常见操作，按经纬度（三位小数）去重。

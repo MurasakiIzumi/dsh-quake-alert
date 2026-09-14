@@ -26,6 +26,7 @@
 import { loadJSON, saveJSON } from './02-storage.js'
 import { currentCfg } from './03-settings-bridge.js'
 import { parseJma } from './05b-jma-parser.js'
+import { parseJmaResult, noteParseResult, noteSourceSuccess, effectiveStatusOf } from './05d-source-contracts.js'
 import { handleAlert } from './11-pipeline.js'
 
 /** Host 侧的电文增量路由（与 lib/index.js 的 FEED_PATH 对应）。 */
@@ -56,10 +57,17 @@ function saveFeedCursor(v, key) {
   if (typeof v === 'number' && Number.isFinite(v) && v >= 0) saveJSON(key || FEED_CURSOR_KEY, Math.floor(v))
 }
 
-async function defaultFetchJson(url) {
+async function defaultFetchJson(url, signal) {
   const AS = (typeof window !== 'undefined' && window) ? window.AbortSignal : undefined
-  const signal = (AS && typeof AS.timeout === 'function') ? AS.timeout(FEED_FETCH_TIMEOUT_MS) : undefined
-  const res = await window.fetch(url, { headers: { accept: 'application/json' }, signal })
+  const timeout = (AS && typeof AS.timeout === 'function') ? AS.timeout(FEED_FETCH_TIMEOUT_MS) : undefined
+  // 组合「请求超时」与「插件停用时中止」两个信号。AbortSignal.any 不可用时退回超时信号
+  // （那一轮仍可能跑完，但下面的 stopped 检查会拦住它的 apply）。
+  let sig = timeout
+  try {
+    if (signal && timeout && AS && typeof AS.any === 'function') sig = AS.any([signal, timeout])
+    else if (signal) sig = signal
+  } catch (err) { sig = timeout }
+  const res = await window.fetch(url, { headers: { accept: 'application/json' }, signal: sig })
   if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : '?'))
   return res.json()
 }
@@ -73,6 +81,9 @@ async function defaultFetchJson(url) {
  * @param {number} [opts.intervalMs]
  * @param {number} [opts.firstDelayMs]
  * @param {(url: string) => Promise<object>} [opts.fetchJson] 注入点（测试用）
+ * @param {(patch: object) => void} [opts.onStatus] 状态上报（0.4.1）：把本源的连接 / 失败情况
+ *   送进 store，参与整体状态聚合。没有它的话轮询链路整体死掉时侧边栏仍然是绿的。
+ * @param {string} [opts.label] 状态文案里的源名
  * @param {(entry: object, cfg: object) => boolean} [opts.apply] 注入点（测试用）
  * @param {() => object} [opts.getCfg] 注入点（测试用）
  * @param {() => (number|null)} [opts.loadCursor] 注入点（测试用；默认读 localStorage）
@@ -81,6 +92,7 @@ async function defaultFetchJson(url) {
  */
 export function createFeedClient(opts = {}) {
   const id = opts.id || 'jma'
+  const label = opts.label || id
   const path = opts.path || FEED_PATH
   const cursorKey = opts.cursorKey || FEED_CURSOR_KEY
   const intervalMs = opts.intervalMs || FEED_POLL_MS
@@ -88,15 +100,20 @@ export function createFeedClient(opts = {}) {
   const fetchJson = opts.fetchJson || defaultFetchJson
   const getCfg = opts.getCfg || currentCfg
   const onError = opts.onError || (() => {})
+  const onStatus = opts.onStatus || (() => {})
   // 该源此轮要不要拉：气象源跟 weather 开关，全球地震跟 earthquake 开关，海啸跟 tsunami 开关。
   // 关掉之后 Client 不再拉增量，Host 侧对应的轮询器也会因 idle 自然停下。
   const enabled = opts.enabled || ((cfg) => (cfg.disasters || {}).weather !== false)
   const loadCursor = opts.loadCursor || (() => loadFeedCursor(cursorKey))
   const saveCursor = opts.saveCursor || ((v) => saveFeedCursor(v, cursorKey))
   const apply = opts.apply || ((entry, cfg) => {
-    const alert = parseJma(entry && entry.xml, { id: entry && entry.id })
-    if (!alert) return false
-    handleAlert(alert, cfg)
+    // 走解析契约（0.4.1）：schema / value 失败会计入数据健康并**不播报**，
+    // empty（与本插件无关的电文）只是静静地跳过。
+    const res = parseJmaResult(entry && entry.xml, { id: entry && entry.id })
+    if (noteParseResult(id, res)) return false
+    if (!res.ok) return false
+    noteSourceSuccess(id)
+    handleAlert(res.alert, cfg)
     return true
   })
 
@@ -108,8 +125,22 @@ export function createFeedClient(opts = {}) {
   } catch (err) { /* 读盘失败按首次启动处理 */ }
   let timer = null
   let running = false
+  let stopped = false // 插件停用：在途轮询的响应回来后不该再 apply
   let inFlight = null
-  const stats = { polls: 0, received: 0, applied: 0, errors: 0, truncated: 0, tailSync: 0, resets: 0, morePages: 0, lastAt: 0, cursor: 0 }
+  let abortCtl = null
+  let lastStatusKey = ''
+  const stats = { polls: 0, received: 0, applied: 0, errors: 0, truncated: 0, tailSync: 0, resets: 0, morePages: 0, lastAt: 0, cursor: 0, host: null }
+
+  /** 状态上报：只在**变化**时送出去（轮询每 15 秒一轮，每轮都 push 会让设置页反复重渲）。
+   *  经过 effectiveStatusOf 合并"数据格式异常"——那是蓝点，优先级高于连接状态：
+   *  连接好着呢、只是数据我们读不懂，这个状态不该被下一轮"拉取成功"覆盖掉。 */
+  function reportStatus(patch) {
+    const eff = effectiveStatusOf(id, patch.status, patch.detail)
+    const key = String(eff.status) + '|' + String(eff.detail || '')
+    if (key === lastStatusKey) return
+    lastStatusKey = key
+    try { onStatus(Object.assign({ label }, eff)) } catch (err) { /* UI 回调异常不影响轮询 */ }
+  }
 
   /** 推进游标并落盘（值没变就不写，15s 一次的轮询不必每次都碰 localStorage）。 */
   function setCursor(next) {
@@ -123,23 +154,54 @@ export function createFeedClient(opts = {}) {
 
   async function pollOnce() {
     stats.polls += 1
+    // 该源的灾种开关关闭时不必拉增量（Host 侧随后也会据此停轮询）。状态如实上报为「已关闭」，
+    // 这样聚合状态不会因为"用户主动关掉了"而显示成异常。
+    if (!enabled(getCfg())) {
+      reportStatus({ status: 'disabled', detail: '灾种开关已关闭' })
+      return { applied: 0, cursor: cursorNow(), skipped: true }
+    }
     let data
+    // 自持取消器（0.4.1）：插件停用时要能中止在途请求，否则响应回来后仍会 apply
+    // → handleAlert → 响铃 / 弹窗 / 写历史（用户以为已经关掉了插件）。
+    abortCtl = (typeof window !== 'undefined' && window && typeof window.AbortController === 'function')
+      ? new window.AbortController()
+      : null
     try {
-      // path 可能自带查询串（全球源用 `?source=usgs` 分派），所以要按需选分隔符
+      // path 可能自带查询串（全球源用 `?source=usgs` 分派），所以要按需选分隔符。
+      // stats=1（0.4.1）：把 Host 侧的健康计数一并取回（errors / detailDropped / lastPollAt /
+      // idleSkips / bufferSize）。此前 Client 从不带它，于是「上游被墙 / 被限流」与「上游没有新闻」
+      // 在界面上完全不可区分——设置页的「最近拉取 2 秒前」说的只是**本地路由**的拉取时刻。
       const sep = path.indexOf('?') === -1 ? '?' : '&'
-      data = await fetchJson(path + sep + 'since=' + (since === null ? FEED_TAIL : since))
+      data = await fetchJson(
+        path + sep + 'since=' + (since === null ? FEED_TAIL : since) + '&stats=1',
+        abortCtl ? abortCtl.signal : undefined,
+      )
     } catch (err) {
       stats.errors += 1
       onError(err)
+      reportStatus({ status: 'unreachable', detail: 'Host 增量路由请求失败：' + String((err && err.message) || err) })
       return { applied: 0, cursor: cursorNow() }
+    } finally {
+      abortCtl = null
     }
     stats.lastAt = Date.now()
+    // Host 回显的源必须与请求的一致：Host 比 Client 旧（或参数被改写）时会把 jma 的原文
+    // 交给 noaa 的解析器，解析必然失败、而游标仍在推进——那些条目被永久跳过且表面正常。
+    if (data && data.source && data.source !== id) {
+      const err = new Error('源不匹配：请求 ' + id + '，Host 返回 ' + data.source)
+      stats.errors += 1
+      onError(err)
+      reportStatus({ status: 'unreachable', detail: err.message })
+      return { applied: 0, cursor: cursorNow() }
+    }
+    if (data && data.stats) stats.host = data.stats
     // 首次对齐：Host 只回当前位置。不应用任何条目（即使响应里意外带了也不应用），
     // 否则"刷新页面"又变成了重放历史。
     if (data && data.tail === true) {
       stats.tailSync += 1
       setCursor(data.cursor)
       stats.cursor = cursorNow()
+      reportStatus({ status: 'open', detail: '已对齐当前位置 · ' + hostDetail() })
       return { applied: 0, cursor: cursorNow(), tail: true }
     }
     // 本地还没有游标、响应却没带 tail 标记 → 对面是不认 `since=tail` 的旧版 Host
@@ -156,6 +218,7 @@ export function createFeedClient(opts = {}) {
     if (data && data.truncated) stats.truncated += 1
     let applied = 0
     for (const e of entries) {
+      if (stopped) break // 插件已停用：剩下的条目不再处理
       stats.received += 1
       try {
         if (apply(e, getCfg())) applied += 1
@@ -185,7 +248,29 @@ export function createFeedClient(opts = {}) {
       setCursor(next)
     }
     stats.cursor = cursorNow()
+    // 增量缺口与游标重置必须**让用户看得见**：被跳过的条目是静默漏报，
+    // 只进诊断计数的话用户会以为"该收到的都收到了"。
+    const warn = []
+    if (data && data.truncated) warn.push('有增量缺口（Host 环缓冲已淘汰旧条目）')
+    if (reset) warn.push('Host 游标重置过')
+    if (stats.host && stats.host.errors) warn.push('Host 侧请求失败 ' + stats.host.errors + ' 次')
+    if (stats.host && stats.host.detailDropped) warn.push('Host 侧放弃详情 ' + stats.host.detailDropped + ' 条')
+    if (stats.host && stats.host.stale) warn.push('上游数据已过期（源在响应，但数据是旧的）')
+    reportStatus({
+      status: warn.length ? 'degraded' : 'open',
+      detail: '已收到 ' + stats.received + ' 条增量 · ' + hostDetail() + (warn.length ? ' · ' + warn.join('；') : ''),
+    })
     return { applied, cursor: cursorNow(), truncated: !!(data && data.truncated), reset, more: !!(data && data.more) }
+  }
+
+  /** 状态文案里的 Host 侧摘要：只在本源当前有问题时才值得占位置（正常时保持简短）。 */
+  function hostDetail() {
+    const h = stats.host
+    if (!h) return '最近拉取 ' + new Date(stats.lastAt).toLocaleTimeString()
+    const errs = Number(h.errors) || 0
+    const idle = Number(h.idleSkips) || 0
+    return 'Host 轮询 ' + (Number(h.polls) || 0) + ' 次' + (errs ? '，失败 ' + errs + ' 次' : '') +
+      (idle ? '，节流跳过 ' + idle + ' 次' : '')
   }
 
   function pollSerial() {
@@ -202,10 +287,9 @@ export function createFeedClient(opts = {}) {
     if (!running) return
     timer = setTimeout(async () => {
       timer = null
-      // 该源的灾种开关关闭时不必拉增量（Host 侧随后也会据此停轮询）
-      if (enabled(getCfg())) {
-        try { await pollSerial() } catch (err) { onError(err) }
-      }
+      // 灾种开关的判断放在 pollOnce 里：那里会如实上报「已关闭」状态（不产生任何网络请求），
+      // 这样聚合状态不会因为"用户主动关掉了"而显示成异常。
+      try { await pollSerial() } catch (err) { onError(err) }
       schedule(intervalMs)
     }, delay)
   }
@@ -216,12 +300,16 @@ export function createFeedClient(opts = {}) {
     cursorKey,
     start() {
       if (running) return
+      stopped = false
       running = true
       schedule(firstDelayMs)
     },
     stop() {
+      stopped = true
       running = false
       if (timer) { clearTimeout(timer); timer = null }
+      // 中止在途请求：插件停用后回来的响应不该再 apply（响铃 / 弹窗 / 写历史）
+      if (abortCtl) { try { abortCtl.abort() } catch (err) { /* 已结束等忽略 */ } abortCtl = null }
     },
     pollOnce,
     pollSerial,

@@ -8,18 +8,20 @@
 // 约定：所有写入都经 applyCfg，保证内存/镜像/Host 三处一致。
 // ============================================================================
 
-import { h, useState, useEffect, useRef, PREFECTURES, SCALE_OPTIONS, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, HISTORY_MAX, HISTORY_KEY, MAX_WATCH_CITIES, MAX_WATCH_PLACES } from './01-constants.js'
+import { h, useState, useEffect, useRef, PREFECTURES, SCALE_OPTIONS, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, HISTORY_MAX, HISTORY_KEY, MAX_WATCH_CITIES, MAX_WATCH_PLACES, formatIssuedLocal } from './01-constants.js'
 import { saveJSON, own } from './02-storage.js'
 import { currentCfg, applyCfg, settingsSync } from './03-settings-bridge.js'
 import { citiesOfPref, cityTableState, loadCityTable } from './04-city-table.js'
 import { parseJma, buildTestTelegram, TEST_SCENARIOS } from './05b-jma-parser.js'
 import { TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage } from './05c-global-parsers.js'
 import { store } from './07-store.js'
-import { playSound, unlockAudio } from './08-audio.js'
+import { playSound, unlockAudio, audioState } from './08-audio.js'
 import { showToast, showSystemNotification, notificationPermission, requestNotificationPermission } from './09-notify.js'
 import { handleAlert } from './11-pipeline.js'
 import { activeClient } from './12-websocket.js'
 import { feedStatsOf } from './12b-feed-poll.js'
+import { broadcastHistoryCleared } from './10-dedupe.js'
+import { retrySource } from './05d-source-contracts.js'
 
 // ---------- 设置页 UI ----------
 // 连接状态 → 颜色 / 文案（设置页与侧边栏状态指示共用）
@@ -30,6 +32,13 @@ function statusMetaOf(status, retries) {
     open: { color: '#4ade80', text: '已连接' },
     reconnecting: { color: '#d9a406', text: '重连中（第 ' + retries + ' 次）' },
     closed: { color: '#e5484d', text: '已停止' },
+    // 0.4.1：轮询源与"消息处理失败"也需要自己的状态。此前只有 WebSocket 的五个状态，
+    // 于是上游被墙 / 路由 500 / 主链抛错时界面上与"没有新闻"完全不可区分。
+    unreachable: { color: '#e5484d', text: '无法连接' },
+    degraded: { color: '#d9a406', text: '链路降级' },
+    stale: { color: '#8b8f98', text: '数据已过期' },
+    'schema-error': { color: '#3b82f6', text: '数据格式异常' },
+    disabled: { color: '#7c8494', text: '已关闭' },
   }[status] || { color: '#7c8494', text: String(status) }
 }
 // 配置存储位置的人话说明（settings.yaml / 进程内 / localStorage）
@@ -43,10 +52,21 @@ function settingsSyncLabel() {
 // 历史条目「类型」行显示的 P2PQuake code。气象电文不在此表里（它不是 P2PQuake 来源），
 // 索引一律经 own()，避免外部数据里的 'constructor' 之类的键命中原型链。
 const P2P_KIND_CODE = { quake: 551, eew: 556, tsunami: 552 }
-/** 历史条目「类型」行的来源标注：气象电文来自気象庁防災情報XML，没有 P2PQuake code。 */
-function p2pCodeTextOf(kind) {
-  const code = own(P2P_KIND_CODE, kind)
-  if (code) return 'code ' + code
+/** alert.code → 来源标注（全球源与 JMA 电文没有 P2PQuake 的 code）。 */
+const SOURCE_CODE_TEXT = { emsc: 'EMSC', usgs: 'USGS', noaa: 'NOAA CAP', jma: 'JMA 电文' }
+/**
+ * 历史条目「类型」行的来源标注。
+ *
+ * 0.4.1：优先用 alert.code，而不是 kind。全球地震（EMSC / USGS）的 kind 也是 'quake'，
+ * 只看 kind 会把它们标成「code 551」（P2PQuake 的震度速报）——与 0.3.2 修过的
+ * "气象条目被标成 code 551"是同一类错误。旧历史条目没有 code 字段 → 回退到 kind 映射。
+ */
+function p2pCodeTextOf(kind, code) {
+  const byCode = own(SOURCE_CODE_TEXT, String(code === undefined || code === null ? '' : code))
+  if (byCode) return byCode
+  if (typeof code === 'number') return 'code ' + code
+  const c = own(P2P_KIND_CODE, kind)
+  if (c) return 'code ' + c
   return kind === 'weather' ? 'JMA 电文' : '—'
 }
 // 灾种配色：气象灾害此前没有键，历史条目一律落到灰色兜底，与另外三类不一致
@@ -72,6 +92,71 @@ const s = {
   }, text),
 }
 
+/** 轮询源的中文标签（状态区块与详情共用）。 */
+const SOURCE_LABELS = {
+  p2pquake: 'P2PQuake（日本地震 / EEW / 海啸，实时推送）',
+  emsc: 'EMSC（全球地震，实时推送）',
+  jma: '気象庁（气象灾害，Host 轮询）',
+  usgs: 'USGS（全球地震目录，Host 轮询）',
+  noaa: 'NOAA（海啸 CAP，Host 轮询）',
+}
+
+/**
+ * 源状态区块（0.4.1）。
+ *
+ * 拆成独立组件的理由：它显示"最近拉取 N 秒前"，需要自己走时钟；而此前这段逻辑挂在
+ * 设置页主组件里，5 秒一次的 setState 会**重建整个设置页**——关注县较多时那意味着
+ * 每次最多 47×200 个市町村按钮一起重建，输入明显卡顿。现在只有这一小块重渲。
+ *
+ * 内容也扩了：除本地的增量 / 失败计数，还显示 Host 侧的失败与放弃数（来自 /feed?stats=1）。
+ * 只显示本地计数的话，「上游被墙」与「上游没有新闻」仍然不可区分。
+ */
+function SourceStatusBlock() {
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const t = setInterval(() => setTick((x) => x + 1), 5000)
+    return () => clearInterval(t)
+  }, [])
+  // 订阅 store：源的连接 / 数据状态变化要立刻反映（不必等那 5 秒的时钟）
+  useEffect(() => store.subscribe(() => setTick((x) => x + 1)), [])
+  const rows = []
+  const sources = store.sources || {}
+  for (const id of ['p2pquake', 'emsc', 'jma', 'usgs', 'noaa']) {
+    const st = sources[id]
+    if (!st) continue
+    const meta = statusMetaOf(st.status, st.retries)
+    rows.push((st.label || SOURCE_LABELS[id] || id) + '：' + meta.text + (st.detail ? ' · ' + st.detail : ''))
+  }
+  for (const id of ['jma', 'usgs', 'noaa']) {
+    const f = feedStatsOf[id]
+    const st = sources[id]
+    if (!f) {
+      if (!st) rows.push((SOURCE_LABELS[id] || id) + '：尚未拉取')
+      continue
+    }
+    const host = f.host || {}
+    const ago = f.lastAt ? Math.max(0, Math.round((Date.now() - f.lastAt) / 1000)) + ' 秒前' : '—'
+    rows.push((SOURCE_LABELS[id] || id) + '：已收到 ' + f.received + ' 条增量' +
+      (f.errors ? '，本地失败 ' + f.errors + ' 次' : '') +
+      (f.truncated ? '，增量缺口 ' + f.truncated + ' 次' : '') +
+      (f.resets ? '，游标重置 ' + f.resets + ' 次' : '') +
+      (Number(host.errors) ? '，Host 失败 ' + host.errors + ' 次' : '') +
+      (Number(host.detailDropped) ? '，Host 放弃详情 ' + host.detailDropped + ' 条' : '') +
+      ' · 最近拉取 ' + ago)
+  }
+  if (rows.length === 0) return null
+  // 数据格式异常（schema-error）：按 DESIGN 5.4 提供**手动重试**——源改版后字段可能又回来了，
+  // 用户不该为了清掉一个蓝点去重装插件。
+  const retryRows = ['p2pquake', 'emsc', 'jma', 'usgs', 'noaa']
+    .filter((id) => sources[id] && sources[id].status === 'schema-error')
+    .map((id) => h('div', { key: 'retry-' + id, style: { marginTop: 4 } },
+      s.btn('重试 ' + (sources[id].label || SOURCE_LABELS[id] || id) + ' 的数据解析', () => retrySource(id))))
+  return h('div', { style: { marginTop: 10, fontSize: 11, color: '#9aa0a6', lineHeight: 1.7 } },
+    h('div', { style: { marginBottom: 2 } }, '源状态'),
+    rows.map((t, i) => h('div', { key: 'feedstat-' + i }, t)),
+    retryRows)
+}
+
 function SettingsPanel() {
   const [cfg, setCfgState] = useState(() => currentCfg())
   const [, setTick] = useState(0)
@@ -87,20 +172,18 @@ function SettingsPanel() {
   // 全球链路的测试（0.4.0）：场景轮换游标与结果提示
   const [geTestSeq, setGeTestSeq] = useState(0)
   const [geTestMsg, setGeTestMsg] = useState('')
-  // 「全球源状态」里的相对时间要自己走（feedStatsOf 不经过 store，避免每 15 秒重渲整个设置页）
-  const [, setFeedTick] = useState(0)
-  useEffect(() => {
-    const t = setInterval(() => setFeedTick((x) => x + 1), 5000)
-    return () => clearInterval(t)
-  }, [])
+  // 「源状态」区块里的相对时间要自己走 —— 见 SourceStatusBlock（独立组件，避免每 5 秒
+  // 重渲整个设置页，尤其是关注县较多时那几千个市町村按钮）
   // 音量滑块：拖动期间只改本地草稿，停手 300ms 后才落盘（避免每移动 1px 写一次 localStorage）
   const [volDraft, setVolDraft] = useState(null)
   const volTimer = useRef(null)
   const volPending = useRef(null) // 尚未落盘的草稿值：卸载时补写，拖完立刻关设置页也不丢改动
+  const restartTimer = useRef(null) // 切换数据源后的重启延时（见下方）
   // store 变化（新预警、Host 配置同步）都要重新读一次当前配置
   useEffect(() => store.subscribe(() => { setTick((t) => t + 1); setCfgState(currentCfg()) }), [])
   useEffect(() => () => {
     if (volTimer.current) { clearTimeout(volTimer.current); volTimer.current = null }
+    if (restartTimer.current) { clearTimeout(restartTimer.current); restartTimer.current = null }
     const v = volPending.current
     if (v !== null) {
       volPending.current = null
@@ -196,30 +279,8 @@ function SettingsPanel() {
     },
   }))
   // 全球源状态（0.4.0）：用户看不出"链路到底在不在拉"，这是最常见的困惑来源——
-  // 尤其全球地震本来就不频繁。feedStatsOf 不经过 store（见 12b 的注释），所以这里自己每 5 秒重读。
-  const feedStatusBlock = () => {
-    const rows = []
-    const emsc = (store.sources || {}).emsc
-    rows.push('EMSC（全球地震，实时推送）：' + (emsc
-      ? statusMetaOf(emsc.status, emsc.retries).text + (emsc.detail ? ' · ' + emsc.detail : '')
-      : '未启动'))
-    const sourceLabel = {
-      jma: '気象庁（气象灾害，Host 轮询）',
-      usgs: 'USGS（全球地震目录，Host 轮询）',
-      noaa: 'NOAA（海啸，Host 轮询）',
-    }
-    for (const id of ['jma', 'usgs', 'noaa']) {
-      const st = feedStatsOf[id]
-      if (!st) { rows.push(sourceLabel[id] + '：尚未拉取'); continue }
-      const ago = st.lastAt ? Math.max(0, Math.round((Date.now() - st.lastAt) / 1000)) + ' 秒前' : '—'
-      rows.push(sourceLabel[id] + '：已收到 ' + st.received + ' 条增量' +
-        (st.errors ? '，' + st.errors + ' 次失败' : '') + ' · 最近拉取 ' + ago)
-    }
-    return h('div', { style: { marginTop: 10, fontSize: 11, color: '#9aa0a6', lineHeight: 1.7 } },
-      h('div', { style: { marginBottom: 2 } }, '全球源状态'),
-      rows.map((t, i) => h('div', { key: 'feedstat-' + i }, t)),
-    )
-  }
+  // 尤其全球地震本来就不频繁。feedStatsOf 不经过 store（见 12b 的注释），
+  // 所以由 SourceStatusBlock 自己每 5 秒重读（见文件下方）。
   // 市区町村选择器：数据表到位后，为每个已关注的县提供「搜索 + 多选」
   const cityPicker = () => {
     if (cityTableState === 'failed') {
@@ -361,7 +422,15 @@ function SettingsPanel() {
           { v: 'sandbox', label: '沙箱：回放 2023 年历史（约30秒/条，测试用）' },
         ], (v) => {
           setCfg((c) => ({ ...c, source: v }))
-          if (activeClient) setTimeout(() => { try { activeClient.restart() } catch (err) {} }, 80)
+          // 延时用 ref 保存并在卸载时清理：否则"切换数据源后 80ms 内离开设置页 / 停用插件"
+          // 会在到点时复活一个已经没有任何 fiber 归属的 socket（它会继续上报状态并经
+          // handleAlert 响铃），直到用户刷新页面。执行前再复查一次 activeClient。
+          if (restartTimer.current) clearTimeout(restartTimer.current)
+          restartTimer.current = setTimeout(() => {
+            restartTimer.current = null
+            const c = activeClient // 模块级 live binding：插件停用时已被置为 null
+            if (c) { try { c.restart() } catch (err) { /* 忽略 */ } }
+          }, 80)
         }, (o) => o.label),
       ),
       h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 6 } },
@@ -444,7 +513,7 @@ function SettingsPanel() {
           '。最后一条刻意落在半径之外——用来演示半径是怎么起作用的。'),
         geTestMsg ? h('div', { style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, geTestMsg) : null,
       ),
-      feedStatusBlock(),
+      h(SourceStatusBlock, { key: 'source-status' }),
     ),
 
     // 阈值
@@ -474,10 +543,11 @@ function SettingsPanel() {
         style: { flex: 1, minWidth: 120 },
       }), h('span', { style: { color: '#9aa0a6', fontSize: 11, width: 34 } }, Math.round(volShown * 100) + '%')),
       s.row(
-        s.btn('试听地震音', () => playSound('quake', volShown)),
-        s.btn('试听 EEW 音', () => playSound('eew', volShown)),
-        s.btn('试听海啸音', () => playSound('tsunami', volShown)),
-        s.btn('试听气象音', () => playSound('weather', volShown)),
+        // 试听本身就是用户手势：顺手解锁音频并刷新状态提示（否则"尚未解锁"的警告会一直挂着）
+        s.btn('试听地震音', () => { unlockAudio(); setTick((t) => t + 1); playSound('quake', volShown) }),
+        s.btn('试听 EEW 音', () => { unlockAudio(); setTick((t) => t + 1); playSound('eew', volShown) }),
+        s.btn('试听海啸音', () => { unlockAudio(); setTick((t) => t + 1); playSound('tsunami', volShown) }),
+        s.btn('试听气象音', () => { unlockAudio(); setTick((t) => t + 1); playSound('weather', volShown) }),
       ),
       s.row(
         s.btn('测试系统通知', () => {
@@ -501,6 +571,14 @@ function SettingsPanel() {
         s.btn('测试 Toast', () => showToast({ title: 'QuakeAlert 测试', body: '页面内弹窗工作正常。', color: '#4ade80', ttlMs: 4000 })),
       ),
       h('div', { style: { color: '#9aa0a6', fontSize: 11, marginTop: 6 } }, permText),
+      // 提示音未解锁时必须**显式告知**：页面可见时通知路径只用页内 toast（不发系统通知），
+      // 于是"打开 DSH 后从未点过页面"的用户在设置里看到「提示音：开」，实际上一条声音都听不到。
+      audioState() === 'suspended'
+        ? h('div', { style: { color: '#d9a406', fontSize: 11, marginTop: 4 } },
+            '⚠ 提示音尚未解锁：浏览器要求先有一次页面交互才能出声——点一下页面任意位置即可。')
+        : (audioState() === 'unavailable'
+          ? h('div', { style: { color: '#9aa0a6', fontSize: 11, marginTop: 4 } }, '当前环境不支持 Web Audio，提示音不可用。')
+          : null),
       testMsg ? h('div', { style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, testMsg) : null,
     ),
 
@@ -539,7 +617,9 @@ function SettingsPanel() {
         ? h('div', { style: { color: '#9aa0a6', fontSize: 12, padding: '4px 0' } }, '暂无记录 —— 收到真实预警或测试消息后显示')
         : h('div', { style: { maxHeight: 300, overflowY: 'auto', paddingRight: 4 } },
             store.events.slice(0, HISTORY_MAX).map((e, i) => {
-              const open = expanded === (e.key || e.id || i)
+              const itemKey = e.key || e.id || i
+              const open = expanded === itemKey
+              const toggle = () => setExpanded(open ? null : itemKey)
               const head = String(e.headline || '')
               const muted = e.hit === false || e.suppressed === true
               const statusText = e.hit === false
@@ -547,11 +627,19 @@ function SettingsPanel() {
                 : (e.suppressed ? '未重复提醒' : (e.pref ? '命中 ' + e.pref : '已提醒'))
               // 气象电文来自気象庁防災情報XML，没有 P2PQuake 的 code：旧写法对 weather 落进
               // 最后的 else 分支，展开详情时会把泥石流 / 洪水电文标成「code 551」（地震速报）。
-              const codeText = p2pCodeTextOf(e.kind)
+              const codeText = p2pCodeTextOf(e.kind, e.code)
               return h('div', {
-                key: e.key || e.id || i,
-                onClick: () => setExpanded(open ? null : (e.key || e.id || i)),
-                title: open ? '点击收起' : '点击展开详情',
+                key: itemKey,
+                // 可键盘操作（0.4.1）：详情是用户核对"插件到底看到了什么"的唯一入口，
+                // 只在 onClick 上可用等于把键盘 / 读屏用户挡在门外。
+                role: 'button',
+                tabIndex: 0,
+                'aria-expanded': open,
+                onClick: toggle,
+                onKeyDown: (ev) => {
+                  if (ev.key === 'Enter' || ev.key === ' ' || ev.key === 'Spacebar') { ev.preventDefault(); toggle() }
+                },
+                title: open ? '点击收起（回车 / 空格同样可用）' : '点击展开详情（回车 / 空格同样可用）',
                 style: Object.assign({
                   cursor: 'pointer',
                   borderLeft: '3px solid ' + kindColorOf(e.kind),
@@ -573,7 +661,9 @@ function SettingsPanel() {
                         h('span', { style: { color: '#e6e6e8' } }, String(e.label || '') + '（' + codeText + '）')),
                       h('div', { style: { display: 'flex', gap: 6, marginTop: 2 } },
                         h('span', { style: { color: '#9aa0a6', width: 44 } }, '时间'),
-                        h('span', { style: { color: '#e6e6e8' } }, String(e.issued || '—'))),
+                        // 按**本地时区**渲染（DESIGN 第 4 节）：解析层存的是带偏移的 ISO 8601，
+                        // 直接显示原文会让大陆用户看到一个差 1 小时且无标注的 JST 时间。
+                        h('span', { style: { color: '#e6e6e8' } }, formatIssuedLocal(e.issued) || '—')),
                       e.pref ? h('div', { style: { display: 'flex', gap: 6, marginTop: 2 } },
                         h('span', { style: { color: '#9aa0a6', width: 44 } }, '命中'),
                         h('span', { style: { color: '#e6e6e8' } }, String(e.pref))) : null,
@@ -587,7 +677,14 @@ function SettingsPanel() {
               )
             }),
           ),
-      s.row(s.btn('清空记录', () => { store.events = []; saveJSON(HISTORY_KEY, []); store.push({}) })),
+      s.row(s.btn('清空记录', () => {
+        store.push({ events: [] })
+        saveJSON(HISTORY_KEY, [])
+        // 还要广播：其它标签页的内存副本不清的话，它们下一次 addEvent 会把整份记录（含刚被
+        // 清掉的条目）重新写回磁盘——用户以为清空了，实际只是本标签页看不见（若清空的动机
+        // 是隐私，这就是实际的信息泄露面）。
+        broadcastHistoryCleared()
+      })),
     ),
   )
 }

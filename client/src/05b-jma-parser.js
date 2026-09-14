@@ -20,7 +20,7 @@
 
 import { prefOfCode, prefCodeOf } from './01-constants.js'
 import { own } from './02-storage.js'
-import { prefsOfCity, canonicalCityOf, riverAreaCities } from './04-city-table.js'
+import { prefsOfCity, canonicalCityOf, riverAreaCities, normKana } from './04-city-table.js'
 import { prefsOfArea } from './05-parser.js'
 
 const LEVEL_DIGITS = { '１': 1, '２': 2, '３': 3, '４': 4, '５': 5, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5 }
@@ -35,7 +35,7 @@ const FLOOD_KIND_LEVEL = {
 const INACTIVE_KIND = /^(解除|なし|発表警報・注意報はなし)$/
 
 /**
- * 旧格式电文的 Kind 名称 → 警戒レベル（0.3.4 修复漏报）。
+ * 旧格式电文的 Kind 名称 → 警戒レベル（0.4.0 修复漏报）。
  *
  * R06 新格式把级别写在名称里（「レベル４大雨危険警報」），旧格式只写名称
  * （「大雨特別警報」「大雨警報」「大雨注意報」）。此前 levelOf() 只认「レベルＮ」字样，
@@ -57,6 +57,34 @@ function legacyKindLevel(name) {
   if (/危険警報/.test(s)) return 4
   if (/警報/.test(s) && !/注意報/.test(s)) return 3
   return 0
+}
+/**
+ * **地区级**级别：与 legacyKindLevel 的唯一差别是注意報给出 2（而不是 0）。
+ *
+ * 为什么必须拆成两个函数：电文级不能把「注意報」抬成 2——同一次发布常有 VPWW53 与（Ｈ２７）
+ * 两份副本，抬升会让历史被同一份注意報刷屏（而 L2 本来就不播报）；但地区级必须给出 2，
+ * 否则该地区会**回退到电文最大值**：一条含危険警報（L4）的电文里，只到「大雨注意報」的
+ * 西脇市会被播成「警戒レベル4（避难指示级）」——实测 2026-09-14 兵庫県就是这样，
+ * 同一电文里姫路市是 L4 危険警報、相生市是 L3 大雨警報、西脇市是 L2 大雨注意報。
+ */
+function regionKindLevel(name) {
+  const s = String(name || '')
+  if (!s) return 0
+  if (/特別警報/.test(s)) return 5
+  if (/危険警報/.test(s)) return 4
+  if (/注意報/.test(s)) return 2
+  if (/警報/.test(s)) return 3
+  return 0
+}
+/** 解除 / 无内容：这些 Kind 不代表"正在发布某种警报"（Name 与 Status 任一命中即算）。 */
+const isInactiveItem = (it) => !!it && (INACTIVE_KIND.test(it.kindName) || INACTIVE_KIND.test(it.status))
+/** 单个 Item（一条电文里的一个区域块）的警戒レベル：名称里的「レベルＮ」优先，其次河川等级映射与名称语义。 */
+function itemLevelOf(it) {
+  return Math.max(
+    maxLevelIn(it.kindName),
+    own(FLOOD_KIND_LEVEL, it.kindName) || 0,
+    regionKindLevel(it.kindName),
+  )
 }
 // 电文标题 → 中文标签（M3 才做 i18n，这里与既有 kindLabel 一样先硬编码中文）
 const KIND_LABELS = [
@@ -139,7 +167,22 @@ function itemsOf(scope) {
     containers.push({ type: attrOf(m[2], 'type'), body: m[3] })
   }
   if (containers.length === 0) containers.push({ type: '', body: String(scope) })
-  const AREA = /<Area>\s*<Name>([^<]*)<\/Name>\s*<Code>([^<]*)<\/Code>[\s\S]*?<\/Area>/g
+  // 宽松的 <Area> 匹配（0.4.1）：原写法要求 `<Area>` 后紧跟 `<Name>` 再 `<Code>`，
+  // 于是 ①带属性的 `<Area codeType="…">`（实测 jma-vxko-flood.xml 里就有）、
+  // ②Name/Code 之间插了其它子元素、③只有 Name 没有 Code 的条目，都会被**静默丢弃**。
+  // 表现是"解析成功但 regions 为空"——而 regions 为空就直接不播报，等于静默漏报。
+  // 改为按块取、块内各自取值；codeType 先看 <Area> 自身的属性，再退回容器/外层。
+  const AREA = /<Area(\s[^>]*)?>([\s\S]*?)<\/Area>/g
+  const areasIn = (blockText, fallbackType) => {
+    const list = []
+    for (const a of String(blockText).matchAll(AREA)) {
+      const name = tag(a[2], 'Name')
+      const code = tag(a[2], 'Code')
+      if (!name && !code) continue
+      list.push({ codeType: attrOf(a[1], 'codeType') || fallbackType, name, code })
+    }
+    return list
+  }
   for (const c of containers) {
     for (const im of c.body.matchAll(/<Item>([\s\S]*?)<\/Item>/g)) {
       const raw = im[1]
@@ -155,14 +198,10 @@ function itemsOf(scope) {
       if (wrapped.length) {
         for (const am of wrapped) {
           const ct = attrOf(am[1], 'codeType') || c.type
-          for (const a of am[2].matchAll(AREA)) {
-            item.areas.push({ codeType: ct, name: decode(a[1]).trim(), code: a[2].trim() })
-          }
+          for (const a of areasIn(am[2], ct)) item.areas.push(a)
         }
       } else {
-        for (const a of raw.matchAll(AREA)) {
-          item.areas.push({ codeType: c.type, name: decode(a[1]).trim(), code: a[2].trim() })
-        }
+        for (const a of areasIn(raw, c.type)) item.areas.push(a)
       }
       out.push(item)
     }
@@ -174,10 +213,12 @@ function itemsOf(scope) {
  * 判定电文整体的警戒レベル：取自 Kind 名称、Headline 文本、标题，三者取最大。
  * 指定河川洪水予報另按 Kind 名称映射；土砂災害警戒情報固定为 4（它本身就是 L4 相当）。
  */
-function levelOf({ title, headTitle, headlineText, items }) {
+function levelOf({ title, headTitle, headlineText, notice, items }) {
   let level = 0
   for (const it of items) {
     if (INACTIVE_KIND.test(it.kindName)) continue
+    // 电文级**刻意不含注意報的 2**：同一次发布常有 VPWW53 与（Ｈ２７）两份副本，
+    // 把 L2 也抬升等于让历史被同一份注意報刷屏（而 L2 本来就不播报）。逐区级别另算（见 itemLevelOf）。
     const inName = maxLevelIn(it.kindName)
     if (inName > level) level = inName
     const mapped = own(FLOOD_KIND_LEVEL, it.kindName) || 0
@@ -185,18 +226,66 @@ function levelOf({ title, headTitle, headlineText, items }) {
     const legacy = legacyKindLevel(it.kindName)
     if (legacy > level) level = legacy
   }
-  for (const s of [headlineText, headTitle, title]) {
+  // 除标题与主文之外还必须读 **<Body><Notice>**：Ｒ０６ 的総合副本（VPWW53/54）把多灾种
+  // 多级别合并成一条电文，Kind 只写灾种名（「大雨警報」），地区级级别只出现在 Notice 里：
+  //   ［危険警報・氾濫特別警報の発表状況］〈レベル４大雨危険警報〉姫路市　たつの市　多可町＊
+  // 实测 2026-09-14 兵庫県：不读 Notice 时整条被判成 L3，一条真实存在的 L4 危険警報完全不播报。
+  for (const s of [headlineText, notice, headTitle, title]) {
     const n = maxLevelIn(s)
     if (n > level) level = n
   }
+  // 有些 Notice 只写〈危険警報（大雨、土砂災害）〉而不带「レベルＮ」字样（Headline 的主文
+  // 就是这种形态）。「危険警報」在気象庁体系里固定是 L4 相当，按语义兜底。
+  if (level < 4 && /危険警報/.test(String(headlineText || '') + String(notice || ''))) level = 4
   if (level === 0 && /土砂災害警戒情報/.test(title)) level = 4
   // 「気象特別警報報知」是气象厅为特別警報专发的最高优先级报知电文；正常情况它的 Kind 名称
   // 就是「大雨特別警報」（已被上面的映射接住），这里只是 Kind 缺失时的兜底。
   // 必须排除"整条电文都是解除"的情况：解除报知的 Kind 是「解除」（循环里被 continue 跳过），
   // 若不排除，标题兜底会把一条解除消息抬成 L5，headline 会显示成「警戒レベル5（已解除）」。
-  const allInactive = items.length > 0 && items.every((it) => INACTIVE_KIND.test(it.kindName))
+  // 判定必须与 cancelled 用同一个函数：JMA 常把解除写在 <Status> 里而 Name 为空，
+  // 只看 kindName 会漏掉那种形态，于是同一条解除报知被判成"还没解除"而抬到 L5。
+  const allInactive = items.length > 0 && items.every(isInactiveItem)
   if (level === 0 && !allInactive && /気象特別警報報知/.test(title)) level = 5
   return level
+}
+
+/**
+ * 从 <Body><Notice> 里解析「级别 → 地区名列表」。
+ *
+ * 格式（实测 2026-09-14 兵庫県 VPWW53）：`〈レベル４大雨危険警報〉姫路市　たつの市　多可町＊`
+ * ——全角空格分隔，`＊` 表示"此外还有"（列表不完整）。所以这里只做**精确提升**：
+ * 列出的地区提升到该级别，没列出的仍按自己的 Kind 判定（R06 分灾种副本通常同时存在，
+ * 它带精确的逐区级别，会照常播报那些地区）。解析不出来就返回空表，调用方回退电文级别。
+ */
+function noticeAreaLevels(notice) {
+  const text = String(notice || '')
+  if (!text || text.indexOf('レベル') === -1) return []
+  const out = []
+  for (const m of text.matchAll(/レベル\s*([１-５1-5])[^〉]*〉([^〈］＊]*)/g)) {
+    const level = own(LEVEL_DIGITS, m[1]) || 0
+    if (level <= 0) continue
+    const names = String(m[2]).split(/[\s\u3000、,，]+/).map((s) => s.trim()).filter(Boolean)
+    if (names.length) out.push({ level, names })
+  }
+  return out
+}
+/** 把 Notice 里的地区级级别套到 regions 上（名称经假名归一比较写法差异）。只在更高时提升。 */
+function applyNoticeLevels(regions, notice) {
+  const pairs = noticeAreaLevels(notice)
+  if (pairs.length === 0) return regions
+  for (const r of regions) {
+    const own1 = normKana(r.city || '')
+    const own2 = normKana(r.area || '')
+    for (const p of pairs) {
+      let hit = false
+      for (const n of p.names) {
+        const k = normKana(n)
+        if ((own1 && own1 === k) || (own2 && own2 === k)) { hit = true; break }
+      }
+      if (hit && p.level > (r.level || 0)) r.level = p.level
+    }
+  }
+  return regions
 }
 
 /**
@@ -206,17 +295,24 @@ function levelOf({ title, headTitle, headlineText, items }) {
  * 市町村名来自市区町村表，而电文与河川区域表给的是外部写法（「南アルプス市」vs 本表
  * 「南あるぷす市」、「金ケ崎町」vs「金け崎町」），直接比对会漏报。取不到规范名时回退原写法。
  */
-function regionsOf(items) {
+function regionsOf(items, notice) {
   const out = []
-  const seen = new Set()
-  const push = (region) => {
+  const at = new Map() // 区域键 → out 下标：同一区域重复出现时保留更高的级别
+  const push = (region, level) => {
     const key = region.pref + '|' + (region.city || '') + '|' + region.area
-    if (seen.has(key)) return
-    seen.add(key)
-    out.push(region)
+    const idx = at.get(key)
+    if (idx !== undefined) {
+      if (level > (out[idx].level || 0)) out[idx].level = level
+      return
+    }
+    at.set(key, out.length)
+    out.push(level > 0 ? Object.assign({ level }, region) : region)
   }
   for (const it of items) {
-    if (INACTIVE_KIND.test(it.kindName) || INACTIVE_KIND.test(it.status)) continue
+    if (isInactiveItem(it)) continue
+    // 逐区级别：由这条 Item 自己的 Kind 决定。**不能用电文最大值**——同一次发布里
+    // 姫路市可以是 L4 危険警報、相生市 L3 大雨警報、西脇市 L2 大雨注意報（2026-09-14 兵庫県）。
+    const lv = itemLevelOf(it)
     for (const a of it.areas) {
       const kind = regionKindOf(a.codeType, a.code)
       if (kind === 'city' || kind === 'pref') {
@@ -224,29 +320,30 @@ function regionsOf(items) {
         // 判县优先用区域码前两位（准确），名称反查只在前者不可用时兜底
         const byCode = prefOfCode(a.code)
         if (byCode) {
-          push({ pref: byCode, area: a.name, city })
+          push({ pref: byCode, area: a.name, city }, lv)
           continue
         }
         const prefs = kind === 'city' ? prefsOfCity(a.name) : prefsOfArea(a.name)
-        if (prefs.length === 0) push({ pref: '', area: a.name, city, prefUnknown: true })
-        else for (const p of prefs) push({ pref: p, area: a.name, city })
+        if (prefs.length === 0) push({ pref: '', area: a.name, city, prefUnknown: true }, lv)
+        else for (const p of prefs) push({ pref: p, area: a.name, city }, lv)
       } else if (kind === 'river') {
         // 河川予報区域码是 12 位，前两位与都道府県无关，只能查 river-areas 表
         const cities = riverAreaCities(a.code)
-        if (cities.length === 0) push({ pref: '', area: a.name, city: '', prefUnknown: true })
+        if (cities.length === 0) push({ pref: '', area: a.name, city: '', prefUnknown: true }, lv)
         else {
           for (const raw of cities) {
             const c = canonicalCityOf(raw) || raw
             const prefs = prefsOfCity(c)
-            if (prefs.length === 0) push({ pref: '', area: a.name, city: c, prefUnknown: true })
-            else for (const p of prefs) push({ pref: p, area: a.name, city: c })
+            if (prefs.length === 0) push({ pref: '', area: a.name, city: c, prefUnknown: true }, lv)
+            else for (const p of prefs) push({ pref: p, area: a.name, city: c }, lv)
           }
         }
       }
       // 判不出类型的条目（水位観測所等）一律忽略
     }
   }
-  return out
+  // <Body><Notice> 是総合副本里唯一的地区级级别来源（见 noticeAreaLevels）
+  return applyNoticeLevels(out, notice)
 }
 
 function kindLabelOf(title) {
@@ -261,7 +358,7 @@ function kindLabelOf(title) {
  * 它们的 title / headTitle 各不相同，而気象警報・注意報 的 EventID 又是空的——
  * 若沿用「标题」做事件键，同一条警报会被当成三个事件、连响三次铃。
  */
-const SUMMARY_TITLE = /気象特別警報・警報・注意報|気象警報・注意報（Ｈ２７）|気象特別警報報知/
+const SUMMARY_TITLE = /気象特別警報・警報・注意報|気象警報・注意報（Ｈ２７）|気象警報・注意報（Ｒ０６）|気象特別警報報知/
 // 灾种关键词（顺序 = 优先级无关，按最高级别的 Kind 名称匹配具体灾种）
 const HAZARD_KEYS = [
   [/大雨|浸水/, '大雨'], [/土砂/, '土砂'], [/洪水|氾濫/, '洪水'], [/高潮/, '高潮'],
@@ -269,16 +366,20 @@ const HAZARD_KEYS = [
   [/乾燥/, '乾燥'], [/なだれ/, 'なだれ'], [/大雪|着雪/, '大雪'],
 ]
 /** 取级别最高的那条 Kind 名称，再从中提取灾种——副本之间只要最高级条目相同就会得到同一个键。 */
-function hazardKeyOf(items) {
+function hazardKeyOf(items, fallbackText) {
   let name = ''
   let best = -1
   for (const it of items) {
-    if (INACTIVE_KIND.test(it.kindName)) continue
-    const lv = Math.max(legacyKindLevel(it.kindName), own(FLOOD_KIND_LEVEL, it.kindName) || 0, maxLevelIn(it.kindName))
+    if (isInactiveItem(it)) continue
+    const lv = itemLevelOf(it)
     if (lv > best) { best = lv; name = it.kindName }
   }
   for (const [re, key] of HAZARD_KEYS) if (re.test(name)) return key
-  return name || '气象'
+  if (name) return name
+  // Kind 里没有任何灾种信息（解除报知只写「解除」）→ 退回主文里认灾种。
+  // 这是解除电文能与发布电文算出同一个键的前提之一（另一个是键里不含发布时刻）。
+  for (const [re, key] of HAZARD_KEYS) if (re.test(String(fallbackText || ''))) return key
+  return '气象'
 }
 
 /**
@@ -292,37 +393,47 @@ function parseJma(xml, entry) {
   if (!text || text.indexOf('<Report') === -1) return null
   const control = block(text, 'Control')
   const head = block(text, 'Head')
+  const body = block(text, 'Body')
 
   const title = tag(control, 'Title') || tag(head, 'Title')
   const headTitle = tag(head, 'Title')
   const headlineText = tag(block(head, 'Headline'), 'Text')
+  // <Body><Notice>：Ｒ０６ 総合副本里唯一的地区级级别来源（见 levelOf / noticeAreaLevels）
+  const notice = tag(body, 'Notice')
+  const reportTime = tag(head, 'ReportDateTime') || tag(control, 'DateTime')
   const eventId = tag(head, 'EventID')
   // 用**全文**提取条目：市町村清单常只出现在 Head 的 <Information> 里（Body 的 <Warning>
   // 反而只有摘要），只看 Body 会取不到区域。重复条目由 regionsOf 去重兜住。
   const items = itemsOf(text)
 
-  const level = levelOf({ title, headTitle, headlineText, items })
-  const cancelled = items.length > 0 &&
-    items.every((it) => INACTIVE_KIND.test(it.kindName) || INACTIVE_KIND.test(it.status))
+  const level = levelOf({ title, headTitle, headlineText, notice, items })
+  // 解除判定与 levelOf 里的 allInactive 用同一个函数（Name 与 Status 都算）
+  const cancelled = items.length > 0 && items.every(isInactiveItem)
   // 没有级别又不是解除 → 与预警无关（天气预报、观测资料等），交给调用方丢弃
   if (level === 0 && !cancelled) return null
 
-  const regions = cancelled ? [] : regionsOf(items)
+  const regions = cancelled ? [] : regionsOf(items, notice)
   // 解除电文若展开不出区域，至少保留一个空区域条目，让事件键与提示仍可工作
   const kindLabel = kindLabelOf(title)
   const first = String(headlineText || '').split(/[。\n]/)[0].trim()
   const levelText = level > 0 ? '（警戒レベル' + level + '）' : ''
   const headline = (kindLabel + levelText + (first ? ' · ' + first : '')).slice(0, 180)
   // 事件键：优先 EventID，其次 Head 标题。汇总型电文（同时存在多份格式副本）改用**内容指纹**
-  // ——「灾种 + 发布时刻(分钟) + 府县码」——否则同一条警报会因副本标题不同而被当成三个事件、连响三次。
-  // 指纹里的府县码取电文 id 的后缀，而不是 regions[0]：解除电文的 regions 恒为空，
-  // 用 regions 会让解除与发布算出不同的键，handleCancelled 就找不到"此前提醒过的事件"，
-  // 解除提醒会静默丢失（与 0.1.3 加入的取消链路冲突）。
+  // ——「灾种 + 編集官署名コード」——否则同一条警报会因副本标题不同而被当成三个事件、连响三次。
+  //
+  // 指纹里**刻意不含发布时刻**。原因有两层，都是实测出来的：
+  //   ① 同一次发布的副本会跨分钟：2026-09-14 兵庫県，Ｒ０６ 分灾种副本（VPWW55/56）在 11:30:33，
+  //      総合副本（VPWW53/54）在 11:31:10——按分钟切片后两者永远算不出同一个键；
+  //   ② 更致命的是**解除**：解除报知的发布时间必然晚于发布（实测相差 5 小时），
+  //      指纹含时刻就注定让解除与发布算出不同的键，handleCancelled 于是永远找不到"此前提醒过的事件"，
+  //      0.1.3 加入的解除链路实际从未生效。去掉时刻后，同一官署 + 同一灾种在事件窗口内共用一个键，
+  //      重复与升级由去重层判定（strength 升级仍会再次提醒，解除时清掉该键，见 10-dedupe）。
+  //
+  // 官署名碼取电文 id 的后缀（編集官署名コード：130000=気象庁、280000=神戸地方気象台…），
+  // 而不是 regions[0]：解除电文的 regions 恒为空，用 regions 同样会让两边算不出同一个键。
   const idSuffix = /([0-9]{6})\.xml$/.exec(String((entry && entry.id) || ''))
   const eventKey = SUMMARY_TITLE.test(title)
-    ? 'jma:summary:' + hazardKeyOf(items) + ':' +
-      String(tag(control, 'DateTime') || tag(head, 'ReportDateTime') || '').slice(0, 16) + ':' +
-      (idSuffix ? idSuffix[1] : '')
+    ? 'jma:summary:' + hazardKeyOf(items, headlineText) + ':' + (idSuffix ? idSuffix[1] : '')
     : 'jma:' + (eventId || headTitle || title)
 
   return {
@@ -331,7 +442,7 @@ function parseJma(xml, entry) {
     kind: 'weather',
     kindLabel: cancelled ? kindLabel + '（已解除）' : kindLabel,
     severity: level >= 4 ? 'red' : (level === 3 ? 'orange' : (level === 2 ? 'yellow' : 'info')),
-    issued: tag(head, 'ReportDateTime') || tag(control, 'DateTime'),
+    issued: reportTime,
     headline,
     level,
     maxScale: level,

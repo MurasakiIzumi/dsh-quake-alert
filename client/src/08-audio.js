@@ -21,6 +21,19 @@ function unlockAudio() {
   const ctx = ensureAudio()
   if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {})
 }
+/**
+ * 当前音频可用状态（0.4.1）：'running' | 'suspended' | 'unavailable'。
+ *
+ * 为什么需要它：浏览器要求 AudioContext 必须先有一次用户交互才能出声，而**页面可见时
+ * 通知路径只用页内 toast（不发系统通知）**。于是"打开 DSH 后从未点击过页面"的用户
+ * 在设置里看到「提示音：开」，实际一条声音都听不到，且没有任何地方能发现这件事——
+ * 这是纯静默失效。设置页据此显式提示"提示音尚未解锁"。
+ */
+function audioState() {
+  const ctx = ensureAudio()
+  if (!ctx) return 'unavailable'
+  return ctx.state === 'running' ? 'running' : 'suspended'
+}
 // 音色描述：notes 列表（freq Hz / start s / dur s / type）
 const SOUNDS = {
   eew: { notes: [
@@ -104,4 +117,4 @@ function playAlertSound(alert, volume) {
 }
 
 
-export { ensureAudio, unlockAudio, playSound, playAlertSound, soundKindOf, SOUNDS }
+export { ensureAudio, unlockAudio, audioState, playSound, playAlertSound, soundKindOf, SOUNDS }

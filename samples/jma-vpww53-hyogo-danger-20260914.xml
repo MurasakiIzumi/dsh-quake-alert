@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  0.4.1 回归样本：Ｒ０６ 総合副本里的「危険警報（=L4）」与逐区级别。
+  精简自気象庁 live 电文 https://www.data.jma.go.jp/developer/xml/data/20260914113112_0_VPWW53_280000.xml
+  （2026-09-14 20:31 JST 兵庫県，神戸地方気象台）。为控制体积只保留三个市町村的 Item，
+  其余结构（Control / Head / Headline / Body Notice / Warning 的市町村区域）与原文一致。
+
+  这份样本锁定两个真实缺陷（0.4.1 修正）：
+    ① 総合副本的 Kind 只写灾种名（「大雨警報」），级别只在 <Body><Notice> 里。
+       不读 Notice 时整条电文被判成 L3 —— 一条真实存在的 L4 危険警報完全不播报。
+    ② 同一电文里不同市町村的级别不同（姫路市 L4 / 相生市 L3 / 西脇市 L2）。
+       用电文最大值当闸门会把只到 L2 的西脇市播成「警戒レベル4（避难指示级）」。
+-->
+<Report xmlns="http://xml.kishou.go.jp/jmaxml1/" xmlns:jmx="http://xml.kishou.go.jp/jmaxml1/" xmlns:jmx_add="http://xml.kishou.go.jp/jmaxml1/addition1/">
+<Control>
+<Title>気象特別警報・警報・注意報</Title>
+<DateTime>2026-09-14T11:31:10Z</DateTime>
+<Status>通常</Status>
+<EditorialOffice>神戸地方気象台</EditorialOffice>
+<PublishingOffice>神戸地方気象台</PublishingOffice>
+</Control>
+<Head xmlns="http://xml.kishou.go.jp/jmaxml1/informationBasis1/">
+<Title>兵庫県気象警報・注意報</Title>
+<ReportDateTime>2026-09-14T20:31:00+09:00</ReportDateTime>
+<TargetDateTime>2026-09-14T20:31:00+09:00</TargetDateTime>
+<EventID/>
+<InfoType>発表</InfoType>
+<Serial/>
+<InfoKind>気象警報・注意報</InfoKind>
+<InfoKindVersion>1.1_2</InfoKindVersion>
+<Headline>
+<Text>〈危険警報（大雨、土砂災害）〉南部では、土砂災害や低い土地の浸水に厳重に警戒してください。</Text>
+<Information type="気象警報・注意報（市町村等）">
+<Item>
+<Kind>
+<Name>大雨警報</Name>
+<Code>03</Code>
+<Condition>土砂災害、浸水害</Condition>
+</Kind>
+<Areas codeType="気象・地震・火山情報／市町村等">
+<Area>
+<Name>姫路市</Name>
+<Code>2820100</Code>
+</Area>
+</Areas>
+</Item>
+<Item>
+<Kind>
+<Name>大雨警報</Name>
+<Code>03</Code>
+<Condition>浸水害</Condition>
+</Kind>
+<Areas codeType="気象・地震・火山情報／市町村等">
+<Area>
+<Name>相生市</Name>
+<Code>2820800</Code>
+</Area>
+</Areas>
+</Item>
+<Item>
+<Kind>
+<Name>大雨注意報</Name>
+<Code>10</Code>
+</Kind>
+<Areas codeType="気象・地震・火山情報／市町村等">
+<Area>
+<Name>西脇市</Name>
+<Code>2821300</Code>
+</Area>
+</Areas>
+</Item>
+</Information>
+</Headline>
+</Head>
+<Body xmlns="http://xml.kishou.go.jp/jmaxml1/body/meteorology1/" xmlns:jmx_eb="http://xml.kishou.go.jp/jmaxml1/elementBasis1/">
+<Notice>［危険警報・氾濫特別警報の発表状況］
+〈レベル４大雨危険警報〉姫路市　たつの市　多可町＊</Notice>
+<Warning type="気象警報・注意報（市町村等）">
+<Item>
+<Kind>
+<Name>大雨警報</Name>
+<Code>03</Code>
+<Status>継続</Status>
+<Condition>土砂災害、浸水害</Condition>
+</Kind>
+<Area>
+<Name>姫路市</Name>
+<Code>2820100</Code>
+</Area>
+<ChangeStatus>変化無</ChangeStatus>
+</Item>
+<Item>
+<Kind>
+<Name>大雨警報</Name>
+<Code>03</Code>
+<Status>継続</Status>
+<Condition>浸水害</Condition>
+</Kind>
+<Area>
+<Name>相生市</Name>
+<Code>2820800</Code>
+</Area>
+<ChangeStatus>変化無</ChangeStatus>
+</Item>
+<Item>
+<Kind>
+<Name>大雨注意報</Name>
+<Code>10</Code>
+<Status>発表</Status>
+</Kind>
+<Area>
+<Name>西脇市</Name>
+<Code>2821300</Code>
+</Area>
+<ChangeStatus>警報・注意報種別に変化有</ChangeStatus>
+</Item>
+</Warning>
+</Body>
+</Report>

@@ -1,6 +1,6 @@
 {
   "name": "dsh-quake-alert",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Real-time earthquake, EEW, tsunami and JMA weather alerts (landslides, floods, heavy rain, storm surges) for Japan, plus global earthquake (EMSC/USGS) and tsunami (NOAA) sources — matched against your watch regions and thresholds.",
   "private": false,
   "type": "module",
@@ -17,6 +17,7 @@
     "README.md",
     "README.zh.md",
     "README.ja.md",
+    "TROUBLESHOOTING.zh.md",
     "CHANGELOG.md",
     "LICENSE"
   ],

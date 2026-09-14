@@ -100,6 +100,46 @@ function normalizePref(raw) {
   return Object.prototype.hasOwnProperty.call(PREF_SHORT, s) ? PREF_SHORT[s] : s
 }
 
+// ---------- 时间：源时区 → 带偏移的 ISO 8601（DESIGN 第 4 节） ----------
+// 各源给的时间字符串**自己不带时区信息**——P2PQuake 是 JST（"2023/09/05 06:16:32"），
+// 单看字符串完全看不出这是哪里的本地时间。所以解析器负责把它转成带偏移的 ISO 8601
+// （"2023-09-05T06:16:32+09:00"），UI 只按**本地时区**渲染（Intl.DateTimeFormat）。
+// 不做这一步，大陆浏览器上会显示一个比本地时间早 1 小时、且没有任何标注的时间戳。
+// 其余源本身就是绝对时间，无需转换：JMA 的 ReportDateTime 带 +09:00、USGS 是 epoch 毫秒、
+// EMSC 的时间带 Z、NOAA CAP 的 <sent> 带偏移。
+// 历史记录里的**旧数据**没有偏移（0.4.1 之前写入的），一律按 JST 解释——旧数据只可能来自
+// P2PQuake 这一条链路（见 issuedToDate）。
+const P2P_TZ_OFFSET = '+09:00'
+const P2P_TIME_RE = /^(\d{4})\/(\d{2})\/(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?$/
+/** P2PQuake 的裸 JST 时间串 → 带 +09:00 偏移的 ISO 8601；认不出时**原样返回**（绝不丢信息）。 */
+function p2pTimeToIso(raw) {
+  const s = String(raw === undefined || raw === null ? '' : raw).trim()
+  if (!s) return ''
+  const m = P2P_TIME_RE.exec(s)
+  if (!m) return s
+  const ms = m[7] ? m[7].padEnd(3, '0').slice(0, 3) : ''
+  return m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] +
+    (ms ? '.' + ms : '') + P2P_TZ_OFFSET
+}
+/** 时间串 → Date：裸 JST 按 +09:00 解释，带偏移的 ISO 直接解析，其余返回 null。 */
+function issuedToDate(raw) {
+  const s = String(raw === undefined || raw === null ? '' : raw).trim()
+  if (!s) return null
+  const d = new Date(P2P_TIME_RE.test(s) ? p2pTimeToIso(s) : s)
+  return Number.isFinite(d.getTime()) ? d : null
+}
+/** 时间串 → 本地时区文案（历史详情用）；无法解析时原样返回，不把原文弄丢。 */
+function formatIssuedLocal(raw) {
+  const d = issuedToDate(raw)
+  if (!d) return String(raw === undefined || raw === null ? '' : raw)
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    }).format(d)
+  } catch (err) { return d.toISOString() }
+}
+
 const DEFAULT_CFG = {
   version: 1,
   source: 'prod', // prod | sandbox（沙箱回放 2023 年历史，约30秒/条，测试用）
@@ -119,4 +159,4 @@ const DEFAULT_CFG = {
 }
 
 
-export { React, h, useState, useEffect, useRef, WS_URL, SANDBOX_URL, EMSC_WS_URL, STORAGE_KEY, HISTORY_KEY, HISTORY_MAX, MAX_WATCH_CITIES, MAX_WATCH_PLACES, RECONNECT_BASE, RECONNECT_MAX, SCALE_TEXT, SCALE_OPTIONS, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, PREFECTURES, PREF_SET, PREF_SHORT, PREF_BY_CODE, prefOfCode, prefCodeOf, normalizePref, DEFAULT_CFG }
+export { React, h, useState, useEffect, useRef, WS_URL, SANDBOX_URL, EMSC_WS_URL, STORAGE_KEY, HISTORY_KEY, HISTORY_MAX, MAX_WATCH_CITIES, MAX_WATCH_PLACES, RECONNECT_BASE, RECONNECT_MAX, SCALE_TEXT, SCALE_OPTIONS, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, PREFECTURES, PREF_SET, PREF_SHORT, PREF_BY_CODE, prefOfCode, prefCodeOf, normalizePref, P2P_TZ_OFFSET, P2P_TIME_RE, p2pTimeToIso, issuedToDate, formatIssuedLocal, DEFAULT_CFG }

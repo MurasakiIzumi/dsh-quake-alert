@@ -11,11 +11,22 @@
 import { PREFECTURES } from './01-constants.js'
 import { inQuietHours } from './02-storage.js'
 import { parse, severityOfScale, sevColor } from './05-parser.js'
-import { matchAlert, regionInWeatherWatch } from './06-matcher.js'
+import { matchAlert, regionInWeatherWatch, validGeo } from './06-matcher.js'
 import { addEvent, store } from './07-store.js'
 import { playSound, playAlertSound } from './08-audio.js'
 import { showToast, showSystemNotification } from './09-notify.js'
-import { isDuplicate, isEventRepeat, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, alertedEvents } from './10-dedupe.js'
+import { isDuplicate, isEventRepeat, isStrengthUpgrade, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, alertedEvents } from './10-dedupe.js'
+
+/**
+ * 气象灾害的**事件窗口**（分钟）。
+ *
+ * 气象灾害是持续过程：同一官署同一灾种会在数小时内反复发布（更新、扩区、维持），
+ * 而这些更新的强度通常不变。事件键已按「官署 + 灾种」归并（见 05b 的 eventKey），
+ * 若还用默认的 10 分钟窗口，窗口一过每一条更新都会被当成新事件重新响铃。
+ * 取 3 小时：窗口内强度未升级只记历史，升级（L3→L4、注意報→危険警報）仍会提醒；
+ * 解除时会 forgetEvent 清掉记忆，所以"解除后再次发布"不会被吞掉。
+ */
+const WEATHER_EVENT_WINDOW_MINUTES = 180
 
 // ---------- 主链：收到消息 ----------
 // 区域文案：府県予報区级的条目里 area 与 pref 常是同一个名字（「東京都」+「東京都」），
@@ -41,6 +52,25 @@ function alertTitleOf(alert) {
   return '灾害预警'
 }
 
+/**
+ * 命中之后的 severity：决定通知配色，也决定静默时段能否穿透。
+ *
+ * 日本地震按**命中区域的实际强度**判定（关注县的震度低时颜色不该是红，而 headline 里的
+ * 最大震度可能来自别的县）；EEW 恒为 red（警报本质，不能因为预测震度刚好到阈值就降级）；
+ * 海啸 / 气象用解析层算好的 severity。
+ *
+ * 全球源（`locator === 'point'`）必须单独处理：它们没有震度，`maxScale` 恒为 -1，
+ * 若沿用震度的路径，一场 M7.4 会被算成 `info`（信息蓝）——既显示不出严重性，
+ * 也会在静默时段被当成"非红色等级"静默掉（用户开了红色穿透也收不到）。所以坐标型地震
+ * 直接用解析层按震级判定的 `severity`（severityOfMagnitude）。
+ */
+function hitSeverityOf(alert, m) {
+  if (!alert || alert.kind !== 'quake') return alert ? alert.severity : 'info'
+  if (alert.locator === 'point') return alert.severity
+  const scale = (m && m.region && typeof m.region.scale === 'number') ? m.region.scale : alert.maxScale
+  return severityOfScale(scale)
+}
+
 // 气象警报的「静默提示」：只在"命中关注地区、但未达 L4 所以没有播报"时留一笔，
 // 由侧边栏状态点的悬停提示与设置页显示。
 // 注意 L4 以上**必须清掉**它：那时已经真正播报过，再挂着这条（文案是"未达 L4，未播报"）
@@ -48,12 +78,16 @@ function alertTitleOf(alert) {
 function updateWeatherHint(alert, cfg) {
   if (alert.kind !== 'weather' || alert.cancelled) return
   if ((cfg.disasters || {}).weather === false) return
-  if (alert.level !== 3) {
+  const w = cfg.watch || {}
+  const lvOf = (r) => (typeof r.level === 'number' ? r.level : alert.level)
+  // 只看**关注地区自己的级别**：整条电文最大是 L4 时关注地区可能只有 L3（提示要保留），
+  // 反之命中地区已达 L4（已真正播报）就该清掉——否则「未达 L4，未播报」的文案会与事实矛盾。
+  const hit = alert.regions.find((r) => regionInWeatherWatch(r, w) && lvOf(r) === 3)
+  const hitL4 = alert.regions.some((r) => regionInWeatherWatch(r, w) && lvOf(r) >= 4)
+  if (!hit || hitL4) {
     if (store.weatherHint) store.push({ weatherHint: null })
     return
   }
-  const hit = alert.regions.find((r) => regionInWeatherWatch(r, cfg.watch || {}))
-  if (!hit) return
   store.push({
     weatherHint: { level: 3, label: areaLabelOf(hit), at: Date.now() },
   })
@@ -66,9 +100,9 @@ function handleCancelled(alert, cfg) {
   if (alert.kind === 'eew' && disasters.earthquake === false) return
   if (alert.kind === 'tsunami' && disasters.tsunami === false) return
   if (alert.kind === 'weather' && disasters.weather === false) return
-  if (!wasRecentlyAlerted(alert, cfg.dedupe.windowMinutes)) {
+  if (!wasRecentlyAlerted(alert)) {
     addEvent({
-      id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
+      id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
       issued: alert.issued, headline: alert.headline + '（未命中：取消 / 解除消息，且此前未提醒过该事件）', hit: false,
     })
     return
@@ -76,7 +110,7 @@ function handleCancelled(alert, cfg) {
   // 取消 / 解除消息不穿透静默（它不是紧急警报，静默期间只记历史）
   if (inQuietHours(cfg)) {
     addEvent({
-      id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
+      id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
       issued: alert.issued, headline: alert.headline, hit: true,
       suppressed: true,
       suppressedReason: '静默时段 ' + cfg.quietHours.start + '–' + cfg.quietHours.end + '（取消 / 解除不穿透）',
@@ -84,16 +118,18 @@ function handleCancelled(alert, cfg) {
     return
   }
   alertedEvents.delete(cancelKeyOf(alert)) // 同一条取消只提醒一次
+  // 灾害过程已结束：忘掉事件键，这样"解除之后再次发布"会被当成新事件而不是重复（见 10-dedupe）
+  forgetEvent(cancelKeyOf(alert))
   if (!claimAlertForTab('cancel:' + (alert.id || cancelKeyOf(alert)), '')) {
     addEvent({
-      id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
+      id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
       issued: alert.issued, headline: alert.headline, hit: true,
       suppressed: true, suppressedReason: '其它 DSH 标签页已提醒',
     })
     return
   }
   addEvent({
-    id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
+    id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
     issued: alert.issued, headline: alert.headline, hit: true,
   })
   const title = alert.kind === 'eew' ? '✅ 紧急地震速报已取消'
@@ -140,8 +176,13 @@ function handleAlert(alert, cfg, opts) {
   if (watchlessPoint(alert, cfg)) {
     return { notified: false, reason: 'no-watch-point', detail: '全球源消息，但未设置全球关注点' }
   }
-  store.received += 1
-  if (isDuplicate(alert.id, cfg.dedupe.windowMinutes)) {
+  // 诊断计数：用 push 带出去，让设置页的"已收到 N 条推送"立刻反映（直接自增不会触发重渲，
+  // 徽标会滞后到下一次 push；而 clearSources 时会归零，不再跨代累积）。
+  store.push({ received: store.received + 1 })
+  // 消息级去重按 alert.id。**但强度升级要放行**：全球源的修订版复用同一个 id
+  // （EMSC 的 unid / USGS 的 feature id），一律挡掉会让震级上修永远不再提醒。
+  // 放行后由下面的 isEventRepeat 判定"确实升级才播报"，未升级仍只记历史。
+  if (isDuplicate(alert.id, cfg.dedupe.windowMinutes) && !isStrengthUpgrade(alert)) {
     return { notified: false, reason: 'duplicate', detail: '同一条消息刚处理过（去重窗口内）' }
   }
   if (alert.cancelled) {
@@ -152,28 +193,30 @@ function handleAlert(alert, cfg, opts) {
   if (!m.hit) {
     // 气象警报：即使不播报（L3 及以下），也把"正在升级"留给侧边栏 tooltip
     updateWeatherHint(alert, cfg)
-    // 全球源（坐标型）的"未命中"不进历史：USGS 的 24 小时目录有近百条 M2.5+，
+    // 全球源（坐标型）的"未命中"通常不进历史：USGS 的 24 小时目录有近百条 M2.5+，
     // 逐条记"未命中"会把历史列表刷满与用户无关的地震，真正该看的提醒反而被挤掉。
-    // 命中项仍然照常记录；设置页的源统计里能看到拉取与解析条数。
-    if (alert.locator !== 'point') {
+    // **但「坐标缺失」是例外**——那不是"离得远"，而是"根本没法判定"。DESIGN 3.1 要求
+    // 这种情况不猜、如实说明；若也丢进 /dev/null，用户看到的就是"根本没有地震"，
+    // 与"未设置关注点"（更早由 watchlessPoint 拦下，有意不回历史）是完全不同的两件事。
+    if (alert.locator !== 'point' || !validGeo(alert.geo)) {
       addEvent({
-        id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
+        id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
         issued: alert.issued, headline: alert.headline + '（未命中：' + m.reason + '）', hit: false,
       })
     }
     return { notified: false, reason: 'not-hit', detail: m.reason }
   }
   const hitPref = m.region ? m.region.pref : ''
-  // 严重度：地震按「命中区域的实际强度」判定（关注县震度低时颜色不该是红）；
-  // EEW 恒为 red（警报本质，不能因为预测震度刚好到阈值就降级成橙色）；
-  // 海啸用自身等级（MajorWarning / Warning → red，Watch → orange）。
-  const hitSeverity = alert.kind === 'quake'
-    ? severityOfScale(m.region && typeof m.region.scale === 'number' ? m.region.scale : alert.maxScale)
-    : alert.severity
-  // 同一次地震的后续发布（速报 → 震源 → 各地震度、或 EEW 多报）强度未升级 → 只更新历史，不再响铃
-  if (isEventRepeat(alert, cfg.dedupe.windowMinutes)) {
+  // 严重度见 hitSeverityOf 的注释（全球点型地震此前被算成 info，静默穿透因此失效）
+  const hitSeverity = hitSeverityOf(alert, m)
+  // 同一次地震的后续发布（速报 → 震源 → 各地震度、或 EEW 多报）强度未升级 → 只更新历史，不再响铃。
+  // 气象灾害用更长的事件窗口（见 WEATHER_EVENT_WINDOW_MINUTES 的说明）。
+  const repeatWindow = alert.kind === 'weather'
+    ? Math.max(cfg.dedupe.windowMinutes || 10, WEATHER_EVENT_WINDOW_MINUTES)
+    : cfg.dedupe.windowMinutes
+  if (isEventRepeat(alert, repeatWindow)) {
     addEvent({
-      id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
+      id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true, suppressedReason: '同一地震的后续发布（强度未升级）',
     })
@@ -182,7 +225,7 @@ function handleAlert(alert, cfg, opts) {
   // 静默时段：命中但不响铃、不弹通知，只记历史。红色等级（EEW、大海啸警报）默认可穿透。
   if (!options.skipQuietHours && inQuietHours(cfg) && !(hitSeverity === 'red' && cfg.quietHours.breakForSevere !== false)) {
     addEvent({
-      id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
+      id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true,
       suppressedReason: '静默时段 ' + cfg.quietHours.start + '–' + cfg.quietHours.end +
@@ -194,7 +237,7 @@ function handleAlert(alert, cfg, opts) {
   // 用消息 id 而不是事件键：多标签页收到的是同一条消息，而同一事件的不同消息（如强度升级）不应被拦。
   if (!claimAlertForTab(alert.id, cancelKeyOf(alert))) {
     addEvent({
-      id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
+      id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true, suppressedReason: '其它 DSH 标签页已提醒',
     })
@@ -211,7 +254,7 @@ function handleAlert(alert, cfg, opts) {
   if (alert.kind === 'weather') bodyLines.push('请确认所在市町村的避难信息')
   bodyLines.push('—— 仅供参考，请以气象厅官方发布为准')
   addEvent({
-    id: alert.id, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
+    id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
     issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
   })
   updateWeatherHint(alert, cfg)
@@ -231,4 +274,4 @@ function handleAlert(alert, cfg, opts) {
 }
 
 
-export { handleCancelled, handleRaw, handleAlert, updateWeatherHint, alertTitleOf, watchlessPoint }
+export { handleCancelled, handleRaw, handleAlert, updateWeatherHint, alertTitleOf, watchlessPoint, hitSeverityOf }

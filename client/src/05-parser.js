@@ -8,7 +8,7 @@
 // 注意：551 的 points[].pref 实测存在「京都」这类简写，已在常量层归一为全称。
 // ============================================================================
 
-import { PREFECTURES, SCALE_TEXT, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, normalizePref } from './01-constants.js'
+import { PREFECTURES, SCALE_TEXT, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, normalizePref, p2pTimeToIso } from './01-constants.js'
 import { own } from './02-storage.js'
 
 // ---------- 解析器：P2PQuake code → Alert ----------
@@ -131,7 +131,10 @@ function parseQuake(raw) {
     id: String(raw.id || raw._id || ''), code: 551, kind: 'quake',
     kindLabel: own(labelMap, type) || '地震情报',
     severity: severityOfScale(eq.maxScale),
-    issued: (raw.issue && raw.issue.time) || raw.time || '',
+    // 时间统一转成**带偏移**的 ISO 8601（源时区见 DESIGN 第 4 节 / 05d 的 SOURCE_CONTRACTS）。
+    // P2PQuake 的时间是裸 JST（"2026/09/07 23:25:14"），不补偏移的话大陆浏览器上会显示成
+    // 一个差 1 小时、且没有任何标注的时间；旧历史数据没有偏移，由 formatIssuedLocal 按 JST 解释。
+    issued: p2pTimeToIso((raw.issue && raw.issue.time) || raw.time || ''),
     headline,
     maxScale: typeof eq.maxScale === 'number' ? eq.maxScale : -1,
     // 事件级去重键：同一次地震的速报 / 震源 / 详报共享 earthquake.time（551 没有 issue.eventId）
@@ -161,7 +164,7 @@ function parseEew(raw) {
     id: String(raw.id || raw._id || ''), code: 556, kind: 'eew',
     kindLabel: cancelled ? 'EEW·已取消' : '紧急地震速报（警报）',
     severity: cancelled ? 'info' : 'red',
-    issued: (raw.issue && raw.issue.time) || raw.time || '',
+    issued: p2pTimeToIso((raw.issue && raw.issue.time) || raw.time || ''),
     headline: cancelled ? '本警报已取消' : '震源 ' + (hypo.name || '—') + ' · M' + (typeof hypo.magnitude === 'number' ? hypo.magnitude : '—') + scaleSuffix(maxTo, '预测最大'),
     maxScale: maxTo,
     // EEW 的多报共享 issue.eventId（serial 递增），用它做事件级去重
@@ -187,11 +190,15 @@ function parseTsunami(raw) {
     id: String(raw.id || raw._id || ''), code: 552, kind: 'tsunami',
     kindLabel: cancelled ? '海啸·已解除' : (worst >= 3 ? '大海啸警报' : (anyWarning ? '海啸警报' : '海啸注意报')),
     severity: cancelled ? 'info' : (worst >= 2 ? 'red' : 'orange'),
-    issued: (raw.issue && raw.issue.time) || raw.time || '',
+    issued: p2pTimeToIso((raw.issue && raw.issue.time) || raw.time || ''),
     headline: cancelled ? '海啸预报已解除' : lines.join('；'),
     maxScale: worst,
-    // 海啸预报没有可归并的事件 id（issue 只有 source/time/type），保持逐条判定
-    eventKey: '',
+    // 海啸预报没有可归并的事件 id（issue 只有 source/time/type），但**绝不能留空**：
+    // cancelKeyOf 会退回 kind（'tsunami'），于是任意海域的解除都被当成"此前提醒过的事件"，
+    // 播出一条与用户无关的「海啸预报已解除 …此前发出的警报已作废」——海啸域的**假安全**
+    // 是最危险的误报。用「预报区名集合」当事件键：只有针对同一批预报区的发布与解除
+    // 才归并为同一个事件（区域不一致时匹配不上 → 不提示，安全侧）。
+    eventKey: areas.length ? 'tsunami:' + areas.map((a) => String(a.name || '')).sort().join(',') : '',
     strength: worst,
     regions: areas.flatMap((a) => regionsOfArea(a.name, a.pref, a.grade || '', 'grade')),
     cancelled,

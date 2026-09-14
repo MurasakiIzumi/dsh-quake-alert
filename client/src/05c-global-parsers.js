@@ -22,10 +22,14 @@
 
 import { isPlainObject } from './02-storage.js'
 
-/** 取第一个有限数值（全球源的坐标/震级可能同时存在于两三个地方，按优先级回退）。 */
+/** 取第一个可用数值（全球源的坐标/震级可能同时存在于两三个地方，按优先级回退）。
+ *  经 toNumOrNull 归一，所以**数字字符串也算**：源侧类型并不稳定（CAP 的 parameter 里全是字符串，
+ * 而 EMSC/USGS 某次改版也可能把 mag 序列化成 "5.6"）。只认 typeof number 的话，
+ * `magnitude` 会变成 null → 震级闸门被整个跳过 → 低于阈值的地震照常响铃（误报）。 */
 function firstNumber(...vals) {
   for (const v of vals) {
-    if (typeof v === 'number' && Number.isFinite(v)) return v
+    const n = toNumOrNull(v)
+    if (n !== null) return n
   }
   return null
 }
@@ -177,11 +181,15 @@ function parseUsgsFeed(json) {
 
 // NOAA tsunami.gov 的事件分级。CAP 的 <severity>（Minor/Moderate/…）对海啸不够具体，
 // 真正决定行动的是 <event> 名称，实测样本是 "Tsunami Information"（Minor）。
+// 第三项是**等级**，与日本 552 的 TSUNAMI_RANK（Watch=1/Warning=2/MajorWarning=3）同一把尺，
+// 由 matchPointAlert 用 thresholds.tsunamiGrade 做闸门。
+// 「Tsunami Information」= 0：它在语义上低于日本的「津波注意報」，是"没有破坏性海啸"的信息类
+// 电文——按 1 处理会让它在半径内直接响铃（全球海啸无法用等级收敛）。
 const NOAA_EVENT_RULES = [
   [/Tsunami Warning/i, '大海啸警报（NOAA）', 3, 'red'],
   [/Tsunami Advisory/i, '海啸注意报（NOAA）', 2, 'orange'],
   [/Tsunami Watch/i, '海啸注意报（NOAA）', 2, 'orange'],
-  [/Tsunami Information/i, '海啸信息（NOAA）', 1, 'info'],
+  [/Tsunami Information/i, '海啸信息（NOAA）', 0, 'info'],
 ]
 
 /**
@@ -207,20 +215,22 @@ function parseNoaaCap(xml, entry) {
     const n = tagText(m[1], 'valueName')
     if (n) params[n] = tagText(m[1], 'value')
   }
-  // 震中优先取 area 的 circle（"纬,经 半径"），它才是配信覆盖范围；EventLatLon 是备份
-  let lat = null
-  let lon = null
-  const circle = tagText(text, 'circle')
-  const cm = /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/.exec(circle)
-  if (cm) { lat = Number(cm[1]); lon = Number(cm[2]) }
-  if (lat === null || lon === null) {
-    const em = /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/.exec(String(params.EventLatLon || ''))
-    if (em) { lat = Number(em[1]); lon = Number(em[2]) }
+  // 震中优先取 area 的 circle（"纬,经 半径"），它才是配信覆盖范围；EventLatLon 只是备份。
+  // CAP 允许一个 info 下**多个 <area>**，各有自己的 circle——全部收集。
+  // 只看第一个 circle 会让其余海域的沿海用户漏报，而多区域海啸恰恰是最常见的形态。
+  const geoList = []
+  for (const m of text.matchAll(/<circle>([\s\S]*?)<\/circle>/g)) {
+    const cm = /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/.exec(m[1])
+    if (cm) geoList.push({ lat: Number(cm[1]), lon: Number(cm[2]) })
   }
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) { lat = null; lon = null }
+  if (geoList.length === 0) {
+    const em = /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/.exec(String(params.EventLatLon || ''))
+    if (em) geoList.push({ lat: Number(em[1]), lon: Number(em[2]) })
+  }
+  const geo = geoList.length ? geoList[0] : { lat: null, lon: null }
   const mag = toNumOrNull(params.EventPreliminaryMagnitude)
   const rule = NOAA_EVENT_RULES.find(([re]) => re.test(event)) ||
-    [/./, '海啸信息（NOAA）', 1, 'info']
+    [/./, '海啸信息（NOAA）', 0, 'info']
   const cancelled = msgType === 'Cancel'
   const origin = String(params.EventOriginTime || sent || '')
   const eventName = String(params.EventLocationName || areaDesc || '').trim()
@@ -239,8 +249,12 @@ function parseNoaaCap(xml, entry) {
     issued: sent || origin,
     headline,
     maxScale: rule[2],
+    // 与日本 552 的等级共用同一把尺，供 matchPointAlert 做 tsunamiGrade 闸门
+    tsunamiRank: rule[2],
     level: 0,
-    geo: { lat, lon },
+    geo,
+    // 多区域电文的全部圆心（matchPointAlert 对任一点命中即算命中）；geo 保留第一个以兼容旧调用方
+    geoList,
     magnitude: mag,
     magType: String(params.EventPreliminaryMagnitudeType || ''),
     hypo: { name: eventName, magnitude: mag },

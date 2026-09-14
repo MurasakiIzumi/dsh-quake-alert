@@ -191,11 +191,19 @@ console.log('== 回归：本轮修复的漏报场景 ==')
   assert(ar.regions.length === 4, '有明・八代海 展开为 4 条 region（福岡/佐賀/長崎/熊本）')
   assert(['福岡県', '佐賀県', '長崎県', '熊本県'].every((p) => ar.regions.some((r) => r.pref === p)), '四个县都在 regions 中')
   assert(T.matchAlert(ar, cfg(['熊本県'])).hit === true, '有明・八代海 → 关注熊本県命中')
-  // 5) 未识别区域名不再静默：未命中原因里明确提示
+  // 5) 未识别区域名（0.4.1 起**放行**）：原本被直接否决，与气象侧（regionInWeatherWatch
+  //    有 region.pref && 保护）语义相反，也让"新设的观测点 / 未收录的预报区名"变成静默漏报。
   const unk = T.parse({ code: 552, id: 't-unk', cancelled: false, issue: { time: 'x' }, areas: [{ grade: 'Warning', name: '謎の海域' }] })
-  const m = T.matchAlert(unk, cfg(['東京都']))
-  assert(m.hit === false && m.reason.indexOf('未能识别') !== -1, '未识别区域名在未命中原因中明确提示')
+  assert(T.matchAlert(unk, cfg(['東京都'])).hit === true, '未识别区域名不再被否决（宁可多报绝不漏报）')
   assert(T.matchAlert(unk, cfg([])).hit === true, '全日本模式（未选地区）下未识别区域仍可提醒')
+  // 「未能识别」的提示仍然保留：可识别区域未命中、且未识别区域的等级也没到阈值时
+  const mixed = T.parse({
+    code: 552, id: 't-mix', cancelled: false, issue: { time: 'x' },
+    areas: [{ grade: 'Watch', name: '福島県' }, { grade: 'Watch', name: '謎の海域' }],
+  })
+  const mm = T.matchAlert(mixed, cfg(['東京都'], 'Warning'))
+  assert(mm.hit === false && mm.reason.indexOf('未能识别') !== -1,
+    '未命中原因里仍提示「另有 N 个区域名未能识别归属县」')
 }
 
 console.log('== 存储健壮性：localStorage 被污染时插件仍能加载 ==')
@@ -459,8 +467,20 @@ console.log('== EEW 取消 / 海啸解除在「此前提醒过」时补提醒 ==
   assert(t.store.events[0].hit === false && t.store.events[0].headline.indexOf('此前未提醒过') !== -1, '未提醒过的事件取消 → 只记历史，不打扰')
   t.handleRaw(tsunami, cfg)
   assert(t.store.events[0].hit === true, '海啸警报 → 提醒')
-  t.handleRaw(Object.assign({}, tsunami, { id: 't-clear', cancelled: true, areas: [] }), cfg)
-  assert(t.store.events[0].hit === true && t.store.events[0].headline.indexOf('解除') !== -1, '海啸解除 → 补一条解除提醒')
+  // 0.4.1：552 的事件键改为「预报区名集合」（原来是空串 → cancelKeyOf 退化成 'tsunami'，
+  // 任意海域的解除都会被当成"此前提醒过的事件"，播出一条假解除——海啸域的假安全）。
+  // 解除电文会列出被解除的预报区，名字集合与发布一致时才算同一事件。
+  const cleared = Object.assign({}, tsunami, {
+    id: 't-clear',
+    cancelled: true,
+    areas: tsunami.areas.map((a) => Object.assign({}, a, { grade: null })),
+  })
+  t.handleRaw(cleared, cfg)
+  assert(t.store.events[0].hit === true && t.store.events[0].headline.indexOf('解除') !== -1,
+    '海啸解除（同一批预报区）→ 补一条解除提醒')
+  t.handleRaw(Object.assign({}, tsunami, { id: 't-clear2', cancelled: true, areas: [] }), cfg)
+  assert(t.store.events[0].hit === false && t.store.events[0].headline.indexOf('此前未提醒过') !== -1,
+    '不带预报区的解除 → 只记历史（不退回按 kind 盲目匹配，否则会播报假解除）')
 }
 console.log('== 通知行为：前台只 toast / 后台系统通知 ==')
 {
@@ -1125,20 +1145,52 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(p1.snapshot(p1Base + 2).entries.length === 0, 'since=最新游标 → 返回空')
     assert(p1.snapshot(0).truncated === false, '没发生淘汰时不标记截断')
 
-    // ⑥ 详情拉取失败：不产事件、记 error，且不再重试（避免对坏 URL 反复请求）
+    // ⑥ 详情拉取失败：不产事件、记 error，并**有界重试**（0.4.1 修正）
+    //    旧实现把失败的 entry 也记为已见，于是一次瞬时故障（超时 / 连接被重置 / 5xx，
+    //    大陆网络下是常态）就让这条警报永久漏报——extra.xml 是滚动 feed，同一 id 不会再出现。
+    //    気象庁约束的是「一度**取得**したファイルを再度取得しない」，没取得就没有可复用之物。
     clock += 60 * 1000
     const feedFail = atom([entry(7, new Date(clock).toISOString())])
     const f2 = fakeFetch({ [FEED]: () => feedFail }) // detail-7 未登记 → 详情请求抛错
     const pFail = createPoller({
       feedUrl: FEED, fetchText: f2.fn, now: () => clock,
-      backfillMs: 5 * 60 * 1000, // 让冷启动也处理它，才能走到详情失败这条路径
+      backfillMs: 5 * 60 * 1000, maxDetailRetries: 2,
     })
     const r6 = await pFail.pollOnce()
     assert(r6.added === 0 && pFail.stats().errors === 1, '详情拉取失败 → 不产事件、记 error')
-    const tried = f2.calls.filter((u) => u === 'detail-7').length
+    assert(pFail.stats().detailDropped === 0, '首次失败不写 seen（下一轮还会重试）')
     clock += 60 * 1000
     await pFail.pollOnce()
-    assert(tried === 1 && f2.calls.filter((u) => u === 'detail-7').length === 1, '失败的 entry 不再重试')
+    assert(f2.calls.filter((u) => u === 'detail-7').length === 2, '瞬时故障会重试（旧实现一次失败就永久漏报）')
+    clock += 60 * 1000
+    await pFail.pollOnce()
+    assert(pFail.stats().detailDropped === 1, '超过重试上限后放弃，并计入 detailDropped（UI 可见）')
+    const failTries = f2.calls.filter((u) => u === 'detail-7').length
+    clock += 60 * 1000
+    await pFail.pollOnce()
+    assert(f2.calls.filter((u) => u === 'detail-7').length === failTries, '放弃之后不再重复请求同一个坏 URL')
+
+    // ⑥b 单级源的修订版：USGS 复核震级上修是最常见的路径，必须能进缓冲
+    clock += 60 * 1000
+    let revUpdated = new Date(clock).toISOString()
+    const revEntry = () => [{ id: 'us123', title: 'rev', updated: revUpdated, payload: 'body' }]
+    const pRev = createPoller({
+      feedUrl: 'https://example.test/usgs', fetchText: async () => 'x', now: () => clock,
+      singleStage: true, idleMs: 0, backfillMs: 60 * 60 * 1000, dedupeKeyOf: (e) => e.id + '@' + e.updated,
+      parseFeed: revEntry,
+    })
+    assert((await pRev.pollOnce()).added === 1, '单级源首版入缓冲')
+    clock += 60 * 1000
+    assert((await pRev.pollOnce()).added === 0, 'updated 未变 → 不重复入缓冲（同源不重复取）')
+    revUpdated = new Date(clock).toISOString()
+    assert((await pRev.pollOnce()).added === 1, 'updated 刷新 → 修订版重新入缓冲（震级上修不再被吞）')
+    const pNoDedupe = createPoller({
+      feedUrl: 'https://example.test/usgs', fetchText: async () => 'x', now: () => clock,
+      singleStage: true, idleMs: 0, backfillMs: 60 * 60 * 1000, parseFeed: revEntry,
+    })
+    assert((await pNoDedupe.pollOnce()).added === 1, '（对照）按 entry id 去重时首版入缓冲')
+    revUpdated = new Date(clock + 60 * 1000).toISOString()
+    assert((await pNoDedupe.pollOnce()).added === 0, '（对照）按 entry id 去重：修订版被永久挡住（旧行为）')
 
     // ⑦ 环缓冲上限：连续入 3 条、容量 1 → 只留最后 1 条，且更旧的游标标记截断
     clock += 60 * 1000
@@ -1292,8 +1344,13 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const usgsEntries = parseUsgsEntries(usgsText)
     assert(usgsEntries.length >= 3, 'USGS feed → 解析出 ' + usgsEntries.length + ' 条 entry')
     assert(usgsEntries.every((e) => e.id && e.payload && e.updated), 'USGS entry 自带 id / payload / updated')
-    assert(parseUsgsEntries('not json').length === 0 && parseUsgsEntries('{}').length === 0,
-      'USGS → 非 JSON / 空对象返回空数组')
+    // 0.4.1：结构不符必须**抛错**（由 poller 计入 errors），不能与"没有数据"同形
+    let usgsThrew = 0
+    try { parseUsgsEntries('not json') } catch (err) { usgsThrew += 1 }
+    try { parseUsgsEntries('{}') } catch (err) { usgsThrew += 1 }
+    assert(usgsThrew === 2,
+      'USGS feed 非 JSON / 缺 features → 抛错（此前返回 []，与"这一小时没有地震"完全同形）')
+    assert(parseUsgsEntries('{"features":[]}').length === 0, 'USGS feed 结构正确但为空 → 空数组（empty，不是故障）')
     assert(USGS_FEED_URL.indexOf('earthquake.usgs.gov') !== -1, 'USGS feed 常量指向官方域名')
 
     const callsU = []
@@ -1363,18 +1420,37 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(!!feedRoute, 'apply 注册了 /feed 路由')
     assert(!!routes.filter((r) => r.path === hostMod.AREAS_PATH)[0], 'apply 注册了 /areas 路由')
 
-    const call = (query) => {
+    const callRaw = (query, headers) => {
       let body = ''
-      feedRoute.handler({ url: '/dsh-quake-alert/feed' + query }, { writeHead() {}, end(s) { body = s } })
-      return JSON.parse(body)
+      let status = 0
+      feedRoute.handler({ url: '/dsh-quake-alert/feed' + query, headers: headers || {} }, { writeHead(s) { status = s }, end(s) { body = s } })
+      return { status, body: JSON.parse(body) }
     }
+    const call = (query) => callRaw(query).body
     assert(call('?since=tail').source === 'jma', '不带 source 参数 → 默认 jma（旧版 Client 仍兼容）')
     assert(call('?since=tail').tail === true, 'since=tail → 只对齐位置、不回历史')
     assert(call('?source=usgs&since=tail').source === 'usgs', '?source=usgs 分派到 USGS 轮询器')
     assert(call('?source=noaa&since=tail').source === 'noaa', '?source=noaa 分派到 NOAA 轮询器')
-    assert(call('?source=constructor&since=tail').source === 'jma',
-      '原型链键（constructor）退回默认源，不发生 TypeError')
-    assert(call('?source=%3BDROP&since=tail').source === 'jma', '未知 source 退回默认源')
+    // 0.4.1：显式给了认不出的 source 必须 400，而不是静默退回 jma——静默兜底会让 Client
+    // 拿到另一个源的原文去解析（必然失败）却照样推进游标，条目被永久跳过而表面一切正常。
+    const badProto = callRaw('?source=constructor&since=tail')
+    assert(badProto.status === 400 && badProto.body.error === 'unknown source',
+      '原型链键（constructor）不再命中原型链，直接 400（不是 TypeError、也不再静默兜底）')
+    const badUnknown = callRaw('?source=%3BDROP&since=tail')
+    assert(badUnknown.status === 400, '未知 source → 400，不再静默退回 jma')
+    assert(call('?source=%20noaa%20&since=tail').source === 'noaa', 'source 两侧空白被裁剪（" noaa " 仍可识别）')
+    // 0.4.1：跨站 GET 会被拒绝。/feed 的 markRead 副作用不需要读响应就能触发，
+    // 任意网页一个 <img> 就能把三个源的按需轮询永久压住（对気象庁是封 IP 风险）。
+    const crossSite = callRaw('?source=jma&since=tail', { 'sec-fetch-site': 'cross-site' })
+    assert(crossSite.status === 403, '跨站请求（sec-fetch-site: cross-site）被拒')
+    assert(callRaw('?source=jma&since=tail', { 'sec-fetch-site': 'same-origin' }).status === 200,
+      '同源请求（same-origin）放行')
+    assert(callRaw('?source=jma&since=tail').status === 200, '没有 sec-fetch-site 头（老浏览器 / curl）照常放行')
+    // stats=1：把 Host 侧健康计数暴露出来，客户端把它显示到「全球源状态」
+    const withStats = call('?source=usgs&since=0&stats=1')
+    assert(withStats.stats && typeof withStats.stats.errors === 'number' &&
+      typeof withStats.stats.detailDropped === 'number' && typeof withStats.stats.idleSkips === 'number',
+      '?stats=1 返回 Host 侧健康计数（errors / detailDropped / idleSkips）')
     const empty = call('?source=usgs&since=0')
     assert(Array.isArray(empty.entries) && empty.reset === false, '各源在未启动时也能安全返回空增量')
   } catch (err) {
@@ -1672,7 +1748,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.matchAlert(e, strict).hit === false, '端到端：M3.3 低于默认全球阈值 M4.5 → 不打扰')
     const tsunamiCfg = JSON.parse(JSON.stringify(gcfg))
     tsunamiCfg.watch.places = [{ name: ' Scotia 海', lat: -60.48, lon: -47.19, radiusKm: 300 }]
-    assert(t.matchAlert(n, tsunamiCfg).hit === true, '端到端：NOAA 海啸信息命中 Scotia 海关注点')
+    // 0.4.1：NOAA 的「Tsunami Information」等级为 0，默认 tsunamiGrade=Watch(1) 之下不命中。
+    // 它是"没有破坏性海啸"的信息类电文，在半径内响铃会直接摧毁用户对整条链路的信任。
+    assert(t.matchAlert(n, tsunamiCfg).hit === false, '端到端：NOAA「海啸信息」不再响铃（等级低于 tsunamiGrade）')
+    const nAdv = t.parseNoaaCap(
+      fs.readFileSync(path.join(ROOT, 'samples', 'global', 'noaa-pheb-cap.xml'), 'utf8')
+        .replace('<event>Tsunami Information</event>', '<event>Tsunami Advisory</event>'),
+      { id: 'adv' })
+    assert(t.matchAlert(nAdv, tsunamiCfg).hit === true, '端到端：Tsunami Advisory 命中 Scotia 海关注点')
     assert(t.matchAlert(n, JSON.parse(JSON.stringify(gcfg))).hit === false, '端到端：海啸没命中任何关注点 → 不提醒')
   } catch (err) {
     assert(false, '全球源解析验证失败：' + err.message)
@@ -1808,7 +1891,15 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const realCap = t.parseNoaaCap(fs.readFileSync(path.join(ROOT, 'samples', 'global', 'noaa-pheb-cap.xml'), 'utf8'), { id: 'x' })
     const capCfg = gcfg(9)
     capCfg.watch.places = [{ name: 'Scotia', lat: -60.48, lon: -47.19, radiusKm: 300 }]
-    assert(t.matchAlert(realCap, capCfg).hit === true, '真实 NOAA CAP 样本在 M9.0 阈值下仍命中')
+    // 0.4.1：真实样本是「Tsunami Information」→ 等级 0，默认 tsunamiGrade=Watch 之下不响铃。
+    // 「海啸不受震级阈值限制」这一点改由同一份 CAP 的 Advisory 版本验证（震级阈值仍为 M9.0）。
+    assert(realCap.tsunamiRank === 0, 'NOAA Information → tsunamiRank=0（与日本 TSUNAMI_RANK 同一把尺）')
+    assert(t.matchAlert(realCap, capCfg).hit === false, 'NOAA「海啸信息」不再命中（等级低于阈值）')
+    const capAdv = t.parseNoaaCap(
+      fs.readFileSync(path.join(ROOT, 'samples', 'global', 'noaa-pheb-cap.xml'), 'utf8')
+        .replace('<event>Tsunami Information</event>', '<event>Tsunami Advisory</event>'),
+      { id: 'adv' })
+    assert(t.matchAlert(capAdv, capCfg).hit === true, '同一份 CAP 改成 Advisory → 在 M9.0 阈值下仍命中（海啸不受震级限制）')
   } catch (err) {
     assert(false, '全球测试消息验证失败：' + err.message)
   }
@@ -2390,6 +2481,153 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(rDup.notified === false && rDup.reason === 'duplicate', '同一 id 再发 → 返回 duplicate（去重窗口内）')
   } catch (e) {
     assert(false, '测试电文验证失败：' + e.message)
+  }
+
+  console.log('== 0.4.1：源时区与全局严重度 ==')
+  try {
+    const t = loadClient().__test
+    // ① P2PQuake 的时间是裸 JST，解析层必须补上 +09:00 偏移（DESIGN 第 4 节）
+    assert(t.p2pTimeToIso('2026/09/07 23:25:14') === '2026-09-07T23:25:14+09:00',
+      'P2PQuake 裸 JST → 带 +09:00 偏移的 ISO 8601')
+    assert(t.p2pTimeToIso('2026/09/08 00:03:16.886') === '2026-09-08T00:03:16.886+09:00', '毫秒被保留')
+    assert(t.p2pTimeToIso('不是时间') === '不是时间', '认不出时原样返回（绝不丢信息）')
+    assert(t.p2pTimeToIso('') === '', '空串 → 空串')
+    const q = t.parse(readSample('quake-kumamoto-detailscale-20260907.json'))
+    assert(q.issued.indexOf('+09:00') !== -1, '551 的 issued 带 +09:00（此前是裸 JST 字符串）')
+    const e = t.parse(eew)
+    assert(e.issued.indexOf('+09:00') !== -1, '556 的 issued 带 +09:00')
+    // 旧历史数据没有偏移 → 按 JST 解释（DESIGN 334）
+    assert(typeof t.formatIssuedLocal('2026/09/07 23:25:14') === 'string', '旧历史（裸 JST）也能格式化，不抛错')
+
+    // ② 全球点型地震的严重度（0.4.0 的隐患）：maxScale 恒为 -1，若走震度路径会算成 info，
+    //    既显示不出严重性、又让静默时段的红色穿透失效（一场 M7 被静默）。
+    const prog = { prefectures: [], cities: [], places: [{ name: 'P', lat: 35.68, lon: 139.77, radiusKm: 300 }] }
+    const m7 = { kind: 'quake', locator: 'point', severity: 'red', maxScale: -1, magnitude: 7.4, geo: { lat: 35.68, lon: 139.77 }, regions: [] }
+    const m5 = Object.assign({}, m7, { severity: 'yellow', magnitude: 5.2 })
+    assert(t.hitSeverityOf(m7, {}) === 'red', '点型 M7.4 → severity 取解析层的 red（不是 info）')
+    assert(t.hitSeverityOf(m5, {}) === 'yellow', '点型 M5.2 → yellow')
+    // 日本地震仍按命中区域的实测震度（德国 M7 不影响关注县的黄色）
+    const jp = { kind: 'quake', locator: 'area', severity: 'red', maxScale: 70, magnitude: null }
+    assert(t.hitSeverityOf(jp, { region: { scale: 40 } }) === 'yellow',
+      '日本地震仍按命中区域震度判色（不因全日本最大值是 7 就标红）')
+    assert(t.hitSeverityOf({ kind: 'eew', severity: 'red', maxScale: 45 }, { region: { scale: 45 } }) === 'red',
+      'EEW 恒为 red')
+
+    // ③ 同一消息 id 的强度升级要能穿透消息级去重（EMSC 的 unid / USGS 的 feature id 都是稳定的）
+    const ev = { id: 'emsc-1', eventKey: 'geo:x', strength: 5.2, locator: 'point', issued: '2026-09-12T02:15:12Z', geo: { lat: 38, lon: 22.3 } }
+    assert(t.isDuplicate(ev.id, 10) === false, '（前置）首次见到该 id')
+    assert(t.isStrengthUpgrade(Object.assign({}, ev, { strength: 6.4 })) === false,
+      '还没登记事件时不算升级（isStrengthUpgrade 只读）')
+    t.isEventRepeat(ev, 10) // 登记 strength=5.2
+    assert(t.isStrengthUpgrade(Object.assign({}, ev, { strength: 6.4 })) === true,
+      'M5.2 → M6.4 判为强度升级 → 允许穿透消息级去重（否则震级上修永远不会再提醒）')
+    assert(t.isStrengthUpgrade(ev) === false, '同强度不算升级')
+    assert(t.isDuplicate(ev.id, 10) === true, '同一 id 第二次确实被消息级去重挡住（升级由调用方放行）')
+
+    // ④ 坐标型的近似事件归并：跨源 / 修订会让「分钟 + 0.1 度」指纹换键
+    const a1 = { id: 'e1', eventKey: 'geo:k1', strength: 5.0, locator: 'point', issued: '2026-09-13T10:00:00Z', geo: { lat: 10.1, lon: 100.2 } }
+    const a2 = { id: 'u1', eventKey: 'geo:k2', strength: 5.0, locator: 'point', issued: '2026-09-13T10:00:30Z', geo: { lat: 10.15, lon: 100.25 } }
+    assert(t.isEventRepeat(a1, 10) === false, '（前置）第一源播报')
+    assert(t.isEventRepeat(a2, 10) === true,
+      '另一个源对同一场地震（±2 分钟内、约 7km）换了个指纹 → 仍判为同一事件，不重复响铃')
+    const a3 = Object.assign({}, a2, { eventKey: 'geo:k3', issued: '2026-09-13T12:30:00Z' })
+    assert(t.isEventRepeat(a3, 10) === false, '时间差 2.5 小时 → 按新事件处理')
+
+    // ⑤ 解析契约：empty / schema / value 三类的区分（DESIGN 4.5）
+    const emptyCode = t.parseEpspResult({ code: 554, id: 'x' })
+    assert(emptyCode.ok === false && emptyCode.kind === 'empty', 'P2PQuake 其他 code → empty（不计故障）')
+    const badQuake = t.parseEpspResult({ code: 551, id: 'x', issue: { time: 't' }, earthquake: {}, points: [] })
+    assert(badQuake.ok === false && badQuake.kind === 'schema', '551 缺 maxScale → schema')
+    const badScale = t.parseEpspResult({
+      code: 551, id: 'x', issue: { time: 't' },
+      earthquake: { time: '9999/01/01 00:00:00', maxScale: 10 }, points: [],
+    })
+    assert(badScale.ok === false && badScale.kind === 'value', '551 的发布时间在 100 年后 → value')
+    const okEew = t.parseEpspResult(eew)
+    assert(okEew.ok === true && okEew.alert.kind === 'eew', '结构完整 → ok + alert')
+    assert(t.parseJmaResult('<html>blocked</html>').kind === 'schema', 'JMA 拿到 HTML 拦截页 → schema')
+    assert(t.parseJmaResult('<Report><Control><Title>天気予報</Title></Control></Report>').kind === 'empty',
+      'JMA 与本插件无关的电文 → empty（不是故障）')
+    assert(t.parseEmscResult({ action: 'delete', data: {} }).kind === 'empty', 'EMSC 撤回通知 → empty')
+    assert(t.parseEmscResult({ action: 'update', data: {} }).kind === 'schema', 'EMSC 缺 properties → schema')
+    assert(t.parseUsgsResult({ properties: { mag: 5 } }).kind === 'schema', 'USGS 缺坐标 → schema')
+    assert(t.parseNoaaResult('<alert><msgType>Test</msgType></alert>').kind === 'empty', 'NOAA 演练电文 → empty')
+    assert(t.parseNoaaResult('<html>nope</html>').kind === 'schema', 'NOAA 拿到 HTML → schema')
+
+    // ⑥ 每源约定（四要素）必须齐全：字段清单、源时区、新鲜度阈值、empty 判据
+    const ids = ['p2pquake', 'jma', 'emsc', 'usgs', 'noaa']
+    const missing = ids.filter((id) => {
+      const c = t.SOURCE_CONTRACTS[id]
+      return !c || !c.label || !c.timezone || !Array.isArray(c.required) || c.required.length === 0 ||
+        !c.empty || !('staleAfterMs' in c) || (!c.staleAfterMs && !c.staleReason)
+    })
+    assert(missing.length === 0, '五个源的校验约定齐全（必需字段 / 源时区 / 新鲜度阈值 / empty 判据）' +
+      (missing.length ? '（缺：' + missing.join(',') + '）' : ''))
+
+    // ⑦ 健康状态：schema 失败进入 schema-error，empty 不进；恢复后回到 open；同一原因只记一次
+    t.store.clearSources()
+    t.resetSourceHealth()
+    t.noteParseResult('usgs', t.failResult('schema', '缺 properties.mag'))
+    assert(t.store.sources.usgs.status === 'schema-error', 'schema 失败 → 该源进入 schema-error')
+    assert(t.sourceHealthOf('usgs').detail.indexOf('mag') !== -1, '失败原因可读（供排查文档引用）')
+    t.noteParseResult('usgs', t.failResult('empty', 'features 为空'))
+    assert(t.store.sources.usgs.status === 'schema-error', 'empty 不覆盖已有的 schema-error（不计故障）')
+    assert(t.effectiveStatusOf('usgs', 'open', '连接正常').status === 'schema-error',
+      '连接正常也不该掩盖数据格式异常（蓝点优先于绿灯）')
+    assert(t.noteSourceSuccess('usgs') === true, '解析恢复 → 清除异常并上报')
+    assert(t.store.sources.usgs.status === 'open', '恢复后回到 open')
+    assert(t.effectiveStatusOf('p2pquake', 'open', 'ok').status === 'open', '没有异常记录的源不受影响')
+    t.noteParseResult('emsc', t.failResult('schema', '缺 data'))
+    t.retrySource('emsc')
+    assert(t.sourceHealthOf('emsc') === null && t.store.sources.emsc.status === 'open', '手动重试清掉异常标记')
+    // ⑧ 0.4.1：Ｒ０６ 総合副本的「危険警報」与逐区级别（真实 live 电文的精简样本）
+    const hyogo = fs.readFileSync(path.join(ROOT, 'samples', 'jma-vpww53-hyogo-danger-20260914.xml'), 'utf8')
+    const h53 = t.parseJma(hyogo, { id: 'https://www.data.jma.go.jp/developer/xml/data/20260914113112_0_VPWW53_280000.xml' })
+    assert(h53 && h53.level === 4,
+      '総合副本的级别取自 <Body><Notice> 的「レベル４」（Kind 只写"大雨警報"，不读 Notice 会判成 L3）')
+    assert(h53.headline.indexOf('警戒レベル4') !== -1, 'headline 标注警戒レベル4')
+    const byCity = {}
+    for (const r of h53.regions) byCity[r.city || r.area] = r.level
+    assert(byCity['姫路市'] === 4, '姫路市在 Notice 的 L4 列表里 → region.level=4（即使它的 Kind 只是"大雨警報"）')
+    assert(byCity['相生市'] === 3, '相生市的 Kind 是"大雨警報"→ region.level=3（不被电文最大值抬到 4）')
+    assert(byCity['西脇市'] === 2, '西脇市的 Kind 是"大雨注意報"→ region.level=2（不被抬到 4）')
+    const hyCfg = (cities) => ({
+      watch: { prefectures: ['兵庫県'], cities: cities || [] },
+      disasters: { weather: true }, thresholds: {}, dedupe: { windowMinutes: 10 }, notify: {}, quietHours: {},
+    })
+    assert(t.matchAlert(h53, hyCfg()).hit === true, '关注兵庫県 → 命中（姫路市 L4）')
+    const onlyNishiwaki = t.matchAlert(h53, hyCfg(['西脇市']))
+    assert(onlyNishiwaki.hit === false && onlyNishiwaki.reason.indexOf('未达 L4') !== -1,
+      '只关注西脇市（L2）→ 不播报（逐区闸门生效，不被同县 L4 连坐）')
+    // 事件键不含发布时刻：解除电文才能与发布电文算到同一个键（否则解除链路永远匹配不上）
+    assert(h53.eventKey === 'jma:summary:大雨:280000',
+      '総合副本的事件键 = 灾种 + 編集官署名コード（不含发布时刻，解除才能匹配上）')
+    const cancelSame = Object.assign({}, h53, { cancelled: true, level: 0, strength: 0, regions: [] })
+    assert(t.cancelKeyOf(cancelSame) === h53.eventKey, '解除与发布共用同一个 cancelKeyOf 键')
+
+    // ⑨ Host 侧：feed 结构不符必须计入 errors，不能与"源正常但当前无数据"同形
+    const pollerMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'poller.js')).href)
+    const gsMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'global-sources.js')).href)
+    const t0 = Date.parse('2026-09-14T12:00:00Z')
+    const badFeed = pollerMod.createPoller({
+      feedUrl: 'https://example.test/usgs', parseFeed: gsMod.parseUsgsEntries, singleStage: true,
+      idleMs: 0, now: () => t0, startedAt: t0,
+      fetchText: async () => '<html>blocked</html>',
+    })
+    const rBad = await badFeed.pollOnce()
+    assert(rBad.parseFailed === true && badFeed.stats().errors === 1,
+      'Host：feed 被替换成 HTML / 改版 → 计入 errors（此前与"没有数据"同形）')
+    assert(String(badFeed.stats().lastError).indexOf('解析失败') !== -1, 'Host：失败原因可读（供 TROUBLESHOOTING 引用）')
+    const goodEmpty = pollerMod.createPoller({
+      feedUrl: 'https://example.test/usgs', parseFeed: gsMod.parseUsgsEntries, singleStage: true,
+      idleMs: 0, now: () => t0, startedAt: t0,
+      fetchText: async () => '{"features":[]}',
+    })
+    const rGood = await goodEmpty.pollOnce()
+    assert(rGood.parseFailed !== true && goodEmpty.stats().errors === 0 && goodEmpty.stats().feedEntries === 0,
+      'Host：结构正确但为空 → 不算故障（empty 与 schema 必须分开）')
+  } catch (e) {
+    assert(false, '0.4.1 契约与时区验证失败：' + e.message)
   }
 
   console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败')

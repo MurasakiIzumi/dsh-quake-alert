@@ -146,7 +146,12 @@ for (const f of files) {
   const badAssign = new Set()
   for (const m of body.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?<![=!<>])=(?!=)/g)) {
     const n = m[1]
-    if (local.has(n) || imported.has(n) || owner.has(n) || GLOBALS.has(n)) continue
+    // 0.4.1：这里曾额外放行 owner.has(n)（"某文件导出过这个名字"），但它与"本文件是否 import 了
+    // 它"无关，于是"给别处导出的名字裸赋值"整类被放过——那正是 0.2.1 的 `runtimeCfg = loadCfg()`
+    // 那一类 bug（runtimeCfg 由 03-settings-bridge 导出，本文件裸赋值会通过检查，
+    // 运行时在 'use strict' 的 bundle 里抛 ReferenceError）。本文件的声明已由 local 覆盖
+    // （`export const x` 也能被声明正则匹配），所以去掉 owner 分支是纯收紧。
+    if (local.has(n) || imported.has(n) || GLOBALS.has(n)) continue
     badAssign.add(n)
   }
   if (badAssign.size) {

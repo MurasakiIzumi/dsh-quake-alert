@@ -21,7 +21,12 @@ import { lookupAddrCity, normKana } from './04-city-table.js'
 function regionInWatch(region, watch, cityLevel) {
   const list = watch && watch.prefectures
   const cities = (watch && watch.cities) || []
-  if (list && list.length > 0 && list.indexOf(region.pref) === -1) return false
+  // region.pref 为空 = 归属县未能识别。**放行**而不是否决（0.4.1 修正）：
+  //   · DESIGN 3.2 明写"区域级数据一律放行"；
+  //   · 气象侧（regionInWeatherWatch）一直有 `region.pref &&` 保护，两条路此前语义相反；
+  //   · 否决会让"新设的观测点 / 未收录的预报区名"变成静默漏报，而 missReason 里那句
+  //     「另有 N 个区域名未能识别归属县」也无从补救（用户已经看不到这条提醒了）。
+  if (list && list.length > 0 && region.pref && list.indexOf(region.pref) === -1) return false
   if (!cityLevel || cities.length === 0) return true
   if (region.cityKnown === false) return true
   const addrCity = lookupAddrCity(region.area)
@@ -78,12 +83,29 @@ function matchPointAlert(alert, cfg) {
   if (places.length === 0) {
     return { hit: false, reason: '未设置全球关注点（设置 → 灾害预警 → 全球关注点）' }
   }
-  if (!validGeo(alert.geo)) {
+  // 多区域电文（CAP 允许一个 info 下多个 <area><circle>）：任一圆心落在半径内即算命中。
+  // 只看第一个 circle 会让其余海域的沿海用户漏报——多区域海啸恰恰是最常见形态。
+  const pts = (Array.isArray(alert.geoList) && alert.geoList.length ? alert.geoList : [alert.geo]).filter(validGeo)
+  if (pts.length === 0) {
     return { hit: false, reason: '本条消息未携带可用坐标，无法判定震中距' }
+  }
+  // 海啸的**等级闸门**同样适用于全球源（0.4.1）。NOAA CAP 的 <event> 决定等级
+  // （Warning=3 / Advisory・Watch=2 / Information=0，见 05c 的 NOAA_EVENT_RULES），
+  // 与日本 552 的 tsunamiGrade 共用同一把尺。此前这条闸门只作用于日本源，于是
+  // 「Tsunami Information」（气象机构明确表示无破坏性海啸的信息）也会在半径内响铃——
+  // 全球海啸完全无法用等级收敛，而海啸的误报会直接摧毁用户对整条链路的信任。
+  if (alert.kind === 'tsunami') {
+    const rank = typeof alert.tsunamiRank === 'number'
+      ? alert.tsunamiRank
+      : (typeof alert.maxScale === 'number' ? alert.maxScale : 0)
+    const minRank = own(TSUNAMI_RANK, (cfg.thresholds || {}).tsunamiGrade) || 1
+    if (rank < minRank) {
+      return { hit: false, reason: '海啸等级未达阈值（本条 ' + rank + ' < ' + minRank + '）' }
+    }
   }
   const minMag = (cfg.thresholds || {}).globalMagnitude
   const mag = typeof alert.magnitude === 'number' && Number.isFinite(alert.magnitude) ? alert.magnitude : null
-  // 震级阈值只作用于地震。海啸的严重性由它自己的等级决定（警报 / 注意报 / 信息），
+  // 震级阈值只作用于地震。海啸的严重性由它自己的等级决定（上面的闸门），
   // 不该被"引发它的那次地震有多大"过滤掉：NOAA 电文里那个前震震级只是参考值，而且用同一个
   // 阈值卡海啸是危险的——用户把全球阈值调到 M7.0 时，一场 M6.7 引发的海啸警报会被静默丢掉，
   // 而海啸恰恰是这里最不能漏的一类。
@@ -92,16 +114,18 @@ function matchPointAlert(alert, cfg) {
     return { hit: false, reason: 'M' + mag + ' 低于全球震级阈值 M' + minMag }
   }
   let nearest = null
-  for (const p of places) {
-    const d = distanceKm(alert.geo.lat, alert.geo.lon, p.lat, p.lon)
-    if (!nearest || d < nearest.d) nearest = { p, d }
-    if (d <= p.radiusKm) {
-      return {
-        hit: true,
-        reason: (mag === null ? '' : 'M' + mag + ' · ') + '距 ' + p.name + ' 约 ' + Math.round(d) +
-          ' km（半径 ' + p.radiusKm + ' km）',
-        place: p,
-        distanceKm: d,
+  for (const g of pts) {
+    for (const p of places) {
+      const d = distanceKm(g.lat, g.lon, p.lat, p.lon)
+      if (!nearest || d < nearest.d) nearest = { p, d }
+      if (d <= p.radiusKm) {
+        return {
+          hit: true,
+          reason: (mag === null ? '' : 'M' + mag + ' · ') + '距 ' + p.name + ' 约 ' + Math.round(d) +
+            ' km（半径 ' + p.radiusKm + ' km）',
+          place: p,
+          distanceKm: d,
+        }
       }
     }
   }
@@ -162,16 +186,30 @@ function matchAlert(alert, cfg) {
   if (alert.kind === 'weather') {
     if ((cfg.disasters || {}).weather === false) return { hit: false, reason: '气象灾害提醒已关闭' }
     if (alert.cancelled) return { hit: false, reason: '解除消息不提醒' }
+    if (alert.regions.length === 0) return { hit: false, reason: '本条电文未携带可判定的区域' }
     // 播报边界写死在 L4：L1〜L3 仍然解析、仍然进历史（灰色条目），只是不打扰。
     // 依据见 DESIGN 10.3——L3 是「高齢者等避難」，与 DSH 用户群不匹配；L4 才是避难指示级。
-    if (!(typeof alert.level === 'number' && alert.level >= 4)) {
-      return { hit: false, reason: '警戒レベル' + (alert.level || '—') + '（未达 L4，仅记录）' }
+    //
+    // **闸门必须看命中地区自己的级别**，不能看电文最大值：同一条 VPWW55 里姫路市是
+    // L4 大雨危険警報、相生市是 L3 大雨警報、西脇市是 L2 大雨注意報（2026-09-14 兵庫県实测）。
+    // 用电文最大值会把只到 L2 的地区播成「警戒レベル4（避难指示级）」——内容夸大，
+    // 而且让「市级收窄」彻底失去意义。region.level 缺失时（老对象 / 类型未识别）回退电文级别。
+    const lvOf = (r) => (typeof r.level === 'number' ? r.level : alert.level)
+    const hitRegion = alert.regions.find((r) => regionInWeatherWatch(r, w) && lvOf(r) >= 4)
+    if (!hitRegion) {
+      const anyL4 = alert.regions.some((r) => lvOf(r) >= 4)
+      return {
+        hit: false,
+        reason: missReason(alert, w, anyL4
+          ? '关注地区未命中，或命中地区未达 L4'
+          : '警戒レベル' + (alert.level || '—') + '（未达 L4，仅记录）'),
+      }
     }
-    if (alert.regions.length === 0) return { hit: false, reason: '本条电文未携带可判定的区域' }
-    const hitRegion = alert.regions.find((r) => regionInWeatherWatch(r, w))
-    return hitRegion
-      ? { hit: true, reason: '警戒レベル' + alert.level + '（' + (hitRegion.city || hitRegion.area) + '）', region: hitRegion }
-      : { hit: false, reason: missReason(alert, w, '关注地区未命中') }
+    return {
+      hit: true,
+      reason: '警戒レベル' + lvOf(hitRegion) + '（' + (hitRegion.city || hitRegion.area) + '）',
+      region: hitRegion,
+    }
   }
   return { hit: false, reason: '不支持的 code' }
 }

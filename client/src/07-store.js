@@ -40,6 +40,7 @@ const store = {
   /** 插件停用 / 重建时把源清空，避免残留的旧状态把新会话显示成"已连接"。 */
   clearSources() {
     this.sources = {}
+    this.received = 0 // 推送计数也归零：否则重载后徽标会带着上一代的数字继续涨
     this.recomputeStatus()
     this.push({})
   },
@@ -49,12 +50,28 @@ const store = {
       this.status = 'idle'; this.retries = 0; this.detail = ''
       return
     }
-    const pick = (s) => list.filter((x) => x.status === s)[0]
-    // 红优先：任一链路停了 / 断了，整体就不是"正常"
-    const chosen = pick('closed') || pick('reconnecting') || pick('connecting') || pick('open') || list[0]
+    // disabled（用户关掉了某个灾种）不参与聚合：它不该把整体拉成"异常"，
+    // 但全部源都关掉时要如实显示成"已关闭"而不是"未启动"。
+    const active = list.filter((x) => x.status !== 'disabled')
+    if (active.length === 0) {
+      this.status = 'disabled'; this.retries = 0
+      this.detail = list.map((x) => (x.label || '') + '：已关闭').join(' · ')
+      return
+    }
+    const pick = (s) => active.filter((x) => x.status === s)[0]
+    // 红优先：任一链路停了 / 不可达，整体就不是"正常"；其次蓝（数据格式异常，用户处理不了）、
+    // 黄（连接中 / 重连 / 降级）、中灰（数据过期），最后才是绿。
+    // 0.4.1 起 feed 源（JMA / USGS / NOAA）也上报状态——此前只有 WebSocket 源参与聚合，
+    // 于是气象 / 全球轮询链路整体死掉时侧边栏仍然是绿的（用户以为在被保护）。
+    const chosen = pick('closed') || pick('unreachable') || pick('schema-error') ||
+      pick('reconnecting') || pick('connecting') || pick('degraded') || pick('stale') ||
+      pick('open') || active[0]
     this.status = chosen.status
     this.retries = typeof chosen.retries === 'number' ? chosen.retries : 0
-    this.detail = list.map((x) => (x.label || '') + '：' + (x.detail || x.status)).join(' · ')
+    // 详情优先列异常源（全部正常时才列全部）：源多了以后逐条列会挤爆悬停提示
+    const bad = active.filter((x) => x.status !== 'open')
+    this.detail = (bad.length ? bad : active)
+      .map((x) => (x.label || '') + '：' + (x.detail || x.status)).join(' · ')
   },
   subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn) },
 }
