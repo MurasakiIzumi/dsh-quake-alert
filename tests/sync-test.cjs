@@ -2570,12 +2570,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     t.noteParseResult('usgs', t.failResult('schema', '缺 properties.mag'))
     assert(t.store.sources.usgs.status === 'schema-error', 'schema 失败 → 该源进入 schema-error')
     assert(t.sourceHealthOf('usgs').detail.indexOf('mag') !== -1, '失败原因可读（供排查文档引用）')
-    t.noteParseResult('usgs', t.failResult('empty', 'features 为空'))
-    assert(t.store.sources.usgs.status === 'schema-error', 'empty 不覆盖已有的 schema-error（不计故障）')
     assert(t.effectiveStatusOf('usgs', 'open', '连接正常').status === 'schema-error',
       '连接正常也不该掩盖数据格式异常（蓝点优先于绿灯）')
-    assert(t.noteSourceSuccess('usgs') === true, '解析恢复 → 清除异常并上报')
-    assert(t.store.sources.usgs.status === 'open', '恢复后回到 open')
+    // 0.4.2：empty 证明"结构是好的"，要清掉 schema-error——JMA 的常态就是 empty，
+    // 否则一条坏电文会让蓝点挂到下一次成功解析为止。
+    t.noteParseResult('usgs', t.failResult('empty', 'features 为空'))
+    assert(t.sourceHealthOf('usgs') === null && t.store.sources.usgs.status === 'open',
+      'empty 清掉 schema-error（不再是"不覆盖已有异常"）')
+    assert(t.noteSourceSuccess('usgs') === false, '已经恢复的源再报成功 → 无动作（不会重复上报）')
     assert(t.effectiveStatusOf('p2pquake', 'open', 'ok').status === 'open', '没有异常记录的源不受影响')
     t.noteParseResult('emsc', t.failResult('schema', '缺 data'))
     t.retrySource('emsc')
@@ -2602,8 +2604,17 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     // 事件键不含发布时刻：解除电文才能与发布电文算到同一个键（否则解除链路永远匹配不上）
     assert(h53.eventKey === 'jma:summary:大雨:280000',
       '総合副本的事件键 = 灾种 + 編集官署名コード（不含发布时刻，解除才能匹配上）')
+    // 真实解除电文（気象庁样本）：Kind 全是「解除」、主文里也不含灾种词
+    // → 灾种只能退化成中性的「气象」，键与发布的「大雨」不同 ⇒ 当前**不提示**解除。
+    // 这不是同义反复，而是把"键推导依赖主文文案"这条机制限制固定下来（见 DESIGN 11.6 #3）。
+    const cancelXml = fs.readFileSync(path.join(ROOT, 'samples', 'jma-vpno50-tokyo-cancel-20260907.xml'), 'utf8')
+    const cancelAlert = t.parseJma(cancelXml, { id: 'https://x/20260907190104_0_VPNO50_130000.xml' })
+    assert(cancelAlert && cancelAlert.cancelled === true, '真实解除报知 → cancelled=true（只看 Body 副本的 Status）')
+    assert(cancelAlert.eventKey === 'jma:summary:气象:130000',
+      '真实解除报知的灾种认不出（Kind 只有「解除」、主文无灾种词）→ 键与发布的不同，故不提示（DESIGN 11.6 #3）')
+    // 对照：主文里认得出灾种时，解除与发布能算到同一个键
     const cancelSame = Object.assign({}, h53, { cancelled: true, level: 0, strength: 0, regions: [] })
-    assert(t.cancelKeyOf(cancelSame) === h53.eventKey, '解除与发布共用同一个 cancelKeyOf 键')
+    assert(t.cancelKeyOf(cancelSame) === h53.eventKey, '（对照）同一灾种的解除与发布共用同一个 cancelKeyOf 键')
 
     // ⑨ Host 侧：feed 结构不符必须计入 errors，不能与"源正常但当前无数据"同形
     const pollerMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'poller.js')).href)
@@ -2628,6 +2639,210 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       'Host：结构正确但为空 → 不算故障（empty 与 schema 必须分开）')
   } catch (e) {
     assert(false, '0.4.1 契约与时区验证失败：' + e.message)
+  }
+
+  console.log('== 0.4.2：对 0.4.1 修复的回归检查 ==')
+  try {
+    const t = loadClient().__test
+    const wcfg = {
+      watch: { prefectures: ['東京都'], cities: [], places: [] },
+      disasters: { earthquake: true, tsunami: true, weather: true },
+      thresholds: { quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch', globalMagnitude: 4.5 },
+      notify: { sound: false, system: false, volume: 0 },
+      dedupe: { windowMinutes: 10 },
+      quietHours: { enabled: false, start: '23:00', end: '07:00', breakForSevere: true },
+    }
+    const mkWeather = (strength, level, id) => ({
+      id: id || ('w-' + strength + '-' + level), code: 'jma', kind: 'weather', kindLabel: '大雨警報',
+      severity: level >= 4 ? 'red' : 'orange', issued: '2026-09-14T12:00:00+09:00', headline: 'h',
+      level, maxScale: level, hypo: {}, regions: [{ pref: '東京都', area: '東京都', city: '', level }],
+      eventKey: 'jma:summary:大雨:130000', strength, cancelled: false,
+    })
+    // ① 气象「降级后再次升级」不该被静默（0.4.1 去掉事件键里的发布时刻后新引入的漏报）
+    assert(t.handleAlert(mkWeather(4, 4, 'r1'), wcfg).notified === true, 'L4 首次 → 播报')
+    assert(t.handleAlert(mkWeather(3, 3, 'r2'), wcfg).reason === 'not-hit', 'L3 降级 → 不播报（未达 L4）')
+    assert(t.handleAlert(mkWeather(4, 4, 'r3'), wcfg).notified === true,
+      '再次升回 L4 → 仍要播报（此前被判"强度未升级的重复发布"而静默）')
+    // weakenEvent 只在确实更低时下调
+    const w1 = { eventKey: 'wx', strength: 4 }
+    assert(t.isEventRepeat(w1, 180) === false, '（前置）登记 strength=4')
+    assert(t.weakenEvent({ eventKey: 'wx', strength: 3 }) === true, 'weakenEvent：3 < 4 → 下调')
+    assert(t.weakenEvent({ eventKey: 'wx', strength: 4 }) === false, 'weakenEvent：同强度不下调')
+    assert(t.weakenEvent({ eventKey: '不存在', strength: 1 }) === false, 'weakenEvent：没有记录时安全返回 false')
+
+    // ② 官署名碼取不到时不能留空（否则不同官署的同一灾种共键 → 互相静默）
+    const hyogoXml = fs.readFileSync(path.join(ROOT, 'samples', 'jma-vpww53-hyogo-danger-20260914.xml'), 'utf8')
+    const tokyoXml = fs.readFileSync(path.join(ROOT, 'samples', 'jma-vpww55-heavyrain.xml'), 'utf8')
+    const k1 = t.parseJma(hyogoXml, { id: 'no-suffix-1' }).eventKey
+    const k2 = t.parseJma(tokyoXml, { id: 'no-suffix-2' }).eventKey
+    assert(k1.indexOf('jma:summary:') === 0 && k1.split(':')[3] !== '',
+      'id 不含 6 位后缀时，键里仍有官署标识（' + k1 + '）')
+    assert(k1 !== k2, '不同气象台的同灾种电文不会共键（' + k1 + ' vs ' + k2 + '）')
+
+    // ③ 551 单个观测点缺字段不该让整条警报消失
+    const q551 = {
+      code: 551, id: 'x', issue: { time: 't' },
+      earthquake: { time: '2026/09/14 12:00:00', maxScale: 40 },
+      points: [{ pref: '東京都', addr: '千代田区' }],
+    }
+    const r551 = t.parseEpspResult(q551)
+    assert(r551.ok === true, '551 的 points 项缺 scale → 仍按可用数据处理（不再整条判 schema）')
+    const bad551 = Object.assign({}, q551, { points: [{ pref: '東京都', addr: 'a', scale: '40' }] })
+    assert(t.parseEpspResult(bad551).kind === 'schema', '字段类型明显不对（scale 是字符串）仍判 schema')
+
+    // ④ 坐标型近似归并只在**跨源**之间生效（同源的主震/余震不该被吞）
+    const s1 = { id: 's1', source: 'emsc', eventKey: 'geo:m1', strength: 5.0, locator: 'point', issued: '2026-09-21T10:00:00Z', geo: { lat: 30, lon: 130 } }
+    const s2 = { id: 's2', source: 'emsc', eventKey: 'geo:m2', strength: 5.0, locator: 'point', issued: '2026-09-21T10:00:40Z', geo: { lat: 30.05, lon: 130.05 } }
+    assert(t.isEventRepeat(s1, 10) === false, '（前置）同源第一条播报')
+    assert(t.isEventRepeat(s2, 10) === false,
+      '同源相隔 40 秒、相距 ~7km 的第二条消息 → 不算同一事件（可能是主震与余震，吞掉就是漏报）')
+    const u1 = Object.assign({}, s1, { id: 'u1', source: 'usgs', eventKey: 'geo:m3' })
+    const e1 = Object.assign({}, s1, { id: 'e1', source: 'emsc', eventKey: 'geo:m4', issued: '2026-09-21T11:00:00Z' })
+    assert(t.isEventRepeat(e1, 10) === false, '（前置）EMSC 报一场地震')
+    assert(t.isEventRepeat(u1, 10) === true, 'USGS 对同一场地震（±2 分钟、~7km）→ 跨源归并，不重复响铃')
+
+    // ⑤ 配置字段漂移保护：normalizeCfg 必须覆盖 DEFAULT_CFG 的每一个字段
+    //    （freshCfg 已改为从 DEFAULT_CFG 深拷贝派生，但 normalizeCfg 仍是手写的字段集；
+    //     给它加断言，避免以后加字段时被 applyCfg 静默丢弃）
+    const nc = t.normalizeCfg(t.DEFAULT_CFG)
+    const lostTop = Object.keys(t.DEFAULT_CFG).filter((k) => !(k in nc))
+    const lostNested = []
+    for (const k of ['watch', 'disasters', 'thresholds', 'notify', 'dedupe', 'quietHours']) {
+      for (const f of Object.keys(t.DEFAULT_CFG[k])) if (!(f in nc[k])) lostNested.push(k + '.' + f)
+    }
+    assert(lostTop.length === 0 && lostNested.length === 0,
+      'normalizeCfg 覆盖 DEFAULT_CFG 的全部字段（顶层与嵌套都没有漂移）' +
+      (lostTop.length || lostNested.length ? '（缺：' + lostTop.concat(lostNested).join(',') + '）' : ''))
+
+    // ⑥ audioState 只回答状态，不为了回答而创建 AudioContext
+    assert(t.audioState() === 'unavailable', '沙箱里没有 AudioContext 构造器 → audioState=unavailable（且不抛错）')
+
+    // ⑧ 拦截页 / 被截断的 feed 必须抛错（否则"被拦"与"上游没有新闻"在 UI 上完全同形）
+    const pollerMod2 = await import(pathToFileURL(path.join(ROOT, 'lib', 'poller.js')).href)
+    const gsMod2 = await import(pathToFileURL(path.join(ROOT, 'lib', 'global-sources.js')).href)
+    let feedThrew = 0
+    try { pollerMod2.parseAtomEntries('<html><body>blocked</body></html>') } catch (err) { feedThrew += 1 }
+    try { pollerMod2.parseAtomEntries('<feed><entry><id>x</id>') } catch (err) { feedThrew += 1 }
+    assert(feedThrew === 2, 'Atom 解析：HTML 拦截页与被截断的 feed 都抛错（errors 才会增长）')
+    assert(pollerMod2.parseAtomEntries('<feed></feed>').length === 0,
+      '结构正确的空 feed → 空数组（empty，不是故障）')
+    let noaaThrew = 0
+    try { gsMod2.parseNoaaEntries('<html>nope</html>') } catch (err) { noaaThrew += 1 }
+    try { gsMod2.parseNoaaEntries('<feed><entry>') } catch (err) { noaaThrew += 1 }
+    assert(noaaThrew === 2, 'NOAA 事件列表：HTML 与被截断同样抛错（JMA 与 NOAA 此前都静默返回 []）')
+
+    // ⑨ empty 要清掉之前的 schema-error（否则一条坏电文会让蓝点挂到下一次成功解析为止）
+    t.store.clearSources()
+    t.resetSourceHealth()
+    t.noteParseResult('jma', t.failResult('schema', '结构不符'))
+    assert(t.store.sources.jma.status === 'schema-error', '（前置）进入 schema-error')
+    t.noteParseResult('jma', t.failResult('empty', '天气预报，与本插件无关'))
+    assert(t.sourceHealthOf('jma') === null && t.store.sources.jma.status === 'open',
+      'empty 证明结构是好的 → 清掉 schema-error（JMA 的常态就是 empty）')
+
+    // ⑩ timeIsImpossible：时间**缺失**不是"客观不可能"（存在性由 schema 判据负责）
+    const noTime551 = {
+      code: 551, id: 't', issue: { time: '2026/09/14 12:00:00' },
+      earthquake: { maxScale: 40 }, points: [{ pref: '東京都', addr: 'a', scale: 40 }],
+    }
+    assert(t.parseEpspResult(noTime551).ok === true, '551 缺 earthquake.time → 不再整条判 value')
+
+    // ⑪ 跨会话重放的**判定条件**：wasRecentlyAlerted（24 小时记忆）且强度未升级。
+    // 真正的"时间推进"（让 10 分钟的事件窗口过期、而 24 小时记忆仍在）在单进程测试里无法模拟，
+    // 所以这里分别验证两个输入 + 组合语义；handleAlert 里那两条分支的顺序由注释与代码保证。
+    t.store.events = []
+    const repKey = 'jma:summary:大雨:REPLAY'
+    const rep1 = Object.assign(mkWeather(4, 4, 'rp1'), { eventKey: repKey })
+    assert(t.handleAlert(rep1, wcfg).notified === true, '（前置）事件首次播报')
+    assert(t.wasRecentlyAlerted(rep1) === true, '播报后 24 小时记忆里就有这个事件键')
+    const rep2 = Object.assign(mkWeather(4, 4, 'rp2'), { eventKey: repKey })
+    assert(t.isStrengthUpgrade(rep2) === false, '同强度的再次投递 → 不算升级（会被重放抑制拦下）')
+    const rep3 = Object.assign(mkWeather(5, 5, 'rp3'), { eventKey: repKey })
+    assert(t.isStrengthUpgrade(rep3) === true, '强度上修的再次投递 → 算升级（重放抑制不会拦它）')
+    assert(t.isDuplicate(rep1.id, 10) === true, '同一条消息（同 id）再来 → 消息级去重挡住')
+    assert(t.parseEpspResult(readSample('quake-kumamoto-detailscale-20260907.json')).ok === true, '真实 551 → ok')
+    assert(t.parseEpspResult(readSample('quake-kumamoto-scaleprompt-20260907.json')).ok === true, '真实 551（速报）→ ok')
+    assert(t.parseEpspResult(readSample('eew-ibaraki-m6.7-20260823.json')).ok === true, '真实 556 → ok')
+    assert(t.parseEpspResult(readSample('tsunami-fukushima-spec-example.json')).ok === true, '真实 552（规格示例）→ ok')
+    assert(t.parseJmaResult(fs.readFileSync(path.join(ROOT, 'samples', 'jma-vxww50-landslide.xml'), 'utf8'), { id: 'x' }).ok === true,
+      '真实 VXWW50（土砂災害警戒情報）→ ok')
+    assert(t.parseJmaResult(fs.readFileSync(path.join(ROOT, 'samples', 'jma-vxko-flood.xml'), 'utf8'), { id: 'x' }).ok === true,
+      '真实 VXKO（指定河川洪水予報）→ ok')
+    assert(t.parseJmaResult(hyogoXml, { id: 'x' }).ok === true, '真实 VPWW53（危険警報）→ ok')
+    const emscSample = JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'global', 'emsc-ws-sample.json'), 'utf8'))
+    assert(t.parseEmscResult(emscSample).ok === true, '真实 EMSC 帧 → ok')
+    const usgsFeed = JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'global', 'usgs-all-hour.geojson'), 'utf8'))
+    const usgsBad = usgsFeed.features.filter((f) => !t.parseUsgsResult(f).ok)
+    assert(usgsBad.length === 0, '真实 USGS 的 ' + usgsFeed.features.length + ' 条 feature 全部 → ok')
+    const noaaCap = fs.readFileSync(path.join(ROOT, 'samples', 'global', 'noaa-pheb-cap.xml'), 'utf8')
+    assert(t.parseNoaaResult(noaaCap, { id: 'x' }).ok === true, '真实 NOAA CAP → ok')
+
+    // ⑫ pref='' 的口径（0.4.2 修正）：同一条消息里**有**区域能归县时，归不到的条目不参与
+    //    县级过滤（否则一条含"未收录预报区名"的海啸会提醒所有关注列表非空的用户）；
+    //    整条消息都归不到县时才放行（边界情况让步，避免整条静默）。
+    const tcfg = (watch, grade) => ({
+      disasters: { earthquake: true, tsunami: true }, dedupe: { windowMinutes: 10 },
+      watch: { prefectures: watch }, thresholds: { quakeScale: 40, eewScale: 45, tsunamiGrade: grade || 'Watch' },
+      notify: {}, quietHours: {},
+    })
+    const mixedUnknown = t.parse({
+      code: 552, id: 't-mix2', cancelled: false, issue: { time: 'x' },
+      areas: [{ grade: 'Warning', name: '福島県' }, { grade: 'MajorWarning', name: '謎の海域' }],
+    })
+    assert(t.matchAlert(mixedUnknown, tcfg(['東京都'])).hit === false,
+      '有可归县区域且未命中时，未识别区域不放行（否则海啸会误报给所有关注列表非空的用户）')
+    const allUnknown = t.parse({
+      code: 552, id: 't-unk2', cancelled: false, issue: { time: 'x' },
+      areas: [{ grade: 'MajorWarning', name: '謎の海域' }],
+    })
+    assert(t.matchAlert(allUnknown, tcfg(['東京都'])).hit === true,
+      '整条消息的区域都归不到县 → 仍放行（边界情况让步，避免静默漏报）')
+
+    // ⑬ Notice 解析的两处收紧
+    const baseUrl = 'https://x/20260914113112_0_VPWW53_280000.xml'
+    const oneCity = hyogoXml.replace('〈レベル４大雨危険警報〉姫路市　たつの市　多可町＊', '〈レベル４大雨危険警報〉姫路市*')
+    const hOne = t.parseJma(oneCity, { id: baseUrl })
+    assert((hOne.regions.find((r) => r.city === '姫路市') || {}).level === 4,
+      '半角 * 的省略标记不粘在最后一个地区名上（唯一那个 L4 城市仍被提升）')
+    const twoSeg = hyogoXml.replace(
+      '〈レベル４大雨危険警報〉姫路市　たつの市　多可町＊',
+      '［警戒レベル４相当情報の発表状況］\n姫路市　たつの市\n［氾濫注意情報の発表状況］\n〈氾濫注意情報〉西脇市＊')
+    const hTwo = t.parseJma(twoSeg, { id: baseUrl })
+    const cityLv = (a, city) => (a.regions.find((r) => r.city === city) || {}).level
+    assert(cityLv(hTwo, '姫路市') === 4, '栏目名里的「レベル４」能把紧随其后的地区提到 L4')
+    assert(cityLv(hTwo, '西脇市') === 2,
+      '另一段的地区不被前面那段的级别吞掉（跨段量词会同时造成误报与漏报）')
+
+    // ⑭ XML 注释不参与解析（否则注释里的标签与级别会污染 block/tag）
+    const commented = '<Report><Control><Title>気象特別警報・警報・注意報</Title><EditorialOffice>测试台</EditorialOffice></Control>' +
+      '<Head><Title>某県気象警報・注意報</Title><ReportDateTime>2026-09-14T20:31:00+09:00</ReportDateTime>' +
+      '<Headline><Text>大雨警報を発表</Text><Information type="気象・地震・火山情報／市町村等"><Item>' +
+      '<Kind><Name>大雨警報</Name><Code>03</Code></Kind>' +
+      '<Areas codeType="気象・地震・火山情報／市町村等"><Area><Name>姫路市</Name><Code>2820100</Code></Area></Areas>' +
+      '</Item></Information></Headline></Head>' +
+      '<!-- <Body><Notice>〈レベル４大雨危険警報〉姫路市＊</Notice></Body> -->' +
+      '<Body></Body></Report>'
+    const hCmt = t.parseJma(commented, { id: baseUrl })
+    assert(hCmt.level === 3, 'XML 注释里的「レベル４」不参与级别判定（解析前先剥注释）')
+
+    // ⑮ 显式但不可识别的 codeType 不再按码位数猜成行政区域
+    const gauge = commented.replace('</Item></Information>',
+      '</Item><Item><Kind><Name>大雨警報</Name><Code>03</Code></Kind>' +
+      '<Areas codeType="水位観測所"><Area><Name>某某観測所</Name><Code>123456</Code></Area></Areas>' +
+      '</Item></Information>')
+    const hGauge = t.parseJma(gauge, { id: baseUrl })
+    assert(!hGauge.regions.some((r) => r.area === '某某観測所'),
+      'codeType 显式但不是行政区域 → 忽略（位数兜底只服务于没给 codeType 的裸 <Area>）')
+
+    // ⑯ 解除判定只看 Body 副本（Head 摘要没有 Status，会把"解除"稀释成"发布"）
+    const canceled = hyogoXml.replace(/<Status>継続<\/Status>|<Status>発表<\/Status>/g, '<Status>解除</Status>')
+    const hCancel = t.parseJma(canceled, { id: baseUrl })
+    assert(hCancel && hCancel.cancelled === true, 'Body 的 Status 全是解除（Head 摘要无 Status）→ cancelled=true')
+    const partial = hyogoXml.replace('<Status>継続</Status>', '<Status>解除</Status>')
+    assert(t.parseJma(partial, { id: baseUrl }).cancelled === false,
+      '只有部分条目是解除 → 不算整条解除（仍按发布处理）')
+  } catch (e) {
+    assert(false, '0.4.2 回归检查失败：' + e.message)
   }
 
   console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败')

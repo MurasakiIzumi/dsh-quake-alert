@@ -43,6 +43,37 @@ function issuedMsOf(alert) {
   const t = Date.parse(String((alert && alert.issued) || ''))
   return Number.isFinite(t) ? t : null
 }
+/**
+ * 找"这一条可能对应的先前事件记录"。
+ *
+ * 两级：先看**精确事件键**；未命中时再看**坐标近似**（±2 分钟 + 50km）。
+ *
+ * `allowSameSource` 决定近似那一级要不要排除同源：
+ *   · `isEventRepeat` 传 false —— 它要回答"这条是不是另一条源对同一场地震的重复播报"，
+ *     而同源不会用两个 id 报同一事件（同源修订复用同一个 id）。同源的两次不同地震
+ *     （例如相隔 40 秒、相距 7km 的主震与余震）被归并就是漏报。
+ *   · `isStrengthUpgrade` 传 true —— 它只在**消息 id 已经重复**时才被求值（handleAlert 里的
+ *     `&&` 短路），也就是说调用方已经确定"这是同一条消息的又一次到达"，此时同源的坐标近似
+ *     也必须认（EMSC 的修订版会挪坐标 / 跨分钟，键就变了）。
+ */
+function findPrevEvent(alert, allowSameSource) {
+  const prev = eventSeen.get(alert.eventKey)
+  if (prev) return prev
+  if (alert.locator !== 'point' || !validGeo(alert.geo)) return null
+  const at = issuedMsOf(alert)
+  if (at === null) return null
+  if (String(alert.eventKey || '').indexOf('test:') === 0) return null // 测试消息每次都是独立演示
+  const source = String(alert.source || '')
+  for (const v of eventSeen.values()) {
+    if (!v.geo || typeof v.at !== 'number') continue
+    if (!allowSameSource && source && v.source && v.source === source) continue
+    if (Math.abs(v.at - at) <= GEO_NEAR_MS && distanceKm(alert.geo.lat, alert.geo.lon, v.geo.lat, v.geo.lon) <= GEO_NEAR_KM) {
+      return v
+    }
+  }
+  return null
+}
+
 function isEventRepeat(alert, windowMinutes) {
   if (!alert.eventKey) return false
   const now = Date.now()
@@ -51,23 +82,28 @@ function isEventRepeat(alert, windowMinutes) {
     if (v.ts > now) { v.ts = now; continue }
     if (now - v.ts > win) eventSeen.delete(k)
   }
+  const prev = findPrevEvent(alert, false)
+  if (prev && alert.strength <= prev.strength) return true
   const at = issuedMsOf(alert)
   const geo = (alert.locator === 'point' && validGeo(alert.geo)) ? { lat: alert.geo.lat, lon: alert.geo.lon } : null
-  let prev = eventSeen.get(alert.eventKey)
-  // 设置页的"发送测试全球警报"每次点击都是**独立演示**（事件键形如 test:…），
-  // 语义上就该每次都播报，不参与下面的坐标近似归并——否则连点两次第二次会被静默。
-  const isTest = String(alert.eventKey || '').indexOf('test:') === 0
-  if (!prev && geo && at !== null && !isTest) {
-    for (const v of eventSeen.values()) {
-      if (!v.geo || typeof v.at !== 'number') continue
-      if (Math.abs(v.at - at) <= GEO_NEAR_MS && distanceKm(geo.lat, geo.lon, v.geo.lat, v.geo.lon) <= GEO_NEAR_KM) {
-        prev = v
-        break
-      }
-    }
-  }
-  if (prev && alert.strength <= prev.strength) return true
-  eventSeen.set(alert.eventKey, { ts: now, strength: alert.strength, at, geo })
+  eventSeen.set(alert.eventKey, { ts: now, strength: alert.strength, at, geo, source: String(alert.source || '') })
+  return false
+}
+
+/**
+ * 让事件键的强度**回落**（降级电文调用），返回是否真的降了。
+ *
+ * 气象电文会"降级"：L4 → L3 → L2 是同一次灾害过程的强度回落，本身不该播报（L3 以下本来就不播报），
+ * 但必须让记忆里的 strength 跟着降下来。否则"降级之后再次升级"会被判成"强度未升级的重复发布"
+ * 而永久静默——这是 0.4.1 把发布时刻从事件键里去掉之后**新引入**的漏报
+ * （实测：L4 播报 → L3 降级 → 再升回 L4，返回 event-repeat）。
+ * 只在强度**确实更低**时下调，所以"关注地区未命中"这类 not-hit 不会误降（强度没变）。
+ */
+function weakenEvent(alert) {
+  if (!alert || !alert.eventKey) return false
+  const prev = eventSeen.get(alert.eventKey)
+  if (!prev || typeof alert.strength !== 'number') return false
+  if (alert.strength < prev.strength) { prev.strength = alert.strength; return true }
   return false
 }
 /**
@@ -86,7 +122,12 @@ function isEventRepeat(alert, windowMinutes) {
  */
 function isStrengthUpgrade(alert) {
   if (!alert || !alert.eventKey) return false
-  const prev = eventSeen.get(alert.eventKey)
+  // 必须走 findPrevEvent（含坐标近似）：本函数只在**消息 id 已重复**时被求值，也就是调用方
+  // 已经确定"同一条消息又来了"。而源在修订时会把坐标挪过 0.1° 桶、或让发震时刻跨分钟 ——
+  // 精确键随之改变，只查精确键就会把"震级上修"误判成"重复发布"而静默
+  // （实测 EMSC 同一 unid M5.0 → M6.4 跨分钟修订 → duplicate）。这是 0.4.1 声称修好、
+  // 实际只在键逐字相同时成立的那条。
+  const prev = findPrevEvent(alert, true)
   if (!prev) return false
   if (prev.ts > Date.now()) return false
   return alert.strength > prev.strength
@@ -196,4 +237,4 @@ function closeAlertChannel() {
   try { if (alertChannel) { alertChannel.close(); alertChannel = null } } catch (err) { /* 忽略 */ }
 }
 
-export { isDuplicate, isEventRepeat, isStrengthUpgrade, forgetEvent, ensureAlertChannel, closeAlertChannel, claimAlertForTab, broadcastHistoryCleared, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, alertedEvents }
+export { isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, ensureAlertChannel, closeAlertChannel, claimAlertForTab, broadcastHistoryCleared, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, alertedEvents }

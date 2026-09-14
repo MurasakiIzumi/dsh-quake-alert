@@ -102,6 +102,11 @@ last poll; hovering the sidebar status dot shows the same (abnormal sources firs
 
 ## Behaviour changes in 0.4.1
 
+- **Region filtering is stricter about unresolvable areas (adjusted in 0.4.2).** When a message
+  contains at least one area that resolves to a prefecture, areas that cannot be resolved no longer
+  take part in prefecture filtering (one unknown forecast-area name no longer alerts every user);
+  only when *every* area is unresolvable does it pass (prefer over-alerting over going silent).
+
 - **Weather events are merged per (forecast office, hazard) with a 3-hour event window.** Updates,
   area extensions and continuations of the same hazard from the same office alert once; an intensity
   escalation (L3→L4) still alerts again. Crossing an hour boundary, or the same event issued by two
@@ -174,7 +179,7 @@ node scripts/build-client.mjs          # rebuild client/client.js after editing 
 node scripts/build-areas.mjs           # regenerate the river-area table from the JMA public zip (needs network)
 node scripts/check-imports.mjs         # cross-module reference check (missing import / undeclared assignment)
 node scripts/build-client.mjs --check  # fail when the committed bundle is stale
-node tests/sync-test.cjs               # regression tests (627 assertions)
+node tests/sync-test.cjs               # regression tests (679 assertions)
 ```
 
 > **Note**: `tests/sync-test.cjs` loads the **built** `client/client.js`. After editing `client/src/`
@@ -193,9 +198,9 @@ node tests/sync-test.cjs               # regression tests (627 assertions)
 
 ## Changelog
 
-Current version **0.4.1** (review and fixes for 0.4.0: several missed-alert and silent-failure bugs
-fixed, validation contracts completed for the five existing sources, and an AI-facing mainland-network
-troubleshooting guide added). See [CHANGELOG.md](./CHANGELOG.md) for the details of each release.
+Current version **0.4.2** (a review of the 0.4.1 fixes themselves: several missed-alert, false-alert
+and status bugs they introduced were fixed, and the parsing contracts were re-verified against real
+live data). See [CHANGELOG.md](./CHANGELOG.md) for the details of each release.
 
 ## Data sources
 

@@ -15,7 +15,7 @@ import { matchAlert, regionInWeatherWatch, validGeo } from './06-matcher.js'
 import { addEvent, store } from './07-store.js'
 import { playSound, playAlertSound } from './08-audio.js'
 import { showToast, showSystemNotification } from './09-notify.js'
-import { isDuplicate, isEventRepeat, isStrengthUpgrade, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, alertedEvents } from './10-dedupe.js'
+import { isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, alertedEvents } from './10-dedupe.js'
 
 /**
  * 气象灾害的**事件窗口**（分钟）。
@@ -193,6 +193,10 @@ function handleAlert(alert, cfg, opts) {
   if (!m.hit) {
     // 气象警报：即使不播报（L3 及以下），也把"正在升级"留给侧边栏 tooltip
     updateWeatherHint(alert, cfg)
+    // 气象的**降级**（L4 → L3 → L2）要记进事件键：否则"降级之后再次升级"会被当成
+    // 强度未升级的重复发布而永久静默（见 10-dedupe 的 weakenEvent）。
+    // 只在强度确实更低时下调，所以"关注地区未命中"这类 not-hit 不会有副作用。
+    if (alert.kind === 'weather') weakenEvent(alert)
     // 全球源（坐标型）的"未命中"通常不进历史：USGS 的 24 小时目录有近百条 M2.5+，
     // 逐条记"未命中"会把历史列表刷满与用户无关的地震，真正该看的提醒反而被挤掉。
     // **但「坐标缺失」是例外**——那不是"离得远"，而是"根本没法判定"。DESIGN 3.1 要求
@@ -209,6 +213,14 @@ function handleAlert(alert, cfg, opts) {
   const hitPref = m.region ? m.region.pref : ''
   // 严重度见 hitSeverityOf 的注释（全球点型地震此前被算成 info，静默穿透因此失效）
   const hitSeverity = hitSeverityOf(alert, m)
+  // 跨会话重放**探测**（0.4.2）：Host 重启后会按冷启动回看窗口（USGS 6 小时 / NOAA 24 小时）把
+  // 缓冲里的事件重新投递，而 Client 的消息级 / 事件级去重都是 10 分钟的内存窗口——页面没刷新时
+  // 早已过期，同一场地震会被再报一次。`alertedEvents`（"真正播报过"的记忆）保留 24 小时，
+  // 正好用来挡这种重放。
+  // **必须在这里先算**：isEventRepeat 会把 strength 更新成本次的值，之后 isStrengthUpgrade 就
+  // 永远是 false。也不能直接在这里就抑制——同一会话内的"后续发布"（震度速报 → 各地震度）
+  // 应该由 isEventRepeat 归类为更准确的"同一地震的后续发布"，而不是笼统的"重放"。
+  const looksReplayed = wasRecentlyAlerted(alert) && !isStrengthUpgrade(alert)
   // 同一次地震的后续发布（速报 → 震源 → 各地震度、或 EEW 多报）强度未升级 → 只更新历史，不再响铃。
   // 气象灾害用更长的事件窗口（见 WEATHER_EVENT_WINDOW_MINUTES 的说明）。
   const repeatWindow = alert.kind === 'weather'
@@ -221,6 +233,16 @@ function handleAlert(alert, cfg, opts) {
       suppressed: true, suppressedReason: '同一地震的后续发布（强度未升级）',
     })
     return { notified: false, reason: 'event-repeat', detail: '同一事件的后续发布，强度未升级' }
+  }
+  // 事件级去重没拦下、但记忆说"这个事件在 24 小时内已经真正播报过" → 判为跨会话重放
+  // （Host 重启按回看窗口重投），只记历史不响铃。
+  if (looksReplayed) {
+    addEvent({
+      id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
+      issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
+      suppressed: true, suppressedReason: '同一事件在最近 24 小时内已提醒过（Host 重启 / 重连后的重放）',
+    })
+    return { notified: false, reason: 'replayed', detail: '该事件在最近 24 小时内已经提醒过，本次只记历史' }
   }
   // 静默时段：命中但不响铃、不弹通知，只记历史。红色等级（EEW、大海啸警报）默认可穿透。
   if (!options.skipQuietHours && inQuietHours(cfg) && !(hitSeverity === 'red' && cfg.quietHours.breakForSevere !== false)) {

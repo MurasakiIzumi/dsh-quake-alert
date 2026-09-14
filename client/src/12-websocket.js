@@ -166,7 +166,13 @@ function createWsClient(opts) {
       // 零提醒、无计数——这是比断线更难发现的静默失效（断线至少会变红）。
       try {
         onRaw(raw, currentCfg())
-        processFails = 0
+        // 恢复：连续失败之后只要有一条处理成功，就要把状态改回 open（0.4.2）。
+        // 原先只在 onopen 时复位，于是 **一次** 主链异常就会让侧边栏永久停在"链路降级"——
+        // 用户看到一个错误的黄点，比不显示更糟。
+        if (processFails > 0) {
+          processFails = 0
+          report({ status: 'open', retries, detail: openDetailOf(url) })
+        }
       } catch (err) {
         processFails += 1
         report({
@@ -201,6 +207,7 @@ function createWsClient(opts) {
       stopped = false
       retries = 0 // 切数据源后立即从 1s 退避重新开始，而不是沿用上一条连接的退避进度
       processFails = 0
+      bindVisibility() // stop() 会解绑；restart 之后这条 socket 同样需要"恢复可见时重置 stale 计时"
       teardown()
       connect()
     },

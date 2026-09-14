@@ -16,6 +16,11 @@ function StatusIndicator(props) {
   useEffect(() => store.subscribe(() => setTick((t) => t + 1)), [])
   const meta = statusMetaOf(store.status, store.retries)
   const wide = Boolean(props && props.wide)
+  // disabled（用户关掉了某个灾种 / 全部关掉）用**空心**圆点表示，与 stale / 未启动 的实心灰区分开
+  // （DESIGN 5 节的六态表格）。轮廓是边框而非填充，深色主题下也不会消失。
+  const dotStyle = store.status === 'disabled'
+    ? { display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: 'transparent', border: '1.5px solid ' + meta.color, flex: '0 0 auto' }
+    : { display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: meta.color, flex: '0 0 auto' }
   // 气象警报的「静默提示」（0.3.0）：只有"命中关注地区但未达 L4、没有播报"时才存在
   // （L4 以上播报后会清掉，否则这里会与事实矛盾）。不改颜色、不弹窗、不响铃。
   const hint = store.weatherHint
@@ -28,7 +33,7 @@ function StatusIndicator(props) {
     title: '灾害预警：' + meta.text + (store.detail ? ' · ' + store.detail : '') + hintText,
     style: { display: 'flex', alignItems: 'center', gap: 6, padding: wide ? '4px 8px' : '4px', fontSize: 12, color: 'inherit', cursor: 'default' },
   },
-    h('span', { style: { display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: meta.color, flex: '0 0 auto' } }),
+    h('span', { style: dotStyle }),
     wide ? h('span', { style: { whiteSpace: 'nowrap' } }, '灾害预警') : null)
 }
 

@@ -59,12 +59,19 @@ const SOURCE_CODE_TEXT = { emsc: 'EMSC', usgs: 'USGS', noaa: 'NOAA CAP', jma: 'J
  *
  * 0.4.1：优先用 alert.code，而不是 kind。全球地震（EMSC / USGS）的 kind 也是 'quake'，
  * 只看 kind 会把它们标成「code 551」（P2PQuake 的震度速报）——与 0.3.2 修过的
- * "气象条目被标成 code 551"是同一类错误。旧历史条目没有 code 字段 → 回退到 kind 映射。
+ * "气象条目被标成 code 551"是同一类错误。
+ * 0.4.2 补两处兜底：① 数值 code 经 `strOr` 变成字符串后也能显示成 `code N`；
+ * ② **旧历史**（0.4.1 之前写入）没有 code 字段，用 id 前缀（emsc: / usgs: / noaa:）认出来源。
  */
-function p2pCodeTextOf(kind, code) {
-  const byCode = own(SOURCE_CODE_TEXT, String(code === undefined || code === null ? '' : code))
+function p2pCodeTextOf(kind, code, id) {
+  const codeStr = String(code === undefined || code === null ? '' : code)
+  const byCode = own(SOURCE_CODE_TEXT, codeStr)
   if (byCode) return byCode
-  if (typeof code === 'number') return 'code ' + code
+  if (/^\d{3}$/.test(codeStr)) return 'code ' + codeStr
+  const idStr = String(id === undefined || id === null ? '' : id)
+  if (idStr.indexOf('emsc:') === 0) return 'EMSC'
+  if (idStr.indexOf('usgs:') === 0) return 'USGS'
+  if (idStr.indexOf('noaa:') === 0) return 'NOAA CAP'
   const c = own(P2P_KIND_CODE, kind)
   if (c) return 'code ' + c
   return kind === 'weather' ? 'JMA 电文' : '—'
@@ -627,7 +634,7 @@ function SettingsPanel() {
                 : (e.suppressed ? '未重复提醒' : (e.pref ? '命中 ' + e.pref : '已提醒'))
               // 气象电文来自気象庁防災情報XML，没有 P2PQuake 的 code：旧写法对 weather 落进
               // 最后的 else 分支，展开详情时会把泥石流 / 洪水电文标成「code 551」（地震速报）。
-              const codeText = p2pCodeTextOf(e.kind, e.code)
+              const codeText = p2pCodeTextOf(e.kind, e.code, e.id)
               return h('div', {
                 key: itemKey,
                 // 可键盘操作（0.4.1）：详情是用户核对"插件到底看到了什么"的唯一入口，

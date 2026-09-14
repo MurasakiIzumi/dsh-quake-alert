@@ -30,9 +30,13 @@ function unlockAudio() {
  * 这是纯静默失效。设置页据此显式提示"提示音尚未解锁"。
  */
 function audioState() {
-  const ctx = ensureAudio()
-  if (!ctx) return 'unavailable'
-  return ctx.state === 'running' ? 'running' : 'suspended'
+  // 注意：**不能调用 ensureAudio()**（0.4.2）。设置页在渲染时会读这个函数，而 ensureAudio 会
+  // 真的 new 一个 AudioContext —— 于是"只是打开设置页"就创建了音频上下文（浏览器控制台会报
+  // "AudioContext was not allowed to start"），也破坏了"只在用户手势里创建"的设计。
+  // 未创建同样属于"未解锁"，直接按 suspended 回答。
+  if (typeof window !== 'undefined' && !(window.AudioContext || window.webkitAudioContext)) return 'unavailable'
+  if (audioCtx === null) return 'suspended'
+  return audioCtx.state === 'running' ? 'running' : 'suspended'
 }
 // 音色描述：notes 列表（freq Hz / start s / dur s / type）
 const SOUNDS = {

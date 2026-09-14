@@ -43,9 +43,13 @@ const timeMsOf = (v) => {
   const t = Date.parse(String(v === undefined || v === null ? '' : v))
   return Number.isFinite(t) ? t : null
 }
-/** 时间戳是否客观不可能：1970 年以前、或 100 年以后（DESIGN 4.5 的 value 判据）。 */
-const timeIsImpossible = (ms, now) => (typeof ms !== 'number') ||
-  ms < 0 || ms > (now || Date.now()) + 100 * 365 * 24 * 3600 * 1000
+/** 时间戳是否客观不可能：1970 年以前、或 100 年以后（DESIGN 4.5 的 value 判据）。
+ *  **缺失 / 不可解析不算"不可能"**——存在性由各源的 schema 判据负责。传 null 时若返回 true，
+ *  会让"没给时间"的地震情报整条被丢掉（parseQuake 本来容忍缺 time，只让 eventKey 留空）。 */
+const timeIsImpossible = (ms, now) => {
+  if (typeof ms !== 'number' || !Number.isFinite(ms)) return false
+  return ms < 0 || ms > (now || Date.now()) + 100 * 365 * 24 * 3600 * 1000
+}
 
 // ---------------------------------------------------------------- 每源约定
 /**
@@ -92,7 +96,8 @@ export const SOURCE_CONTRACTS = {
       '至少一个 <Item>，其 <Kind> 能给出 Name 或 Status',
       '区域：<Area> 下的 <Name> 或 <Code>（codeType 或码位数决定粒度）',
     ],
-    empty: '与本插件无关的电文（天气预报、府県気象情報、火山、观测资料…）——判据是警戒レベル 0 且不是解除',
+    empty: '警戒レベル 0 且不是解除的电文：天气预报、府県気象情報、火山、观测资料，以及"只有注意報 /' +
+      ' なし"的警报电文（L1〜L2 按设计既不播报也不进历史，所以归入 empty 而不是失败）',
     staleAfterMs: 3 * 60 * 60 * 1000,
     staleReason: 'feed 每分钟更新（掲載直近の入電）。但"我们没有相关电文"是常态（只有天气预报时也正常），' +
       '所以阈值不查"我们收到多少条"，只查 feed 自身的最新 <updated>：超过 3 小时说明上游停更。',
@@ -175,8 +180,18 @@ export function parseEpspResult(raw) {
     if (!Array.isArray(raw.points)) return failResult('schema', '551 缺少 points 数组')
     for (const p of raw.points) {
       if (!isPlainObject(p)) return failResult('schema', '551 的 points[] 含非对象项')
-      if (typeof p.scale !== 'number') return failResult('schema', '551 的 points[].scale 不是 number')
-      if (p.pref !== undefined && typeof p.pref !== 'string') return failResult('schema', '551 的 points[].pref 不是 string')
+      // 逐项只查"**存在则类型正确**"（0.4.2 放宽）：单个观测点缺 scale / 缺 pref 不该让整条
+      // 警报消失——其他观测点是好的，而整条丢弃在预警产品里的代价是漏报。
+      // 真正要挡的是"结构型错误"（points 不是数组、项不是对象、字段类型明显不对）。
+      if (p.scale !== undefined && p.scale !== null && typeof p.scale !== 'number') {
+        return failResult('schema', '551 的 points[].scale 类型不是 number')
+      }
+      if (p.pref !== undefined && p.pref !== null && typeof p.pref !== 'string') {
+        return failResult('schema', '551 的 points[].pref 类型不是 string')
+      }
+      if (p.addr !== undefined && p.addr !== null && typeof p.addr !== 'string') {
+        return failResult('schema', '551 的 points[].addr 类型不是 string')
+      }
     }
     if (timeIsImpossible(timeMsOf(eq.time))) return failResult('value', '551 的 earthquake.time 客观不可能：' + String(eq.time))
   }
@@ -305,14 +320,23 @@ const health = new Map()
  * empty 不算故障（源正常但没有与本插件相关的数据）。
  */
 export function noteParseResult(sourceId, res) {
-  if (!res || res.ok || res.kind === 'empty') return false
+  if (!res || res.ok) return false
+  if (res.kind === 'empty') {
+    // empty 表示"源正常地给出了这一条，只是与本插件无关"——它同样证明**结构是好的**，
+    // 所以要把之前可能留下的 schema-error 清掉。否则一条坏电文会让蓝点（+ 重试按钮）
+    // 挂几个小时甚至几天：JMA 的常态就是 empty（天气预报、只有注意報的电文）。
+    noteSourceSuccess(sourceId)
+    return false
+  }
   const key = res.kind + '|' + res.detail
   const prev = health.get(sourceId)
   if (!prev || prev.errorKey !== key) {
     health.set(sourceId, { errorKey: key, kind: res.kind, detail: res.detail, at: Date.now() })
     try { console.warn('[dsh-quake-alert] ' + sourceId + ' 解析失败（' + res.kind + '）：' + res.detail) } catch (e) { /* 忽略 */ }
+    // 上报也放在这个分支里：源整体变坏时一轮可能有几十条 entry 都失败，
+    // 每条都 pushSource 会把设置页重渲几十次。"同一失败原因只记一次"要同时约束日志与上报。
+    store.pushSource(sourceId, { status: 'schema-error', detail: res.kind + '：' + res.detail })
   }
-  store.pushSource(sourceId, { status: 'schema-error', detail: res.kind + '：' + res.detail })
   return true
 }
 

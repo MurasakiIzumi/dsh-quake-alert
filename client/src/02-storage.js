@@ -118,7 +118,11 @@ function normalizePlaces(list) {
   return out
 }
 // 逐字段校验 + 回退默认值：任何形状的输入都归一成一份合法配置
-function normalizeCfg(stored) {  const w = isPlainObject(stored.watch) ? stored.watch : {}
+function normalizeCfg(input) {
+  // 兜底：调用方（loadCfg / sectionToCfg / applyCfg）都保证传对象，但归一化函数自己不该因为
+  // 传进 null/undefined 就抛错——它的契约是"任何脏输入都能归一成一份合法配置"。
+  const stored = isPlainObject(input) ? input : {}
+  const w = isPlainObject(stored.watch) ? stored.watch : {}
   const d = isPlainObject(stored.disasters) ? stored.disasters : {}
   const t = isPlainObject(stored.thresholds) ? stored.thresholds : {}
   const n = isPlainObject(stored.notify) ? stored.notify : {}

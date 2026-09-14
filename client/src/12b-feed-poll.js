@@ -129,6 +129,10 @@ export function createFeedClient(opts = {}) {
   let inFlight = null
   let abortCtl = null
   let lastStatusKey = ''
+  // Host 的 errors / detailDropped 是**进程内累计**计数（永不归零）。要判断"这一轮又失败了"
+  // 必须看增量——直接判"非 0 就告警"会让一次瞬时失败之后该源永久停在"链路降级"（0.4.2 修正）。
+  let lastHostErrors = 0
+  let lastHostDropped = 0
   const stats = { polls: 0, received: 0, applied: 0, errors: 0, truncated: 0, tailSync: 0, resets: 0, morePages: 0, lastAt: 0, cursor: 0, host: null }
 
   /** 状态上报：只在**变化**时送出去（轮询每 15 秒一轮，每轮都 push 会让设置页反复重渲）。
@@ -136,9 +140,11 @@ export function createFeedClient(opts = {}) {
    *  连接好着呢、只是数据我们读不懂，这个状态不该被下一轮"拉取成功"覆盖掉。 */
   function reportStatus(patch) {
     const eff = effectiveStatusOf(id, patch.status, patch.detail)
-    const key = String(eff.status) + '|' + String(eff.detail || '')
-    if (key === lastStatusKey) return
-    lastStatusKey = key
+    // key **只取状态**：detail 里含"已收到 N 条增量""Host 轮询 N 次"这类单调计数，
+    // 用它做 key 会让每轮都判定为"变化"→ 每 15 秒整页重渲一次（正是拆 SourceStatusBlock
+    // 想避免的事）。数字本身由 SourceStatusBlock 每 5 秒直接从 feedStatsOf 读，不依赖这里。
+    if (eff.status === lastStatusKey) return
+    lastStatusKey = eff.status
     try { onStatus(Object.assign({ label }, eff)) } catch (err) { /* UI 回调异常不影响轮询 */ }
   }
 
@@ -177,6 +183,9 @@ export function createFeedClient(opts = {}) {
         abortCtl ? abortCtl.signal : undefined,
       )
     } catch (err) {
+      // 用户主动停用（abort）不是"源不可达"：不上报 unreachable、不计失败、不写失败日志。
+      // 否则停用插件会在侧边栏留下一个红点；重载时旧 fiber 的这次上报还会把新会话短暂染红。
+      if (stopped) return { applied: 0, cursor: cursorNow(), aborted: true }
       stats.errors += 1
       onError(err)
       reportStatus({ status: 'unreachable', detail: 'Host 增量路由请求失败：' + String((err && err.message) || err) })
@@ -217,6 +226,7 @@ export function createFeedClient(opts = {}) {
     const entries = Array.isArray(data && data.entries) ? data.entries : []
     if (data && data.truncated) stats.truncated += 1
     let applied = 0
+    let lastSeenSeq = null
     for (const e of entries) {
       if (stopped) break // 插件已停用：剩下的条目不再处理
       stats.received += 1
@@ -227,6 +237,7 @@ export function createFeedClient(opts = {}) {
         stats.errors += 1
         onError(err)
       }
+      if (e && Number.isFinite(e.seq)) lastSeenSeq = e.seq
     }
     stats.applied += applied
     let reset = false
@@ -243,22 +254,37 @@ export function createFeedClient(opts = {}) {
       // data.cursor，否则那 N 条之后的条目会被静默跳过；改用**最后一条实际返回的 seq**
       // 推进，下一轮接着取。正常增量路径 entries 很短，等价于 data.cursor。
       const last = entries.length ? entries[entries.length - 1] : null
-      const next = last && Number.isFinite(last.seq) ? last.seq : data.cursor
+      // 被停用打断时（stopped）只能用**已经处理到的那条**推进：直接跳到整批末条会把没处理的
+      // 条目连同游标一起跳过，下次回来也补不回来（永久漏报）。一条都没处理就原地不动。
+      const next = stopped
+        ? (lastSeenSeq !== null ? lastSeenSeq : cursorNow())
+        : (last && Number.isFinite(last.seq) ? last.seq : data.cursor)
       if (data.more === true) stats.morePages += 1
       setCursor(next)
     }
     stats.cursor = cursorNow()
     // 增量缺口与游标重置必须**让用户看得见**：被跳过的条目是静默漏报，
     // 只进诊断计数的话用户会以为"该收到的都收到了"。
+    // Host 的 errors / detailDropped 是累计计数，所以一律看**增量**（见 lastHostErrors 的说明）。
+    const host = stats.host || {}
+    const hostErrors = Number(host.errors) || 0
+    const hostDropped = Number(host.detailDropped) || 0
+    const errDelta = Math.max(0, hostErrors - lastHostErrors)
+    const dropDelta = Math.max(0, hostDropped - lastHostDropped)
+    lastHostErrors = hostErrors
+    lastHostDropped = hostDropped
     const warn = []
     if (data && data.truncated) warn.push('有增量缺口（Host 环缓冲已淘汰旧条目）')
     if (reset) warn.push('Host 游标重置过')
-    if (stats.host && stats.host.errors) warn.push('Host 侧请求失败 ' + stats.host.errors + ' 次')
-    if (stats.host && stats.host.detailDropped) warn.push('Host 侧放弃详情 ' + stats.host.detailDropped + ' 条')
-    if (stats.host && stats.host.stale) warn.push('上游数据已过期（源在响应，但数据是旧的）')
+    if (errDelta) warn.push('Host 侧新增失败 ' + errDelta + ' 次')
+    if (dropDelta) warn.push('Host 侧新增放弃详情 ' + dropDelta + ' 条')
+    // stale 有**自己的状态**（中灰「数据已过期」），不折叠进 degraded：它表示"源在响应、
+    // 但给的是旧数据"，与"链路有故障"是两类，DESIGN 的六态里也是分开的。
     reportStatus({
-      status: warn.length ? 'degraded' : 'open',
-      detail: '已收到 ' + stats.received + ' 条增量 · ' + hostDetail() + (warn.length ? ' · ' + warn.join('；') : ''),
+      status: host.stale ? 'stale' : (warn.length ? 'degraded' : 'open'),
+      detail: '已收到 ' + stats.received + ' 条增量 · ' + hostDetail() +
+        (host.stale ? ' · 上游数据已过期（源在响应，但数据是旧的）' : '') +
+        (warn.length ? ' · ' + warn.join('；') : ''),
     })
     return { applied, cursor: cursorNow(), truncated: !!(data && data.truncated), reset, more: !!(data && data.more) }
   }

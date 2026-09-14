@@ -77,17 +77,22 @@ function settingsOpsFor(cfg) {
   walk(cur, def, [])
   return ops
 }
+/**
+ * 把配置推给 Host。返回 `scope.mutate()` 的 pending（没有真正发出写请求时返回 null），
+ * 调用方据此判断"Host 是否确认接收"——迁移标记要靠它，见 bindSettingsScope。
+ */
 function pushCfgToHost(cfg) {
   const scope = settingsScope
-  if (!scope || settingsSync !== 'host') return
+  if (!scope || settingsSync !== 'host') return null
   try {
     const snap = scope.getSnapshot()
-    if (!snap || snap.status !== 'ready' || snap.writable !== true || snap.mode !== 'host') return
+    if (!snap || snap.status !== 'ready' || snap.writable !== true || snap.mode !== 'host') return null
     const ops = settingsOpsFor(cfg)
-    if (ops.length === 0) return
+    if (ops.length === 0) return null
     const pending = scope.mutate(ops)
     if (pending && typeof pending.catch === 'function') pending.catch(() => { /* 写失败不回滚本地 */ })
-  } catch (err) { /* 通道异常时本地配置仍然生效 */ }
+    return (pending && typeof pending.then === 'function') ? pending : null
+  } catch (err) { return null }
 }
 // 绑定 Host settings。三种来源的优先关系：
 //   ① Host 用户层已有内容 → 以 Host 为准（机器级配置是 source of truth）
@@ -112,9 +117,13 @@ function bindSettingsScope(scope) {
       const already = loadJSON(MIGRATED_KEY, null) === 1
       const local = loadCfg()
       if (!already && JSON.stringify(cfgToSection(local)) !== JSON.stringify(cfgToSection(freshCfg()))) {
-        saveJSON(MIGRATED_KEY, 1)
         runtimeCfg = saveCfg(local)
-        pushCfgToHost(runtimeCfg)
+        const pending = pushCfgToHost(runtimeCfg)
+        // **等 Host 确认接收之后再落"已迁移"标记**：先落标记再写的话，写入失败（磁盘 / 权限 /
+        // 瞬时冲突）会让本地配置既没进 Host、又因为标记而不再重试，随后被 Host 的空值覆盖
+        // ——永久且静默地丢配置。写失败就不写标记，下次加载还能再试一次。
+        if (pending) pending.then(() => { try { saveJSON(MIGRATED_KEY, 1) } catch (err) { /* 忽略 */ } })
+          .catch(() => { /* 写失败：不落标记，下次重试 */ })
         store.push({})
         return
       }

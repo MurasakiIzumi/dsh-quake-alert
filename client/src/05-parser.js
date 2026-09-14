@@ -59,8 +59,8 @@ const HOKKAIDO_AREA_PREFIX = [
 // 县名按长度降序：保证「京都府」先于「京都」被匹配（否则京都府会被截成京都）
 const PREF_BY_LENGTH = PREFECTURES.map((p) => p.jp).sort((a, b) => b.length - a.length)
 const startsWith = (s, p) => s.lastIndexOf(p, 0) === 0
-// 安全字典查找：外部数据里的 'constructor'/'toString' 等键会命中原型链，
-// 例如 AREA_PREF['constructor'] 会返回 Object 构造函数并让 .slice() 抛错
+// 安全字典查找 own() 见 02-storage：外部数据里的 'constructor' / 'toString' 等键会命中原型链，
+// 例如 AREA_PREF['constructor'] 会返回 Object 构造函数并让 .slice() 抛错。
 
 // 归一区域名，返回它可能覆盖的全部都道府县（海啸「有明・八代海」等跨多个县）
 function prefsOfArea(name, forecastPref) {

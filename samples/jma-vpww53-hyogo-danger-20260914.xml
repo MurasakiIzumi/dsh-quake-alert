@@ -1,15 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  0.4.1 回归样本：Ｒ０６ 総合副本里的「危険警報（=L4）」与逐区级别。
+  0.4.1 回归样本：Ｒ０６ 総合副本里的危険警報（L4 相当）与逐区级别。
   精简自気象庁 live 电文 https://www.data.jma.go.jp/developer/xml/data/20260914113112_0_VPWW53_280000.xml
   （2026-09-14 20:31 JST 兵庫県，神戸地方気象台）。为控制体积只保留三个市町村的 Item，
-  其余结构（Control / Head / Headline / Body Notice / Warning 的市町村区域）与原文一致。
+  其余结构（Control / Head / Headline / Body 与 Warning 的市町村区域）与原文一致。
 
   这份样本锁定两个真实缺陷（0.4.1 修正）：
-    ① 総合副本的 Kind 只写灾种名（「大雨警報」），级别只在 <Body><Notice> 里。
+    ① 総合副本的 Kind 只写灾种名（大雨警報），地区级级别只出现在 Body 的 Notice 元素里。
        不读 Notice 时整条电文被判成 L3 —— 一条真实存在的 L4 危険警報完全不播报。
     ② 同一电文里不同市町村的级别不同（姫路市 L4 / 相生市 L3 / 西脇市 L2）。
-       用电文最大值当闸门会把只到 L2 的西脇市播成「警戒レベル4（避难指示级）」。
+       用整条电文的最大值当闸门，会把只到 L2 的市町村播成「避难指示级」。
+
+  注意：本注释刻意不写出可被解析正则命中的标签与级别字样 —— 0.4.2 起解析器会先剥离 XML
+  注释，但 fixture 自己也不该把「假 Notice」写进去（曾经因此让断言"通过得不对"）。
 -->
 <Report xmlns="http://xml.kishou.go.jp/jmaxml1/" xmlns:jmx="http://xml.kishou.go.jp/jmaxml1/" xmlns:jmx_add="http://xml.kishou.go.jp/jmaxml1/addition1/">
 <Control>

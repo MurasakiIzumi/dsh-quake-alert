@@ -117,6 +117,9 @@ dsh plugin --profile web add github:MurasakiIzumi/dsh-quake-alert
 
 ### 0.4.1 起需要知道的行为
 
+- **关注地区的过滤对"认不出归属县的区域"更严谨了（0.4.2 微调）**：同一条消息里只要**有**区域能
+  归到县，认不出的那部分就不参与县级过滤（不会因为一个未收录的预报区名而提醒所有人）；
+  只有整条消息的区域都归不到县时才放行（宁可多报，避免整条静默）。
 - **气象灾害按「气象台 + 灾种」归并成一个事件**：同一气象台对同一灾种在 3 小时内的持续发布
   （更新、扩区、维持）只提醒一次，强度升级（L3→L4 等）仍会再次提醒。跨小时边界、或同一事件由
   不同气象台发布时，仍可能重复提醒一次——取舍是宁可多响一次也不漏。
@@ -172,7 +175,7 @@ node scripts/build-client.mjs          # 改完 client/src 后重新打包（必
 node scripts/build-areas.mjs           # 从気象庁公开 zip 重新生成河川区域表（需联网）
 node scripts/check-imports.mjs         # 跨模块引用检查（漏 import / 未声明赋值）
 node scripts/build-client.mjs --check  # 校验已提交的 bundle 是否陈旧
-node tests/sync-test.cjs               # 回归测试（627 项断言）
+node tests/sync-test.cjs               # 回归测试（679 项断言）
 ```
 
 > **注意**：`tests/sync-test.cjs` 加载的是**已构建的** `client/client.js`。改了 `client/src/`
@@ -191,8 +194,8 @@ node tests/sync-test.cjs               # 回归测试（627 项断言）
 
 ## 更新记录
 
-当前版本 **0.4.1**（0.4.0 的 review 与修正：修掉若干漏报与静默失效、补齐已有 5 个源的校验约定、
-产出面向 AI 的大陆网络排查文档）。各版本的变更明细见 [CHANGELOG.md](./CHANGELOG.md)。
+当前版本 **0.4.2**（对 0.4.1 那批修复自身的 review：修掉若干由它引入的漏报 / 误报 / 状态错误，
+并用真实 live 数据复核了解析契约）。各版本的变更明细见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## 数据来源
 

@@ -18,15 +18,21 @@ import { lookupAddrCity, normKana } from './04-city-table.js'
 // 两类情况一律放行，宁可多提醒也绝不漏报：
 //   ① 区域级数据：isArea=true 的区域名、556 的区域名、552 的津波予報区名都对应不到市町村；
 //   ② addr 归一不到任何市町村：机场观测点（新千歳空港）、未收录写法等。
-function regionInWatch(region, watch, cityLevel) {
+function regionInWatch(region, watch, cityLevel, anyResolvedPref) {
   const list = watch && watch.prefectures
   const cities = (watch && watch.cities) || []
-  // region.pref 为空 = 归属县未能识别。**放行**而不是否决（0.4.1 修正）：
-  //   · DESIGN 3.2 明写"区域级数据一律放行"；
-  //   · 气象侧（regionInWeatherWatch）一直有 `region.pref &&` 保护，两条路此前语义相反；
-  //   · 否决会让"新设的观测点 / 未收录的预报区名"变成静默漏报，而 missReason 里那句
-  //     「另有 N 个区域名未能识别归属县」也无从补救（用户已经看不到这条提醒了）。
-  if (list && list.length > 0 && region.pref && list.indexOf(region.pref) === -1) return false
+  // region.pref 为空 = 归属县未能识别。这里**不能简单地一律放行**（0.4.2 修正）：
+  // 552/556 走的是 cityLevel=false，县级过滤是**唯一**的收窄手段，一律放行会让一条含
+  // "未收录预报区名"的海啸电文提醒**所有关注列表非空的用户**（海啸域的误报最伤信任）。
+  // 口径：同一条消息里只要**有**区域能归到县，归不到的条目不参与县级过滤（不因它命中）；
+  // 只有当整条消息的区域**全都**归不到县时，才为了不漏报而放行（DESIGN 3.2 的"边界情况让步"）。
+  if (list && list.length > 0) {
+    if (region.pref) {
+      if (list.indexOf(region.pref) === -1) return false
+    } else if (anyResolvedPref) {
+      return false
+    }
+  }
   if (!cityLevel || cities.length === 0) return true
   if (region.cityKnown === false) return true
   const addrCity = lookupAddrCity(region.area)
@@ -151,6 +157,8 @@ function missReason(alert, watch, base) {  const list = watch && watch.prefectur
 function matchAlert(alert, cfg) {
   const w = cfg.watch || {}
   const t = cfg.thresholds || {}
+  // 这条消息里是否存在**能归到县**的区域：决定"归不到县的区域"要不要放行（见 regionInWatch）
+  const anyPref = (alert.regions || []).some((r) => !!r.pref)
   if (alert.kind === 'eew' || alert.kind === 'quake') {
     if ((cfg.disasters || {}).earthquake === false) return { hit: false, reason: '地震提醒已关闭' }
     if (alert.cancelled) return { hit: false, reason: '取消消息不提醒' }
@@ -166,7 +174,7 @@ function matchAlert(alert, cfg) {
       }
     }
     const threshold = alert.kind === 'eew' ? t.eewScale : t.quakeScale
-    const hitRegion = alert.regions.find((r) => regionInWatch(r, w, alert.kind === 'quake') && typeof r.scale === 'number' && r.scale >= threshold)
+    const hitRegion = alert.regions.find((r) => regionInWatch(r, w, alert.kind === 'quake', anyPref) && typeof r.scale === 'number' && r.scale >= threshold)
     return hitRegion
       ? { hit: true, reason: alert.kind === 'eew' ? 'EEW 预测震度达标' : '观测震度达标', region: hitRegion }
       : { hit: false, reason: missReason(alert, w, '关注地区未命中或强度低于阈值') }
@@ -178,7 +186,7 @@ function matchAlert(alert, cfg) {
     if (alert.locator === 'point') return matchPointAlert(alert, cfg)
     if (alert.regions.length === 0) return { hit: false, reason: '本条没有海啸预报区数据' }
     const minRank = own(TSUNAMI_RANK, t.tsunamiGrade) || 1
-    const hitRegion = alert.regions.find((r) => regionInWatch(r, w, false) && (own(TSUNAMI_RANK, r.grade) || 0) >= minRank)
+    const hitRegion = alert.regions.find((r) => regionInWatch(r, w, false, anyPref) && (own(TSUNAMI_RANK, r.grade) || 0) >= minRank)
     return hitRegion
       ? { hit: true, reason: '海啸等级达标', region: hitRegion }
       : { hit: false, reason: missReason(alert, w, '关注地区未命中或等级低于阈值') }
