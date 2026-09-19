@@ -25,6 +25,7 @@ import { parse } from './05-parser.js'
 import { parseJma } from './05b-jma-parser.js'
 import { parseEmsc, parseUsgsFeature, parseNoaaCap } from './05c-global-parsers.js'
 import { parseCencEew, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of } from './05e-cn-parsers.js'
+import { parseNmcAlarm, orgOf, NMC_KIND_TEXT, NMC_LEVEL_TEXT } from './05f-nmc-parsers.js'
 import { store } from './07-store.js'
 
 // ---------------------------------------------------------------- 返回形态
@@ -216,6 +217,41 @@ export const SOURCE_CONTRACTS = {
     staleReason: '**本插件唯一真正有意义的新鲜度阈值，而且它探的是中继不是灾害**：速报每天都有数据，' +
       '所以"超过 48 小时没有新批次"即判中继异常（fj_eew 那种连接正常但停更 4 个月的形态，' +
       '靠连接检测完全发现不了）。实测发布 lag 209–1643 秒，阈值不能贴着 lag 取留出余量。',
+  },
+  // ---- 中国大陆气象源（0.5.2）----
+  // 一条 Host 源（`nmc_alarm`）承载**两个灾种**（暴雨 / 地质灾害）。契约按"一个端点 + 一种载荷"
+  // 划分，而这两个灾种来自同一个 `rest/findAlarm` 响应、只有 `pic` 编码不同，所以是一条契约。
+  // 与其它源的差异：匹配走**行政区层级**（locator:'area'），因此"title 能解析出机构名"是
+  // **必需字段**——解析不出就等于这条预警无法归属，而不是"少了一个可选字段"。
+  nmc_alarm: {
+    label: '中央气象台预警信号（nmc.cn）',
+    region: 'cn',
+    disasters: ['weather'],
+    transport: 'feed',
+    url: 'https://www.nmc.cn/rest/findAlarm（详情页 https://www.nmc.cn/publish/alarm/<alertid>.html）',
+    pollMs: 120 * 1000,
+    timezone: 'Asia/Shanghai（+08:00，无夏令时）—— issuetime 是裸北京时间，且写法与 Wolfx 不同' +
+      '（`2026/09/19 12:31`：斜杠分隔、无秒）。Host 侧补偏移后以带偏移的 ISO 下发，' +
+      '所以 Client 这里拿到的时间已经可以直接 Date.parse。',
+    required: [
+      'alertid string 非空（每条预警的唯一键，Host 用它去重与拼详情 URL）',
+      'kind ∈ {rainstorm, geology}（Host 从 pic 的灾种码译出）',
+      'level ∈ {red, orange, yellow, blue}（Host 从 pic 的等级码译出）',
+      'title string 非空，且形如「…气象台发布…预警信号」——**匹配完全依赖它**，解析不出机构名即判 schema',
+      'issued 可解析的 ISO 时间（Host 已补 +08:00）',
+    ],
+    tolerant: 'detail（详情页正文）缺失或为空**不判 schema**：只有橙色及以上才会拉详情（DESIGN 8.4），' +
+      '蓝 / 黄的正文本来就是空的，而详情抓取失败也只会让文案少一段说明——' +
+      '为了一段附属文字丢掉一条真实预警是漏报方向。',
+    empty: 'kind 是字符串但**不在本插件范围内**——这是**向前兼容**的兜底而不是当下会发生的形态：' +
+      'Host 已经按灾种过滤（实测雷电 / 大风 / 高温占 76%，原样转发会把历史刷满），' +
+      '所以正常收到的条目一定是暴雨或地质灾害。判 empty 而不是 schema，是为了将来 Host 若改为' +
+      '转发全部灾种时，旧 Client 静默跳过而不是点亮一个用户处理不了的蓝点。',
+    staleAfterMs: 3 * 60 * 60 * 1000,
+    staleReason: '判据是**列表里最新一条的发布时间**（不是"我们收到多少条"）：全国范围的预警是连续' +
+      '不断的（实测 238 条覆盖约 24 小时），所以"3 小时没有任何新预警"只可能是上游停更或我们' +
+      '拿到缓存。与 JMA 同档；实测 40 分钟窗口里新增 11 条、相邻两次新增的最长间隔只有 10 分钟，' +
+      '余量近 20 倍。',
   },
 }
 
@@ -449,6 +485,35 @@ export function parseCencEqlistResult(json) {
     return failResult('schema', '整表 ' + items.length + ' 条全部无法解析（' + firstDetail + '）')
   }
   return { ok: true, alerts, dropped, md5: cencEqlistMd5Of(json), total: items.length }
+}
+
+/**
+ * 中央气象台预警（`nmc_alarm`）。
+ *
+ * 与其它源的两处判据差异（都由"匹配依赖机构名"这一条推出）：
+ *   · `title` 里**必须**能解析出机构名——解析不出就等于这条预警无法归属（DESIGN 8.5），
+ *     宁可点亮蓝点让用户知道"数据格式变了"，也不要静默播报一条不知道发给谁的预警。
+ *   · 灾种不在本插件范围内时判 **empty 而不是 schema**：Host 已按灾种过滤，正常收不到这类
+ *     条目；判 empty 是为了让"Host 将来转发更多灾种"这件事对旧 Client 是静默跳过。
+ */
+export function parseNmcAlarmResult(raw) {
+  if (!isPlainObject(raw)) return failResult('schema', '顶层不是对象')
+  const alertid = String(raw.alertid === undefined || raw.alertid === null ? '' : raw.alertid).trim()
+  if (!alertid) return failResult('schema', '缺少 alertid（string）')
+  if (typeof raw.kind !== 'string' || !raw.kind) return failResult('schema', '缺少 kind（string）')
+  if (!NMC_KIND_TEXT[raw.kind]) return failResult('empty', '灾种不在本插件范围内：' + raw.kind)
+  if (typeof raw.level !== 'string' || !NMC_LEVEL_TEXT[raw.level]) {
+    return failResult('schema', '缺少或无法识别的 level：' + String(raw.level))
+  }
+  const title = String(raw.title === undefined || raw.title === null ? '' : raw.title).trim()
+  if (!title) return failResult('schema', '缺少 title（string）')
+  if (!orgOf(title)) return failResult('schema', 'title 里解析不出发布机构（形如「…气象台发布…」）')
+  const t = timeMsOf(raw.issued)
+  if (t === null) return failResult('schema', '缺少 issued（可解析的 ISO 时间）')
+  if (timeIsImpossible(t)) return failResult('value', '发布时间客观不可能：' + String(raw.issued))
+  const alert = parseNmcAlarm(raw)
+  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  return okResult(alert)
 }
 
 // ---------------------------------------------------------------- 健康状态

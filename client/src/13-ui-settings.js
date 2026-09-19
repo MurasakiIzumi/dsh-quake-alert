@@ -58,6 +58,9 @@ const P2P_KIND_CODE = { quake: 551, eew: 556, tsunami: 552 }
 const SOURCE_CODE_TEXT = {
   emsc: 'EMSC', usgs: 'USGS', noaa: 'NOAA CAP', jma: 'JMA 电文',
   cenc_eew: 'CENC 预警', cenc_eqlist: 'CENC 速报',
+  // 0.5.2：大陆气象预警的发布主体是各级气象台、由中央气象台汇总。标成「JMA 电文」会让
+  // 一条云南暴雨预警看起来来自日本气象厅（同 SOURCE_CODE_TEXT 存在的理由）。
+  nmc_alarm: '中央气象台',
 }
 /**
  * 历史条目「类型」行的来源标注。
@@ -78,8 +81,12 @@ function p2pCodeTextOf(kind, code, id) {
   if (idStr.indexOf('usgs:') === 0) return 'USGS'
   if (idStr.indexOf('noaa:') === 0) return 'NOAA CAP'
   if (idStr.indexOf('cenc:') === 0) return 'CENC 大陆'
+  // 0.5.2：大陆气象源（新的历史条目走 code，这里兜住"更早写入的"这条路径）
+  if (idStr.indexOf('nmc:') === 0) return '中央气象台'
   const c = own(P2P_KIND_CODE, kind)
   if (c) return 'code ' + c
+  // 兜底：气象（kind='weather'）在 0.5.2 之前只有日本这一个来源。现在有了大陆气象源，
+  // 所以这里的兜底必须注明它是**日方**的，而不是把两者混起来（大陆那条在上面的 id / code 分支已拦下）。
   return kind === 'weather' ? 'JMA 电文' : '—'
 }
 // 灾种配色：气象灾害此前没有键，历史条目一律落到灰色兜底，与另外三类不一致
@@ -114,15 +121,16 @@ const SOURCE_LABELS = {
   jma: '気象庁（气象灾害，Host 轮询）',
   usgs: 'USGS（全球地震目录，Host 轮询）',
   noaa: 'NOAA（海啸 CAP，Host 轮询）',
+  nmc_alarm: '中央气象台（大陆暴雨 / 地质灾害预警，Host 轮询）',
 }
 /**
  * 源状态区块里的源顺序与分组。**一处维护**：此前同样的列表在三个地方各写一遍
  * （状态行、增量计数行、重试按钮），加一个源要改三处——漏掉任何一处就变成
  * "某个源坏了但界面上看不见"，而"让失败可见"正是这个区块存在的全部理由。
  */
-const SOURCE_ORDER = ['p2pquake', 'emsc', 'cenc_eew', 'cenc_eqlist', 'jma', 'usgs', 'noaa']
-/** 走 `/feed` 增量计数的源（feedStatsOf 有快照）。大陆源走 SSE，另有自己的计数与链路模式。 */
-const FEED_STAT_ORDER = ['jma', 'usgs', 'noaa']
+const SOURCE_ORDER = ['p2pquake', 'emsc', 'cenc_eew', 'cenc_eqlist', 'jma', 'usgs', 'noaa', 'nmc_alarm']
+/** 走 `/feed` 增量计数的源（feedStatsOf 有快照）。大陆地震源走 SSE，另有自己的计数与链路模式。 */
+const FEED_STAT_ORDER = ['jma', 'usgs', 'noaa', 'nmc_alarm']
 /** 走 SSE 的源（0.5.0）：状态从 cnStreamRegistry 实时读。 */
 const STREAM_ORDER = ['cenc_eew', 'cenc_eqlist']
 /**
@@ -506,6 +514,27 @@ function SettingsPanel() {
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 6, lineHeight: 1.6 } },
       '气象灾害＝泥石流 / 洪水 / 大雨 / 高潮 等。只播报警戒レベル4 以上（相当于日本的「避难指示」级：' +
       '土砂災害警戒情報、氾濫危険情報、大雨特別警報…）；L1〜L3 仍然解析并记入下方「最近预警记录」，只是不响铃、不弹通知。'),
+    // 中国大陆气象灾害（0.5.2）：**两个灾种分开**。它们来自同一个源（中央气象台汇总的
+    // 预警信号列表），但产出差别很大——暴雨的橙 / 红常年可见，而地质灾害实测全是黄色
+    // （达不到播报门槛，只在历史里留痕）。合成一个开关会让"我只想要暴雨"的用户找不到出口。
+    h('div', { style: { fontSize: 12, color: '#9aa0a6', marginTop: 12, marginBottom: 2 } },
+      '中国大陆气象灾害（中央气象台汇总各级气象台发布）'),
+    s.row(
+      s.checkbox(cfg.disasters.cnRainstorm !== false,
+        (v) => setCfg((c) => ({ ...c, disasters: { ...c.disasters, cnRainstorm: v } })), '暴雨预警'),
+      s.checkbox(cfg.disasters.cnGeology !== false,
+        (v) => setCfg((c) => ({ ...c, disasters: { ...c.disasters, cnGeology: v } })), '地质灾害预警'),
+    ),
+    h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4, lineHeight: 1.6 } },
+      // 注意：这是**界面文本**（React 文本节点），不是 markdown——写 `**粗体**` 会在页面上
+      // 原样渲染出星号。强调靠语序，不靠标记。
+      '只接暴雨与地质灾害两类（雷电 / 大风 / 高温等其余灾种不接，否则会被每天几十条刷屏）。' +
+      '只播报橙色及以上；黄色 / 蓝色仍然记录在下方「最近预警记录」里，只是不响铃、不弹通知' +
+      '（因此静默时段默认也不会放行橙色——它只在红色时穿透）。' +
+      '匹配按行政区层级：在「中国大陆」里选到的省 / 市才算关注点，自由填写的坐标点不参与；' +
+      '机构名只报出省级（如海南省直辖县）时会按整个省放行，宁可多报一次也不漏报。' +
+      '与大陆地震源一样，这批数据没有「解除」标志——预警到期会直接从这个列表里消失，' +
+      '所以"没收到取消"不等于"警报仍然有效"。'),
     store.weatherHint
       ? h('div', { style: { fontSize: 11, color: '#d9a406', marginTop: 4 } },
           '当前：' + (store.weatherHint.label || '') +

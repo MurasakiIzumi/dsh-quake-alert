@@ -213,7 +213,7 @@ const DEFAULT_CFG = {
   //   · 坐标点（places）——全球源（EMSC / USGS / NOAA）用，判定方式是「震中距 ≤ radiusKm」
   // 两者互不影响：日本用户不用配 places，全球用户不用配 prefectures。
   watch: { prefectures: [], cities: [], places: [] },
-  disasters: { earthquake: true, tsunami: true, weather: true }, // weather = 气象灾害（泥石流 / 洪水 / 大雨 / 高潮…），固定 L4 以上播报
+  disasters: { earthquake: true, tsunami: true, weather: true, cnRainstorm: true, cnGeology: true }, // weather = 日本气象灾害（泥石流 / 洪水 / 大雨 / 高潮…），固定 L4 以上播报；cnRainstorm / cnGeology = 中国大陆气象灾害（0.5.2），固定橙色以上播报
   // globalMagnitude：全球源（EMSC / USGS）的最低震级。日本源用的是震度（quakeScale），
   // 全球源只有震级——实测 EMSC 会推 M3.8 级别的事件，若沿用"来什么报什么"会明显吵闹。
   // cnReportMagnitude：大陆**速报**（cenc_eqlist）的独立震级门槛。大陆地震预警（cenc_eew）与
@@ -380,6 +380,10 @@ function normalizeCfg(input) {
       tsunami: boolOr(d.tsunami, DEFAULT_CFG.disasters.tsunami),
       // 0.3.0 新增。旧配置没有这个字段 → 取默认值 true，不会被清空或误关
       weather: boolOr(d.weather, DEFAULT_CFG.disasters.weather),
+      // 大陆气象灾害的两类（0.5.2）。同样必须在这里同步——漏掉就会被 applyCfg 静默丢弃，
+      // 表现是"用户关掉了暴雨提醒，刷新后又自己开了"。
+      cnRainstorm: boolOr(d.cnRainstorm, DEFAULT_CFG.disasters.cnRainstorm),
+      cnGeology: boolOr(d.cnGeology, DEFAULT_CFG.disasters.cnGeology),
     },
     thresholds: {
       quakeScale: numOr(t.quakeScale, DEFAULT_CFG.thresholds.quakeScale, 0, 70),
@@ -795,7 +799,28 @@ const riverAreaCities = (code) => {
 // 大陆源（cenc_eew / cenc_eqlist）是坐标 + 半径匹配（DESIGN 8.3），
 // 让用户手填经纬度不现实，由这张表按所选城市给出坐标。
 // 表由 scripts/build-cn-areas.mjs 从 GeoNames 生成（含 TW/HK/MO），头部记着已知取舍。
-let cnAreas = null; // [{ code, name, lat, lon, cities:[{name,lat,lon}] }]
+let cnAreas = null; // [{ code, name, aliases, lat, lon, cities:[{name,aliases,lat,lon}] }]
+/**
+ * 别名的规整：只留**有意义**的候选。
+ *
+ * 丢掉单字别名（"丽"这类会匹配到半个中国）与和显示名重复的项；上限 8 条，因为候选是长尾的
+ * （个别条目有几十个历史名 / 罗马字音译），而匹配是**最长命中**，砍掉短名不影响建制全名。
+ * 缺失 `aliases` 字段（Host 未升级 / 手写的旧数据）时返回空数组——**别名是增强，不是前提**。
+ */
+function normAliases(list, name) {
+  if (!Array.isArray(list)) return []
+  const out = [];
+  const seen = new Set();
+  for (const a of list) {
+    if (typeof a !== 'string') continue
+    const s = a.trim();
+    if (!s || s === name || s.length < 2 || seen.has(s)) continue
+    seen.add(s);
+    out.push(s);
+    if (out.length >= 8) break
+  }
+  return out
+}
 /**
  * 注入并规整行政区划表。**逐字段校验**：表来自 Host 的 JSON，与 localStorage 一样属于
  * "不可信的输入"——一个坏条目会让级联渲染出幽灵选项，或把用户带到错误的坐标上
@@ -818,12 +843,12 @@ function setCnAreas(list) {
       if (!cn2 || seenCity.has(cn2)) continue
       if (!validLatLon(c.lat, c.lon)) continue
       seenCity.add(cn2);
-      cities.push({ name: cn2, lat: c.lat, lon: c.lon });
+      cities.push({ name: cn2, aliases: normAliases(c.aliases, cn2), lat: c.lat, lon: c.lon });
     }
     // 没有下级的省级项在级联里是死路：直接丢弃，避免用户选中后按钮没反应
     if (cities.length === 0) continue
     seenProv.add(name);
-    out.push({ code: typeof p.code === 'string' ? p.code : '', name, lat: p.lat, lon: p.lon, cities });
+    out.push({ code: typeof p.code === 'string' ? p.code : '', name, aliases: normAliases(p.aliases, name), lat: p.lat, lon: p.lon, cities });
   }
   if (out.length === 0) return false
   cnAreas = out;
@@ -856,6 +881,51 @@ function cnPlaceOf(province, city, radiusKm) {
   const r = Number(radiusKm);
   if (!Number.isFinite(r) || r < 1 || r > 2000) return null
   return { name: province + '·' + city, lat: c.lat, lon: c.lon, radiusKm: r }
+}
+
+/**
+ * 发布机构名 → 行政区归属（0.5.2，大陆气象源用）。
+ *
+ * 输入是气象台的机构名（`气象台` 后缀已去掉或未去掉都可以），例如
+ * `云南省丽江市宁蒗彝族自治县气象台`。输出 `{ province, city, matched }`。
+ *
+ * 三条规则，全部由 238 条真实样本定出来（见 DESIGN 8.5 的实测记录）：
+ *  ① **省名必须出现在机构名的开头**，取最长命中。不能改成"全局搜索"：省别名里有
+ *     「海南」，而青海省的机构名是「青海省海南藏族自治州共和县气象台」——全局搜会把
+ *     一条青海的预警归到海南省，那是最难查的一类错误（名字看着对、地方错了几百公里）。
+ *     实测 238 条**全部**以省名开头，所以这个约束不损失覆盖。
+ *  ② 市级在**省名之后的那一段**里找最长命中，用 `aliases`（GeoNames 的全部中文候选）而不是
+ *     只认显示名——实测显示名会挑到旧名（「毕节地区」对应气象台的「毕节市」、
+ *     「思茅市」对应「普洱市」），只认显示名会让这些预警退化成"仅省"。
+ *  ③ 市级找不到时，若该省下**只有一个可选条目**（直辖市 / 港澳），就用它：
+ *     「上海市浦东新区气象台」的省名之后不含"上海市"，但上海市的关注点确实该响。
+ *     其余情况返回 `city: ''`——由调用方走**省级兜底**（宁可多报，绝不漏报，DESIGN 8.5）。
+ *
+ * @param {unknown} org 机构名
+ * @returns {{ province: string, city: string, matched: boolean }|null} 表未加载时返回 null
+ */
+function cnAreaOf(org) {
+  if (!cnAreas || cnAreas.length === 0) return null
+  const s = String(org === undefined || org === null ? '' : org).trim();
+  if (!s) return { province: '', city: '', matched: false }
+  let prov = null;
+  let plen = 0;
+  for (const p of cnAreas) {
+    for (const n of [p.name].concat(p.aliases || [])) {
+      if (n.length > plen && s.startsWith(n)) { prov = p; plen = n.length; }
+    }
+  }
+  if (!prov) return { province: '', city: '', matched: false }
+  const rest = s.slice(plen);
+  let city = null;
+  let clen = 0;
+  for (const c of prov.cities) {
+    for (const n of [c.name].concat(c.aliases || [])) {
+      if (n.length > clen && rest.indexOf(n) !== -1) { city = c; clen = n.length; }
+    }
+  }
+  if (!city && prov.cities.length === 1) city = prov.cities[0];
+  return { province: prov.name, city: city ? city.name : '', matched: true }
 }
 
 // ---------- addr → 市町村归一 ----------
@@ -2412,6 +2482,140 @@ function parseCencEqlist(json) {
 }
 
 // ============================================================================
+// dsh-quake-alert · client/src/05f-nmc-parsers.js
+//
+// 作用：把 Host 转来的 nmc.cn 预警（JSON）解析成与日本源 / 全球源同一套内部模型（Alert）。
+// 内容：`nmc_alarm`——中央气象台汇总的**暴雨**与**地质灾害**预警信号。
+// 依赖：02-storage（isPlainObject）、04-city-table（cnAreaOf）。
+//
+// 与其它源的三处结构性差异（都是实测决定的，不是风格选择）：
+//
+// ① **匹配走行政区层级，不走半径**（DESIGN 8.5）。
+//    预警的粒度到县（「云南省丽江市宁蒗彝族自治县气象台发布地质灾害黄色预警信号」），
+//    而设置页只让用户选到地级市。所以 locator 是 `'area'`：把机构名解析成「省 + 市」，
+//    再与用户关注的市比对。**不用半径**——"选丽江市 + 100km"会漏掉辖下较远的县，
+//    而漏报正是这套系统最不想要的（DESIGN 8.5 明确否决了"县名换坐标 + 半径"）。
+//
+// ② **机构名自带完整层级链，不需要县表**。
+//    0.5.0 曾预留"省 → 市 → 县"三级表（2900 条）用于"从县名向上找地级市"。开工前实测
+//    238 条真实预警：**每一条的机构名都以省名开头**，226 条能直接定位到地级市，剩下 12 条
+//    是海南省直辖县 / 上海市辖区（本就不属于任何地级市，县表也救不了）。所以县表不建，
+//    改由 04-city-table 的 cnAreaOf 在「省 + 市」这一层做最长匹配（DESIGN 8.5 已按实测更正）。
+//
+// ③ **等级与灾种只认图标编码，不认中文**。
+//    Host 已经把 `pic` 的编码解成 `kind` / `level` 两个词（见 lib/nmc-source.js），
+//    这一层不做任何中文匹配——`title` 的措辞会随上游改（样本里"预警信号"与"预警"两种都有），
+//    而图标文件名是程序契约。
+//
+// 三条已知缺口（与大陆地震源同类，UI 与文档必须如实说明，代码里不得假装能处理）：
+//   · **没有"解除"电文**。列表是"当前生效集合"，预警过期就从列表消失，我们看不到"解除"这个
+//     动作，因此 cancelled 恒为 false——"没收到取消"不等于"警报仍然有效"。
+//   · **没有取消 / 最终报标志**。
+//   · **机构名可能带错字**。实测「黑龙江省齐哈尔市克山县气象台」（少了"齐"）——市名对不上时
+//     按省级兜底放行（见 06-matcher），而不是丢弃这条预警。
+// ============================================================================
+
+
+/** 灾种标识 → 中文（与 Host 的 NMC_KINDS 值域对齐）。 */
+const NMC_KIND_TEXT = { rainstorm: '暴雨', geology: '地质灾害' };
+/** 等级 → 中文（与图标编码 `001`..`004` 的对应关系见 lib/nmc-source.js）。 */
+const NMC_LEVEL_TEXT = { red: '红色', orange: '橙色', yellow: '黄色', blue: '蓝色' };
+/**
+ * 等级 → severity（DESIGN 2 节的配色语义）：红 → red、橙 → orange、黄 → yellow、蓝 → info。
+ *
+ * **忠实映射，不做"警报恒 red"那种拔高**（0.5.1 对 `cenc_eew` 的修正不适用这里）：
+ * 那条修正是因为日本 EEW 本身就是警报、按震级分档纯属把警报降级；而气象预警的四个颜色
+ * **本身就是等级**，拔高橙色会让"橙色"这个用户能看见的官方等级失去意义。
+ * 后果要如实写进文档：静默时段（默认只放行 red）**不会**放行橙色预警——夜里发布的橙色
+ * 暴雨预警只在历史里留痕。这是取舍，不是遗漏。
+ */
+const NMC_LEVEL_SEVERITY = { red: 'red', orange: 'orange', yellow: 'yellow', blue: 'info' };
+/** 等级序（越大越重），与 Host 的 NMC_LEVEL_RANK 一致。 */
+const NMC_LEVEL_RANK = { red: 4, orange: 3, yellow: 2, blue: 1 };
+/** 播报门槛：橙色及以上（DESIGN 8.4）。低于它的条目仍然解析、仍然进历史，只是不打扰。 */
+const NMC_BROADCAST_MIN_RANK = 3;
+
+/**
+ * 从 `title` 里取出发布机构名（`…气象台发布…`）。
+ * 认不出返回空串——那说明上游换了措辞，届时由契约层的 schema 判据兜住（见 05d）。
+ * @param {unknown} title
+ */
+function orgOf(title) {
+  const m = /^(.*?(?:气象台|气象局|预警中心))发布/.exec(String(title === undefined || title === null ? '' : title));
+  return m ? m[1] : ''
+}
+
+/**
+ * nmc.cn 预警（Host 的 JSON 载荷）→ Alert。
+ *
+ * **结构不符返回 null**（由契约层分类成 schema / empty），而不是在这里抛错或编一个空对象：
+ * 后者会让"上游改版"在 UI 上长成"这条预警没有内容"。
+ *
+ * @param {object} raw `{ alertid, title, issued, kind, level, detail }`
+ * @returns {object|null}
+ */
+function parseNmcAlarm(raw) {
+  if (!isPlainObject(raw)) return null
+  const alertid = String(raw.alertid === undefined || raw.alertid === null ? '' : raw.alertid).trim();
+  if (!alertid) return null
+  const kind = typeof raw.kind === 'string' && NMC_KIND_TEXT[raw.kind] ? raw.kind : '';
+  if (!kind) return null
+  const level = typeof raw.level === 'string' && NMC_LEVEL_TEXT[raw.level] ? raw.level : '';
+  if (!level) return null
+  const issued = String(raw.issued === undefined || raw.issued === null ? '' : raw.issued).trim();
+  const title = String(raw.title === undefined || raw.title === null ? '' : raw.title).trim();
+  const detail = String(raw.detail === undefined || raw.detail === null ? '' : raw.detail).trim();
+  const org = orgOf(title);
+  const area = org ? cnAreaOf(org) : null;
+  // 机构名去掉表示发布主体的后缀即"发布地"：「云南省丽江市宁蒗彝族自治县气象台」→ 该县。
+  const place = org.replace(/(?:气象台|气象局|预警中心)$/, '');
+  const rank = NMC_LEVEL_RANK[level] || 0;
+  const kindText = NMC_KIND_TEXT[kind];
+  return {
+    // 前缀 nmc: ——与其它源的 id 命名空间分开（alertid 是纯数字串，不加前缀会与
+    // P2PQuake 的数字 eventId 撞在同一个集合里，去重表可以按 id 建索引）。
+    id: 'nmc:' + alertid,
+    code: 'nmc_alarm',
+    // kind 复用 'weather'：它是气象灾害，与日本气象电文共用"进历史 / 配色 / 文案"的整条链路。
+    // 真正区分两者的是 locator（'area' = 走行政区层级匹配，见 06-matcher）。
+    kind: 'weather',
+    kindLabel: '大陆' + kindText + '预警（中央气象台）',
+    source: 'nmc_alarm',
+    locator: 'area',
+    severity: NMC_LEVEL_SEVERITY[level],
+    issued,
+    reportTime: issued,
+    // 文案用**发布地 + 灾种 + 等级**，不用行政区表里的名字：表里的名字是 GeoNames 的显示名，
+    // 实测会挑到旧名（「思茅市」而气象台写「普洱市」），照搬会让用户对不上号。
+    headline: (place ? place + ' · ' : '') + kindText + NMC_LEVEL_TEXT[level] + '预警',
+    maxScale: -1,
+    level: 0,
+    // regions 是日本源的概念（都道府县 + 市町村）。大陆源不用它——归属放在 cnArea 里，
+    // 留空数组是为了让 06-matcher 的"未携带可判定区域"分支不会误伤（那条分支只看 regions）。
+    regions: [],
+    // 事件键取 alertid：nmc.cn 的 alertid 是**每条预警唯一**的，升级（黄→橙）会换新的 alertid
+    // ——那正是应该再响一次的情形。所以这里不做"同机构同灾种归并"：那会把升级吞掉，
+    // 而升级恰恰是用户最需要知道的那一次（与 DESIGN 11.7 第 6 条对日本官署的取舍不同：
+    // 那边是同一官署管多县导致的**误归并**，这边的键本来就是唯一的）。
+    eventKey: 'nmc:' + alertid,
+    strength: rank,
+    // 行政区归属：city 为空 = 只能定位到省（省直辖县 / 省台发布），由 matcher 走省级兜底。
+    cnArea: {
+      org,
+      province: area ? area.province : '',
+      city: area ? area.city : '',
+      resolved: !!(area && area.matched),
+    },
+    cnKind: kind,
+    cnLevel: level,
+    cnRank: rank,
+    detail,
+    cancelled: false, // 列表里没有"解除"这种形态——见文件头，不得假装能处理
+    raw,
+  }
+}
+
+// ============================================================================
 // dsh-quake-alert · client/src/05d-source-contracts.js
 //
 // 作用：**解析契约**与**每源校验约定**（0.4.1 的交付物之一，对应 DESIGN 4.5 与 11.1）。
@@ -2622,6 +2826,41 @@ const SOURCE_CONTRACTS = {
     staleReason: '**本插件唯一真正有意义的新鲜度阈值，而且它探的是中继不是灾害**：速报每天都有数据，' +
       '所以"超过 48 小时没有新批次"即判中继异常（fj_eew 那种连接正常但停更 4 个月的形态，' +
       '靠连接检测完全发现不了）。实测发布 lag 209–1643 秒，阈值不能贴着 lag 取留出余量。',
+  },
+  // ---- 中国大陆气象源（0.5.2）----
+  // 一条 Host 源（`nmc_alarm`）承载**两个灾种**（暴雨 / 地质灾害）。契约按"一个端点 + 一种载荷"
+  // 划分，而这两个灾种来自同一个 `rest/findAlarm` 响应、只有 `pic` 编码不同，所以是一条契约。
+  // 与其它源的差异：匹配走**行政区层级**（locator:'area'），因此"title 能解析出机构名"是
+  // **必需字段**——解析不出就等于这条预警无法归属，而不是"少了一个可选字段"。
+  nmc_alarm: {
+    label: '中央气象台预警信号（nmc.cn）',
+    region: 'cn',
+    disasters: ['weather'],
+    transport: 'feed',
+    url: 'https://www.nmc.cn/rest/findAlarm（详情页 https://www.nmc.cn/publish/alarm/<alertid>.html）',
+    pollMs: 120 * 1000,
+    timezone: 'Asia/Shanghai（+08:00，无夏令时）—— issuetime 是裸北京时间，且写法与 Wolfx 不同' +
+      '（`2026/09/19 12:31`：斜杠分隔、无秒）。Host 侧补偏移后以带偏移的 ISO 下发，' +
+      '所以 Client 这里拿到的时间已经可以直接 Date.parse。',
+    required: [
+      'alertid string 非空（每条预警的唯一键，Host 用它去重与拼详情 URL）',
+      'kind ∈ {rainstorm, geology}（Host 从 pic 的灾种码译出）',
+      'level ∈ {red, orange, yellow, blue}（Host 从 pic 的等级码译出）',
+      'title string 非空，且形如「…气象台发布…预警信号」——**匹配完全依赖它**，解析不出机构名即判 schema',
+      'issued 可解析的 ISO 时间（Host 已补 +08:00）',
+    ],
+    tolerant: 'detail（详情页正文）缺失或为空**不判 schema**：只有橙色及以上才会拉详情（DESIGN 8.4），' +
+      '蓝 / 黄的正文本来就是空的，而详情抓取失败也只会让文案少一段说明——' +
+      '为了一段附属文字丢掉一条真实预警是漏报方向。',
+    empty: 'kind 是字符串但**不在本插件范围内**——这是**向前兼容**的兜底而不是当下会发生的形态：' +
+      'Host 已经按灾种过滤（实测雷电 / 大风 / 高温占 76%，原样转发会把历史刷满），' +
+      '所以正常收到的条目一定是暴雨或地质灾害。判 empty 而不是 schema，是为了将来 Host 若改为' +
+      '转发全部灾种时，旧 Client 静默跳过而不是点亮一个用户处理不了的蓝点。',
+    staleAfterMs: 3 * 60 * 60 * 1000,
+    staleReason: '判据是**列表里最新一条的发布时间**（不是"我们收到多少条"）：全国范围的预警是连续' +
+      '不断的（实测 238 条覆盖约 24 小时），所以"3 小时没有任何新预警"只可能是上游停更或我们' +
+      '拿到缓存。与 JMA 同档；实测 40 分钟窗口里新增 11 条、相邻两次新增的最长间隔只有 10 分钟，' +
+      '余量近 20 倍。',
   },
 };
 
@@ -2857,6 +3096,35 @@ function parseCencEqlistResult(json) {
   return { ok: true, alerts, dropped, md5: cencEqlistMd5Of(json), total: items.length }
 }
 
+/**
+ * 中央气象台预警（`nmc_alarm`）。
+ *
+ * 与其它源的两处判据差异（都由"匹配依赖机构名"这一条推出）：
+ *   · `title` 里**必须**能解析出机构名——解析不出就等于这条预警无法归属（DESIGN 8.5），
+ *     宁可点亮蓝点让用户知道"数据格式变了"，也不要静默播报一条不知道发给谁的预警。
+ *   · 灾种不在本插件范围内时判 **empty 而不是 schema**：Host 已按灾种过滤，正常收不到这类
+ *     条目；判 empty 是为了让"Host 将来转发更多灾种"这件事对旧 Client 是静默跳过。
+ */
+function parseNmcAlarmResult(raw) {
+  if (!isPlainObject(raw)) return failResult('schema', '顶层不是对象')
+  const alertid = String(raw.alertid === undefined || raw.alertid === null ? '' : raw.alertid).trim();
+  if (!alertid) return failResult('schema', '缺少 alertid（string）')
+  if (typeof raw.kind !== 'string' || !raw.kind) return failResult('schema', '缺少 kind（string）')
+  if (!NMC_KIND_TEXT[raw.kind]) return failResult('empty', '灾种不在本插件范围内：' + raw.kind)
+  if (typeof raw.level !== 'string' || !NMC_LEVEL_TEXT[raw.level]) {
+    return failResult('schema', '缺少或无法识别的 level：' + String(raw.level))
+  }
+  const title = String(raw.title === undefined || raw.title === null ? '' : raw.title).trim();
+  if (!title) return failResult('schema', '缺少 title（string）')
+  if (!orgOf(title)) return failResult('schema', 'title 里解析不出发布机构（形如「…气象台发布…」）')
+  const t = timeMsOf(raw.issued);
+  if (t === null) return failResult('schema', '缺少 issued（可解析的 ISO 时间）')
+  if (timeIsImpossible(t)) return failResult('value', '发布时间客观不可能：' + String(raw.issued))
+  const alert = parseNmcAlarm(raw);
+  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  return okResult(alert)
+}
+
 // ---------------------------------------------------------------- 健康状态
 /**
  * 数据健康记录（sourceId → 最近一次解析失败）。
@@ -3084,6 +3352,86 @@ function missReason(alert, watch, base) {  const list = watch && watch.prefectur
   return reason
 }
 
+// ---------- 行政区层级匹配（大陆气象源，0.5.2 / DESIGN 8.5） ----------
+/**
+ * 关注点名字 → 行政区对。设置页「中国大陆」加进来的点由 04-city-table 的 cnPlaceOf 生成，
+ * 名字固定是「省·市」（用 U+00B7 分隔，以免两个省的"城区"撞名）。
+ * 不含分隔符的点（手填坐标、全球关注点）返回 null——**行政区层级匹配不适用于它们**，
+ * 忽略而不是报错：同一个 places 列表同时服务坐标型源（地震）与行政型源（气象）。
+ */
+function cnPlaceParts(name) {
+  const s = String(name === undefined || name === null ? '' : name).trim();
+  const i = s.indexOf('·');
+  if (i <= 0 || i === s.length - 1) return null
+  return { province: s.slice(0, i), city: s.slice(i + 1) }
+}
+
+/** 等级中文（与 05f 的 NMC_LEVEL_TEXT 同源；这里只需要拼 reason，不复制映射表会更好，
+ *  但 06 不该依赖解析层——所以就地写一份最小的，并靠回归断言钉住两边一致。 */
+const NMC_LEVEL_ZH = { red: '红色', orange: '橙色', yellow: '黄色', blue: '蓝色' };
+
+/**
+ * 大陆气象预警的匹配。规则按优先级排，每一条都对应一个"用户会问为什么"的场景：
+ *
+ *  ① 灾种开关（DESIGN 8.4 把它们拆成两个：暴雨的橙 / 红常年可见，地质灾害实测全是黄色）。
+ *  ② 播报门槛：**橙色及以上**才打扰，黄 / 蓝只入历史。不满足时 reason 要说清是"等级不够"，
+ *     而不是含糊的"未命中"——否则用户会把"这条预警我收到了但没响"读成故障。
+ *  ③ 归属：市能对上就用市；市对不上（省直辖县 / 省台发布 / 机构名错字）时**按省放行**；
+ *     连省都认不出（国家级机构等）也放行。后两条都是 DESIGN 3.2 / 8.5 的"宁可多报绝不漏报"
+ *     ——一次漏报的代价远大于一次多报。
+ */
+function matchCnAreaAlert(alert, cfg) {
+  const d = cfg.disasters || {};
+  if (alert.cnKind === 'geology') {
+    if (d.cnGeology === false) return { hit: false, reason: '大陆地质灾害提醒已关闭' }
+  } else if (d.cnRainstorm === false) {
+    return { hit: false, reason: '大陆暴雨提醒已关闭' }
+  }
+  if (alert.cancelled) return { hit: false, reason: '解除消息不提醒' }
+  const levelZh = NMC_LEVEL_ZH[alert.cnLevel] || String(alert.cnLevel || '');
+  const what = (alert.cnKind === 'geology' ? '地质灾害' : '暴雨') + levelZh + '预警';
+  const rank = typeof alert.cnRank === 'number' ? alert.cnRank : 0;
+  if (rank < 3) {
+    return { hit: false, reason: what + '（未达橙色，仅记录）' }
+  }
+  const places = (cfg.watch && cfg.watch.places) || [];
+  const cnPlaces = [];
+  for (const p of places) {
+    const parts = cnPlaceParts(p && p.name);
+    if (parts) cnPlaces.push({ place: p, province: parts.province, city: parts.city });
+  }
+  if (cnPlaces.length === 0) {
+    // 与坐标型源同一条原则：没有关注点就明确说明怎么加，**不静默**——
+    // "配错了关注点"看起来像"根本没有预警"是这套系统最该避免的误解之一。
+    return { hit: false, reason: '未设置中国大陆关注点（设置 → 灾害预警 → 中国大陆 → 选省与城市）' }
+  }
+  const area = alert.cnArea || {};
+  const province = String(area.province || '');
+  const city = String(area.city || '');
+  if (city) {
+    const hit = cnPlaces.find((p) => p.province === province && p.city === city);
+    if (hit) {
+      return { hit: true, reason: what + ' · 命中关注点 ' + hit.province + '·' + hit.city, place: hit.place }
+    }
+    return {
+      hit: false,
+      reason: what + '（' + province + '·' + city + '）不在关注列表里',
+    }
+  }
+  // 市级归属未知：省内有任何一个关注点就放行，并在 reason 里如实说明只定位到省。
+  // 实测这一类的来源是海南省直辖县（乐东 / 昌江 / 琼中…）、上海市辖区，以及上游的机构名错字
+  //（「黑龙江省齐哈尔市克山县」少了"齐"）——它们都是真实预警，丢掉就是漏报。
+  const sameProv = cnPlaces.filter((p) => !province || p.province === province);
+  if (sameProv.length > 0) {
+    return {
+      hit: true,
+      reason: what + ' · ' + (province ? '仅能定位到 ' + province + '（' + (area.org || '发布机构未给出市级）') + '）' : '未能定位到省份，按全国放行'),
+      place: sameProv[0].place,
+    }
+  }
+  return { hit: false, reason: what + ' · 归属未识别（' + (area.org || '机构名未知') + '）' }
+}
+
 function matchAlert(alert, cfg) {
   const w = cfg.watch || {};
   const t = cfg.thresholds || {};
@@ -3122,6 +3470,10 @@ function matchAlert(alert, cfg) {
       : { hit: false, reason: missReason(alert, w, '关注地区未命中或等级低于阈值') }
   }
   if (alert.kind === 'weather') {
+    // 大陆气象源（0.5.2）走**行政区层级**匹配，与日本电文那套（都道府县 + 市町村名）是两套
+    // 规则：那边的粒度是市町村、兜底是"区域级条目放行"；这边的粒度是地级市、兜底是"省级放行"，
+    // 而且多一道**等级门槛**（DESIGN 8.4：橙色及以上才播报）。
+    if (alert.locator === 'area') return matchCnAreaAlert(alert, cfg)
     if ((cfg.disasters || {}).weather === false) return { hit: false, reason: '气象灾害提醒已关闭' }
     if (alert.cancelled) return { hit: false, reason: '解除消息不提醒' }
     if (alert.regions.length === 0) return { hit: false, reason: '本条电文未携带可判定的区域' }
@@ -3657,6 +4009,10 @@ const AUTHORITY_BY_SOURCE = {
   noaa: '太平洋海啸警报中心（NOAA）',
   cenc_eew: '中国地震台网（CENC）',
   cenc_eqlist: '中国地震台网（CENC）',
+  // 0.5.2：大陆气象预警的发布主体是**各级气象台**，汇总在中央气象台（中国气象局）的网站上。
+  // 免责声明里点名"中央气象台（中国气象局）"而不是泛泛的"气象厅"——后者是日本的机构，
+  // 出现在一条云南暴雨预警的免责声明里会直接削弱这份声明的可信度（同上一段的理由）。
+  nmc_alarm: '中央气象台（中国气象局）',
   jma: '気象庁',
 };
 function authorityOf(alert) {
@@ -5260,6 +5616,9 @@ const P2P_KIND_CODE = { quake: 551, eew: 556, tsunami: 552 };
 const SOURCE_CODE_TEXT = {
   emsc: 'EMSC', usgs: 'USGS', noaa: 'NOAA CAP', jma: 'JMA 电文',
   cenc_eew: 'CENC 预警', cenc_eqlist: 'CENC 速报',
+  // 0.5.2：大陆气象预警的发布主体是各级气象台、由中央气象台汇总。标成「JMA 电文」会让
+  // 一条云南暴雨预警看起来来自日本气象厅（同 SOURCE_CODE_TEXT 存在的理由）。
+  nmc_alarm: '中央气象台',
 };
 /**
  * 历史条目「类型」行的来源标注。
@@ -5280,8 +5639,12 @@ function p2pCodeTextOf(kind, code, id) {
   if (idStr.indexOf('usgs:') === 0) return 'USGS'
   if (idStr.indexOf('noaa:') === 0) return 'NOAA CAP'
   if (idStr.indexOf('cenc:') === 0) return 'CENC 大陆'
+  // 0.5.2：大陆气象源（新的历史条目走 code，这里兜住"更早写入的"这条路径）
+  if (idStr.indexOf('nmc:') === 0) return '中央气象台'
   const c = own(P2P_KIND_CODE, kind);
   if (c) return 'code ' + c
+  // 兜底：气象（kind='weather'）在 0.5.2 之前只有日本这一个来源。现在有了大陆气象源，
+  // 所以这里的兜底必须注明它是**日方**的，而不是把两者混起来（大陆那条在上面的 id / code 分支已拦下）。
   return kind === 'weather' ? 'JMA 电文' : '—'
 }
 // 灾种配色：气象灾害此前没有键，历史条目一律落到灰色兜底，与另外三类不一致
@@ -5316,15 +5679,16 @@ const SOURCE_LABELS = {
   jma: '気象庁（气象灾害，Host 轮询）',
   usgs: 'USGS（全球地震目录，Host 轮询）',
   noaa: 'NOAA（海啸 CAP，Host 轮询）',
+  nmc_alarm: '中央气象台（大陆暴雨 / 地质灾害预警，Host 轮询）',
 };
 /**
  * 源状态区块里的源顺序与分组。**一处维护**：此前同样的列表在三个地方各写一遍
  * （状态行、增量计数行、重试按钮），加一个源要改三处——漏掉任何一处就变成
  * "某个源坏了但界面上看不见"，而"让失败可见"正是这个区块存在的全部理由。
  */
-const SOURCE_ORDER = ['p2pquake', 'emsc', 'cenc_eew', 'cenc_eqlist', 'jma', 'usgs', 'noaa'];
-/** 走 `/feed` 增量计数的源（feedStatsOf 有快照）。大陆源走 SSE，另有自己的计数与链路模式。 */
-const FEED_STAT_ORDER = ['jma', 'usgs', 'noaa'];
+const SOURCE_ORDER = ['p2pquake', 'emsc', 'cenc_eew', 'cenc_eqlist', 'jma', 'usgs', 'noaa', 'nmc_alarm'];
+/** 走 `/feed` 增量计数的源（feedStatsOf 有快照）。大陆地震源走 SSE，另有自己的计数与链路模式。 */
+const FEED_STAT_ORDER = ['jma', 'usgs', 'noaa', 'nmc_alarm'];
 /** 走 SSE 的源（0.5.0）：状态从 cnStreamRegistry 实时读。 */
 const STREAM_ORDER = ['cenc_eew', 'cenc_eqlist'];
 /**
@@ -5708,6 +6072,27 @@ function SettingsPanel() {
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 6, lineHeight: 1.6 } },
       '气象灾害＝泥石流 / 洪水 / 大雨 / 高潮 等。只播报警戒レベル4 以上（相当于日本的「避难指示」级：' +
       '土砂災害警戒情報、氾濫危険情報、大雨特別警報…）；L1〜L3 仍然解析并记入下方「最近预警记录」，只是不响铃、不弹通知。'),
+    // 中国大陆气象灾害（0.5.2）：**两个灾种分开**。它们来自同一个源（中央气象台汇总的
+    // 预警信号列表），但产出差别很大——暴雨的橙 / 红常年可见，而地质灾害实测全是黄色
+    // （达不到播报门槛，只在历史里留痕）。合成一个开关会让"我只想要暴雨"的用户找不到出口。
+    h('div', { style: { fontSize: 12, color: '#9aa0a6', marginTop: 12, marginBottom: 2 } },
+      '中国大陆气象灾害（中央气象台汇总各级气象台发布）'),
+    s.row(
+      s.checkbox(cfg.disasters.cnRainstorm !== false,
+        (v) => setCfg((c) => ({ ...c, disasters: { ...c.disasters, cnRainstorm: v } })), '暴雨预警'),
+      s.checkbox(cfg.disasters.cnGeology !== false,
+        (v) => setCfg((c) => ({ ...c, disasters: { ...c.disasters, cnGeology: v } })), '地质灾害预警'),
+    ),
+    h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4, lineHeight: 1.6 } },
+      // 注意：这是**界面文本**（React 文本节点），不是 markdown——写 `**粗体**` 会在页面上
+      // 原样渲染出星号。强调靠语序，不靠标记。
+      '只接暴雨与地质灾害两类（雷电 / 大风 / 高温等其余灾种不接，否则会被每天几十条刷屏）。' +
+      '只播报橙色及以上；黄色 / 蓝色仍然记录在下方「最近预警记录」里，只是不响铃、不弹通知' +
+      '（因此静默时段默认也不会放行橙色——它只在红色时穿透）。' +
+      '匹配按行政区层级：在「中国大陆」里选到的省 / 市才算关注点，自由填写的坐标点不参与；' +
+      '机构名只报出省级（如海南省直辖县）时会按整个省放行，宁可多报一次也不漏报。' +
+      '与大陆地震源一样，这批数据没有「解除」标志——预警到期会直接从这个列表里消失，' +
+      '所以"没收到取消"不等于"警报仍然有效"。'),
     store.weatherHint
       ? h('div', { style: { fontSize: 11, color: '#d9a406', marginTop: 4 } },
           '当前：' + (store.weatherHint.label || '') +
@@ -6324,7 +6709,38 @@ function apply(ctx) {
       return true
     },
   });
-  const feeds = [feed, usgsFeed, noaaFeed];
+  // 大陆气象灾害（0.5.2）：中央气象台汇总的预警信号（暴雨 + 地质灾害），走 Host 的 `/feed` **轮询**。
+  // 为什么不是像 cenc 那样用 SSE：气象预警是"提前数十分钟到数小时发布"的警戒级信息，与 JMA 同一
+  // 性质——DESIGN 5.2 的 `/feed` + 15 秒本地拉取本来就是为这类信息设计的，延迟最坏 120+15 秒。
+  // 两个灾种各有开关，但**共用一个 Host 源**（同一个端点、同一份响应），所以只要有一个开着就继续拉。
+  const nmcFeed = createFeedClient({
+    id: 'nmc_alarm',
+    label: '中央气象台',
+    path: FEED_PATH + '?source=nmc_alarm',
+    cursorKey: FEED_CURSOR_KEY + '.nmc_alarm',
+    enabled: (cfg) => {
+      const d = cfg.disasters || {};
+      return d.cnRainstorm !== false || d.cnGeology !== false
+    },
+    onStatus: feedStatus('nmc_alarm'),
+    onError: feedError('nmc_alarm'),
+    apply: (entry, cfg) => {
+      let raw;
+      try {
+        raw = JSON.parse(entry && entry.xml);
+      } catch (err) {
+        noteParseResult('nmc_alarm', failResult('schema', 'Host 载荷不是合法 JSON'));
+        return false
+      }
+      const res = parseNmcAlarmResult(raw);
+      if (noteParseResult('nmc_alarm', res)) return false
+      if (!res.ok) return false
+      noteSourceSuccess('nmc_alarm');
+      handleAlert(res.alert, cfg);
+      return true
+    },
+  });
+  const feeds = [feed, usgsFeed, noaaFeed, nmcFeed];
   ctx.effect(() => {
     for (const f of feeds) f.start();
     return () => { for (const f of feeds) { try { f.stop(); } catch (err) {} } }
@@ -6416,7 +6832,11 @@ function apply(ctx) {
 }
 
 // 单测钩子（客户端宿主忽略额外导出）
-const __test = { parse, parseQuake, parseEew, parseTsunami, parseJma, parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage, feedStatsOf, watchlessPoint, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn: maxLevelIn, jmaItemsOf: itemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf, matchAlert, matchPointAlert, distanceKm, validGeo, normalizePlaces, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, hitSeverityOf, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY, cnProductName, authorityOf, disclaimerOf, SOURCE_ORDER, SOURCE_LABELS, SOURCE_CODE_TEXT, SettingsPanel, statusMetaOf, buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION, inQuietHours, isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, ensureAlertChannel, broadcastHistoryCleared, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, p2pTimeToIso, cnTimeToIso, CN_TIME_RE, CN_REPORT_MAG_OPTIONS, issuedToDate, formatIssuedLocal, audioState, SOURCE_CONTRACTS, parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of, failResult, noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, P2P_TIME_RE, MIGRATED_KEY };
+const __test = {
+  // 0.5.2：大陆气象源（nmc.cn）—— 解析层 / 契约 / 行政区层级匹配
+  parseNmcAlarm, orgOf, parseNmcAlarmResult, matchCnAreaAlert, cnPlaceParts, cnAreaOf, normAliases,
+  NMC_KIND_TEXT, NMC_LEVEL_TEXT, NMC_LEVEL_RANK, NMC_BROADCAST_MIN_RANK,
+  parse, parseQuake, parseEew, parseTsunami, parseJma, parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage, feedStatsOf, watchlessPoint, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn: maxLevelIn, jmaItemsOf: itemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf, matchAlert, matchPointAlert, distanceKm, validGeo, normalizePlaces, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, hitSeverityOf, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY, cnProductName, authorityOf, disclaimerOf, SOURCE_ORDER, SOURCE_LABELS, SOURCE_CODE_TEXT, SettingsPanel, statusMetaOf, buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION, inQuietHours, isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, ensureAlertChannel, broadcastHistoryCleared, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, p2pTimeToIso, cnTimeToIso, CN_TIME_RE, CN_REPORT_MAG_OPTIONS, issuedToDate, formatIssuedLocal, audioState, SOURCE_CONTRACTS, parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of, failResult, noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, P2P_TIME_RE, MIGRATED_KEY };
 
 // activeClient 是 12-websocket 的模块级 let：给 12 用的赋值出口（跨模块不能写 imported binding）
 // 由 12-websocket 提供 setter；这里仅保留引用以便阅读

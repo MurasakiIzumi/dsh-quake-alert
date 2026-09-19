@@ -128,7 +128,28 @@ const riverAreaCities = (code) => {
 // 大陆源（cenc_eew / cenc_eqlist）是坐标 + 半径匹配（DESIGN 8.3），
 // 让用户手填经纬度不现实，由这张表按所选城市给出坐标。
 // 表由 scripts/build-cn-areas.mjs 从 GeoNames 生成（含 TW/HK/MO），头部记着已知取舍。
-let cnAreas = null // [{ code, name, lat, lon, cities:[{name,lat,lon}] }]
+let cnAreas = null // [{ code, name, aliases, lat, lon, cities:[{name,aliases,lat,lon}] }]
+/**
+ * 别名的规整：只留**有意义**的候选。
+ *
+ * 丢掉单字别名（"丽"这类会匹配到半个中国）与和显示名重复的项；上限 8 条，因为候选是长尾的
+ * （个别条目有几十个历史名 / 罗马字音译），而匹配是**最长命中**，砍掉短名不影响建制全名。
+ * 缺失 `aliases` 字段（Host 未升级 / 手写的旧数据）时返回空数组——**别名是增强，不是前提**。
+ */
+function normAliases(list, name) {
+  if (!Array.isArray(list)) return []
+  const out = []
+  const seen = new Set()
+  for (const a of list) {
+    if (typeof a !== 'string') continue
+    const s = a.trim()
+    if (!s || s === name || s.length < 2 || seen.has(s)) continue
+    seen.add(s)
+    out.push(s)
+    if (out.length >= 8) break
+  }
+  return out
+}
 /**
  * 注入并规整行政区划表。**逐字段校验**：表来自 Host 的 JSON，与 localStorage 一样属于
  * "不可信的输入"——一个坏条目会让级联渲染出幽灵选项，或把用户带到错误的坐标上
@@ -151,12 +172,12 @@ function setCnAreas(list) {
       if (!cn2 || seenCity.has(cn2)) continue
       if (!validLatLon(c.lat, c.lon)) continue
       seenCity.add(cn2)
-      cities.push({ name: cn2, lat: c.lat, lon: c.lon })
+      cities.push({ name: cn2, aliases: normAliases(c.aliases, cn2), lat: c.lat, lon: c.lon })
     }
     // 没有下级的省级项在级联里是死路：直接丢弃，避免用户选中后按钮没反应
     if (cities.length === 0) continue
     seenProv.add(name)
-    out.push({ code: typeof p.code === 'string' ? p.code : '', name, lat: p.lat, lon: p.lon, cities })
+    out.push({ code: typeof p.code === 'string' ? p.code : '', name, aliases: normAliases(p.aliases, name), lat: p.lat, lon: p.lon, cities })
   }
   if (out.length === 0) return false
   cnAreas = out
@@ -189,6 +210,51 @@ function cnPlaceOf(province, city, radiusKm) {
   const r = Number(radiusKm)
   if (!Number.isFinite(r) || r < 1 || r > 2000) return null
   return { name: province + '·' + city, lat: c.lat, lon: c.lon, radiusKm: r }
+}
+
+/**
+ * 发布机构名 → 行政区归属（0.5.2，大陆气象源用）。
+ *
+ * 输入是气象台的机构名（`气象台` 后缀已去掉或未去掉都可以），例如
+ * `云南省丽江市宁蒗彝族自治县气象台`。输出 `{ province, city, matched }`。
+ *
+ * 三条规则，全部由 238 条真实样本定出来（见 DESIGN 8.5 的实测记录）：
+ *  ① **省名必须出现在机构名的开头**，取最长命中。不能改成"全局搜索"：省别名里有
+ *     「海南」，而青海省的机构名是「青海省海南藏族自治州共和县气象台」——全局搜会把
+ *     一条青海的预警归到海南省，那是最难查的一类错误（名字看着对、地方错了几百公里）。
+ *     实测 238 条**全部**以省名开头，所以这个约束不损失覆盖。
+ *  ② 市级在**省名之后的那一段**里找最长命中，用 `aliases`（GeoNames 的全部中文候选）而不是
+ *     只认显示名——实测显示名会挑到旧名（「毕节地区」对应气象台的「毕节市」、
+ *     「思茅市」对应「普洱市」），只认显示名会让这些预警退化成"仅省"。
+ *  ③ 市级找不到时，若该省下**只有一个可选条目**（直辖市 / 港澳），就用它：
+ *     「上海市浦东新区气象台」的省名之后不含"上海市"，但上海市的关注点确实该响。
+ *     其余情况返回 `city: ''`——由调用方走**省级兜底**（宁可多报，绝不漏报，DESIGN 8.5）。
+ *
+ * @param {unknown} org 机构名
+ * @returns {{ province: string, city: string, matched: boolean }|null} 表未加载时返回 null
+ */
+function cnAreaOf(org) {
+  if (!cnAreas || cnAreas.length === 0) return null
+  const s = String(org === undefined || org === null ? '' : org).trim()
+  if (!s) return { province: '', city: '', matched: false }
+  let prov = null
+  let plen = 0
+  for (const p of cnAreas) {
+    for (const n of [p.name].concat(p.aliases || [])) {
+      if (n.length > plen && s.startsWith(n)) { prov = p; plen = n.length }
+    }
+  }
+  if (!prov) return { province: '', city: '', matched: false }
+  const rest = s.slice(plen)
+  let city = null
+  let clen = 0
+  for (const c of prov.cities) {
+    for (const n of [c.name].concat(c.aliases || [])) {
+      if (n.length > clen && rest.indexOf(n) !== -1) { city = c; clen = n.length }
+    }
+  }
+  if (!city && prov.cities.length === 1) city = prov.cities[0]
+  return { province: prov.name, city: city ? city.name : '', matched: true }
 }
 
 // ---------- addr → 市町村归一 ----------
@@ -308,4 +374,4 @@ const resetCityTable = () => {
   cnAreas = null
 }
 
-export { AREAS_PATH, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, buildAddrIndex, lookupAddrCity, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf }
+export { AREAS_PATH, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, buildAddrIndex, lookupAddrCity, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, cnAreaOf, normAliases }

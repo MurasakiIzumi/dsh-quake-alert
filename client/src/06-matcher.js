@@ -159,6 +159,86 @@ function missReason(alert, watch, base) {  const list = watch && watch.prefectur
   return reason
 }
 
+// ---------- 行政区层级匹配（大陆气象源，0.5.2 / DESIGN 8.5） ----------
+/**
+ * 关注点名字 → 行政区对。设置页「中国大陆」加进来的点由 04-city-table 的 cnPlaceOf 生成，
+ * 名字固定是「省·市」（用 U+00B7 分隔，以免两个省的"城区"撞名）。
+ * 不含分隔符的点（手填坐标、全球关注点）返回 null——**行政区层级匹配不适用于它们**，
+ * 忽略而不是报错：同一个 places 列表同时服务坐标型源（地震）与行政型源（气象）。
+ */
+function cnPlaceParts(name) {
+  const s = String(name === undefined || name === null ? '' : name).trim()
+  const i = s.indexOf('·')
+  if (i <= 0 || i === s.length - 1) return null
+  return { province: s.slice(0, i), city: s.slice(i + 1) }
+}
+
+/** 等级中文（与 05f 的 NMC_LEVEL_TEXT 同源；这里只需要拼 reason，不复制映射表会更好，
+ *  但 06 不该依赖解析层——所以就地写一份最小的，并靠回归断言钉住两边一致。 */
+const NMC_LEVEL_ZH = { red: '红色', orange: '橙色', yellow: '黄色', blue: '蓝色' }
+
+/**
+ * 大陆气象预警的匹配。规则按优先级排，每一条都对应一个"用户会问为什么"的场景：
+ *
+ *  ① 灾种开关（DESIGN 8.4 把它们拆成两个：暴雨的橙 / 红常年可见，地质灾害实测全是黄色）。
+ *  ② 播报门槛：**橙色及以上**才打扰，黄 / 蓝只入历史。不满足时 reason 要说清是"等级不够"，
+ *     而不是含糊的"未命中"——否则用户会把"这条预警我收到了但没响"读成故障。
+ *  ③ 归属：市能对上就用市；市对不上（省直辖县 / 省台发布 / 机构名错字）时**按省放行**；
+ *     连省都认不出（国家级机构等）也放行。后两条都是 DESIGN 3.2 / 8.5 的"宁可多报绝不漏报"
+ *     ——一次漏报的代价远大于一次多报。
+ */
+function matchCnAreaAlert(alert, cfg) {
+  const d = cfg.disasters || {}
+  if (alert.cnKind === 'geology') {
+    if (d.cnGeology === false) return { hit: false, reason: '大陆地质灾害提醒已关闭' }
+  } else if (d.cnRainstorm === false) {
+    return { hit: false, reason: '大陆暴雨提醒已关闭' }
+  }
+  if (alert.cancelled) return { hit: false, reason: '解除消息不提醒' }
+  const levelZh = NMC_LEVEL_ZH[alert.cnLevel] || String(alert.cnLevel || '')
+  const what = (alert.cnKind === 'geology' ? '地质灾害' : '暴雨') + levelZh + '预警'
+  const rank = typeof alert.cnRank === 'number' ? alert.cnRank : 0
+  if (rank < 3) {
+    return { hit: false, reason: what + '（未达橙色，仅记录）' }
+  }
+  const places = (cfg.watch && cfg.watch.places) || []
+  const cnPlaces = []
+  for (const p of places) {
+    const parts = cnPlaceParts(p && p.name)
+    if (parts) cnPlaces.push({ place: p, province: parts.province, city: parts.city })
+  }
+  if (cnPlaces.length === 0) {
+    // 与坐标型源同一条原则：没有关注点就明确说明怎么加，**不静默**——
+    // "配错了关注点"看起来像"根本没有预警"是这套系统最该避免的误解之一。
+    return { hit: false, reason: '未设置中国大陆关注点（设置 → 灾害预警 → 中国大陆 → 选省与城市）' }
+  }
+  const area = alert.cnArea || {}
+  const province = String(area.province || '')
+  const city = String(area.city || '')
+  if (city) {
+    const hit = cnPlaces.find((p) => p.province === province && p.city === city)
+    if (hit) {
+      return { hit: true, reason: what + ' · 命中关注点 ' + hit.province + '·' + hit.city, place: hit.place }
+    }
+    return {
+      hit: false,
+      reason: what + '（' + province + '·' + city + '）不在关注列表里',
+    }
+  }
+  // 市级归属未知：省内有任何一个关注点就放行，并在 reason 里如实说明只定位到省。
+  // 实测这一类的来源是海南省直辖县（乐东 / 昌江 / 琼中…）、上海市辖区，以及上游的机构名错字
+  //（「黑龙江省齐哈尔市克山县」少了"齐"）——它们都是真实预警，丢掉就是漏报。
+  const sameProv = cnPlaces.filter((p) => !province || p.province === province)
+  if (sameProv.length > 0) {
+    return {
+      hit: true,
+      reason: what + ' · ' + (province ? '仅能定位到 ' + province + '（' + (area.org || '发布机构未给出市级）') + '）' : '未能定位到省份，按全国放行'),
+      place: sameProv[0].place,
+    }
+  }
+  return { hit: false, reason: what + ' · 归属未识别（' + (area.org || '机构名未知') + '）' }
+}
+
 function matchAlert(alert, cfg) {
   const w = cfg.watch || {}
   const t = cfg.thresholds || {}
@@ -197,6 +277,10 @@ function matchAlert(alert, cfg) {
       : { hit: false, reason: missReason(alert, w, '关注地区未命中或等级低于阈值') }
   }
   if (alert.kind === 'weather') {
+    // 大陆气象源（0.5.2）走**行政区层级**匹配，与日本电文那套（都道府县 + 市町村名）是两套
+    // 规则：那边的粒度是市町村、兜底是"区域级条目放行"；这边的粒度是地级市、兜底是"省级放行"，
+    // 而且多一道**等级门槛**（DESIGN 8.4：橙色及以上才播报）。
+    if (alert.locator === 'area') return matchCnAreaAlert(alert, cfg)
     if ((cfg.disasters || {}).weather === false) return { hit: false, reason: '气象灾害提醒已关闭' }
     if (alert.cancelled) return { hit: false, reason: '解除消息不提醒' }
     if (alert.regions.length === 0) return { hit: false, reason: '本条电文未携带可判定的区域' }
@@ -228,4 +312,4 @@ function matchAlert(alert, cfg) {
 }
 
 
-export { regionInWatch, regionInWeatherWatch, missReason, matchAlert, matchPointAlert, distanceKm, validGeo, EARTH_RADIUS_KM }
+export { regionInWatch, regionInWeatherWatch, missReason, matchAlert, matchPointAlert, matchCnAreaAlert, cnPlaceParts, distanceKm, validGeo, EARTH_RADIUS_KM }

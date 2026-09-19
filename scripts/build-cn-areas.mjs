@@ -12,9 +12,16 @@
 // 与区划代码，但**没有坐标**——两者无共同主键可关联（一个用拼音罗马字、一个用六位数字码），
 // 硬凑的名字匹配会引入"名字看着对、位置错了几百公里"这类最难查的错误。
 //
-// **范围（0.5.0）**：只做**省 + 地级市**两级。县一级（约 2800）是 DESIGN 8.5 为**气象**源
-//（地质灾害预警粒度到县）准备的，0.5.2 才需要；现在建等于为不存在的功能维护一份无法验证的数据。
-// 这一条已记进 DESIGN。
+// **范围（0.5.0 / 0.5.2 复核）**：只做**省 + 地级市**两级。县一级（约 2900 条）是 DESIGN 8.5
+// 原本为**气象**源（地质灾害预警粒度到县）预留的，理由是"预警只给县名、需要向上找到所属地级市"。
+// **0.5.2 开工前实测推翻了这条假设**：nmc.cn 的预警标题形如「云南省丽江市宁蒗彝族自治县气象台
+// 发布地质灾害黄色预警信号」——机构名**自带完整层级链**，237 条实测里 225 条可直接定位到地级市，
+// 剩下 12 条是海南省直辖县 / 上海市辖区（本就不属于任何地级市，县表也救不了）。县表对匹配的
+// 边际价值接近零，而它要多背 2900 条无法验证的数据，所以**不建**。详见 DESIGN 8.5。
+//
+// 真正需要的是**别名**：显示名只挑一个候选，而气象台用的是自己的写法（实测 GeoNames 给
+// 「毕节地区」/「思茅市」这类**旧名**，而 nmc.cn 写「毕节市」/「普洱市」）。所以每条记录
+// 额外输出它在 GeoNames alternatenames 里的**全部中文候选**（aliases），只参与匹配、不进 UI。
 //
 // 已知取舍（写在这里，避免下一轮当成新发现）：
 //   · **行政区名的时效性**：GeoNames 的中文候选里可能同时有旧名与新名（实测 昌都 → 昌都地区 /
@@ -93,6 +100,35 @@ function pickChineseName(alternates, level) {
   return zh[0] || ''
 }
 
+/**
+ * 同一记录在 GeoNames 里的**全部**中文候选（去掉与显示名重复的、按层级优先级排序）。
+ *
+ * 与 pickChineseName 的分工：那个挑**一个**用于显示的名字；这个留下其余候选供**匹配**。
+ * 两者必须都来自 alternatenames 的同一批中文候选，否则"显示的名字"与"能匹配上的名字"
+ * 会脱节——用户看到「毕节地区」而气象台写「毕节市」，一条真实预警就被判成归属不明。
+ *
+ * 上限 MAX_ALIASES：候选数量是长尾的（少量条目有几十个别名）。匹配是**最长命中**，
+ * 砍掉的尾部候选都是短名，不会让"毕节市"这类完整建制名失效。
+ * @param {string} alternates
+ * @param {string} displayName pickChineseName 的结果（从别名里排除）
+ * @param {'province'|'city'} level
+ */
+function aliasesOf(alternates, displayName, level) {
+  const table = level === 'province' ? PROVINCE_RANK : CITY_RANK
+  const all = String(alternates || '').split(',').filter(isCjk).filter(isChineseName)
+  const seen = new Set()
+  const out = []
+  for (const n of all) {
+    if (n === displayName || n.length < 2 || seen.has(n)) continue
+    seen.add(n)
+    out.push(n)
+  }
+  out.sort((a, b) => (rankOf(b, table) - rankOf(a, table)) || (b.length - a.length))
+  return out.slice(0, MAX_ALIASES)
+}
+/** 别名上限：见 aliasesOf 的说明。 */
+const MAX_ALIASES = 8
+
 /** GeoNames 的 geoname 表（tab 分隔）→ 行数组。只留我们需要的列。 */
 function parseGeonames(text) {
   const out = []
@@ -160,12 +196,24 @@ function build() {
         const cname = pickChineseName(c.alternates, 'city')
         if (!cname) { problems.push('地级条目没有中文名：' + c.name + '（' + pname + '）'); continue }
         if (cname === pname) continue // 直辖市：ADM2 与 ADM1 同名，避免级联里出现两个"北京市"
-        cities.push({ name: cname, lat: round2(c.lat), lon: round2(c.lon) })
+        cities.push({
+          name: cname, aliases: aliasesOf(c.alternates, cname, 'city'),
+          lat: round2(c.lat), lon: round2(c.lon),
+        })
       }
-      // 直辖市 / 没有地级条目的省：把省自己作为一个可选项，否则级联到第二级是空的
-      if (cities.length === 0) cities.push({ name: pname, lat: round2(p.lat), lon: round2(p.lon) })
+      // 直辖市 / 没有地级条目的省：把省自己作为一个可选项，否则级联到第二级是空的。
+      // 别名同样取该省级条目的候选（"上海市"这一条的候选里有"上海"，浦东新区的预警要靠它归属）。
+      if (cities.length === 0) {
+        cities.push({
+          name: pname, aliases: aliasesOf(p.alternates, pname, 'province'),
+          lat: round2(p.lat), lon: round2(p.lon),
+        })
+      }
       cities.sort((a, b) => a.name.localeCompare(b.name, 'zh'))
-      provinces.push({ code: 'CN.' + p.admin1, name: pname, lat: round2(p.lat), lon: round2(p.lon), cities })
+      provinces.push({
+        code: 'CN.' + p.admin1, name: pname, aliases: aliasesOf(p.alternates, pname, 'province'),
+        lat: round2(p.lat), lon: round2(p.lon), cities,
+      })
     }
 
     // TW / HK / MO：GeoNames 里没有"省"这一层 → 各自合成一个省级条目。
@@ -179,13 +227,18 @@ function build() {
       for (const c of tw.adm2) {
         const cname = pickChineseName(c.alternates, 'city')
         if (!cname) { problems.push('台湾的 ADM2 没有中文名：' + c.name); continue }
-        cities.push({ name: cname, lat: round2(c.lat), lon: round2(c.lon) })
+        cities.push({
+          name: cname, aliases: aliasesOf(c.alternates, cname, 'city'),
+          lat: round2(c.lat), lon: round2(c.lon),
+        })
       }
       if (cities.length === 0) problems.push('台湾没有任何可用条目')
       else {
         cities.sort((a, b) => a.name.localeCompare(b.name, 'zh'))
         const c = centroid(cities)
-        provinces.push({ code: 'TW', name: '台湾', lat: c.lat, lon: c.lon, cities })
+        // 台湾在 GeoNames 里没有"省"这一层（条目是合成的），所以别名写在这里：
+        // 气象台的机构名会写「台湾省」或繁体「臺灣」，两种都要能匹配上。
+        provinces.push({ code: 'TW', name: '台湾', aliases: ['臺灣', '台灣'], lat: c.lat, lon: c.lon, cities })
       }
     }
 
@@ -200,8 +253,8 @@ function build() {
       if (pts.length === 0) { problems.push(terr.cc + ' 没有任何条目'); continue }
       const c = centroid(pts)
       provinces.push({
-        code: terr.cc, name: terr.name, lat: c.lat, lon: c.lon,
-        cities: [{ name: terr.name, lat: c.lat, lon: c.lon }],
+        code: terr.cc, name: terr.name, aliases: [], lat: c.lat, lon: c.lon,
+        cities: [{ name: terr.name, aliases: [], lat: c.lat, lon: c.lon }],
       })
     }
 
@@ -221,17 +274,27 @@ function centroid(pts) {
 const round2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : 0)
 
 // ---------------------------------------------------------------- 产物
+/** 别名字段：为空时整段省略，免得产物里塞满 `aliases: []`（读起来全是噪音）。 */
+function aliasField(list) {
+  return (Array.isArray(list) && list.length) ? ' aliases: ' + JSON.stringify(list) + ',' : ''
+}
+
 function render(provinces) {
   const lines = []
-  lines.push('// 中国行政区划表（省 → 地级市，带坐标）——由 scripts/build-cn-areas.mjs 生成，请勿直接编辑。')
+  lines.push('// 中国行政区划表（省 → 地级市，带坐标 + 匹配别名）——由 scripts/build-cn-areas.mjs 生成，请勿直接编辑。')
   lines.push('//')
   lines.push('// 来源：GeoNames（CC BY 4.0）的 CN / TW / HK / MO dump 中的 ADM1 / ADM2 条目。')
   lines.push('// 坐标是**行政区中心点**（不是市政府驻地），用于「关注点 + 半径」匹配足够；')
   lines.push('// 更精确的位置由设置页的「用我的位置」按钮提供。')
   lines.push('//')
-  lines.push('// 范围：省 / 特别行政区（34）+ 地级行政区（' + provinces.reduce((n, p) => n + p.cities.length, 0) + '）。')
-  lines.push('// **县一级不在本表内**：它是 DESIGN 8.5 为气象源（地质灾害预警粒度到县）准备的，')
-  lines.push('// 0.5.2 才需要；现在建等于为不存在的功能维护一份无法验证的数据。')
+  lines.push('// 范围：省 / 特别行政区（' + provinces.length + '）+ 地级行政区（' + provinces.reduce((n, p) => n + p.cities.length, 0) + '）。')
+  lines.push('// **县一级不在本表内**（0.5.2 的决策，理由与实测证据见 DESIGN 8.5）：气象源的预警标题')
+  lines.push('// 自带完整机构链（省 + 市 + 县），不需要靠县名向上反查地级市；2900 条无法验证的数据不背。')
+  lines.push('//')
+  lines.push('// aliases（0.5.2）：同一记录的**其余中文候选**，只参与匹配、不进 UI。')
+  lines.push('// 存在的理由：显示名只挑一个候选，而气象台写的是自己的建制名——实测 GeoNames 会挑到旧名')
+  lines.push('//（「毕节地区」「思茅市」），而 nmc.cn 写「毕节市」「普洱市」，只按显示名匹配会让一条真实')
+  lines.push('// 预警被判成"归属不明"。加入全部候选后，237 条实测样本的可定位率从 88% 升到 95%。')
   lines.push('//')
   lines.push('// 已知取舍（三条都只影响"精度"，不影响"位置对不对"）：')
   lines.push('//  ① 行政区的**中文名可能滞后**：GeoNames 里新旧名并存，脚本按「当前建制后缀」的优先级')
@@ -243,10 +306,11 @@ function render(provinces) {
   lines.push('')
   lines.push('export const CN_AREAS = [')
   for (const p of provinces) {
-    lines.push('  { code: ' + JSON.stringify(p.code) + ', name: ' + JSON.stringify(p.name) +
-      ', lat: ' + p.lat + ', lon: ' + p.lon + ', cities: [')
+    lines.push('  { code: ' + JSON.stringify(p.code) + ', name: ' + JSON.stringify(p.name) + ',' +
+      aliasField(p.aliases) + ' lat: ' + p.lat + ', lon: ' + p.lon + ', cities: [')
     for (const c of p.cities) {
-      lines.push('    { name: ' + JSON.stringify(c.name) + ', lat: ' + c.lat + ', lon: ' + c.lon + ' },')
+      lines.push('    { name: ' + JSON.stringify(c.name) + ',' + aliasField(c.aliases) +
+        ' lat: ' + c.lat + ', lon: ' + c.lon + ' },')
     }
     lines.push('  ] },')
   }

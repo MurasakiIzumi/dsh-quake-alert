@@ -1,0 +1,183 @@
+{
+  "msg": "success",
+  "code": 0,
+  "data": {
+    "page": {
+      "pageNo": 1,
+      "pageSize": 500,
+      "count": 241,
+      "totalPage": 1,
+      "list": [
+        {
+          "alertid": "31011541600000_20260919114511",
+          "issuetime": "2026/09/19 11:42",
+          "title": "上海市浦东新区气象台发布暴雨蓝色预警信号",
+          "url": "/publish/alarm/31011541600000_20260919114511.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0002004.png"
+        },
+        {
+          "alertid": "53058141600000_20260919110753",
+          "issuetime": "2026/09/19 11:06",
+          "title": "云南省保山市腾冲市气象台发布地质灾害黄色预警信号",
+          "url": "/publish/alarm/53058141600000_20260919110753.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0021003.png"
+        },
+        {
+          "alertid": "31015141600000_20260919110844",
+          "issuetime": "2026/09/19 11:06",
+          "title": "上海市崇明区气象台发布暴雨蓝色预警信号",
+          "url": "/publish/alarm/31015141600000_20260919110844.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0002004.png"
+        },
+        {
+          "alertid": "53058141600000_20260919104422",
+          "issuetime": "2026/09/19 10:42",
+          "title": "云南省保山市腾冲市气象台发布暴雨蓝色预警信号",
+          "url": "/publish/alarm/53058141600000_20260919104422.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0002004.png"
+        },
+        {
+          "alertid": "53312241600000_20260919101133",
+          "issuetime": "2026/09/19 10:10",
+          "title": "云南省德宏傣族景颇族自治州梁河县气象台发布暴雨蓝色预警信号",
+          "url": "/publish/alarm/53312241600000_20260919101133.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0002004.png"
+        },
+        {
+          "alertid": "53082241600000_20260919093849",
+          "issuetime": "2026/09/19 09:37",
+          "title": "云南省普洱市墨江哈尼族自治县气象台发布地质灾害黄色预警信号",
+          "url": "/publish/alarm/53082241600000_20260919093849.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0021003.png"
+        },
+        {
+          "alertid": "46902841600000_20260919075712",
+          "issuetime": "2026/09/19 07:57",
+          "title": "海南省陵水县气象台发布暴雨红色预警信号",
+          "url": "/publish/alarm/46902841600000_20260919075712.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0002001.png"
+        },
+        {
+          "alertid": "53052341600000_20260919070007",
+          "issuetime": "2026/09/19 06:58",
+          "title": "云南省保山市龙陵县气象台发布暴雨蓝色预警信号",
+          "url": "/publish/alarm/53052341600000_20260919070007.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0002004.png"
+        },
+        {
+          "alertid": "53072441600000_20260919030245",
+          "issuetime": "2026/09/19 03:01",
+          "title": "云南省丽江市宁蒗彝族自治县气象台发布地质灾害黄色预警信号",
+          "url": "/publish/alarm/53072441600000_20260919030245.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0021003.png"
+        },
+        {
+          "alertid": "53072441600000_20260919022832",
+          "issuetime": "2026/09/19 02:26",
+          "title": "云南省丽江市宁蒗彝族自治县气象台发布暴雨蓝色预警信号",
+          "url": "/publish/alarm/53072441600000_20260919022832.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0002004.png"
+        },
+        {
+          "alertid": "31011341600000_20260919010058",
+          "issuetime": "2026/09/19 00:57",
+          "title": "上海市宝山区气象台发布暴雨黄色预警信号",
+          "url": "/publish/alarm/31011341600000_20260919010058.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0002003.png"
+        },
+        {
+          "alertid": "65292641600000_20260918210857",
+          "issuetime": "2026/09/18 21:08",
+          "title": "新疆维吾尔自治区阿克苏地区拜城县气象台发布暴雨橙色预警信号",
+          "url": "/publish/alarm/65292641600000_20260918210857.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0002002.png"
+        },
+        {
+          "alertid": "65322741600000_20260918210224",
+          "issuetime": "2026/09/18 21:02",
+          "title": "新疆维吾尔自治区和田地区民丰县气象台发布暴雨橙色预警信号",
+          "url": "/publish/alarm/65322741600000_20260918210224.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0002002.png"
+        },
+        {
+          "alertid": "53062341600000_20260918195625",
+          "issuetime": "2026/09/18 19:54",
+          "title": "云南省昭通市盐津县气象台发布地质灾害黄色预警信号",
+          "url": "/publish/alarm/53062341600000_20260918195625.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0021003.png"
+        },
+        {
+          "alertid": "43102241600000_20260918183911",
+          "issuetime": "2026/09/18 18:38",
+          "title": "湖南省郴州市宜章县气象台发布暴雨橙色预警信号",
+          "url": "/publish/alarm/43102241600000_20260918183911.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0002002.png"
+        },
+        {
+          "alertid": "53082541600000_20260918174150",
+          "issuetime": "2026/09/18 17:40",
+          "title": "云南省普洱市镇沅彝族哈尼族拉祜族自治县气象台发布地质灾害黄色预警信号",
+          "url": "/publish/alarm/53082541600000_20260918174150.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0021003.png"
+        },
+        {
+          "alertid": "43102641600000_20260918172923",
+          "issuetime": "2026/09/18 17:29",
+          "title": "湖南省郴州市汝城县气象台发布暴雨黄色预警信号",
+          "url": "/publish/alarm/43102641600000_20260918172923.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0002003.png"
+        },
+        {
+          "alertid": "53310341600000_20260918171403",
+          "issuetime": "2026/09/18 17:11",
+          "title": "云南省德宏傣族景颇族自治州芒市气象台发布地质灾害黄色预警信号",
+          "url": "/publish/alarm/53310341600000_20260918171403.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0021003.png"
+        },
+        {
+          "alertid": "53052341600000_20260918164206",
+          "issuetime": "2026/09/18 16:40",
+          "title": "云南省保山市龙陵县气象台发布地质灾害黄色预警信号",
+          "url": "/publish/alarm/53052341600000_20260918164206.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0021003.png"
+        },
+        {
+          "alertid": "43102741600000_20260918153629",
+          "issuetime": "2026/09/18 15:36",
+          "title": "湖南省郴州市桂东县气象台发布暴雨橙色预警信号",
+          "url": "/publish/alarm/43102741600000_20260918153629.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0002002.png"
+        },
+        {
+          "alertid": "43022541600000_20260918151750",
+          "issuetime": "2026/09/18 15:17",
+          "title": "湖南省株洲市炎陵县气象台发布暴雨橙色预警信号",
+          "url": "/publish/alarm/43022541600000_20260918151750.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0002002.png"
+        },
+        {
+          "alertid": "43022541600000_20260918145856",
+          "issuetime": "2026/09/18 14:58",
+          "title": "湖南省株洲市炎陵县气象台发布暴雨黄色预警信号",
+          "url": "/publish/alarm/43022541600000_20260918145856.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0002003.png"
+        },
+        {
+          "alertid": "43102741600000_20260918144940",
+          "issuetime": "2026/09/18 14:48",
+          "title": "湖南省郴州市桂东县气象台发布暴雨黄色预警信号",
+          "url": "/publish/alarm/43102741600000_20260918144940.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0002003.png"
+        },
+        {
+          "alertid": "65322641600000_20260918134946",
+          "issuetime": "2026/09/18 13:49",
+          "title": "新疆维吾尔自治区和田地区于田县气象台发布暴雨黄色预警信号",
+          "url": "/publish/alarm/65322641600000_20260918134946.html",
+          "pic": "https://image.nmc.cn/assets/img/alarm/p0002003.png"
+        }
+      ]
+    }
+  },
+  "_note": "裁剪自 https://www.nmc.cn/rest/findAlarm?pageNo=1&pageSize=500：完整列表 241 条，本插件接的两类共 24 条"
+}

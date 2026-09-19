@@ -110,7 +110,7 @@ curl -v -m 20 https://www.data.jma.go.jp/developer/xml/feed/extra.xml 2>&1 | hea
 
 ### 3.1 现在就能用的：天然降级（分链路说明）
 
-五个源互不牵连，所以正确回答是**逐条说明**：
+八个源互不牵连，所以正确回答是**逐条说明**：
 
 - `api.p2pquake.net`（日本地震 / EEW / 海啸）不可达 → **日本的地震与 EEW 全没了**，这是最严重的一种；
   明确告知，不要淡化。
@@ -119,11 +119,19 @@ curl -v -m 20 https://www.data.jma.go.jp/developer/xml/feed/extra.xml 2>&1 | hea
 - `earthquake.usgs.gov` 不可达 → EMSC 的实时推送可能仍然正常（不同域名）；USGS 的**修订版**会缺。
 - `www.tsunami.gov` 不可达 → 全球海啸完全没有；日本海啸（P2PQuake）不受影响。
 - `www.seismicportal.eu` 不可达 → 全球地震只剩 USGS 目录（延迟更大，2 分钟一轮）。
+- `api.wolfx.jp`（中国大陆地震预警 / 速报）不可达 → 日本与全球链路不受影响；大陆的**两条**
+  源会同时断（它们共用同一个域名与中继）。这时可以先试设置页的**手动降级开关**（强制走 HTTP
+  轮询 `/feed?source=cenc_*`）；若轮询同样不通，就是该域名在当前网络不可达，不是插件能修的。
+- `www.nmc.cn`（中国大陆气象预警：暴雨 / 地质灾害）不可达 → 与上面所有链路都不牵连；
+  受影响的是这两类预警的播报与历史记录。它走的是普通 HTTPS 轮询，所以**没有可切换的降级通道**
+  （不像 Wolfx 那样有 WS → 轮询的出口），只能等网络恢复。
 
 ### 3.2 当前版本**没有**的降级：不要建议
 
-- **"把 WS 降级成 HTTP 轮询"开关**：设计已定（见 `DESIGN.md` 11.5），落地在 **0.5.0**。
-  0.4.1 没有这个开关。
+> 0.5.2 注：本节原先的第一条是「"把 WS 降级成 HTTP 轮询"开关尚未落地」。**它已在 0.5.0 落地**
+> ——四条自动降级判据 + 设置页的强制开关都是现成能力（见 3.1 与文末入口表）。不要再把它
+> 当成"没有的降级"介绍给用户。
+
 - **代理支持**：插件不读 `HTTPS_PROXY`，也不支持配置代理。Node 的原生 `fetch`（undici）
   **不读**环境变量里的代理设置，所以**不要**建议"设个环境变量就好"。
   可靠的做法只有**系统级 / 路由器级透明代理（TUN 模式）**——那超出插件范围，由用户自行决定。
@@ -195,6 +203,7 @@ AI 完成上述检查后，按这个结构回答：
 | `GET /dsh-quake-alert/feed?source=jma\|usgs\|noaa&since=tail&stats=1` | 读 Host 侧健康计数 | 0.4.1 可用 |
 | `GET /dsh-quake-alert/feed?source=cenc_eew\|cenc_eqlist&since=tail&stats=1` | 读大陆源的 WS 健康计数（`connected` / `messages` / `reconnects` / `lastError` / `dataTime` / `stale` / `ageSkipped`）。`stale` 由时钟推动，中继真停更时也会变 true | 0.5.0 可用 |
 | `GET /dsh-quake-alert/stream?source=cenc_eew\|cenc_eqlist` | 大陆源的 SSE 推送（`event: sync` 首帧给出游标、缓冲状态与数据健康；此后每 15 秒一帧 `event: status`，兼作 keep-alive 并承载"中继停更"） | 0.5.0 可用 |
+| `GET /dsh-quake-alert/feed?source=nmc_alarm&since=tail&stats=1` | 读大陆**气象**源（中央气象台 nmc.cn）的健康计数与条目载荷。载荷是 JSON：`alertid` / `title` / `issued` / `kind`（rainstorm / geology）/ `level`（red / orange / yellow / blue）/ `detail`（只有橙 / 红才有正文）。`stats.stale` 由**列表里最新一条的发布时间**推动（超 3 小时），`stats.errors` 增长说明列表请求失败或响应结构变了 | 0.5.2 可用 |
 | `GET /dsh-quake-alert/areas` | 验证本地回环 webServer 是否活着（返回市区町村表） | 可用 |
 | 设置页「源状态」区块 | 逐源状态、增量、失败、缺口、最近拉取 | 0.4.1 可用 |
 | 侧边栏状态点悬停 | 逐源明细（只列异常源） | 0.4.1 可用 |
@@ -209,3 +218,5 @@ AI 完成上述检查后，按这个结构回答：
 > 0.5.0 追加了大陆源的 `stats=1`（含 WS 专属字段）、SSE 的 `sync` / `status` 帧，以及仓库内的
 > `scripts/check-wolfx-live.mjs`。Client 侧的只读诊断快照（设置页「诊断」）与手动降级开关
 > （`config.cnTransport`）均已落地（见 `DESIGN.md` 11.3 / 11.5）。
+> 0.5.2 追加了大陆**气象**源（`source=nmc_alarm`）的 `stats=1`，以及仓库内的
+> `scripts/capture-nmc-fixtures.mjs`（重抓真实样本，用于确认"结构是否变了"）。

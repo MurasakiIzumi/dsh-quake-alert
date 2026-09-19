@@ -4252,10 +4252,302 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       // 还没选省份时，城市下拉只显示占位项 —— 不做成"猜一个默认省"是对的选择
       assert(has('（先选省份）'), '未选省份时城市下拉给出占位提示，而不是空的')
       assert(has('诊断') && has('生成诊断快照'), '诊断区块也在（同一页）')
+      // 0.5.2 的教训与 0.5.0 相同：新加的 UI 必须有渲染断言守着，否则一个拼错的 h(...) 会白屏
+      // 而没有任何断言会失败。这里同时确认两个灾种开关与那段"橙色才播报 / 没有解除标志"的说明。
+      assert(has('中国大陆气象灾害') && has('暴雨预警') && has('地质灾害预警'),
+        '大陆气象灾害的两个开关渲染出来了')
+      assert(has('橙色及以上') && has('没有「解除」标志'),
+        '设置页如实说明"橙色才播报"与"没有解除标志"（DESIGN 10.2 要求 UI 不得假装能处理）')
       T2.resetCityTable()
     }
   } catch (e) {
     assert(false, '0.5.0 设置页级联检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
+  }
+
+  // ==========================================================================
+  // 0.5.2：大陆气象源（nmc.cn）
+  // Host 侧：列表裁剪 / 详情门槛 / 正文提取；Client 侧：契约 / 行政区归属 / 层级匹配。
+  // 全部用 samples/nmc/ 的真实 fixture，不联网。
+  // ==========================================================================
+  try {
+    const nmc = await import(pathToFileURL(path.join(ROOT, 'lib', 'nmc-source.js')).href)
+    const { CN_AREAS } = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cn-areas.js')).href)
+    const samplePath = (n) => path.join(ROOT, 'samples', 'nmc', n)
+    const listSample = JSON.parse(fs.readFileSync(samplePath('alarm-list.json'), 'utf8'))
+    const fixtureItems = listSample.data.page.list
+    const detailOf = (n) => fs.readFileSync(samplePath(n), 'utf8')
+
+    console.log('== 0.5.2 Host：时间与图标编码 ==')
+    assert(nmc.nmcTimeToIso('2026/09/19 12:31') === '2026-09-19T12:31:00+08:00',
+      '北京时间裸串（斜杠、无秒）→ 带 +08:00 的 ISO（交给 Date.parse 会按本机时区解释，本机是 JST 时整差一小时）')
+    assert(nmc.nmcTimeToIso('2026-09-19 12:31:05') === '2026-09-19T12:31:05+08:00', '连字符 + 带秒的写法也认')
+    assert(nmc.nmcTimeToIso('') === '' && nmc.nmcTimeToIso('昨天') === '',
+      '认不出返回空串（不猜当前时间——那会让一条时间损坏的预警在每次重启时被当成"刚发布"重播）')
+    assert(nmc.nmcTimeMs('2026/09/19 12:31') === Date.parse('2026-09-19T12:31:00+08:00'), 'nmcTimeMs 与 ISO 一致')
+    {
+      const c = nmc.nmcCodesOf('https://image.nmc.cn/assets/img/alarm/p0021003.png')
+      assert(c && c.kindCode === 21 && c.levelCode === 3, '图标编码 p0021003 → 灾种 21（地质灾害）/ 等级 3（黄）')
+      assert(nmc.nmcCodesOf('') === null && nmc.nmcCodesOf('https://x/y.png') === null, '不成形的图标地址 → null（由调用方跳过该条）')
+    }
+
+    console.log('== 0.5.2 Host：列表解析与灾种裁剪 ==')
+    let parsed = null
+    let parseErr = null
+    try { parsed = nmc.parseNmcList(JSON.stringify(listSample)) } catch (e) { parseErr = e }
+    assert(parseErr === null, '真实列表样本能解析' + (parseErr ? '：' + parseErr.message : ''))
+    assert(parsed && parsed.length === fixtureItems.length, '裁剪后条数与样本一致（' + (parsed ? parsed.length : '-') + '）')
+    assert(parsed && parsed.every((e) => e.kind === 'rainstorm' || e.kind === 'geology'),
+      '只留暴雨 / 地质灾害——实测雷电+大风+高温占完整列表的 76%，原样转发会把历史刷满')
+    assert(parsed && parsed.every((e) => e.id && e.title && e.detailUrl && e.payload),
+      '每条都有 id / title / detailUrl / payload')
+    assert(parsed && parsed.every((e) => e.updated.indexOf('+08:00') > 0),
+      '每条都带可比较的发布时间（冷启动判据要用它）')
+    assert(parsed && parsed.every((e) => e.detailNeeded === (['red', 'orange'].indexOf(e.level) !== -1)),
+      '只有橙 / 红才需要拉详情（蓝 / 黄占样本的 94%）')
+    {
+      // 结构不符必须抛错：被拦截成 HTML 与"这一次没有预警"不能同形（DESIGN 4.5）
+      let e1 = null
+      try { nmc.parseNmcList('<html>拦截页</html>') } catch (e) { e1 = e }
+      assert(!!e1, '响应不是 JSON → 抛错（不是返回空数组）')
+      let e2 = null
+      try { nmc.parseNmcList('{"code":0}') } catch (e) { e2 = e }
+      assert(!!e2, '缺少 data.page.list → 抛错（上游改版要能被看见）')
+      const empty = nmc.parseNmcList('{"code":0,"data":{"page":{"list":[]}}}')
+      assert(Array.isArray(empty) && empty.length === 0, '真正的空列表 → 空数组（不是故障）')
+      // 单条坏（缺 pic / 缺 alertid）只跳过它，其余真实预警照常
+      const mixed = {
+        code: 0,
+        data: { page: { list: [
+          { alertid: 'x1', issuetime: '2026/09/19 12:31', title: '云南省丽江市气象台发布暴雨橙色预警信号', pic: 'https://i/a/p0002002.png' },
+          { alertid: '', issuetime: '2026/09/19 12:31', title: '缺 alertid', pic: 'https://i/a/p0002003.png' },
+          { alertid: 'x3', issuetime: '2026/09/19 12:31', title: '缺 pic', pic: '' },
+          { alertid: 'x4', issuetime: '2026/09/19 12:31', title: '不接的灾种', pic: 'https://i/a/p0012003.png' },
+        ] } },
+      }
+      const one = nmc.parseNmcList(JSON.stringify(mixed))
+      assert(one.length === 1 && one[0].id === 'x1', '单条缺字段 / 不接的灾种只跳过它，其余照常（逐条语义）')
+    }
+    {
+      // 详情页正文提取：用真实页面（46KB），验证的不是"正则能不能跑"，而是容器还在不在
+      const text = nmc.extractAlarmText(detailOf('detail-geology-yellow.html'))
+      assert(text.length > 20 && text.indexOf('<') === -1, '详情页 → 纯文本正文（' + text.length + ' 字）')
+      assert(text.indexOf('地质灾害') !== -1, '正文里含灾种说明（#alarmtext 还在原位置）')
+      assert(nmc.extractAlarmText('<html>没有正文容器</html>') === '', '没有 #alarmtext → 空串（文案少一段，不让整条预警作废）')
+    }
+    assert(Number.isFinite(nmc.nmcFeedTime(JSON.stringify(listSample))),
+      '上游数据时间取自列表里最新一条（stale 判定用它，而不是"我们收到多少条"）')
+
+    console.log('== 0.5.2 Host：详情门槛与冷启动窗口 ==')
+    {
+      // startedAt=0 → 所有样本条目都落在回看窗口内，断言与"样本里恰好有哪些时间"解耦
+      const calls = []
+      const detailByUrl = {}
+      for (const it of fixtureItems) detailByUrl[nmc.NMC_DETAIL_BASE + it.alertid + '.html'] = detailOf('detail-geology-yellow.html')
+      const src = nmc.createNmcSource({
+        now: () => Date.parse('2026-09-19T05:00:00Z'),
+        startedAt: 0,
+        fetchText: async (url) => {
+          calls.push(url)
+          if (url.indexOf('/rest/findAlarm') !== -1) return JSON.stringify(listSample)
+          return detailByUrl[url] !== undefined ? detailByUrl[url] : '<html></html>'
+        },
+        idleMs: 0,
+      })
+      await src.pollOnce()
+      const wantDetail = parsed.filter((e) => e.detailNeeded).length
+      const detailCalls = calls.filter((u) => u.indexOf('/rest/findAlarm') === -1).length
+      assert(detailCalls === wantDetail, '只为橙 / 红发详情请求（' + detailCalls + ' 次 = 样本里的橙红条数）')
+      const snap = src.snapshot(0, {})
+      assert(snap.entries.length === parsed.length, '全部条目都进了缓冲（蓝 / 黄也要入历史，只是不播报）')
+      const blue = snap.entries.find((e) => JSON.parse(e.xml).level === 'blue')
+      assert(blue && JSON.parse(blue.xml).detail === '' && blue.xml.indexOf('alertid') !== -1,
+        '蓝 / 黄条目的载荷是 JSON（没拉详情）——两种形态必须统一，否则总有一条路径没被断言覆盖')
+      const orange = snap.entries.find((e) => JSON.parse(e.xml).level === 'orange')
+      if (orange) assert(JSON.parse(orange.xml).detail.length > 0, '橙 / 红条目的载荷里带上了详情正文')
+      assert(src.stats().detailsFetched === wantDetail, 'detailsFetched 计数与请求数一致')
+    }
+    {
+      // 冷启动回看窗口：窗口外的旧条目只记已见、不产事件（否则每次重启都会重播 24 小时的历史）。
+      // 用**单条**构造而不是整个 fixture：样本横跨 24 小时，用样本会让"窗口外"这条断言
+      // 实际取决于"样本里恰好有哪些时间"，那是噪声不是验证。
+      const one = {
+        code: 0,
+        data: { page: { list: [{
+          alertid: 'old-1', issuetime: '2026/09/19 08:00',
+          title: '云南省丽江市气象台发布暴雨橙色预警信号', pic: 'https://i/a/p0002002.png',
+        }] } },
+      }
+      const t0 = Date.parse('2026-09-19T12:30:00+08:00')
+      const detailCalls = []
+      const src = nmc.createNmcSource({
+        now: () => t0,
+        startedAt: t0,
+        fetchText: async (url) => {
+          detailCalls.push(url)
+          return url.indexOf('/rest/findAlarm') !== -1 ? JSON.stringify(one) : '<html></html>'
+        },
+        idleMs: 0,
+      })
+      await src.pollOnce()
+      assert(src.snapshot(0, {}).entries.length === 0, '早于启动时刻 4.5 小时（回看窗口 30 分钟之外）的旧预警不入缓冲')
+      assert(detailCalls.length === 1, '就连详情也不会为它抓（历史只记已见）')
+      // 同一条数据、把启动时刻挪到它发布后 10 分钟 → 它就成了"启动前后不久发布的新预警"，照常处理
+      const t1 = Date.parse('2026-09-19T08:10:00+08:00')
+      const src2 = nmc.createNmcSource({
+        now: () => t1,
+        startedAt: t1,
+        fetchText: async (url) => (url.indexOf('/rest/findAlarm') !== -1 ? JSON.stringify(one) : '<html></html>'),
+        idleMs: 0,
+      })
+      await src2.pollOnce()
+      assert(src2.snapshot(0, {}).entries.length === 1, '同一批数据、启动时刻在它发布之后 10 分钟 → 照常处理（窗口边界真的在起作用）')
+    }
+    {
+      // 停更探针：源还在响应、但最新一条已经很旧 → stale。判据是**数据时间**，不是"收到几条"。
+      const staleList = JSON.parse(JSON.stringify(listSample))
+      for (const it of staleList.data.page.list) it.issuetime = '2026/09/19 08:00'
+      const mkSrc = (nowMs) => nmc.createNmcSource({
+        now: () => nowMs,
+        startedAt: 0,
+        fetchText: async (url) => (url.indexOf('/rest/findAlarm') !== -1 ? JSON.stringify(staleList) : '<html></html>'),
+        idleMs: 0,
+      })
+      const stale = mkSrc(Date.parse('2026-09-19T12:30:00+08:00'))
+      await stale.pollOnce()
+      assert(stale.stats().stale === true, '最新一条已过 4.5 小时（阈值 3 小时）→ 判上游停更')
+      const fresh = mkSrc(Date.parse('2026-09-19T09:30:00+08:00'))
+      await fresh.pollOnce()
+      assert(fresh.stats().stale === false, '同一批数据、时钟离它只有 1.5 小时 → 不判停更（阈值真的在起作用）')
+    }
+
+    console.log('== 0.5.2 Client：契约与解析 ==')
+    // 归属解析（cnArea）依赖行政区划表，所以先在契约段之前注入——否则下面那条
+    // "机构名 → 省 + 市"会因为表还没到位而失败（这正是它第一次跑出来的样子）
+    assert(T.setCnAreas(CN_AREAS), '注入中国行政区划表')
+    {
+      const mk = (o) => Object.assign({
+        alertid: '53072441600000_20260919030245',
+        title: '云南省丽江市宁蒗彝族自治县气象台发布地质灾害黄色预警信号',
+        issued: '2026-09-19T03:01:00+08:00',
+        kind: 'geology',
+        level: 'yellow',
+        detail: '',
+      }, o || {})
+      const res = T.parseNmcAlarmResult(mk())
+      assert(res.ok && res.alert.kind === 'weather' && res.alert.locator === 'area',
+        '气象源复用 kind=weather，但 locator=area（匹配走行政区层级，DESIGN 8.5）')
+      assert(res.ok && res.alert.severity === 'yellow', '黄色 → severity=yellow（忠实映射，不拔高）')
+      assert(res.ok && res.alert.cnArea.province === '云南省' && res.alert.cnArea.city === '丽江市',
+        '机构名 → 省 + 市（云南省 / 丽江市）')
+      assert(res.ok && res.alert.headline === '云南省丽江市宁蒗彝族自治县 · 地质灾害黄色预警',
+        '文案用发布地的原文，不用行政区表里的显示名（表里是 GeoNames 的旧名，用户对不上号）')
+      assert(res.ok && res.alert.cancelled === false, '没有"解除"形态 → cancelled 恒 false（不得假装能处理）')
+      assert(res.ok && res.alert.eventKey === 'nmc:53072441600000_20260919030245', '事件键取 alertid（升级会换新 ID，那是该再响一次的情形）')
+
+      const red = T.parseNmcAlarmResult(mk({ kind: 'rainstorm', level: 'red', title: '海南省陵水县气象台发布暴雨红色预警信号' }))
+      assert(red.ok && red.alert.severity === 'red' && red.alert.cnRank === 4, '红色 → severity=red（静默时段能穿透的只有它）')
+      assert(T.parseNmcAlarmResult(mk({ alertid: '' })).kind === 'schema', '缺 alertid → schema')
+      assert(T.parseNmcAlarmResult(mk({ kind: undefined })).kind === 'schema', '缺 kind → schema（Host 必须给）')
+      assert(T.parseNmcAlarmResult(mk({ kind: 'typhoon' })).kind === 'empty',
+        '不在范围内的灾种 → empty（向前兼容：Host 将来多转发灾种时旧 Client 静默跳过，而不是点亮蓝点）')
+      assert(T.parseNmcAlarmResult(mk({ level: 'purple' })).kind === 'schema', '认不出的等级 → schema')
+      assert(T.parseNmcAlarmResult(mk({ title: '某机构发布暴雨橙色预警信号' })).kind === 'schema',
+        'title 里解析不出机构名 → schema（匹配完全依赖它，宁可点亮蓝点也不播报给不知道发给谁的人）')
+      assert(T.parseNmcAlarmResult(mk({ issued: '' })).kind === 'schema', '缺发布时间 → schema')
+      assert(T.parseNmcAlarmResult(mk({ issued: '2200-01-01T00:00:00+08:00' })).kind === 'value', '时间在 100 年后 → value')
+      assert(T.parseNmcAlarmResult(null).kind === 'schema', '非对象 → schema')
+    }
+
+    console.log('== 0.5.2 Client：行政区归属（含别名） ==')
+    {
+      const cases = [
+        ['云南省丽江市宁蒗彝族自治县气象台', '云南省', '丽江市'],
+        // 别名：GeoNames 的显示名是「毕节地区」，气象台写「毕节市」
+        ['贵州省毕节市威宁县气象台', '贵州省', '毕节地区'],
+        // 别名：GeoNames 的显示名是「思茅市」（普洱的旧名），气象台写「普洱市」
+        ['云南省普洱市墨江哈尼族自治县气象台', '云南省', '思茅市'],
+        // 直辖市：省名之后没有市名，靠"该省下只有一个条目"补上
+        ['上海市浦东新区气象台', '上海市', '上海市'],
+        // 省直辖县：本来就不属于任何地级市 → city 为空，由调用方按省放行
+        ['海南省乐东县气象台', '海南省', ''],
+        // 省级台：同样只到省
+        ['辽宁省气象台', '辽宁省', ''],
+      ]
+      for (const [org, prov, city] of cases) {
+        const a = T.cnAreaOf(org)
+        assert(a && a.matched && a.province === prov && a.city === city,
+          org + ' → ' + (prov || '?') + ' / ' + (city || '（仅省）'))
+      }
+      // 误配防护：省别名里含「海南」，而青海省有个「海南藏族自治州」——全局搜索会把它归到海南省
+      const qh = T.cnAreaOf('青海省海南藏族自治州共和县气象台')
+      assert(qh && qh.province === '青海省', '「青海省海南藏族自治州」归青海省，不被省别名「海南」抢走（省名必须出现在开头）')
+      assert(T.cnAreaOf('') && T.cnAreaOf('').matched === false, '空机构名 → matched=false（省级兜底的输入）')
+      assert(T.cnAreaOf('中国气象局').matched === false, '认不出的机构 → matched=false（国家级预警按全国放行）')
+      assert(T.normAliases(['丽江市', '丽江', '丽', ''], '丽江市').join(',') === '丽江',
+        '别名规整：去掉与显示名重复的、单字的、空的')
+      assert(T.normAliases(['aa', 'bb', 'cc', 'dd', 'ee', 'ff', 'gg', 'hh', 'ii', 'jj'], 'zz').length === 8, '别名上限 8 条')
+      assert(T.normAliases(undefined, 'x').length === 0, '缺 aliases 字段（Host 未升级）→ 空数组，别名是增强而不是前提')
+    }
+
+    console.log('== 0.5.2 Client：行政区层级匹配 ==')
+    {
+      const place = { name: '云南省·丽江市', lat: 26.85, lon: 100.51, radiusKm: 100 }
+      const mkAlert = (o) => T.parseNmcAlarmResult(Object.assign({
+        alertid: 'a1',
+        title: '云南省丽江市宁蒗彝族自治县气象台发布暴雨橙色预警信号',
+        issued: '2026-09-19T03:01:00+08:00',
+        kind: 'rainstorm',
+        level: 'orange',
+        detail: '',
+      }, o || {})).alert
+      const cfgWith = (watch, disasters) => ({
+        watch: Object.assign({ prefectures: [], cities: [], places: [] }, watch || {}),
+        disasters: Object.assign({ earthquake: true, tsunami: true, weather: true, cnRainstorm: true, cnGeology: true }, disasters || {}),
+        thresholds: {},
+      })
+      let m = T.matchAlert(mkAlert(), cfgWith({ places: [place] }))
+      assert(m.hit === true && m.reason.indexOf('丽江市') !== -1, '命中关注的市（' + m.reason + '）')
+      m = T.matchAlert(mkAlert(), cfgWith({ places: [{ name: '云南省·昆明市', lat: 25, lon: 102.7, radiusKm: 100 }] }))
+      assert(m.hit === false && m.reason.indexOf('不在关注列表') !== -1, '同省不同市 → 不命中（' + m.reason + '）')
+      m = T.matchAlert(mkAlert(), cfgWith({ places: [{ name: '京都', lat: 35, lon: 135, radiusKm: 300 }] }))
+      assert(m.hit === false && m.reason.indexOf('未设置中国大陆关注点') !== -1,
+        '只有自由坐标点（无「省·市」名）→ 明确说明没配中国大陆关注点，不静默（' + m.reason + '）')
+      // 门槛：黄 / 蓝只入历史
+      m = T.matchAlert(mkAlert({ level: 'yellow' }), cfgWith({ places: [place] }))
+      assert(m.hit === false && m.reason.indexOf('未达橙色') !== -1, '黄色 → 不播报，reason 说清是等级不够（' + m.reason + '）')
+      m = T.matchAlert(mkAlert({ level: 'blue' }), cfgWith({ places: [place] }))
+      assert(m.hit === false, '蓝色 → 不播报')
+      m = T.matchAlert(mkAlert({ level: 'red' }), cfgWith({ places: [place] }))
+      assert(m.hit === true, '红色 → 播报')
+      // 两个灾种各有开关（DESIGN 8.4）
+      m = T.matchAlert(mkAlert(), cfgWith({ places: [place] }, { cnRainstorm: false }))
+      assert(m.hit === false && m.reason.indexOf('暴雨') !== -1, '关掉暴雨 → 不播报暴雨')
+      m = T.matchAlert(mkAlert(), cfgWith({ places: [place] }, { cnGeology: false }))
+      assert(m.hit === true, '关掉地质灾害不影响暴雨（两个开关互不牵连）')
+      const geo = mkAlert({ kind: 'geology', level: 'orange', title: '云南省丽江市气象台发布地质灾害橙色预警信号' })
+      m = T.matchAlert(geo, cfgWith({ places: [place] }, { cnGeology: false }))
+      assert(m.hit === false && m.reason.indexOf('地质灾害') !== -1, '关掉地质灾害 → 不播报地质灾害')
+      // 省级兜底：省直辖县（市归属为空）按省放行，宁可多报绝不漏报
+      const hainan = mkAlert({ level: 'red', kind: 'rainstorm', title: '海南省陵水县气象台发布暴雨红色预警信号' })
+      m = T.matchAlert(hainan, cfgWith({ places: [{ name: '海南省·海口市', lat: 20.03, lon: 110.34, radiusKm: 100 }] }))
+      assert(m.hit === true && m.reason.indexOf('仅能定位到 海南省') !== -1,
+        '省直辖县（归属只到省）→ 按省放行并说明原因（' + m.reason + '）')
+      m = T.matchAlert(hainan, cfgWith({ places: [{ name: '广东省·广州市', lat: 23.13, lon: 113.26, radiusKm: 100 }] }))
+      assert(m.hit === false, '同一条预警对另一个省的用户不命中（按省放行不等于全国放行）')
+      // 国家级 / 认不出省的机构 → 全国放行（这类实测为 0 条，但真出现时不该漏）
+      const national = mkAlert({ level: 'red', title: '中央气象台发布暴雨红色预警信号' })
+      m = T.matchAlert(national, cfgWith({ places: [{ name: '广东省·广州市', lat: 23.13, lon: 113.26, radiusKm: 100 }] }))
+      assert(m.hit === true && m.reason.indexOf('未能定位到省份') !== -1, '认不出省 → 按全国放行')
+      assert(T.cnPlaceParts('云南省·丽江市').city === '丽江市' && T.cnPlaceParts('京都') === null,
+        '「省·市」解析：自由坐标点不参与行政区匹配')
+    }
+
+    // 契约层：新源必须同时出现在 SOURCE_CONTRACTS 与设置页的源状态里
+    assert(T.SOURCE_CONTRACTS && T.SOURCE_CONTRACTS.nmc_alarm, 'nmc_alarm 有校验约定（字段契约 / 时区 / 新鲜度阈值）')
+    assert(T.SOURCE_CONTRACTS.nmc_alarm.staleAfterMs === 3 * 60 * 60 * 1000, '停更阈值 3 小时')
+    T.resetCityTable()
+  } catch (e) {
+    assert(false, '0.5.2 大陆气象源检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
   }
 
   console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败')

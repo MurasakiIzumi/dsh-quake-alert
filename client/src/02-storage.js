@@ -151,6 +151,10 @@ function normalizeCfg(input) {
       tsunami: boolOr(d.tsunami, DEFAULT_CFG.disasters.tsunami),
       // 0.3.0 新增。旧配置没有这个字段 → 取默认值 true，不会被清空或误关
       weather: boolOr(d.weather, DEFAULT_CFG.disasters.weather),
+      // 大陆气象灾害的两类（0.5.2）。同样必须在这里同步——漏掉就会被 applyCfg 静默丢弃，
+      // 表现是"用户关掉了暴雨提醒，刷新后又自己开了"。
+      cnRainstorm: boolOr(d.cnRainstorm, DEFAULT_CFG.disasters.cnRainstorm),
+      cnGeology: boolOr(d.cnGeology, DEFAULT_CFG.disasters.cnGeology),
     },
     thresholds: {
       quakeScale: numOr(t.quakeScale, DEFAULT_CFG.thresholds.quakeScale, 0, 70),
