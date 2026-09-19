@@ -15,7 +15,9 @@ import { setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, set
 import { parse, parseQuake, parseEew, parseTsunami, prefsOfArea, regionsOfArea, AREA_PREF, sevColor } from './05-parser.js'
 import { parseJma, buildTestTelegram, TEST_SCENARIOS, maxLevelIn as jmaMaxLevelIn, itemsOf as jmaItemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf } from './05b-jma-parser.js'
 import { parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage } from './05c-global-parsers.js'
-import { parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseNmcAlarmResult, failResult, SOURCE_CONTRACTS, noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth } from './05d-source-contracts.js'
+import { parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseNmcAlarmResult, failResult, SOURCE_CONTRACTS } from './05d-source-contracts.js'
+// 0.5.3：健康状态（机制层）与契约（约定层）现在是两个模块，调用方分别 import。
+import { noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, resetConnHealth, pruneHealth, noteFreshness, noteStale, loadHealth, SCHEMA_ESCALATE_COUNT, SCHEMA_ESCALATE_CONSECUTIVE, SCHEMA_ESCALATE_WINDOW_MS, HEALTH_TTL_MS } from './05g-source-health.js'
 import { parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of } from './05e-cn-parsers.js'
 import { parseNmcAlarm, orgOf, NMC_KIND_TEXT, NMC_LEVEL_TEXT, NMC_LEVEL_RANK, NMC_BROADCAST_MIN_RANK } from './05f-nmc-parsers.js'
 import { matchAlert, matchPointAlert, matchCnAreaAlert, cnPlaceParts, distanceKm, validGeo } from './06-matcher.js'
@@ -26,6 +28,7 @@ import { handleRaw, handleCancelled, handleAlert, updateWeatherHint, alertTitleO
 import { createWsClient, setActiveClient } from './12-websocket.js'
 import { createFeedClient, feedStatsOf, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL } from './12b-feed-poll.js'
 import { createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY } from './12c-cn-stream.js'
+import { createHealthProbe, PROBE_INTERVAL_MS, staleAfterOf } from './12d-health-probe.js'
 import { SettingsPanel, p2pCodeTextOf, kindColorOf, SOURCE_ORDER, SOURCE_LABELS, SOURCE_CODE_TEXT, statusMetaOf } from './13-ui-settings.js'
 import { StatusIndicator } from './14-ui-status.js'
 import { buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION } from './16-diag.js'
@@ -54,11 +57,23 @@ export function apply(ctx) {
     return () => { closeAlertChannel() }
   }, 'dsh-quake-alert: tab channel')
 
-  // 插件（重新）装载时清空上一代的源状态：clearSources 此前定义了却没有任何调用点，
+  // 插件（重新）装载时清空上一代的**连接**状态：clearSources 此前定义了却没有任何调用点，
   // 与它自己的注释"插件停用 / 重建时把源清空"不符，残留状态会把新会话显示成"已连接"。
-  // 数据健康记录同理：上一代留下的 schema-error 会把新会话一开始就显示成蓝点。
+  //
+  // 0.5.3 起**不再清数据健康**（原先是 resetSourceHealth）：那一层已经落了盘，而它表达的是
+  // "上游改了字段、要等插件更新"——这件事与用户刷新页面 / 重新启用插件无关，清掉等于让蓝点
+  // 永远没人看见（DESIGN 11.9 A）。连接与新鲜度才是"重启即无意义"的那两层。
   store.clearSources()
-  resetSourceHealth()
+  resetConnHealth()
+
+  // 健康探针（0.5.3 / DESIGN 11.9 B）：按**契约里的阈值**判定各源的数据新鲜度，并驱动蓝点的
+  // TTL 自愈。把它放进 effect 是因为它有一个定时器——定时器归 fiber，停用即回收。
+  // 阈值只从 SOURCE_CONTRACTS 来，这是机制层的全部意义（此前那个字段整个代码库里没人读）。
+  ctx.effect(() => {
+    const probe = createHealthProbe()
+    probe.start()
+    return () => { try { probe.stop() } catch (err) { /* 已停 */ } }
+  }, 'dsh-quake-alert: health probe')
 
   // 机器级持久化：settings 服务可用时，配置交给 DSH 的 settings.yaml（Host 侧同名 namespace）。
   // 服务缺席（或页面非 loopback）时保持 localStorage 路径，插件照常工作。
@@ -305,6 +320,10 @@ export function apply(ctx) {
 
 // 单测钩子（客户端宿主忽略额外导出）
 export const __test = {
+  // 0.5.3：机制层（统一健康记录 + 探针 + 升级阈值）
+  createHealthProbe, staleAfterOf, PROBE_INTERVAL_MS,
+  resetConnHealth, pruneHealth, noteFreshness, noteStale, loadHealth,
+  SCHEMA_ESCALATE_COUNT, SCHEMA_ESCALATE_CONSECUTIVE, SCHEMA_ESCALATE_WINDOW_MS, HEALTH_TTL_MS,
   // 0.5.2：大陆气象源（nmc.cn）—— 解析层 / 契约 / 行政区层级匹配
   parseNmcAlarm, orgOf, parseNmcAlarmResult, matchCnAreaAlert, cnPlaceParts, cnAreaOf, normAliases,
   NMC_KIND_TEXT, NMC_LEVEL_TEXT, NMC_LEVEL_RANK, NMC_BROADCAST_MIN_RANK,

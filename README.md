@@ -188,7 +188,8 @@ node scripts/build-client.mjs          # rebuild client/client.js after editing 
 node scripts/build-areas.mjs           # regenerate the river-area table from the JMA public zip (needs network)
 node scripts/check-imports.mjs         # cross-module reference check (missing import / undeclared assignment)
 node scripts/build-client.mjs --check  # fail when the committed bundle is stale
-node tests/sync-test.cjs               # regression tests (1039 assertions)
+node tests/sync-test.cjs               # regression tests (1070 assertions)
+node scripts/check-contracts.mjs       # contract check: pull the live sources through the parsers to catch upstream changes (--offline uses samples/, no network)
 ```
 
 > **Note**: `tests/sync-test.cjs` loads the **built** `client/client.js`. After editing `client/src/`
@@ -207,10 +208,11 @@ node tests/sync-test.cjs               # regression tests (1039 assertions)
 
 ## Changelog
 
-Current version **0.5.2** (mainland-China weather hazards: the National Meteorological Center's
-warning-signal list, covering heavy rain and geological disasters, announced from orange upwards
-and matched by administrative area rather than by radius; the regression suite went from 966 to
-1039 assertions). See [CHANGELOG.md](./CHANGELOG.md) for the details of each release.
+Current version **0.5.3** (the validation layer: per-source staleness thresholds, failure records
+and probe scheduling are now systematic — the thresholds written in the contracts actually take
+effect, the "data format error" blue dot survives a reload and self-heals after 24 hours; plus a
+contract-test script that catches an upstream change on the day it happens). The regression suite
+went from 1041 to 1070 assertions. See [CHANGELOG.md](./CHANGELOG.md) for the details of each release.
 
 ## Data sources
 

@@ -23,7 +23,7 @@
 // ============================================================================
 
 import { currentCfg, settingsSync } from './03-settings-bridge.js'
-import { sourceHealthOf } from './05d-source-contracts.js'
+import { sourceHealthOf } from './05g-source-health.js'
 import { store } from './07-store.js'
 import { feedStatsOf } from './12b-feed-poll.js'
 import { cnStreamRegistry } from './12c-cn-stream.js'

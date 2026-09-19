@@ -184,7 +184,8 @@ node scripts/build-client.mjs          # 改完 client/src 后重新打包（必
 node scripts/build-areas.mjs           # 从気象庁公开 zip 重新生成河川区域表（需联网）
 node scripts/check-imports.mjs         # 跨模块引用检查（漏 import / 未声明赋值）
 node scripts/build-client.mjs --check  # 校验已提交的 bundle 是否陈旧
-node tests/sync-test.cjs               # 回归测试（1039 项断言）
+node tests/sync-test.cjs               # 回归测试（1070 项断言）
+node scripts/check-contracts.mjs       # 契约检查：拉真实源过一遍解析器，看上游是否改版（--offline 用 samples/ 快照，不联网）
 ```
 
 > **注意**：`tests/sync-test.cjs` 加载的是**已构建的** `client/client.js`。改了 `client/src/`
@@ -203,8 +204,9 @@ node tests/sync-test.cjs               # 回归测试（1039 项断言）
 
 ## 更新记录
 
-当前版本 **0.5.2**（中国大陆气象灾害：接入中央气象台的预警信号列表，暴雨与地质灾害两类，
-橙色及以上才播报，匹配按行政区层级而非半径；回归断言 966 → 1039）。各版本的变更明细见
+当前版本 **0.5.3**（校验机制层：把每个源的停更阈值、失败记录与探针调度系统化——契约里写的
+阈值从此真的生效，数据格式异常的蓝点跨刷新存活并有 24 小时的自愈；另加了一个能在上游改版
+当天发现问题的契约测试脚本）。回归断言 1041 → 1070。各版本的变更明细见
 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## 数据来源

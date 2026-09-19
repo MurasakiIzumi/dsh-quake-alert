@@ -35,6 +35,11 @@ function loadClientEx(seedStorage, opts) {
     console,
     setTimeout: o.setTimeout || setTimeout,
     clearTimeout: o.clearTimeout || clearTimeout,
+    // 0.5.3：健康探针（12d）在 apply 里排一个 30 秒的 setInterval。沙箱此前没有这两个全局，
+    // 于是"插件能不能装载"这件事本身就会失败。默认给真实实现即可——探针的 timer 带 unref，
+    // 不会把测试进程钉住；要推进判定就用 createHealthProbe 注入假时钟直接调 tick()。
+    setInterval: o.setInterval || setInterval,
+    clearInterval: o.clearInterval || clearInterval,
   }
   // client.js 的 handleRaw 用裸 `document` 判断页面可见性（浏览器里就是 window.document），
   // 注入 document 的用例需要把它同时挂到沙箱全局，否则永远走「后台」分支。
@@ -2591,24 +2596,43 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(missing.length === 0, '七个源的校验约定齐全（必需字段 / 源时区 / 新鲜度阈值 / empty 判据）' +
       (missing.length ? '（缺：' + missing.join(',') + '）' : ''))
 
-    // ⑦ 健康状态：schema 失败进入 schema-error，empty 不进；恢复后回到 open；同一原因只记一次
+    // ⑦ 健康状态（0.5.3 机制化）：**单条失败不升级**、同因累计到阈值才进 schema-error、
+    //    坏法不重样时按连续失败升级；empty 不进（且清掉异常）；恢复后回到 open。
     t.store.clearSources()
     t.resetSourceHealth()
     t.noteParseResult('usgs', t.failResult('schema', '缺 properties.mag'))
-    assert(t.store.sources.usgs.status === 'schema-error', 'schema 失败 → 该源进入 schema-error')
-    assert(t.sourceHealthOf('usgs').detail.indexOf('mag') !== -1, '失败原因可读（供排查文档引用）')
+    assert(!t.store.sources.usgs || t.store.sources.usgs.status !== 'schema-error',
+      '单条坏数据**不**点亮蓝点（线上是逐条 entry，一条脏数据不该让整个源变蓝——0.5.3 修的就是这个）')
+    assert(t.sourceHealthOf('usgs').data && t.sourceHealthOf('usgs').data.count === 1,
+      '但失败被记进了计数（诊断里看得见，不是静默吞掉）')
+    for (let i = 1; i < t.SCHEMA_ESCALATE_COUNT; i++) {
+      t.noteParseResult('usgs', t.failResult('schema', '缺 properties.mag'))
+    }
+    assert(t.store.sources.usgs.status === 'schema-error',
+      '同一失败原因累计 ' + t.SCHEMA_ESCALATE_COUNT + ' 条 → 该源进入 schema-error')
+    assert(t.sourceHealthOf('usgs').data.detail.indexOf('mag') !== -1, '失败原因可读（供排查文档引用）')
     assert(t.effectiveStatusOf('usgs', 'open', '连接正常').status === 'schema-error',
       '连接正常也不该掩盖数据格式异常（蓝点优先于绿灯）')
     // 0.4.2：empty 证明"结构是好的"，要清掉 schema-error——JMA 的常态就是 empty，
     // 否则一条坏电文会让蓝点挂到下一次成功解析为止。
     t.noteParseResult('usgs', t.failResult('empty', 'features 为空'))
-    assert(t.sourceHealthOf('usgs') === null && t.store.sources.usgs.status === 'open',
+    assert(t.sourceHealthOf('usgs').data === null && t.store.sources.usgs.status === 'open',
       'empty 清掉 schema-error（不再是"不覆盖已有异常"）')
     assert(t.noteSourceSuccess('usgs') === false, '已经恢复的源再报成功 → 无动作（不会重复上报）')
     assert(t.effectiveStatusOf('p2pquake', 'open', 'ok').status === 'open', '没有异常记录的源不受影响')
+    // 第二条升级路径：**坏法不重样**（上游把结构改得面目全非时每条 detail 都不同，
+    // 按原因计数永远到不了阈值）→ 由连续失败数兜住
+    t.resetSourceHealth()
+    t.store.clearSources()
+    for (let i = 0; i < t.SCHEMA_ESCALATE_CONSECUTIVE; i++) {
+      t.noteParseResult('jma', t.failResult('schema', '第 ' + i + ' 种坏法'))
+    }
+    assert(t.store.sources.jma.status === 'schema-error',
+      '连续 ' + t.SCHEMA_ESCALATE_CONSECUTIVE + ' 条（原因各不相同）同样升级')
+    t.store.clearSources()
     t.noteParseResult('emsc', t.failResult('schema', '缺 data'))
     t.retrySource('emsc')
-    assert(t.sourceHealthOf('emsc') === null && t.store.sources.emsc.status === 'open', '手动重试清掉异常标记')
+    assert(t.sourceHealthOf('emsc').data === null && t.store.sources.emsc.status === 'open', '手动重试清掉异常标记')
     // ⑧ 0.4.1：Ｒ０６ 総合副本的「危険警報」与逐区级别（真实 live 电文的精简样本）
     const hyogo = fs.readFileSync(path.join(ROOT, 'samples', 'jma-vpww53-hyogo-danger-20260914.xml'), 'utf8')
     const h53 = t.parseJma(hyogo, { id: 'https://www.data.jma.go.jp/developer/xml/data/20260914113112_0_VPWW53_280000.xml' })
@@ -2758,13 +2782,16 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     try { gsMod2.parseNoaaEntries('<feed><entry>') } catch (err) { noaaThrew += 1 }
     assert(noaaThrew === 2, 'NOAA 事件列表：HTML 与被截断同样抛错（JMA 与 NOAA 此前都静默返回 []）')
 
-    // ⑨ empty 要清掉之前的 schema-error（否则一条坏电文会让蓝点挂到下一次成功解析为止）
+    // ⑨ empty 要清掉之前的 schema-error（否则一条坏电文会让蓝点挂到下一次成功解析为止）。
+    //    0.5.3 起"进入 schema-error"要多喂几条（单条不再升级）——这里用连续失败那条路径。
     t.store.clearSources()
     t.resetSourceHealth()
-    t.noteParseResult('jma', t.failResult('schema', '结构不符'))
+    for (let i = 0; i < t.SCHEMA_ESCALATE_CONSECUTIVE; i++) {
+      t.noteParseResult('jma', t.failResult('schema', '结构不符'))
+    }
     assert(t.store.sources.jma.status === 'schema-error', '（前置）进入 schema-error')
     t.noteParseResult('jma', t.failResult('empty', '天气预报，与本插件无关'))
-    assert(t.sourceHealthOf('jma') === null && t.store.sources.jma.status === 'open',
+    assert(t.sourceHealthOf('jma').data === null && t.store.sources.jma.status === 'open',
       'empty 证明结构是好的 → 清掉 schema-error（JMA 的常态就是 empty）')
 
     // ⑩ timeIsImpossible：时间**缺失**不是"客观不可能"（存在性由 schema 判据负责）
@@ -4548,6 +4575,142 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     T.resetCityTable()
   } catch (e) {
     assert(false, '0.5.2 大陆气象源检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
+  }
+
+  // ==========================================================================
+  // 0.5.3：校验机制（探针阈值 / 蓝点生命周期 / 升级阈值 / 字节预算 / Host-Client 一致）
+  //
+  // 这一节的断言刻意都在问「这个能力**真的生效**了吗」，而不是「函数被调用了」。
+  // 依据是 0.5.1 的复盘：那一轮抓出的 4 条缺陷（48 小时停更探针、SSE 的 stale 可见性、
+  // 速报的批量语义、pruneSeen）全都是"写了、注释齐、单测过、但能力不生效"的形态。
+  // ==========================================================================
+  try {
+    console.log('== 0.5.3 机制层：契约阈值真的生效了吗 ==')
+    {
+      let clock = 1_700_000_000_000
+      const pushes = []
+      T.resetSourceHealth()
+      const probe = T.createHealthProbe({ now: () => clock, pushSource: (id, p) => pushes.push([id, p]) })
+
+      // ① 阈值只从契约来：把契约里的数字改成 1 分钟，行为必须跟着变
+      const orig = T.SOURCE_CONTRACTS.usgs.staleAfterMs
+      try {
+        T.SOURCE_CONTRACTS.usgs.staleAfterMs = 60 * 1000
+        assert(T.staleAfterOf('usgs') === 60 * 1000, '探针阈值取自契约（不是某处硬编码）')
+        T.noteFreshness('usgs', clock)
+        probe.tick()
+        assert(T.sourceHealthOf('usgs').fresh.stale === false, '刚拿到数据 → 不停更')
+        clock += 61 * 1000
+        probe.tick()
+        assert(T.sourceHealthOf('usgs').fresh.stale === true,
+          '超过契约里的 1 分钟 → 判停更（改契约即改行为，这就是"声明生效"）')
+        assert(pushes.some((x) => x[0] === 'usgs' && x[1].status === 'stale'),
+          '停更时上报了 stale 状态（否则"数据已过期"永远不会出现在界面上）')
+        clock += 1000
+        T.noteFreshness('usgs', clock)
+        probe.tick()
+        assert(T.sourceHealthOf('usgs').fresh.stale === false, '数据恢复 → 停止更')
+      } finally {
+        T.SOURCE_CONTRACTS.usgs.staleAfterMs = orig
+      }
+      // ② staleAfterMs 为 null 的推送源不判（日本可能数小时没有有感地震，而连接是好的）
+      T.resetSourceHealth()
+      T.noteFreshness('p2pquake', clock)
+      clock += 10 * 60 * 60 * 1000
+      probe.tick()
+      assert(T.sourceHealthOf('p2pquake').fresh.stale === false,
+        '契约里 staleAfterMs=null 的推送源不判停更')
+      // ③ 从未上报过数据时间 → 不判（"不知道数据什么时候来的"不等于"数据是旧的"）
+      T.resetSourceHealth()
+      probe.tick()
+      assert(!T.sourceHealthOf('usgs') || T.sourceHealthOf('usgs').fresh.stale === false,
+        '从未上报数据时间 → 不判停更（不猜）')
+      assert(T.staleAfterOf('p2pquake') === 0 && T.staleAfterOf('emsc') === 0 && T.staleAfterOf('noaa') === 0,
+        '三个 staleAfterMs=null 的源（两个推送源 + NOAA 的"列表为空是常态"）归一成 0')
+      T.resetSourceHealth()
+    }
+
+    console.log('== 0.5.3 机制层：蓝点跨刷新存活 + TTL 自愈 ==')
+    {
+      const c1 = loadClientEx()
+      const t1 = c1.exports.__test
+      t1.resetSourceHealth()
+      for (let i = 0; i < t1.SCHEMA_ESCALATE_CONSECUTIVE; i++) {
+        t1.noteParseResult('usgs', t1.failResult('schema', '上游把 properties.mag 改名了'))
+      }
+      assert(t1.store.sources.usgs.status === 'schema-error', '（前置）蓝点点亮')
+      // 模拟「页面刷新」：同一个 localStorage，重新执行一遍 client bundle
+      const seed = {}
+      for (const [k, v] of c1.storage) seed[k] = v
+      const c2 = loadClientEx(seed)
+      const t2 = c2.exports.__test
+      assert(!t2.store.sources.usgs || t2.store.sources.usgs.status !== 'schema-error',
+        '刷新那一刻连接状态是空的（conn 层不持久化，重启即重新建连）')
+      assert(t2.sourceHealthOf('usgs').data && t2.sourceHealthOf('usgs').data.detail.indexOf('mag') !== -1,
+        '但数据健康记录还在 —— 蓝点跨刷新存活（DESIGN 11.6 第 7 条要的就是这个）')
+      assert(t2.effectiveStatusOf('usgs', 'open', '连接正常').status === 'schema-error',
+        '所以新会话一开始就如实显示为"数据格式异常"，而不是装作一切正常')
+      const healed = t2.pruneHealth(Date.now() + t2.HEALTH_TTL_MS + 1000)
+      assert(healed === 1 && t2.sourceHealthOf('usgs').data === null,
+        '24 小时没有复现 → 自动清除（TTL 自愈；cenc_eew 那种数天一条数据的源靠它恢复）')
+      const c3 = loadClientEx(seed)
+      const t3 = c3.exports.__test
+      assert(t3.loadHealth(Date.now() + t3.HEALTH_TTL_MS + 1000) === 0,
+        '过期的持久化记录在**读取**时也被丢弃（关掉浏览器三天再打开不该看到陈旧蓝点）')
+      t3.resetSourceHealth()
+    }
+
+    console.log('== 0.5.3：环缓冲字节预算（DESIGN 11.6 第 5 条） ==')
+    {
+      const pollerMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'poller.js')).href)
+      const payload = 'x'.repeat(400)
+      const mkPoller = (maxBufferBytes) => pollerMod.createPoller({
+        feedUrl: 'feed://x',
+        parseFeed: () => [
+          { id: 'a', updated: '2026-01-01T00:00:00Z', payload },
+          { id: 'b', updated: '2026-01-01T00:00:01Z', payload },
+          { id: 'c', updated: '2026-01-01T00:00:02Z', payload },
+        ],
+        singleStage: true,
+        maxEntries: 120,
+        maxBufferBytes,
+        now: () => 1_700_000_000_000,
+        startedAt: 0,
+        fetchText: async () => 'feed',
+        idleMs: 0,
+      })
+      const big = mkPoller(0)
+      await big.pollOnce()
+      assert(big.snapshot(0, {}).entries.length === 3, '不限字节时三条都留着（对照）')
+      const capped = mkPoller(1000)
+      await capped.pollOnce()
+      const snap = capped.snapshot(0, {})
+      assert(snap.entries.length === 2, '预算 1000 / 每条 400 → 只留 2 条')
+      assert(snap.entries[0].id === 'b', '留下的是较新的两条（从最旧的一端淘汰）')
+      assert(capped.stats().dropped === 1, '淘汰计入 dropped')
+      assert(snap.truncated === true, '于是 truncated 为真 —— Client 会知道中间有缺口，而不是以为补齐了')
+      assert(capped.stats().bufferBytes <= 1000, 'bufferBytes 不超预算（' + capped.stats().bufferBytes + '）')
+      const tiny = mkPoller(1)
+      await tiny.pollOnce()
+      assert(tiny.snapshot(0, {}).entries.length === 1,
+        '预算装不下一条时仍留一条（那一条正是用户要看的数据，全清掉等于"什么都没收到"）')
+    }
+
+    console.log('== 0.5.3：Host 与 Client 的停更阈值一致 ==')
+    {
+      const host = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
+      const nmcMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'nmc-source.js')).href)
+      assert(T.SOURCE_CONTRACTS.jma.staleAfterMs === host.JMA_STALE_MS,
+        'jma：契约 ' + T.SOURCE_CONTRACTS.jma.staleAfterMs + ' = Host 常量 ' + host.JMA_STALE_MS +
+        '（两个半边分开构建，一致性只能靠断言）')
+      assert(T.SOURCE_CONTRACTS.usgs.staleAfterMs === host.USGS_STALE_MS, 'usgs：契约与 Host 常量一致')
+      assert(T.SOURCE_CONTRACTS.nmc_alarm.staleAfterMs === nmcMod.NMC_STALE_MS, 'nmc_alarm：契约与 Host 常量一致')
+      assert(T.SCHEMA_ESCALATE_COUNT > 1 && T.SCHEMA_ESCALATE_CONSECUTIVE > T.SCHEMA_ESCALATE_COUNT,
+        '两条升级路径的阈值都 > 1（单条失败绝不升级 —— 这是 0.5.3 的前提）')
+      assert(T.HEALTH_TTL_MS === 24 * 60 * 60 * 1000, '蓝点 TTL 是 24 小时')
+    }
+  } catch (e) {
+    assert(false, '0.5.3 校验机制检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
   }
 
   console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败')

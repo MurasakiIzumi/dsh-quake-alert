@@ -1,0 +1,57 @@
+# dsh-quake-alert · CI 契约测试（0.5.3 / DESIGN 11.9 E）
+#
+# 这个 workflow 只做一件事：跑 `scripts/check-contracts.mjs`——把**真实的上游数据**交给
+# 解析器，看它还认不认。它是本插件**唯一能在上游改版当天发现问题**的入口：其余全部测试都
+# 基于 samples/ 的快照，而上游改版时快照不会变。
+#
+# ---------------------------------------------------------------------------
+# 为什么**不设**定时任务（schedule）
+#
+# DESIGN 11.9 E 决定：手动触发 + PR 两种，不设定时。理由是契约漂移**不是急事**——
+# 真发生时用户侧的蓝点（数据格式异常）已经能看见，而定时任务对一个个人项目意味着
+# 每天两次可能失败的邮件通知（上游网络抖动也会让它红），日积月累只会让人学会无视它。
+# 要开定时，加下面这一行即可，其余不用动：
+#
+#   schedule:
+#     - cron: '0 22 * * *'    # 每天 07:00 JST 一次
+#
+# ---------------------------------------------------------------------------
+# 为什么不跑 pnpm install
+#
+# 这个脚本零依赖：只用 Node 内置的 vm / fs / path / fetch / WebSocket。
+# 它读的是**已提交的** client/client.js（构建产物），所以不需要 rollup、不需要装包。
+# 「提交的 bundle 与 client/src/ 不同步」是另一件事，由 `node scripts/build-client.mjs --check`
+# 负责（那一步才需要依赖）——两件事分开，CI 红的时候失败原因才不会混在一起。
+
+name: contracts
+
+on:
+  # 手动触发：**唯一**会跑真实网络的场景（见下面的 if 判断）
+  workflow_dispatch:
+  # PR：只跑离线自检，不联网
+  pull_request:
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # 与 package.json 的 engines（>=22.19.0）对齐：全局 WebSocket 与 fetch 都要它
+          node-version: '22.19.0'
+
+      # 离线自检：只用 samples/ 的快照。样本是刻意挑的**有效数据**，所以这里**必须全通过**
+      # ——它验的是"脚本与解析器还接得上"，而不是上游。任何一条解析不出 Alert 都说明
+      # fixture 名写错 / 解析入口改了名 / client bundle 陈旧，这些都是 PR 该当场拦下的。
+      - name: 离线契约自检（不联网）
+        run: node scripts/check-contracts.mjs --offline
+
+      # 在线检查：真实拉取 8 个源。只在手动触发时跑——PR 上跑会让上游的网络抖动
+      # 变成与改动无关的红灯（而网络问题按设计不算失败，那这个 job 就没有信息量了）。
+      # 判定规则见脚本头部：只有 schema / value（= 上游改版）会让它失败，
+      # 网络不可达 / 超时只记 skip。
+      - name: 在线契约检查（真实拉取 8 个源）
+        if: github.event_name == 'workflow_dispatch'
+        run: node scripts/check-contracts.mjs

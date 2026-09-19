@@ -40,6 +40,10 @@ const SANDBOX_URL = 'wss://api-realtime-sandbox.p2pquake.net/v2/ws';
 const EMSC_WS_URL = 'wss://www.seismicportal.eu/standing_order/websocket';
 const STORAGE_KEY = 'dsh.quakeAlert.v1';
 const HISTORY_KEY = 'dsh.quakeAlert.history';
+// 源健康记录（0.5.3）：**唯一**一处跨刷新保留的运行时状态。它存的是"某个源的解析在什么时候
+// 因为什么失败了"——蓝点是"用户处理不了、等插件更新"的信号，刷新页面就消失会让它没人看见
+// （DESIGN 11.9 A）。连接状态不在这里：重启即重新建连，旧值没有意义。
+const HEALTH_KEY = 'dsh.quakeAlert.health';
 const HISTORY_MAX = 30; // 「最近预警」保留条数（内存与设置页展示）
 const MAX_WATCH_CITIES = 300; // 关注市区町村上限（防止配置与 UI 被撑爆）
 // 全球关注点上限：每个点带名字、经纬度与半径，几十个点就足够覆盖"我住哪、家人在哪"，
@@ -2622,12 +2626,15 @@ function parseNmcAlarm(raw) {
 // 内容：① 统一的解析返回形态 { ok, alert } | { ok:false, kind:'empty'|'schema'|'value', detail }
 //       ② 五个源各自填写的内容：必需字段清单与类型（schema 判据）、源时区、
 //          新鲜度阈值（stale 判据）、empty 判据
-//       ③ 与契约配套的健康状态记录（schema-error 的进入 / 恢复 / 手动重试）
+//       ③ 健康状态记录**已迁出**（0.5.3）：存 / 升级阈值 / 自愈在 05g-source-health.js，
+//          探针调度在 12d-health-probe.js。本文件从此只做"约定"这一层。
 // 依赖：01-constants、02-storage、05/05b/05c（各源的解析器）、07-store（状态上报）。
 //
 // 三层划分（DESIGN 11.1）：本文件是**约定层**——解析失败的返回形态与"UI 如何表示数据格式异常"，
-// 随源走，所以在 0.4.1 一次补齐已有 5 源；**机制层**（健康数据结构、探针调度、CI 契约测试）
-// 集中在 0.5.3，届时本文件的判定函数就是它的输入。
+// 随源走，所以 0.4.1 一次补齐已有 5 源、0.5.0 / 0.5.2 随新源同步制作。
+// **机制层**（健康数据结构、升级阈值、探针调度、CI 契约测试）已在 0.5.3 落地到
+// `05g-source-health.js`（存与升级 / 自愈）与 `12d-health-probe.js`（探针）；本文件末尾只
+// re-export 那几个入口，让调用方不必改 import 来源。
 //
 // 三类失败的语义与处置（DESIGN 4.5）：
 //   empty  —— 源正常，当前没有与本插件相关的数据。**不计失败**、不显示异常。
@@ -3125,74 +3132,309 @@ function parseNmcAlarmResult(raw) {
   return okResult(alert)
 }
 
-// ---------------------------------------------------------------- 健康状态
+// ---------------------------------------------------------------- 健康状态（机制层）
+// 0.5.3：实现已在 **05g-source-health.js**（DESIGN 11.1 的"约定层 / 机制层"划分），调用方
+// 直接从那里 import。**不要在本文件 re-export**：同一个导出名出现两个来源会被
+// `scripts/check-imports.mjs` 直接判失败（它就是这么设计的），而且会让"契约"与"机制"重新
+// 混在一起——那正是 0.5.3 要修的东西（见 DESIGN 11.9）。
+
+// ============================================================================
+// dsh-quake-alert · client/src/05g-source-health.js
+//
+// 作用：**机制层**——统一的源健康记录（0.5.3 / DESIGN 11.9）。
+// 内容：三层模型（conn / data / fresh）中 data 与 fresh 两层的存储与合成、
+//       逐条计数的升级阈值、蓝点的跨刷新持久化与 TTL 自愈。
+// 依赖：01-constants（HEALTH_KEY）、02-storage（loadJSON / saveJSON / isPlainObject）、
+//       07-store（把状态变化报给 UI）。
+//
+// 与 05d 的分工（DESIGN 11.1 的"约定层 / 机制层"）：
+//   · 05d 是**约定层**：每个源的字段契约、失败分类（empty / schema / value）怎么判。
+//   · 本文件是**机制层**：这些失败**怎么存、什么时候升级成源级异常、什么时候消失**。
+//   调用方（15-entry / 12b / 12c）仍然调 `noteParseResult` 等函数，但 import 的来源是这里。
+//
+// ---------------------------------------------------------------------------
+// 为什么需要它（三条证据，都不是推测；详见 DESIGN 11.9）
+//
+// ① 升级阈值：此前**每一条**解析失败都立即把源标成 schema-error（蓝点）+ 一个按了也没用的
+//    「重试」。而线上的形态是逐条 entry（Host 已把整表拆开），所以上游**一条**脏数据就会
+//    点亮蓝点。实测速报整表 50 条里坏 1〜2 条是常态（字段缺失），"整表全坏"才是几百条连坏。
+//    现在：同一失败原因在 10 分钟窗口内累计 ≥5 条、或连续失败 ≥10 条，才升级。
+// ② 蓝点的生命周期：升级后只靠"下一次成功解析"或 empty 分支清除。`cenc_eew` 实测数天才有
+//    一条数据，而它的 empty 判据（10 个字段全空）与 Host"无 ID 不转发"互斥 —— 于是一条判错的
+//    蓝点可以挂数天（DESIGN 11.7 第 2 条）。现在蓝点带 24 小时 TTL：不復现就自动清除并记一次
+//    自愈。**判据本身不改**（改了会引入别的误判），让生命周期来兜。
+// ③ 跨刷新：此前这份记录是纯内存的，页面刷新即丢（DESIGN 11.6 第 7 条）。现在 data 一层落盘，
+//    页面重载后蓝点仍在 —— 它表达的"要等插件更新"这件事与刷新页面无关。
+//
+// 明确不做：连接状态（conn）不持久化、也不在这里判定，它由各传输层上报（重启即重新建连，
+// 旧值没有意义）；新鲜度（fresh）只存"最后数据时间"，判定交给探针（12d），阈值只从契约来。
+// ============================================================================
+
+
 /**
- * 数据健康记录（sourceId → 最近一次解析失败）。
+ * 同一失败原因在窗口内累计这么多条 → 升级成源级蓝点。
  *
- * 与连接状态**分开保存**、由 effectiveStatusOf 合并：连接正常但数据格式变了是完全不同的一类
- * 故障（用户处理不了，只能等插件更新），DESIGN 把两者分成蓝 / 红两色就是为了让用户不去白折腾网络。
- * 「同一失败原因只记一次日志」也在这里实现——高频源（JMA 每分钟）否则会把控制台刷屏。
+ * 取 5 的依据：速报整表 50 条里坏 1〜2 条是常态（个别条目字段缺失），5 条以上同因更像是
+ * "上游改了一个字段名"这类真问题；而窗口取 10 分钟，与 `dedupe.windowMinutes` 同一量级，
+ * 让"同一轮里的连续坏条目"能被累计起来。
  */
+const SCHEMA_ESCALATE_COUNT = 5;
+const SCHEMA_ESCALATE_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * 连续失败这么多条（**不看原因**）→ 同样升级。
+ *
+ * 这条兜的是"坏法不重样"：上游把结构改得面目全非时，每条失败的原因字符串可能都不同
+ * （不同字段先被检查到），按原因计数永远到不了阈值。10 条这个量级对任何源都只有
+ * "结构性失败"才可能达到（正常波动不会连续 10 条全坏）。
+ */
+const SCHEMA_ESCALATE_CONSECUTIVE = 10;
+
+/**
+ * 蓝点的存活上限：超过它没有复现就自动清除（并记一次自愈）。
+ *
+ * 24 小时：足够长到"用户第二天打开还在"（那时插件更新可能已经发布），又足够短到不会让
+ * 一条判错的蓝点永久挂在界面上。稀疏源（`cenc_eew` 数天一条）正是靠它恢复。
+ */
+const HEALTH_TTL_MS = 24 * 60 * 60 * 1000;
+
+// ---------------------------------------------------------------- 存储
+/** 内存里的健康记录：id → { data, fresh, counters, consecutiveFail } */
 const health = new Map();
 
+function ensure(id) {
+  let r = health.get(id);
+  if (!r) {
+    r = {
+      data: null, // { errorKey, kind, detail, at, firstAt, count, escalated }
+      fresh: { dataTime: 0, stale: false, staleSince: 0 },
+      counters: { ok: 0, schema: 0, value: 0, empty: 0 },
+      consecutiveFail: 0,
+    };
+    health.set(id, r);
+  }
+  return r
+}
+
+/** 落盘。只写 data 一层（理由见文件头），没有异常的源不占空间。 */
+function persist() {
+  const out = {};
+  for (const [id, r] of health) {
+    if (!r.data) continue
+    const d = r.data;
+    out[id] = {
+      errorKey: d.errorKey, kind: d.kind, detail: d.detail,
+      at: d.at, firstAt: d.firstAt, escalated: d.escalated === true,
+    };
+  }
+  saveJSON(HEALTH_KEY, out);
+}
+
 /**
- * 记录一次解析结果。返回 true 表示"该源当前处于数据异常状态，调用方不应继续处理这条数据"。
- * empty 不算故障（源正常但没有与本插件相关的数据）。
+ * 从 localStorage 恢复（模块加载时自动调一次）。过期的直接丢掉——TTL 在**读取**时也要判，
+ * 否则关掉浏览器三天再打开会看到一个早已过期的蓝点。
+ * @returns {number} 恢复了几条
  */
-function noteParseResult(sourceId, res) {
+function loadHealth(now) {
+  const t = now === undefined ? Date.now() : now;
+  const raw = loadJSON(HEALTH_KEY, null);
+  if (!isPlainObject(raw)) return 0
+  let n = 0;
+  for (const id of Object.keys(raw)) {
+    const d = raw[id];
+    if (!isPlainObject(d)) continue
+    if (typeof d.errorKey !== 'string' || !d.errorKey) continue
+    if (!Number.isFinite(d.at) || t - d.at > HEALTH_TTL_MS) continue
+    const r = ensure(id);
+    r.data = {
+      errorKey: d.errorKey,
+      kind: typeof d.kind === 'string' ? d.kind : 'schema',
+      detail: typeof d.detail === 'string' ? d.detail : '',
+      at: d.at,
+      firstAt: Number.isFinite(d.firstAt) ? d.firstAt : d.at,
+      count: 1, // 计数不跨刷新累计：它是"这一轮里坏了多少条"，跨会话没有意义
+      escalated: d.escalated === true,
+    };
+    n += 1;
+  }
+  return n
+}
+
+// ---------------------------------------------------------------- 数据层（解析失败）
+/**
+ * 清掉 data 层（成功解析 / empty / TTL 自愈都走这里）。
+ * 只有**确实从异常恢复了**才上报——否则每条成功的数据都会触发一次设置页重渲。
+ */
+function clearData(sourceId, detail, t) {
+  const r = health.get(sourceId);
+  if (!r || !r.data) return false
+  const wasEscalated = r.data.escalated === true;
+  r.data = null;
+  r.consecutiveFail = 0;
+  persist();
+  if (wasEscalated) store.pushSource(sourceId, { status: 'open', detail });
+  return true
+}
+
+/**
+ * 记录一次解析结果。返回 true 表示"这条数据不可用，调用方不应继续处理它"
+ * —— 注意这与"是否点亮蓝点"**已经解耦**（0.5.3）：单条坏数据不该让整个源变蓝。
+ *
+ * empty 仍然算"结构是好的"（源正常地给出了这一条，只是与本插件无关），所以它会清掉蓝点
+ * ——这条语义沿用 0.4.2，JMA 的常态就是 empty。
+ */
+function noteParseResult(sourceId, res, now) {
   if (!res || res.ok) return false
-  if (res.kind === 'empty') {
-    // empty 表示"源正常地给出了这一条，只是与本插件无关"——它同样证明**结构是好的**，
-    // 所以要把之前可能留下的 schema-error 清掉。否则一条坏电文会让蓝点（+ 重试按钮）
-    // 挂几个小时甚至几天：JMA 的常态就是 empty（天气预报、只有注意報的电文）。
-    noteSourceSuccess(sourceId);
+  const t = now === undefined ? Date.now() : now;
+  const r = ensure(sourceId);
+  const kind = res.kind === 'value' ? 'value' : (res.kind === 'empty' ? 'empty' : 'schema');
+  if (kind === 'empty') {
+    r.counters.empty += 1;
+    clearData(sourceId, '数据格式已恢复正常');
     return false
   }
-  const key = res.kind + '|' + res.detail;
-  const prev = health.get(sourceId);
-  if (!prev || prev.errorKey !== key) {
-    health.set(sourceId, { errorKey: key, kind: res.kind, detail: res.detail, at: Date.now() });
-    try { console.warn('[dsh-quake-alert] ' + sourceId + ' 解析失败（' + res.kind + '）：' + res.detail); } catch (e) { /* 忽略 */ }
-    // 上报也放在这个分支里：源整体变坏时一轮可能有几十条 entry 都失败，
-    // 每条都 pushSource 会把设置页重渲几十次。"同一失败原因只记一次"要同时约束日志与上报。
-    store.pushSource(sourceId, { status: 'schema-error', detail: res.kind + '：' + res.detail });
+  r.counters[kind] += 1;
+  r.consecutiveFail += 1;
+  const key = kind + '|' + String(res.detail || '');
+  const prev = r.data;
+  const sameReason = !!prev && prev.errorKey === key && (t - prev.firstAt) <= SCHEMA_ESCALATE_WINDOW_MS;
+  const count = sameReason ? prev.count + 1 : 1;
+  const firstAt = sameReason ? prev.firstAt : t;
+  // 一旦升级就保持（同一条异常挂着的期间不该忽蓝忽绿）；它只由成功 / empty / TTL 清除。
+  const escalated = (prev && prev.escalated === true) ||
+    count >= SCHEMA_ESCALATE_COUNT ||
+    r.consecutiveFail >= SCHEMA_ESCALATE_CONSECUTIVE;
+  const wasEscalated = !!(prev && prev.escalated === true);
+  r.data = { errorKey: key, kind, detail: String(res.detail || ''), at: t, firstAt, count, escalated: !!escalated };
+  if (escalated && !wasEscalated) {
+    try {
+      console.warn('[dsh-quake-alert] ' + sourceId + ' 连续解析失败（' + kind + '，' + count + ' 条）：' + res.detail);
+    } catch (e) { /* 忽略 */ }
+    persist();
+    store.pushSource(sourceId, { status: 'schema-error', detail: kind + '：' + res.detail });
   }
   return true
 }
 
-/** 解析成功：从"数据格式异常"恢复时上报一次（连接层不会替我们清掉蓝点）。 */
-function noteSourceSuccess(sourceId) {
-  const prev = health.get(sourceId);
-  if (!prev || !prev.errorKey) return false
-  health.delete(sourceId);
-  store.pushSource(sourceId, { status: 'open', detail: '数据格式已恢复正常' });
-  return true
+/** 解析成功。清掉蓝点（若此前有），并累加成功计数。 */
+function noteSourceSuccess(sourceId, now) {
+  const r = ensure(sourceId);
+  r.counters.ok += 1;
+  return clearData(sourceId, '数据格式已恢复正常')
 }
 
-/** 手动重试（DESIGN 5.4：schema-error 状态下提供手动重试）。清掉异常标记，等下一批数据自证。 */
-function retrySource(sourceId) {
-  health.delete(sourceId);
-  store.pushSource(sourceId, { status: 'open', detail: '已手动重试，等待下一批数据' });
+/**
+ * TTL 自愈：由探针定期调用（模块自己不排定时器——定时器归 fiber，见 12d）。
+ * @returns {number} 这一轮自愈了几个源
+ */
+function pruneHealth(now) {
+  const t = now === undefined ? Date.now() : now;
+  let healed = 0;
+  for (const [id, r] of health) {
+    if (!r.data) continue
+    if (t - r.data.at <= HEALTH_TTL_MS) continue
+    const wasEscalated = r.data.escalated === true;
+    r.data = null;
+    r.consecutiveFail = 0;
+    healed += 1;
+    if (wasEscalated) {
+      store.pushSource(id, { status: 'open', detail: '数据格式异常已超过 24 小时没有复现，自动恢复' });
+    }
+  }
+  if (healed) persist();
+  return healed
 }
 
-/** 当前的数据健康快照（诊断 / 测试用）。 */
+// ---------------------------------------------------------------- 新鲜度层
+/**
+ * 上报"我最后一次拿到数据的时刻"（epoch 毫秒）。**判定不在这里**——阈值只从契约来，
+ * 由探针（12d）统一算。各源只管上报事实。
+ */
+function noteFreshness(sourceId, dataTime) {
+  const r = ensure(sourceId);
+  if (typeof dataTime === 'number' && Number.isFinite(dataTime) && dataTime > 0) r.fresh.dataTime = dataTime;
+  return Object.assign({}, r.fresh)
+}
+
+/** 探针写入判定结果。`staleSince` 只在"从未停更变成停更"的那一刻记一次。 */
+function noteStale(sourceId, stale, now) {
+  const t = now === undefined ? Date.now() : now;
+  const r = ensure(sourceId);
+  const next = stale === true;
+  if (next && !r.fresh.stale) r.fresh.staleSince = t;
+  if (!next) r.fresh.staleSince = 0;
+  r.fresh.stale = next;
+  return Object.assign({}, r.fresh)
+}
+
+// ---------------------------------------------------------------- 读取
+function snapshot(r) {
+  return {
+    data: r.data ? Object.assign({}, r.data) : null,
+    fresh: Object.assign({}, r.fresh),
+    counters: Object.assign({}, r.counters),
+    consecutiveFail: r.consecutiveFail,
+  }
+}
+
+/** 单个源的记录；传 undefined 取全部（诊断快照用）。沿用既有的 API 名，减少调用方改动面。 */
 function sourceHealthOf(sourceId) {
-  const h = sourceId === undefined ? null : health.get(sourceId);
-  if (sourceId !== undefined) return h ? Object.assign({}, h) : null
+  if (sourceId !== undefined) {
+    const r = health.get(sourceId);
+    return r ? snapshot(r) : null
+  }
   const all = {};
-  for (const [k, v] of health) all[k] = Object.assign({}, v);
+  for (const [k, v] of health) all[k] = snapshot(v);
   return all
 }
 
-/** 把"数据健康"叠加到连接状态上：数据格式异常优先显示（蓝），它才是用户真正处理不了的那个。 */
+/**
+ * 把"数据健康"叠加到连接状态上。优先级：数据格式异常（用户处理不了）> 停更（中灰）> 连接状态。
+ *
+ * 0.5.3 起**多了一层 stale**：此前 stale 由各源自己 pushSource 上报（12b 直通 Host 的
+ * `stats.stale`、12c 直通 SSE 的 status 帧），于是"谁在判"和"阈值在哪"都散着。现在统一由
+ * 探针按契约判定并写进这里，各源只上报 dataTime。
+ */
 function effectiveStatusOf(sourceId, connStatus, detail) {
-  const h = health.get(sourceId);
-  if (h && h.errorKey) return { status: 'schema-error', detail: h.kind + '：' + h.detail }
+  const r = health.get(sourceId);
+  if (r && r.data && r.data.escalated) return { status: 'schema-error', detail: r.data.kind + '：' + r.data.detail }
+  if (r && r.fresh && r.fresh.stale) return { status: 'stale', detail: detail || '上游数据已过期' }
   return { status: connStatus, detail }
 }
 
-/** 测试钩子：清空健康记录（模块级 Map 会跨用例存活）。 */
-function resetSourceHealth() { health.clear(); }
+/** 手动重试（DESIGN 5.4）：清掉异常标记，等下一批数据自证。 */
+function retrySource(sourceId, now) {
+  const r = ensure(sourceId);
+  r.data = null;
+  r.consecutiveFail = 0;
+  persist();
+  store.pushSource(sourceId, { status: 'open', detail: '已手动重试，等待下一批数据' });
+  return true
+}
+
+/**
+ * 插件（重新）装载时重置**连接与新鲜度**两层。
+ *
+ * 刻意**不清 data 层**：它已经从 localStorage 恢复，而"上游改了字段、等插件更新"这件事与
+ * 用户刷新页面 / 重新启用插件无关。0.5.2 之前这里清掉全部，理由是"避免上一代残留"——那是
+ * data 还不持久化时的判断，现在持久化本身就是设计（DESIGN 11.9 A）。
+ */
+function resetConnHealth() {
+  for (const [, r] of health) {
+    r.fresh = { dataTime: 0, stale: false, staleSince: 0 };
+    r.consecutiveFail = 0;
+  }
+}
+
+/** 测试钩子：清空全部（含持久化）——模块级 Map 会跨用例存活。 */
+function resetSourceHealth() {
+  health.clear();
+  saveJSON(HEALTH_KEY, {});
+}
+
+// 模块加载时恢复一次：页面刷新后蓝点仍在（loadClient 在测试里新建沙箱时会重新执行到这里，
+// 所以"跨刷新存活"这条能力可以被直接断言）。
+loadHealth();
 
 // ============================================================================
 // dsh-quake-alert · client/src/06-matcher.js
@@ -4708,6 +4950,16 @@ function createFeedClient(opts = {}) {
       return { applied: 0, cursor: cursorNow() }
     }
     if (data && data.stats) stats.host = data.stats;
+    // 0.5.3（DESIGN 11.9 B）：把**源自己的数据时间**交给探针，阈值由探针从契约里取——
+    // 这里只上报事实，不判 stale。
+    //
+    // 取 Host 的 `feedTime`（poller 从源自己的 <updated> / metadata.generated / 列表最新一条
+    // 算出来的），**不是**"我们收到条目的时刻"：JMA 可能几小时只有天气预报（没有与本插件相关
+    // 的电文），用收到时刻会把那种完全正常的情况判成停更。这也是契约里写明"判据不是我们收到
+    // 多少条"的原因。
+    if (data && data.stats && Number.isFinite(data.stats.feedTime) && data.stats.feedTime > 0) {
+      noteFreshness(id, data.stats.feedTime);
+    }
     // 首次对齐：Host 只回当前位置。不应用任何条目（即使响应里意外带了也不应用），
     // 否则"刷新页面"又变成了重放历史。
     if (data && data.tail === true) {
@@ -5189,6 +5441,10 @@ function createCnStream(opts = {}) {
       stats.frozen = !!(d && d.frozen);
       stats.stale = !!(d && d.stale);
       if (d && Number.isFinite(d.dataTime)) stats.dataTime = d.dataTime;
+      // 0.5.3（DESIGN 11.9 B）：同一个数据时间也交给探针——探针按**契约里的阈值**判，
+      // 而 Host 这一侧继续按它自己的常量判（它能分辨"中继停更"与"数据陈旧"，比我们准）。
+      // 两者用的是同一个数值，一致性由回归断言钉住，不靠"记得同时改两处"。
+      if (d && Number.isFinite(d.dataTime) && d.dataTime > 0) noteFreshness(id, d.dataTime);
       // Host 明确说重置过（它重启 / 时钟回拨）→ **允许游标回退**并对齐到它的当前位置，
       // 否则本地游标卡在比 Host 大的值上，每次重连都会 reset + 全量重放。
       // 没有补发条目 = 已经在线，游标就是 Host 的当前位置 → 同样对齐，
@@ -5225,6 +5481,7 @@ function createCnStream(opts = {}) {
       if (!d || typeof d !== 'object') return
       stats.stale = d.stale === true;
       if (Number.isFinite(d.dataTime)) stats.dataTime = d.dataTime;
+      if (Number.isFinite(d.dataTime) && d.dataTime > 0) noteFreshness(id, d.dataTime);
       // 有意**不更新** stats.lastAt：它表示"最近一条数据"，而状态帧每 15 秒必到一次，
       // 更新它会让设置页永远显示"最近数据 0 秒前"，恰好把"其实很久没有数据了"盖掉。
       // 状态里同时带上 sync 那一刻算出的 connected 告警（见 connWarn）：只报"已连接"会把
@@ -5356,6 +5613,130 @@ function createCnStream(opts = {}) {
  * 而这里恰恰要靠计数判断"是不是根本没在收数据"。
  */
 const cnStreamRegistry = {};
+
+// ============================================================================
+// dsh-quake-alert · client/src/12d-health-probe.js
+//
+// 作用：**机制层**的探针调度（0.5.3 / DESIGN 11.9 B）。
+// 内容：一个定时器，按 `SOURCE_CONTRACTS[*].staleAfterMs` 判定每个源的新鲜度，
+//       并顺带驱动蓝点的 TTL 自愈（`pruneHealth`）。
+// 依赖：05d（契约声明）、05g（健康记录）、07-store（状态上报）。
+//
+// ---------------------------------------------------------------------------
+// 这个文件存在的唯一理由：**让契约里的阈值从"文档"变成"开关"**。
+//
+// 0.5.3 开工前 grep 的结论：`SOURCE_CONTRACTS[*].staleAfterMs`（8 个源）在整个代码库里
+// **没有任何读取点**。阈值实际散在四处硬编码 —— lib/index.js 的 feedStaleMs（jma 3h /
+// usgs 30min / nmc 3h）、lib/wolfx-source.js 的 preset（速报 48h）、15-entry 传给
+// 12-websocket 的 staleAfterMs（emsc 3h）、以及 12c 对 SSE status 帧的直通。
+// 后果是：改契约里的数字，行为一点不变；而"某个源的阈值到底是多少"要翻四个文件才对得上。
+//
+// 现在：**探针是唯一的判定者，契约是唯一的阈值来源**。各源只上报"我最后一次拿到数据的
+// 时刻"（`noteFreshness`），不再自己判 stale。
+//
+// ---------------------------------------------------------------------------
+// 两个刻意的例外（不统一是为了不把事情做坏）
+//
+// ① **`staleAfterMs: null` 的源不判**（P2PQuake / EMSC / cenc_eew）。推送源没有"数据新鲜度"
+//    这个概念——日本可能数小时没有有感地震，而连接是好的。它们的活性由连接层负责
+//    （建连看门狗 + 半开检测），契约里的 `staleReason` 已经写明了这一点。探针读到 null 就跳过。
+// ② **Host 侧保留自己的常量**。`lib/` 不能 import Client 的契约（两个半边是分开构建的），
+//    所以 Host 的 `feedStaleMs` 仍然存在。两边的一致性由**回归断言**守护
+//    （`SOURCE_CONTRACTS[src].staleAfterMs === Host 侧同名常量`），而不是靠"记得同时改两处"。
+//
+// 明确不做：不在探针里发起任何外部请求。它只读已经存在的数据时间——源到不了的时候，
+// "最后数据时间"自然就旧了，不需要另外去探（多一条外部请求路径就多一个要处理的失败形态）。
+// ============================================================================
+
+
+/**
+ * 探针周期。30 秒的依据：最短的阈值是 USGS 的 30 分钟，30 秒的分辨率足以让"刚过期"和
+ * "过期半小时"在 UI 上的差别不值得更细；而它足够轻（只遍历 8 条记录、不发请求）。
+ */
+const PROBE_INTERVAL_MS = 30 * 1000;
+
+/**
+ * 取某个源的新鲜度阈值（毫秒）；`null` / 非正数表示"这条链路不判新鲜度"。
+ *
+ * 抽成导出函数是为了让"声明生效"这件事可以被直接断言：测试里把契约的字段改成 1 分钟，
+ * 探针的行为必须跟着变——那就证明阈值真的来自契约，而不是某个硬编码。
+ * @param {string} sourceId
+ */
+function staleAfterOf(sourceId) {
+  const c = SOURCE_CONTRACTS[sourceId];
+  if (!c) return 0
+  const v = c.staleAfterMs;
+  return (typeof v === 'number' && Number.isFinite(v) && v > 0) ? v : 0
+}
+
+/** 毫秒 → 中文可读（诊断与状态行用）。 */
+function humanMinutes(ms) {
+  const m = Math.round(ms / 60000);
+  if (m < 60) return m + ' 分钟'
+  return (Math.round(m / 6) / 10) + ' 小时'
+}
+
+/**
+ * 建一个探针。定时器与 pushSource 都可注入（测试用假时钟直接调 `tick()`，不等真实定时器）。
+ *
+ * @param {object} [opts]
+ * @param {() => number} [opts.now]
+ * @param {number} [opts.intervalMs]
+ * @param {(fn: Function, ms: number) => any} [opts.setTimer]
+ * @param {(t: any) => void} [opts.clearTimer]
+ * @param {(id: string, patch: object) => void} [opts.pushSource]
+ */
+function createHealthProbe(opts = {}) {
+  const now = opts.now || (() => Date.now());
+  const intervalMs = opts.intervalMs === undefined ? PROBE_INTERVAL_MS : opts.intervalMs;
+  const setTimer = opts.setTimer || ((fn, ms) => setInterval(fn, ms));
+  const clearTimer = opts.clearTimer || ((t) => clearInterval(t));
+  const push = opts.pushSource || ((id, patch) => store.pushSource(id, patch));
+  let timer = null;
+
+  /**
+   * 跑一轮：先做 TTL 自愈，再逐源判新鲜度。
+   *
+   * `dataTime` 从未上报（值为 0）时**不判**——"不知道数据什么时候来的"不等于"数据是旧的"，
+   * 把它当成 stale 会在每个源刚启动的头几秒里闪一片中灰。
+   */
+  function tick() {
+    const t = now();
+    pruneHealth(t);
+    for (const id of Object.keys(SOURCE_CONTRACTS)) {
+      const after = staleAfterOf(id);
+      if (after <= 0) continue
+      const rec = sourceHealthOf(id);
+      const dataTime = rec && rec.fresh && Number.isFinite(rec.fresh.dataTime) ? rec.fresh.dataTime : 0;
+      if (!(dataTime > 0)) continue
+      const stale = (t - dataTime) > after;
+      const was = !!(rec && rec.fresh && rec.fresh.stale);
+      noteStale(id, stale, t);
+      if (stale !== was) {
+        // 只在**翻转**的那一刻上报：状态没变时每次 push 都会让设置页与状态点重渲一遍。
+        // 恢复时给的是 `open`，而源自己的连接状态可能是 reconnecting —— 那由源的下一次
+        // 上报（feed 源 15 秒一轮）纠正。用 05g 记录的连接状态去猜反而会引入两份真相。
+        push(id, stale
+          ? { status: 'stale', detail: '上游数据已过期（超过 ' + humanMinutes(after) + ' 没有新数据）' }
+          : { status: 'open', detail: '数据已恢复更新' });
+      }
+    }
+    return t
+  }
+
+  return {
+    intervalMs,
+    tick,
+    start() {
+      if (timer) return
+      timer = setTimer(tick, intervalMs);
+      if (timer && typeof timer.unref === 'function') timer.unref();
+    },
+    stop() {
+      if (timer) { clearTimer(timer); timer = null; }
+    },
+  }
+}
 
 // ============================================================================
 // dsh-quake-alert · client/src/16-diag.js
@@ -6582,11 +6963,23 @@ function apply(ctx) {
     return () => { closeAlertChannel(); }
   }, 'dsh-quake-alert: tab channel');
 
-  // 插件（重新）装载时清空上一代的源状态：clearSources 此前定义了却没有任何调用点，
+  // 插件（重新）装载时清空上一代的**连接**状态：clearSources 此前定义了却没有任何调用点，
   // 与它自己的注释"插件停用 / 重建时把源清空"不符，残留状态会把新会话显示成"已连接"。
-  // 数据健康记录同理：上一代留下的 schema-error 会把新会话一开始就显示成蓝点。
+  //
+  // 0.5.3 起**不再清数据健康**（原先是 resetSourceHealth）：那一层已经落了盘，而它表达的是
+  // "上游改了字段、要等插件更新"——这件事与用户刷新页面 / 重新启用插件无关，清掉等于让蓝点
+  // 永远没人看见（DESIGN 11.9 A）。连接与新鲜度才是"重启即无意义"的那两层。
   store.clearSources();
-  resetSourceHealth();
+  resetConnHealth();
+
+  // 健康探针（0.5.3 / DESIGN 11.9 B）：按**契约里的阈值**判定各源的数据新鲜度，并驱动蓝点的
+  // TTL 自愈。把它放进 effect 是因为它有一个定时器——定时器归 fiber，停用即回收。
+  // 阈值只从 SOURCE_CONTRACTS 来，这是机制层的全部意义（此前那个字段整个代码库里没人读）。
+  ctx.effect(() => {
+    const probe = createHealthProbe();
+    probe.start();
+    return () => { try { probe.stop(); } catch (err) { /* 已停 */ } }
+  }, 'dsh-quake-alert: health probe');
 
   // 机器级持久化：settings 服务可用时，配置交给 DSH 的 settings.yaml（Host 侧同名 namespace）。
   // 服务缺席（或页面非 loopback）时保持 localStorage 路径，插件照常工作。
@@ -6833,6 +7226,10 @@ function apply(ctx) {
 
 // 单测钩子（客户端宿主忽略额外导出）
 const __test = {
+  // 0.5.3：机制层（统一健康记录 + 探针 + 升级阈值）
+  createHealthProbe, staleAfterOf, PROBE_INTERVAL_MS,
+  resetConnHealth, pruneHealth, noteFreshness, noteStale, loadHealth,
+  SCHEMA_ESCALATE_COUNT, SCHEMA_ESCALATE_CONSECUTIVE, SCHEMA_ESCALATE_WINDOW_MS, HEALTH_TTL_MS,
   // 0.5.2：大陆气象源（nmc.cn）—— 解析层 / 契约 / 行政区层级匹配
   parseNmcAlarm, orgOf, parseNmcAlarmResult, matchCnAreaAlert, cnPlaceParts, cnAreaOf, normAliases,
   NMC_KIND_TEXT, NMC_LEVEL_TEXT, NMC_LEVEL_RANK, NMC_BROADCAST_MIN_RANK,

@@ -22,7 +22,8 @@
 
 import { loadJSON, saveJSON } from './02-storage.js'
 import { currentCfg } from './03-settings-bridge.js'
-import { noteParseResult, effectiveStatusOf, failResult } from './05d-source-contracts.js'
+import { failResult } from './05d-source-contracts.js'
+import { noteParseResult, effectiveStatusOf, noteFreshness } from './05g-source-health.js'
 import { handleAlert } from './11-pipeline.js'
 import { createFeedClient, FEED_PATH, FEED_CURSOR_KEY } from './12b-feed-poll.js'
 
@@ -341,6 +342,10 @@ export function createCnStream(opts = {}) {
       stats.frozen = !!(d && d.frozen)
       stats.stale = !!(d && d.stale)
       if (d && Number.isFinite(d.dataTime)) stats.dataTime = d.dataTime
+      // 0.5.3（DESIGN 11.9 B）：同一个数据时间也交给探针——探针按**契约里的阈值**判，
+      // 而 Host 这一侧继续按它自己的常量判（它能分辨"中继停更"与"数据陈旧"，比我们准）。
+      // 两者用的是同一个数值，一致性由回归断言钉住，不靠"记得同时改两处"。
+      if (d && Number.isFinite(d.dataTime) && d.dataTime > 0) noteFreshness(id, d.dataTime)
       // Host 明确说重置过（它重启 / 时钟回拨）→ **允许游标回退**并对齐到它的当前位置，
       // 否则本地游标卡在比 Host 大的值上，每次重连都会 reset + 全量重放。
       // 没有补发条目 = 已经在线，游标就是 Host 的当前位置 → 同样对齐，
@@ -377,6 +382,7 @@ export function createCnStream(opts = {}) {
       if (!d || typeof d !== 'object') return
       stats.stale = d.stale === true
       if (Number.isFinite(d.dataTime)) stats.dataTime = d.dataTime
+      if (Number.isFinite(d.dataTime) && d.dataTime > 0) noteFreshness(id, d.dataTime)
       // 有意**不更新** stats.lastAt：它表示"最近一条数据"，而状态帧每 15 秒必到一次，
       // 更新它会让设置页永远显示"最近数据 0 秒前"，恰好把"其实很久没有数据了"盖掉。
       // 状态里同时带上 sync 那一刻算出的 connected 告警（见 connWarn）：只报"已连接"会把

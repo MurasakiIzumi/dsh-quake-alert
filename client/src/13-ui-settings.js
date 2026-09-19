@@ -23,7 +23,7 @@ import { handleAlert } from './11-pipeline.js'
 import { activeClient } from './12-websocket.js'
 import { feedStatsOf } from './12b-feed-poll.js'
 import { broadcastHistoryCleared } from './10-dedupe.js'
-import { retrySource } from './05d-source-contracts.js'
+import { retrySource } from './05g-source-health.js'
 
 // ---------- 设置页 UI ----------
 // 连接状态 → 颜色 / 文案（设置页与侧边栏状态指示共用）

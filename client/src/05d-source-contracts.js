@@ -5,12 +5,15 @@
 // 内容：① 统一的解析返回形态 { ok, alert } | { ok:false, kind:'empty'|'schema'|'value', detail }
 //       ② 五个源各自填写的内容：必需字段清单与类型（schema 判据）、源时区、
 //          新鲜度阈值（stale 判据）、empty 判据
-//       ③ 与契约配套的健康状态记录（schema-error 的进入 / 恢复 / 手动重试）
+//       ③ 健康状态记录**已迁出**（0.5.3）：存 / 升级阈值 / 自愈在 05g-source-health.js，
+//          探针调度在 12d-health-probe.js。本文件从此只做"约定"这一层。
 // 依赖：01-constants、02-storage、05/05b/05c（各源的解析器）、07-store（状态上报）。
 //
 // 三层划分（DESIGN 11.1）：本文件是**约定层**——解析失败的返回形态与"UI 如何表示数据格式异常"，
-// 随源走，所以在 0.4.1 一次补齐已有 5 源；**机制层**（健康数据结构、探针调度、CI 契约测试）
-// 集中在 0.5.3，届时本文件的判定函数就是它的输入。
+// 随源走，所以 0.4.1 一次补齐已有 5 源、0.5.0 / 0.5.2 随新源同步制作。
+// **机制层**（健康数据结构、升级阈值、探针调度、CI 契约测试）已在 0.5.3 落地到
+// `05g-source-health.js`（存与升级 / 自愈）与 `12d-health-probe.js`（探针）；本文件末尾只
+// re-export 那几个入口，让调用方不必改 import 来源。
 //
 // 三类失败的语义与处置（DESIGN 4.5）：
 //   empty  —— 源正常，当前没有与本插件相关的数据。**不计失败**、不显示异常。
@@ -26,7 +29,6 @@ import { parseJma } from './05b-jma-parser.js'
 import { parseEmsc, parseUsgsFeature, parseNoaaCap } from './05c-global-parsers.js'
 import { parseCencEew, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of } from './05e-cn-parsers.js'
 import { parseNmcAlarm, orgOf, NMC_KIND_TEXT, NMC_LEVEL_TEXT } from './05f-nmc-parsers.js'
-import { store } from './07-store.js'
 
 // ---------------------------------------------------------------- 返回形态
 /** 解析成功。 */
@@ -516,71 +518,8 @@ export function parseNmcAlarmResult(raw) {
   return okResult(alert)
 }
 
-// ---------------------------------------------------------------- 健康状态
-/**
- * 数据健康记录（sourceId → 最近一次解析失败）。
- *
- * 与连接状态**分开保存**、由 effectiveStatusOf 合并：连接正常但数据格式变了是完全不同的一类
- * 故障（用户处理不了，只能等插件更新），DESIGN 把两者分成蓝 / 红两色就是为了让用户不去白折腾网络。
- * 「同一失败原因只记一次日志」也在这里实现——高频源（JMA 每分钟）否则会把控制台刷屏。
- */
-const health = new Map()
-
-/**
- * 记录一次解析结果。返回 true 表示"该源当前处于数据异常状态，调用方不应继续处理这条数据"。
- * empty 不算故障（源正常但没有与本插件相关的数据）。
- */
-export function noteParseResult(sourceId, res) {
-  if (!res || res.ok) return false
-  if (res.kind === 'empty') {
-    // empty 表示"源正常地给出了这一条，只是与本插件无关"——它同样证明**结构是好的**，
-    // 所以要把之前可能留下的 schema-error 清掉。否则一条坏电文会让蓝点（+ 重试按钮）
-    // 挂几个小时甚至几天：JMA 的常态就是 empty（天气预报、只有注意報的电文）。
-    noteSourceSuccess(sourceId)
-    return false
-  }
-  const key = res.kind + '|' + res.detail
-  const prev = health.get(sourceId)
-  if (!prev || prev.errorKey !== key) {
-    health.set(sourceId, { errorKey: key, kind: res.kind, detail: res.detail, at: Date.now() })
-    try { console.warn('[dsh-quake-alert] ' + sourceId + ' 解析失败（' + res.kind + '）：' + res.detail) } catch (e) { /* 忽略 */ }
-    // 上报也放在这个分支里：源整体变坏时一轮可能有几十条 entry 都失败，
-    // 每条都 pushSource 会把设置页重渲几十次。"同一失败原因只记一次"要同时约束日志与上报。
-    store.pushSource(sourceId, { status: 'schema-error', detail: res.kind + '：' + res.detail })
-  }
-  return true
-}
-
-/** 解析成功：从"数据格式异常"恢复时上报一次（连接层不会替我们清掉蓝点）。 */
-export function noteSourceSuccess(sourceId) {
-  const prev = health.get(sourceId)
-  if (!prev || !prev.errorKey) return false
-  health.delete(sourceId)
-  store.pushSource(sourceId, { status: 'open', detail: '数据格式已恢复正常' })
-  return true
-}
-
-/** 手动重试（DESIGN 5.4：schema-error 状态下提供手动重试）。清掉异常标记，等下一批数据自证。 */
-export function retrySource(sourceId) {
-  health.delete(sourceId)
-  store.pushSource(sourceId, { status: 'open', detail: '已手动重试，等待下一批数据' })
-}
-
-/** 当前的数据健康快照（诊断 / 测试用）。 */
-export function sourceHealthOf(sourceId) {
-  const h = sourceId === undefined ? null : health.get(sourceId)
-  if (sourceId !== undefined) return h ? Object.assign({}, h) : null
-  const all = {}
-  for (const [k, v] of health) all[k] = Object.assign({}, v)
-  return all
-}
-
-/** 把"数据健康"叠加到连接状态上：数据格式异常优先显示（蓝），它才是用户真正处理不了的那个。 */
-export function effectiveStatusOf(sourceId, connStatus, detail) {
-  const h = health.get(sourceId)
-  if (h && h.errorKey) return { status: 'schema-error', detail: h.kind + '：' + h.detail }
-  return { status: connStatus, detail }
-}
-
-/** 测试钩子：清空健康记录（模块级 Map 会跨用例存活）。 */
-export function resetSourceHealth() { health.clear() }
+// ---------------------------------------------------------------- 健康状态（机制层）
+// 0.5.3：实现已在 **05g-source-health.js**（DESIGN 11.1 的"约定层 / 机制层"划分），调用方
+// 直接从那里 import。**不要在本文件 re-export**：同一个导出名出现两个来源会被
+// `scripts/check-imports.mjs` 直接判失败（它就是这么设计的），而且会让"契约"与"机制"重新
+// 混在一起——那正是 0.5.3 要修的东西（见 DESIGN 11.9）。

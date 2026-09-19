@@ -187,7 +187,8 @@ node scripts/build-client.mjs          # client/src を編集したら再バン�
 node scripts/build-areas.mjs           # 気象庁の公開 zip から河川区域表を再生成（要ネットワーク）
 node scripts/check-imports.mjs         # モジュール間参照チェック（import 漏れ・未宣言への代入）
 node scripts/build-client.mjs --check  # コミット済み bundle が古い場合に失敗
-node tests/sync-test.cjs               # 回帰テスト（1039 項目）
+node tests/sync-test.cjs               # 回帰テスト（1070 項目）
+node scripts/check-contracts.mjs       # 契約チェック：実ソースを取得してパーサーに通し、上流の改版を検出（--offline は samples/ のスナップショットを使用、ネットワーク不要）
 ```
 
 > **注意**：`tests/sync-test.cjs` が読み込むのは**ビルド済み**の `client/client.js` です。
@@ -207,9 +208,11 @@ node tests/sync-test.cjs               # 回帰テスト（1039 項目）
 
 ## 更新履歴
 
-現在のバージョンは **0.5.2** です（中国大陸の気象災害：中央気象台の警報信号一覧を接続し、大雨と
-地質災害の 2 種類をオレンジ以上のみ通知、判定は半径ではなく行政区の階層で行います。回帰アサーションは
-966 → 1039）。各バージョンの詳細は [CHANGELOG.md](./CHANGELOG.md) を参照してください。
+現在のバージョンは **0.5.3** です（検証の仕組み層：ソースごとの停更しきい値・失敗記録・
+プローブのスケジューリングを体系化しました——契約に書かれたしきい値が実際に効くようになり、
+データ形式異常の青ドットは再読み込みをまたいで残り、24 時間で自動的に解消されます。さらに、
+上流の改版を当日に検出できる契約テストスクリプトを追加しました）。回帰アサーションは
+1041 → 1070。各バージョンの詳細は [CHANGELOG.md](./CHANGELOG.md) を参照してください。
 
 ## データ出典
 

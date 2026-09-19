@@ -26,7 +26,8 @@
 import { loadJSON, saveJSON } from './02-storage.js'
 import { currentCfg } from './03-settings-bridge.js'
 import { parseJma } from './05b-jma-parser.js'
-import { parseJmaResult, noteParseResult, noteSourceSuccess, effectiveStatusOf } from './05d-source-contracts.js'
+import { parseJmaResult } from './05d-source-contracts.js'
+import { noteParseResult, noteSourceSuccess, effectiveStatusOf, noteFreshness } from './05g-source-health.js'
 import { handleAlert } from './11-pipeline.js'
 
 /** Host 侧的电文增量路由（与 lib/index.js 的 FEED_PATH 对应）。 */
@@ -204,6 +205,16 @@ export function createFeedClient(opts = {}) {
       return { applied: 0, cursor: cursorNow() }
     }
     if (data && data.stats) stats.host = data.stats
+    // 0.5.3（DESIGN 11.9 B）：把**源自己的数据时间**交给探针，阈值由探针从契约里取——
+    // 这里只上报事实，不判 stale。
+    //
+    // 取 Host 的 `feedTime`（poller 从源自己的 <updated> / metadata.generated / 列表最新一条
+    // 算出来的），**不是**"我们收到条目的时刻"：JMA 可能几小时只有天气预报（没有与本插件相关
+    // 的电文），用收到时刻会把那种完全正常的情况判成停更。这也是契约里写明"判据不是我们收到
+    // 多少条"的原因。
+    if (data && data.stats && Number.isFinite(data.stats.feedTime) && data.stats.feedTime > 0) {
+      noteFreshness(id, data.stats.feedTime)
+    }
     // 首次对齐：Host 只回当前位置。不应用任何条目（即使响应里意外带了也不应用），
     // 否则"刷新页面"又变成了重放历史。
     if (data && data.tail === true) {
