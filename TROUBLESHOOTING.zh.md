@@ -193,12 +193,19 @@ AI 完成上述检查后，按这个结构回答：
 | 入口 | 用途 | 状态 |
 |---|---|---|
 | `GET /dsh-quake-alert/feed?source=jma\|usgs\|noaa&since=tail&stats=1` | 读 Host 侧健康计数 | 0.4.1 可用 |
+| `GET /dsh-quake-alert/feed?source=cenc_eew\|cenc_eqlist&since=tail&stats=1` | 读大陆源的 WS 健康计数（`connected` / `messages` / `reconnects` / `lastError` / `dataTime` / `stale` / `ageSkipped`） | 0.5.0 可用 |
+| `GET /dsh-quake-alert/stream?source=cenc_eew\|cenc_eqlist` | 大陆源的 SSE 推送（`event: sync` 首帧给出游标与缓冲状态） | 0.5.0 可用 |
 | `GET /dsh-quake-alert/areas` | 验证本地回环 webServer 是否活着（返回市区町村表） | 可用 |
 | 设置页「源状态」区块 | 逐源状态、增量、失败、缺口、最近拉取 | 0.4.1 可用 |
 | 侧边栏状态点悬停 | 逐源明细（只列异常源） | 0.4.1 可用 |
+| `node scripts/check-wolfx-live.mjs` | 直接连 Wolfx 复验：建连 / query 指令 / 数据新旧，并按 DESIGN 11.5 的类别给出结论 | 0.5.0 可用，**仅仓库内**（`scripts/` 不入发行包） |
+| `node scripts/check-cn-e2e.mjs` | Host↔Client 端到端复验：真实 Wolfx → 真实 HTTP SSE → Client 契约 | 0.5.0 可用，**仅仓库内**，需能连上 Wolfx |
+| 设置页「源状态」里的大陆源行 | 显示**当前链路模式**（SSE 推送 / 已降级为轮询 / 已关闭）与收到、失败、降级次数 | 0.5.0 可用 |
 | Client 侧可读诊断快照（如 `feedStatsOf` 的导出入口） | 供 AI 直接读浏览器状态 | **0.5.0 补齐** |
-| WS → HTTP 轮询降级开关 | 中间设备重置 WS 时的降级路径 | **0.5.0 补齐** |
+| WS → HTTP 轮询降级开关 | 中间设备重置 WS 时的降级路径 | Host 侧**已可用**（`/feed?source=cenc_*`）；Client **已自动降级**（EventSource 不可用 / 连续拿不到首帧 / 连上不推流）；手动强制开关 **0.5.0 补齐** |
 | 插件内代理支持 | 需要走代理的网络 | **0.5.x 补齐** |
 
-> 文档的可执行性依赖诊断入口。0.4.1 已落地 Host 侧的 `stats=1` 与 UI 上的源状态；
-> 更细的 Client 侧诊断快照与降级开关在 0.5.0 补齐（见 `DESIGN.md` 11.3 / 11.5）。
+> 文档的可执行性依赖诊断入口。0.4.1 落地了 Host 侧的 `stats=1` 与 UI 上的源状态；
+> 0.5.0 追加了大陆源的 `stats=1`（含 WS 专属字段）、SSE 的 `sync` 首帧，以及仓库内的
+> `scripts/check-wolfx-live.mjs`。更细的 Client 侧诊断快照与降级**开关**仍在 0.5.0 内补齐
+> （见 `DESIGN.md` 11.3 / 11.5）。

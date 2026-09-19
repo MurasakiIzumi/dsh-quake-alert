@@ -8,10 +8,12 @@
 // 约定：所有写入都经 applyCfg，保证内存/镜像/Host 三处一致。
 // ============================================================================
 
-import { h, useState, useEffect, useRef, PREFECTURES, SCALE_OPTIONS, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, HISTORY_MAX, HISTORY_KEY, MAX_WATCH_CITIES, MAX_WATCH_PLACES, formatIssuedLocal } from './01-constants.js'
+import { h, useState, useEffect, useRef, PREFECTURES, SCALE_OPTIONS, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, CN_REPORT_MAG_OPTIONS, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, HISTORY_MAX, HISTORY_KEY, MAX_WATCH_CITIES, MAX_WATCH_PLACES, formatIssuedLocal } from './01-constants.js'
 import { saveJSON, own } from './02-storage.js'
 import { currentCfg, applyCfg, settingsSync } from './03-settings-bridge.js'
-import { citiesOfPref, cityTableState, loadCityTable } from './04-city-table.js'
+import { citiesOfPref, cityTableState, loadCityTable, cnProvinces, cnCitiesOf, cnPlaceOf } from './04-city-table.js'
+import { cnStreamRegistry } from './12c-cn-stream.js'
+import { copyDiagSnapshot } from './16-diag.js'
 import { parseJma, buildTestTelegram, TEST_SCENARIOS } from './05b-jma-parser.js'
 import { TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage } from './05c-global-parsers.js'
 import { store } from './07-store.js'
@@ -52,8 +54,11 @@ function settingsSyncLabel() {
 // 历史条目「类型」行显示的 P2PQuake code。气象电文不在此表里（它不是 P2PQuake 来源），
 // 索引一律经 own()，避免外部数据里的 'constructor' 之类的键命中原型链。
 const P2P_KIND_CODE = { quake: 551, eew: 556, tsunami: 552 }
-/** alert.code → 来源标注（全球源与 JMA 电文没有 P2PQuake 的 code）。 */
-const SOURCE_CODE_TEXT = { emsc: 'EMSC', usgs: 'USGS', noaa: 'NOAA CAP', jma: 'JMA 电文' }
+/** alert.code → 来源标注（全球源、JMA 电文与大陆源没有 P2PQuake 的 code）。 */
+const SOURCE_CODE_TEXT = {
+  emsc: 'EMSC', usgs: 'USGS', noaa: 'NOAA CAP', jma: 'JMA 电文',
+  cenc_eew: 'CENC 预警', cenc_eqlist: 'CENC 速报',
+}
 /**
  * 历史条目「类型」行的来源标注。
  *
@@ -72,6 +77,7 @@ function p2pCodeTextOf(kind, code, id) {
   if (idStr.indexOf('emsc:') === 0) return 'EMSC'
   if (idStr.indexOf('usgs:') === 0) return 'USGS'
   if (idStr.indexOf('noaa:') === 0) return 'NOAA CAP'
+  if (idStr.indexOf('cenc:') === 0) return 'CENC 大陆'
   const c = own(P2P_KIND_CODE, kind)
   if (c) return 'code ' + c
   return kind === 'weather' ? 'JMA 电文' : '—'
@@ -103,11 +109,22 @@ const s = {
 const SOURCE_LABELS = {
   p2pquake: 'P2PQuake（日本地震 / EEW / 海啸，实时推送）',
   emsc: 'EMSC（全球地震，实时推送）',
+  cenc_eew: '大陆地震预警（CENC，SSE 推送）',
+  cenc_eqlist: '大陆地震速报（CENC，SSE 推送）',
   jma: '気象庁（气象灾害，Host 轮询）',
   usgs: 'USGS（全球地震目录，Host 轮询）',
   noaa: 'NOAA（海啸 CAP，Host 轮询）',
 }
-
+/**
+ * 源状态区块里的源顺序与分组。**一处维护**：此前同样的列表在三个地方各写一遍
+ * （状态行、增量计数行、重试按钮），加一个源要改三处——漏掉任何一处就变成
+ * "某个源坏了但界面上看不见"，而"让失败可见"正是这个区块存在的全部理由。
+ */
+const SOURCE_ORDER = ['p2pquake', 'emsc', 'cenc_eew', 'cenc_eqlist', 'jma', 'usgs', 'noaa']
+/** 走 `/feed` 增量计数的源（feedStatsOf 有快照）。大陆源走 SSE，另有自己的计数与链路模式。 */
+const FEED_STAT_ORDER = ['jma', 'usgs', 'noaa']
+/** 走 SSE 的源（0.5.0）：状态从 cnStreamRegistry 实时读。 */
+const STREAM_ORDER = ['cenc_eew', 'cenc_eqlist']
 /**
  * 源状态区块（0.4.1）。
  *
@@ -128,13 +145,13 @@ function SourceStatusBlock() {
   useEffect(() => store.subscribe(() => setTick((x) => x + 1)), [])
   const rows = []
   const sources = store.sources || {}
-  for (const id of ['p2pquake', 'emsc', 'jma', 'usgs', 'noaa']) {
+  for (const id of SOURCE_ORDER) {
     const st = sources[id]
     if (!st) continue
     const meta = statusMetaOf(st.status, st.retries)
     rows.push((st.label || SOURCE_LABELS[id] || id) + '：' + meta.text + (st.detail ? ' · ' + st.detail : ''))
   }
-  for (const id of ['jma', 'usgs', 'noaa']) {
+  for (const id of FEED_STAT_ORDER) {
     const f = feedStatsOf[id]
     const st = sources[id]
     if (!f) {
@@ -151,10 +168,34 @@ function SourceStatusBlock() {
       (Number(host.detailDropped) ? '，Host 放弃详情 ' + host.detailDropped + ' 条' : '') +
       ' · 最近拉取 ' + ago)
   }
+  // 大陆源（0.5.0）：走 SSE，状态从注册表**实时**读。**链路模式必须显示出来**——
+  // 降级到轮询意味着延迟从秒级变成最长 15 秒，用户有权知道自己在哪条路上。
+  for (const id of STREAM_ORDER) {
+    const reg = cnStreamRegistry[id]
+    const st = sources[id]
+    if (!reg) {
+      if (!st) rows.push((SOURCE_LABELS[id] || id) + '：尚未启动')
+      continue
+    }
+    const c = reg.stats()
+    const modeText = c.mode === 'sse' ? 'SSE 推送'
+      : (c.mode === 'poll' ? '已降级为轮询'
+        : (c.mode === 'disabled' ? '已关闭（「地震」开关关掉了）' : '未连接'))
+    const ago = c.lastAt ? Math.max(0, Math.round((Date.now() - c.lastAt) / 1000)) + ' 秒前' : '—'
+    rows.push((SOURCE_LABELS[id] || id) + '：' + modeText +
+      ' · 已收到 ' + c.received + ' 条' +
+      (c.applied ? '，已播报 ' + c.applied : '') +
+      (c.errors ? '，失败 ' + c.errors + ' 次' : '') +
+      (c.fallbacks ? '，降级 ' + c.fallbacks + ' 次' : '') +
+      (c.probeTimeouts ? '，无首帧 ' + c.probeTimeouts + ' 次' : '') +
+      (c.truncated ? '，增量缺口 ' + c.truncated + ' 次' : '') +
+      (c.resets ? '，游标重置 ' + c.resets + ' 次' : '') +
+      ' · 最近数据 ' + ago)
+  }
   if (rows.length === 0) return null
   // 数据格式异常（schema-error）：按 DESIGN 5.4 提供**手动重试**——源改版后字段可能又回来了，
   // 用户不该为了清掉一个蓝点去重装插件。
-  const retryRows = ['p2pquake', 'emsc', 'jma', 'usgs', 'noaa']
+  const retryRows = SOURCE_ORDER
     .filter((id) => sources[id] && sources[id].status === 'schema-error')
     .map((id) => h('div', { key: 'retry-' + id, style: { marginTop: 4 } },
       s.btn('重试 ' + (sources[id].label || SOURCE_LABELS[id] || id) + ' 的数据解析', () => retrySource(id))))
@@ -174,11 +215,18 @@ function SettingsPanel() {
   const [weatherTestMsg, setWeatherTestMsg] = useState('') // 「发送测试气象警报」的结果提示
   const [weatherTestSeq, setWeatherTestSeq] = useState(0) // 测试场景轮换游标
   // 全球关注点的输入草稿与反馈（0.4.0）：校验失败必须给出文字原因，不能静默吞掉用户输入
-  const [placeDraft, setPlaceDraft] = useState({ name: '', lat: '', lon: '', radiusKm: '300' })
+  // 半径默认值 0.5.0 起是 100（DESIGN 9.2）；**既有配置里的 radiusKm 不动**，只影响新建。
+  const [placeDraft, setPlaceDraft] = useState({ name: '', lat: '', lon: '', radiusKm: String(DEFAULT_PLACE_RADIUS_KM) })
   const [placeMsg, setPlaceMsg] = useState('')
+  // 中国大陆的三级级联（0.5.0）：省 → 地级市 → 半径。选完给出**表里的坐标**，
+  // 用户不需要知道经纬度（大陆源是坐标 + 半径匹配，见 DESIGN 8.3）。
+  const [cnPick, setCnPick] = useState({ province: '', city: '', radiusKm: DEFAULT_PLACE_RADIUS_KM })
+  const [cnMsg, setCnMsg] = useState('')
   // 全球链路的测试（0.4.0）：场景轮换游标与结果提示
   const [geTestSeq, setGeTestSeq] = useState(0)
   const [geTestMsg, setGeTestMsg] = useState('')
+  // 诊断快照（0.5.0）：{ text, msg } | null
+  const [diag, setDiag] = useState(null)
   // 「源状态」区块里的相对时间要自己走 —— 见 SourceStatusBlock（独立组件，避免每 5 秒
   // 重渲整个设置页，尤其是关注县较多时那几千个市町村按钮）
   // 音量滑块：拖动期间只改本地草稿，停手 300ms 后才落盘（避免每移动 1px 写一次 localStorage）
@@ -272,6 +320,32 @@ function SettingsPanel() {
       { timeout: 10000 },
     )
   }
+  /** 定位并**直接添加**一个关注点（大陆级联里的用法：半径已经在级联里选好了，
+   *  再让用户去另一个表单点一次「添加」是多余的一步）。 */
+  const addMyLocationPlace = () => {
+    const geo = (typeof navigator !== 'undefined') ? navigator.geolocation : null
+    if (!geo || typeof geo.getCurrentPosition !== 'function') { setCnMsg('当前浏览器不支持定位，请选择省份与城市'); return }
+    setCnMsg('正在获取当前位置…')
+    geo.getCurrentPosition(
+      (pos) => {
+        const c = pos && pos.coords
+        if (!c) { setCnMsg('定位失败：没有返回坐标'); return }
+        const lat = Math.round(c.latitude * 100) / 100
+        const lon = Math.round(c.longitude * 100) / 100
+        if ((cfg.watch.places || []).length >= MAX_WATCH_PLACES) { setCnMsg('最多 ' + MAX_WATCH_PLACES + ' 个关注点'); return }
+        setCfg((cf) => ({
+          ...cf,
+          watch: { ...cf.watch, places: (cf.watch.places || []).concat([{ name: '我的位置', lat, lon, radiusKm: cnPick.radiusKm }]) },
+        }))
+        // 台式机的定位靠 WiFi / IP 库，可能不准 —— 如实说，别让用户以为这就是精确位置
+        setCnMsg('已添加「我的位置」（' + lat + ', ' + lon + '，半径 ' + cnPick.radiusKm +
+          ' km）。定位可能不精确，请确认坐标或改用手动选择城市。')
+      },
+      (err) => setCnMsg('定位失败：' + ((err && err.message) || '被拒绝或不可用') + '（也可以手动选择省份与城市）'),
+      { timeout: 10000 },
+    )
+  }
+
   /** 关注点输入框（受控）：四个字段共用一份草稿。 */
   const placeField = (label, key, placeholder, width) => h('label', {
     style: { display: 'flex', flexDirection: 'column', gap: 2, fontSize: 11, color: '#9aa0a6' },
@@ -285,6 +359,85 @@ function SettingsPanel() {
       border: '1px solid #6b7280', borderRadius: 6, padding: '3px 6px', fontSize: 12,
     },
   }))
+
+  // ---------- 半径控件（0.5.0 / DESIGN 9.2）----------
+  /** 当前值是否正好是某个语义档。 */
+  const isRadiusPreset = (km) => RADIUS_PRESETS.some((o) => o.v === Number(km))
+  /**
+   * 半径选择：三档**语义标签** + 一个始终可见的数字输入。
+   *
+   * 为什么两者都要：普通用户不必理解"公里"，语义档就够；而"想精确控制的人有出口"
+   * 是 DESIGN 9.2 的硬要求——把数字藏进"自定义…"分支会让改一次半径多两步。
+   * 数字框是真实值，下拉只是快捷键；填了 150 这种非档位值时下拉自动显示「自定义」。
+   */
+  const radiusControl = (km, onChange, key) => h('div', {
+    key: key || 'radius',
+    style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#9aa0a6', flexWrap: 'wrap' },
+  },
+    h('span', null, '半径'),
+    s.select(isRadiusPreset(km) ? Number(km) : 'custom',
+      RADIUS_PRESETS.concat([{ v: 'custom', label: '自定义…' }]),
+      (v) => { if (v !== 'custom') onChange(Number(v)) },
+      (o) => o.label),
+    h('input', {
+      type: 'number', min: MIN_PLACE_RADIUS_KM, max: MAX_PLACE_RADIUS_KM, value: km,
+      onChange: (e) => {
+        const raw = String(e.target.value).trim()
+        if (raw === '') return // 输入中间态（全删）不写进配置，等用户填完
+        const v = Number(raw)
+        if (!Number.isFinite(v)) return
+        onChange(Math.min(MAX_PLACE_RADIUS_KM, Math.max(MIN_PLACE_RADIUS_KM, Math.round(v))))
+      },
+      style: {
+        width: 68, boxSizing: 'border-box', background: '#ffffff', color: '#1a1a1a',
+        border: '1px solid #6b7280', borderRadius: 6, padding: '3px 6px', fontSize: 12,
+      },
+    }),
+    h('span', null, 'km'),
+  )
+
+  // ---------- 中国大陆的三级级联（0.5.0）----------
+  const provinces = cnProvinces()
+  /** 选了省之后，市默认落在第一个上——否则用户会以为"选了省但没反应"。 */
+  const pickProvince = (province) => {
+    const cities = cnCitiesOf(province)
+    setCnPick((p) => ({ ...p, province, city: cities.length ? cities[0].name : '' }))
+    setCnMsg('')
+  }
+  const addCnPlace = () => {
+    const p = cnPlaceOf(cnPick.province, cnPick.city, cnPick.radiusKm)
+    if (!p) { setCnMsg('请先选择省份与城市（行政区划表未加载时请重启 dsh web）'); return }
+    if ((cfg.watch.places || []).length >= MAX_WATCH_PLACES) { setCnMsg('最多 ' + MAX_WATCH_PLACES + ' 个关注点'); return }
+    if ((cfg.watch.places || []).some((x) => x.name === p.name)) { setCnMsg('「' + p.name + '」已经在关注列表里了'); return }
+    setCfg((c) => ({ ...c, watch: { ...c.watch, places: (c.watch.places || []).concat([p]) } }))
+    setCnMsg('已添加「' + p.name + '」（' + p.lat + ', ' + p.lon + '，半径 ' + p.radiusKm + ' km）')
+  }
+  /** 国家 / 地区级联的第一级（中国）——省的选项。 */
+  const cnCascade = () => {
+    if (provinces.length === 0) {
+      return h('div', { style: { fontSize: 11, color: cityTableState === 'failed' ? '#d9a406' : '#9aa0a6', marginTop: 6 } },
+        cityTableState === 'failed'
+          ? '行政区划表加载失败 —— 可以改用下面的「其他地区」手填坐标（可重启 dsh web 重试）'
+          : '正在加载行政区划表…')
+    }
+    const cities = cnCitiesOf(cnPick.province)
+    const provOptions = [{ v: '', label: '请选择省份 / 直辖市 / 特别行政区' }]
+      .concat(provinces.map((p) => ({ v: p.name, label: p.name })))
+    const cityOptions = (cities.length ? cities : [{ name: '' }]).map((c) => ({ v: c.name, label: c.name || '（先选省份）' }))
+    return h('div', null,
+      h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' } },
+        s.select(cnPick.province, provOptions, pickProvince, (o) => o.label),
+        s.select(cnPick.city, cityOptions, (v) => { setCnPick((p) => ({ ...p, city: v })); setCnMsg('') }, (o) => o.label),
+      ),
+      h('div', { style: { marginTop: 6 } },
+        radiusControl(cnPick.radiusKm, (v) => setCnPick((p) => ({ ...p, radiusKm: v })), 'cn-radius')),
+      h('div', { style: { marginTop: 8, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
+        s.btn('添加这个城市', addCnPlace),
+        s.btn('用我的位置', addMyLocationPlace, { fontSize: 11 }),
+      ),
+      cnMsg ? h('div', { style: { fontSize: 11, color: '#93c5fd', marginTop: 6 } }, cnMsg) : null,
+    )
+  }
   // 全球源状态（0.4.0）：用户看不出"链路到底在不在拉"，这是最常见的困惑来源——
   // 尤其全球地震本来就不频繁。feedStatsOf 不经过 store（见 12b 的注释），
   // 所以由 SourceStatusBlock 自己每 5 秒重读（见文件下方）。
@@ -445,7 +598,11 @@ function SettingsPanel() {
     ),
 
     // 关注地区
-    s.section('关注地区（都道府县 / 市区町村）',
+    // 关注地区按**国家 / 地区**分组（DESIGN 9 的"三级级联"：国家/地区 → 一级行政区 → 市/町村）。
+    // 为什么不做成一个统一的下拉级联组件：日本这一路是 47 个都道府县 + 1917 个市区町村的两级多选，
+    // 中国这一路是省 → 地级市，两者的**选择语义不同**（日本源按行政区名匹配，大陆源按坐标 + 半径）。
+    // 硬塞进同一个控件只会让两边都变得难用；这里保证的是**用户视角的三级结构一致**。
+    s.section('① 日本：都道府县 / 市区町村',
       h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 8 } },
         cfg.watch.prefectures.length === 0
           ? '未选择 → 将提醒全日本（按下方阈值过滤）。建议选择你所在/关注的地区以减少打扰。'
@@ -471,11 +628,22 @@ function SettingsPanel() {
     // 灾害类型（0.3.0）
     sectionDisasters(),
 
+    // 中国大陆（0.5.0）：省 → 地级市 → 半径。大陆源是坐标型，所以选完城市即得到坐标。
+    s.section('② 中国大陆：省 / 地级市',
+      h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 8, lineHeight: 1.6 } },
+        '中国地震台网的预警与速报按「震中坐标 + 半径」判定（大陆源没有分区烈度），' +
+        '所以这里选城市即可，不需要知道经纬度。表里的坐标是**行政区中心点**——' +
+        '面积特别大的州 / 市（如甘孜州、哈尔滨市）离城区可差一百多公里，住在边缘时请把半径调大，' +
+        '或用「用我的位置」。'),
+      cnCascade(),
+    ),
+
     // 全球关注点（0.4.0）：全球源是坐标型，关注表达是「位置 + 半径」
-    s.section('全球关注点（坐标 + 半径）',
+    s.section('③ 其他地区：坐标 + 半径',
       h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 8 } },
         (cfg.watch.places || []).length === 0
-          ? '未设置时，全球源（EMSC / USGS 地震、NOAA 海啸）的消息不会打扰你。添加你所在或关心的位置即可生效，不需要重启。'
+          ? '未设置时，全球源（EMSC / USGS 地震、NOAA 海啸）的消息不会打扰你。添加你所在或关心的位置即可生效，不需要重启。' +
+            '这里填的坐标与「② 中国大陆」加进来的城市是**同一份列表**。'
           : '已设置 ' + cfg.watch.places.length + ' 个位置：震中落在半径内才提醒。日本的地震 / 海啸不受这里影响，仍按上面的都道府县判定。'),
       ...(cfg.watch.places || []).map((p, i) => h('div', {
         key: 'place-' + i,
@@ -489,10 +657,12 @@ function SettingsPanel() {
         placeField('名称', 'name', '如 东京 / 家', 120),
         placeField('纬度', 'lat', '35.6812', 90),
         placeField('经度', 'lon', '139.7671', 90),
-        placeField('半径 km', 'radiusKm', '300', 80),
         s.btn('添加关注点', addPlace),
         s.btn('用当前位置', useMyLocation),
       ),
+      h('div', { style: { marginTop: 6 } },
+        radiusControl(Number(placeDraft.radiusKm) || DEFAULT_PLACE_RADIUS_KM,
+          (v) => setPlaceDraft((d) => ({ ...d, radiusKm: String(v) })), 'place-radius')),
       placeMsg ? h('div', { style: { fontSize: 11, color: '#93c5fd', marginTop: 6 } }, placeMsg) : null,
       // 全球源的地震不是随时都有，没法"等一条"来验证链路 —— 与气象链路一样给一个本地测试按钮。
       // 构造的是**源格式原文**（EMSC / USGS / NOAA 各一种），因此解析器与匹配引擎都被真实走过。
@@ -535,6 +705,25 @@ function SettingsPanel() {
       s.row(s.select(cfg.thresholds.globalMagnitude, GLOBAL_MAG_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, globalMagnitude: Number(v) } })), (o) => o.label)),
       h('div', { style: { fontSize: 11, color: '#9aa0a6' } },
         '全球源给的是震级、日本源给的是震度，两者不可换算，所以是两个独立旋钮。'),
+      s.label('大陆地震速报（最低震级，中国地震台网速报）'),
+      s.row(s.select(cfg.thresholds.cnReportMagnitude, CN_REPORT_MAG_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, cnReportMagnitude: Number(v) } })), (o) => o.label)),
+      h('div', { style: { fontSize: 11, color: '#9aa0a6' } },
+        '速报覆盖低到 M2.5 且每天都有数据，所以门槛与上面的预警分开，避免小震刷屏；' +
+        '大陆地震预警与全球源共用「全球地震」那个门槛。'),
+    ),
+
+    // 大陆源的链路选择（0.5.0）。这是一个**出口**：自动降级判不出的那几种网络
+    //（能连上、偶尔漏、整体像坏的）需要一个手动开关，否则用户只能重装或等更新。
+    s.section('大陆源链路',
+      s.label('取数方式（中国地震台网预警 / 速报）'),
+      s.row(s.select(cfg.cnTransport || 'auto', [
+        { v: 'auto', label: '自动：SSE 推送优先，走不通自动降级为轮询' },
+        { v: 'poll', label: '强制轮询（每 15 秒一次）' },
+      ], (v) => setCfg((c) => ({ ...c, cnTransport: v })), (o) => o.label)),
+      h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4, lineHeight: 1.6 } },
+        'SSE 推送的延迟是秒级，轮询最坏 15 秒——大陆预警抢的是这几秒，所以默认用推送。' +
+        '只有在推送被网络中间设备反复掐断、而普通请求仍然正常时，才需要强制轮询。' +
+        '当前实际走在哪条路上，看上面的「源状态」。'),
     ),
 
     // 通知与声音
@@ -611,10 +800,42 @@ function SettingsPanel() {
         '按浏览器本地时间判定；开始时间晚于结束时间表示跨午夜（如 23:00–07:00）。静默期间命中的预警仍会记入下方「最近预警记录」，只是不响铃、不弹通知。'),
     ),
 
+    // 诊断快照（0.5.0）：DESIGN 11.3 的交付物——让"运行时自己说话"。
+    // 界面上只做两件事：生成、以及**在剪贴板不可用时把文本显示出来**（沙箱 iframe 里
+    // navigator.clipboard 常常不可用，而"复制不了"不该成为诊断的第一步就卡住）。
+    s.section('诊断',
+      h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 6, lineHeight: 1.6 } },
+        '把这份快照贴给你的 AI 助手（配合 TROUBLESHOOTING.zh.md），它就能看到逐源状态、' +
+        '数据格式异常的原因、大陆源当前走哪条链路、以及最近几条记录为什么没有响铃。'),
+      s.row(s.btn('生成诊断快照', () => {
+        copyDiagSnapshot().then((r) => setDiag({
+          text: r.text,
+          msg: r.ok ? '已复制到剪贴板。' : ('剪贴板不可用' + (r.error ? '（' + r.error + '）' : '') + '，请手动全选下面的文本复制。'),
+        })).catch((err) => setDiag({ text: '', msg: '生成失败：' + String((err && err.message) || err) }))
+      })),
+      h('div', { style: { fontSize: 11, color: '#d9a406', marginTop: 4 } },
+        '⚠ 快照含你的关注地区名称与坐标——诊断"为什么没命中"必须要有它。分享前请自行确认。'),
+      diag ? h('div', { style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, diag.msg) : null,
+      diag && diag.text
+        ? h('textarea', {
+            readOnly: true, value: diag.text, rows: 10,
+            onFocus: (e) => { try { e.target.select() } catch (err) { /* 忽略 */ } },
+            style: {
+              width: '100%', boxSizing: 'border-box', marginTop: 6, fontSize: 11,
+              fontFamily: 'ui-monospace, monospace', background: '#ffffff', color: '#1a1a1a',
+              border: '1px solid #6b7280', borderRadius: 6, padding: 8,
+            },
+          })
+        : null,
+    ),
+
     // 免责
     s.section('免责声明', h('div', { style: { color: '#9aa0a6', fontSize: 11, lineHeight: 1.6 } },
-      '预警数据由 P2PQuake 转播（非官方直接数据源），EEW 紧急地震速报等内容与配信品质无保证。' +
-      '本插件提醒仅供参考，请务必以日本气象厅（気象庁）官方发布为准。插件仅在 DSH 页面开启时工作。')),
+      '预警数据由 P2PQuake 转播、日本气象厅公开 XML 电文、EMSC / USGS / NOAA，' +
+      '以及 Wolfx 转播的中国地震台网（CENC）信息提供，均非官方直接推送；' +
+      '紧急地震速报（EEW）与大陆地震预警等内容与配信品质无保证。' +
+      '本插件提醒仅供参考，避险请以当地主管机构（日本气象厅 気象庁 / 中国地震台网 CENC / 美国 USGS・NOAA 等）官方发布为准。' +
+      '插件仅在 DSH 页面开启时工作。')),
 
     // 最近预警（点击条目展开详情；多条时可滚动）
     s.section('最近预警记录（' + store.events.length + ' 条）',
@@ -697,4 +918,4 @@ function SettingsPanel() {
 }
 
 
-export { statusMetaOf, SettingsPanel, p2pCodeTextOf, kindColorOf, P2P_KIND_CODE, KIND_COLORS }
+export { statusMetaOf, SettingsPanel, p2pCodeTextOf, kindColorOf, P2P_KIND_CODE, KIND_COLORS, SOURCE_ORDER, SOURCE_LABELS, SOURCE_CODE_TEXT }

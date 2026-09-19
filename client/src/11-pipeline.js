@@ -9,7 +9,7 @@
 // ============================================================================
 
 import { PREFECTURES } from './01-constants.js'
-import { inQuietHours } from './02-storage.js'
+import { inQuietHours, own } from './02-storage.js'
 import { parse, severityOfScale, sevColor } from './05-parser.js'
 import { matchAlert, regionInWeatherWatch, validGeo } from './06-matcher.js'
 import { addEvent, store } from './07-store.js'
@@ -39,13 +39,56 @@ function areaLabelOf(region) {
 }
 
 /**
+ * 大陆源的产品名。日本源与大陆源虽然都叫"地震预警 / 速报"，却是**两家不同机构的不同产品**：
+ * 気象庁的是「緊急地震速報」，中国地震台网的是「地震预警」。把日方名称套到大陆源上，
+ * 用户会以为收到了日本气象厅的速报——在预警类产品里这是会误导行动的错误。
+ */
+function cnProductName(alert) {
+  if (!alert) return ''
+  if (alert.source === 'cenc_eew') return '大陆地震预警'
+  if (alert.source === 'cenc_eqlist') return '大陆地震速报'
+  return ''
+}
+
+/**
+ * 通知文案里的「官方发布」指哪家机构。
+ *
+ * 各源的主管机构完全不同。此前文案里硬编码了「气象厅」，于是希腊的一场 USGS 地震、
+ * 四川的一场 CENC 预警都会让用户"以气象厅官方发布为准"——免责声明里出现错误机构，
+ * 会直接削弱这份声明本身的可信度。这里按源给出机构名，认不出时退化成中性表述。
+ */
+const AUTHORITY_BY_SOURCE = {
+  emsc: '欧洲-地中海地震中心（EMSC）',
+  usgs: '美国地质调查局（USGS）',
+  noaa: '太平洋海啸警报中心（NOAA）',
+  cenc_eew: '中国地震台网（CENC）',
+  cenc_eqlist: '中国地震台网（CENC）',
+  jma: '気象庁',
+}
+function authorityOf(alert) {
+  if (!alert) return ''
+  const bySource = own(AUTHORITY_BY_SOURCE, String(alert.source || ''))
+  if (bySource) return bySource
+  const byCode = own(AUTHORITY_BY_SOURCE, String(alert.code === undefined ? '' : alert.code))
+  if (byCode) return byCode
+  // P2PQuake 的 551 / 552 / 556 都是转播気象庁的信息（它们只有数字 code，没有 source）
+  if (alert.code === 551 || alert.code === 552 || alert.code === 556) return '気象庁'
+  return ''
+}
+/** 「仅供参考」那一行。机构已知时点名，未知时用中性表述（不硬编码日本气象厅）。 */
+function disclaimerOf(alert) {
+  const a = authorityOf(alert)
+  return a ? '—— 仅供参考，请以' + a + '官方发布为准' : '—— 仅供参考，请以官方发布为准'
+}
+
+/**
  * 系统通知 / 页内 toast 的标题。抽成纯函数是为了能直接断言文案——
  * 旧写法把「地震情报 · 」与「各地震度」分开拼，非「各地」分支会留下一个悬空的分隔符。
  */
 function alertTitleOf(alert) {
   if (!alert) return '灾害预警'
   // kindLabel 本身已区分「地震速报·震度速报」「地震情报·各地震度」等，不需要再拼后缀
-  if (alert.kind === 'eew') return '⚠ 紧急地震速报（警报）'
+  if (alert.kind === 'eew') return '⚠ ' + (cnProductName(alert) || '紧急地震速报（警报）')
   if (alert.kind === 'quake') return '🌐 ' + alert.kindLabel
   if (alert.kind === 'tsunami') return '🌊 ' + alert.kindLabel
   if (alert.kind === 'weather') return '🌧 ' + alert.kindLabel
@@ -132,9 +175,10 @@ function handleCancelled(alert, cfg) {
     id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
     issued: alert.issued, headline: alert.headline, hit: true,
   })
-  const title = alert.kind === 'eew' ? '✅ 紧急地震速报已取消'
+  const title = alert.kind === 'eew'
+    ? '✅ ' + (cnProductName(alert) || '紧急地震速报') + '已取消'
     : (alert.kind === 'tsunami' ? '✅ 海啸预报已解除' : '✅ ' + alert.kindLabel)
-  const body = alert.headline + '\n此前发出的警报已作废。\n—— 仅供参考，请以气象厅官方发布为准'
+  const body = alert.headline + '\n此前发出的警报已作废。\n' + disclaimerOf(alert)
   if (cfg.notify.sound !== false) playSound('cancel', cfg.notify.volume)
   const pageVisible = typeof document !== 'undefined' && document.visibilityState === 'visible'
   if (pageVisible) {
@@ -274,7 +318,7 @@ function handleAlert(alert, cfg, opts) {
   else if (m.place) bodyLines.push('命中关注点：' + m.place.name + '（距震中约 ' + Math.round(m.distanceKm) + ' km）')
   if (alert.kind === 'tsunami') bodyLines.push('请立即远离海岸与河口')
   if (alert.kind === 'weather') bodyLines.push('请确认所在市町村的避难信息')
-  bodyLines.push('—— 仅供参考，请以气象厅官方发布为准')
+  bodyLines.push(disclaimerOf(alert))
   addEvent({
     id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
     issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
@@ -296,4 +340,4 @@ function handleAlert(alert, cfg, opts) {
 }
 
 
-export { handleCancelled, handleRaw, handleAlert, updateWeatherHint, alertTitleOf, watchlessPoint, hitSeverityOf }
+export { handleCancelled, handleRaw, handleAlert, updateWeatherHint, alertTitleOf, watchlessPoint, hitSeverityOf, cnProductName, authorityOf, disclaimerOf }

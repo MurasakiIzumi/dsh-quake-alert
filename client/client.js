@@ -71,6 +71,30 @@ const GLOBAL_MAG_OPTIONS = [
   { v: 4.5, label: 'M4.5 以上（默认）' }, { v: 5, label: 'M5.0 以上' }, { v: 5.5, label: 'M5.5 以上' },
   { v: 6, label: 'M6.0 以上' }, { v: 6.5, label: 'M6.5 以上' }, { v: 7, label: 'M7.0 以上' },
 ];
+// 大陆**地震速报**（cenc_eqlist）的最低震级。与预警分开的原因见 DESIGN 8.4：速报覆盖低到 M2.5，
+// 用预警阈值播报会被小震频繁打扰；而它又是 EEW 稀少时的唯一补报通道，所以两把旋钮而不是一把。
+// 档位比 GLOBAL_MAG_OPTIONS 少一档低值（M3.0）——大陆速报的取舍区间在 3.5–6.0。
+const CN_REPORT_MAG_OPTIONS = [
+  { v: 3.5, label: 'M3.5 以上' }, { v: 4, label: 'M4.0 以上' },
+  { v: 4.5, label: 'M4.5 以上（默认）' }, { v: 5, label: 'M5.0 以上' },
+  { v: 5.5, label: 'M5.5 以上' }, { v: 6, label: 'M6.0 以上' },
+];
+
+// ---------- 关注点半径（0.5.0 / DESIGN 9.2） ----------
+// 用语义标签而不是裸数字：普通用户不必理解"公里"，想精确控制的人有「自定义」这个出口。
+// 「本市及周边 100km」是**新建关注点**的默认值（旧值 300km 是为震中距设计的，
+// 套在城市上会把邻省地震也算进来）。既有配置里的 radiusKm 一律不动——
+// 静默把用户配好的半径从 300 改成 100 会让提醒变窄，那是漏报方向的变化。
+const RADIUS_PRESETS = [
+  { v: 30, label: '仅本地（约 30 km）' },
+  { v: 100, label: '本市及周边（约 100 km，默认）' },
+  { v: 300, label: '较大范围（约 300 km）' },
+];
+/** 新建关注点的默认半径（既有配置不动，见上）。 */
+const DEFAULT_PLACE_RADIUS_KM = 100;
+/** 半径上下限，与 Host schema / normalizeCfg 的 1–2000 保持一致。 */
+const MIN_PLACE_RADIUS_KM = 1;
+const MAX_PLACE_RADIUS_KM = 2000;
 
 // 日本 47 都道府县：jp 为匹配用日文全称（P2PQuake pref 格式），zh 为界面显示
 const PREFECTURES = [
@@ -140,11 +164,29 @@ function p2pTimeToIso(raw) {
   return m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] +
     (ms ? '.' + ms : '') + P2P_TZ_OFFSET
 }
-/** 时间串 → Date：裸 JST 按 +09:00 解释，带偏移的 ISO 直接解析，其余返回 null。 */
+// ---------- 大陆源：中国标准时间（CST，UTC+8，无夏令时） ----------
+// Wolfx 的 `cenc_eew` / `cenc_eqlist` 给的是裸北京时间，形如 `2026-09-18 20:50:23`——与 P2PQuake
+// 的 `2023/09/05 06:16:32` **只有分隔符不同**，光看字符串完全无法区分是 JST 还是 CST（DESIGN 4.5）。
+// 所以同样由解析器补偏移，UI 只按本地时区渲染。中国全境单一时区、无夏令时，偏移恒为 +08:00。
+const CN_TZ_OFFSET = '+08:00';
+const CN_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?$/;
+/** 大陆源的裸北京时间串 → 带 +08:00 偏移的 ISO 8601；认不出时**原样返回**（绝不丢信息）。 */
+function cnTimeToIso(raw) {
+  const s = String(raw === undefined || raw === null ? '' : raw).trim();
+  if (!s) return ''
+  const m = CN_TIME_RE.exec(s);
+  if (!m) return s
+  const ms = m[7] ? m[7].padEnd(3, '0').slice(0, 3) : '';
+  return m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] +
+    (ms ? '.' + ms : '') + CN_TZ_OFFSET
+}
+/** 时间串 → Date：裸 JST（P2PQuake）/ 裸北京时间（Wolfx）分别按各自偏移解释，其余交给 Date。
+ *  两个源的时间串**看起来只差分隔符**，所以这里是按各自的正则分别补偏移，不能只判一种。
+ *  漏掉大陆源那一支会让历史详情里的时间差 1 小时（且没有任何标注）。 */
 function issuedToDate(raw) {
   const s = String(raw === undefined || raw === null ? '' : raw).trim();
   if (!s) return null
-  const d = new Date(P2P_TIME_RE.test(s) ? p2pTimeToIso(s) : s);
+  const d = new Date(P2P_TIME_RE.test(s) ? p2pTimeToIso(s) : (CN_TIME_RE.test(s) ? cnTimeToIso(s) : s));
   return Number.isFinite(d.getTime()) ? d : null
 }
 /** 时间串 → 本地时区文案（历史详情用）；无法解析时原样返回，不把原文弄丢。 */
@@ -162,6 +204,10 @@ function formatIssuedLocal(raw) {
 const DEFAULT_CFG = {
   version: 1,
   source: 'prod', // prod | sandbox（沙箱回放 2023 年历史，约30秒/条，测试用）
+  // 大陆源的**链路选择**（0.5.0）：auto = SSE 优先、走不通自动降级为轮询；
+  // poll = 用户强制轮询。给出口的理由见 DESIGN 11.5——某些网络下长连接会被中间设备掐掉，
+  // 而"自动降级"判不出的那几种（能连上、偶尔漏、但整体像坏的）需要一个手动出口。
+  cnTransport: 'auto',
   // 两种关注模式并存：
   //   · 行政区（prefectures / cities）——日本源（P2PQuake、気象庁）用，粒度到市区町村
   //   · 坐标点（places）——全球源（EMSC / USGS / NOAA）用，判定方式是「震中距 ≤ radiusKm」
@@ -170,7 +216,12 @@ const DEFAULT_CFG = {
   disasters: { earthquake: true, tsunami: true, weather: true }, // weather = 气象灾害（泥石流 / 洪水 / 大雨 / 高潮…），固定 L4 以上播报
   // globalMagnitude：全球源（EMSC / USGS）的最低震级。日本源用的是震度（quakeScale），
   // 全球源只有震级——实测 EMSC 会推 M3.8 级别的事件，若沿用"来什么报什么"会明显吵闹。
-  thresholds: { quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch', globalMagnitude: 4.5 },
+  // cnReportMagnitude：大陆**速报**（cenc_eqlist）的独立震级门槛。大陆地震预警（cenc_eew）与
+  // 全球源共用 globalMagnitude（DESIGN 8.4）——它同样是"只有震级、没有分区烈度"的坐标型源。
+  thresholds: {
+    quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch',
+    globalMagnitude: 4.5, cnReportMagnitude: 4.5,
+  },
   notify: { sound: true, system: true, volume: 0.7 },
   dedupe: { windowMinutes: 10 },
   // 静默时段（0.2.0）：按浏览器本地时间判定；跨午夜用 start > end 表示（如 23:00–07:00）
@@ -309,6 +360,9 @@ function normalizeCfg(input) {
   return {
     version: DEFAULT_CFG.version,
     source: stored.source === 'sandbox' ? 'sandbox' : 'prod',
+    // 大陆源的链路选择（0.5.0）：白名单，只认 'poll'，其余一律回 'auto'。
+    // 用白名单而不是"非 poll 即 auto"的等价写法，是为了让将来加第三种取值时不会静默错位。
+    cnTransport: stored.cnTransport === 'poll' ? 'poll' : 'auto',
     watch: {
       // 只保留 47 县中确实存在的名字，避免脏数据在设置页渲染出幽灵按钮
       prefectures: Array.isArray(w.prefectures)
@@ -336,6 +390,9 @@ function normalizeCfg(input) {
         : DEFAULT_CFG.thresholds.tsunamiGrade,
       // 全球源的最低震级（0.4.0）。0 是有意义的取值（来者不拒），所以下界是 0 而不是 1
       globalMagnitude: numOr(t.globalMagnitude, DEFAULT_CFG.thresholds.globalMagnitude, 0, 10),
+      // 大陆速报的独立门槛（0.5.0）。新增字段必须在这里同步，否则 applyCfg 会**静默丢弃**它
+      // ——这正是 DESIGN 11.6 第 10 条那个"有保护的残留"：忘了同步时回归断言会失败。
+      cnReportMagnitude: numOr(t.cnReportMagnitude, DEFAULT_CFG.thresholds.cnReportMagnitude, 0, 10),
     },
     notify: {
       sound: boolOr(n.sound, DEFAULT_CFG.notify.sound),
@@ -732,6 +789,75 @@ const riverAreaCities = (code) => {
   return hit ? hit.cities.slice() : []
 };
 
+// ---------- 中国行政区划表（0.5.0）：Host 随 /areas 一起下发 ----------
+// 与市区町村表同一理由：省 34 + 地级 384 共约 21KB，不内联进 client bundle。
+// 用途是设置页的三级级联（中国 → 省 → 地级市）与**关注点坐标填充**：
+// 大陆源（cenc_eew / cenc_eqlist）是坐标 + 半径匹配（DESIGN 8.3），
+// 让用户手填经纬度不现实，由这张表按所选城市给出坐标。
+// 表由 scripts/build-cn-areas.mjs 从 GeoNames 生成（含 TW/HK/MO），头部记着已知取舍。
+let cnAreas = null; // [{ code, name, lat, lon, cities:[{name,lat,lon}] }]
+/**
+ * 注入并规整行政区划表。**逐字段校验**：表来自 Host 的 JSON，与 localStorage 一样属于
+ * "不可信的输入"——一个坏条目会让级联渲染出幽灵选项，或把用户带到错误的坐标上
+ *（后者在预警产品里是"该响的地方没响"）。规整失败的整体拒绝，不做部分接受。
+ */
+function setCnAreas(list) {
+  if (!Array.isArray(list)) return false
+  const out = [];
+  const seenProv = new Set();
+  for (const p of list) {
+    if (!isPlainObject(p)) continue
+    const name = typeof p.name === 'string' ? p.name.trim() : '';
+    if (!name || seenProv.has(name)) continue
+    if (!validLatLon(p.lat, p.lon)) continue
+    const cities = [];
+    const seenCity = new Set();
+    for (const c of (Array.isArray(p.cities) ? p.cities : [])) {
+      if (!isPlainObject(c)) continue
+      const cn2 = typeof c.name === 'string' ? c.name.trim() : '';
+      if (!cn2 || seenCity.has(cn2)) continue
+      if (!validLatLon(c.lat, c.lon)) continue
+      seenCity.add(cn2);
+      cities.push({ name: cn2, lat: c.lat, lon: c.lon });
+    }
+    // 没有下级的省级项在级联里是死路：直接丢弃，避免用户选中后按钮没反应
+    if (cities.length === 0) continue
+    seenProv.add(name);
+    out.push({ code: typeof p.code === 'string' ? p.code : '', name, lat: p.lat, lon: p.lon, cities });
+  }
+  if (out.length === 0) return false
+  cnAreas = out;
+  return true
+}
+function validLatLon(lat, lon) {
+  return typeof lat === 'number' && Number.isFinite(lat) && Math.abs(lat) <= 90 &&
+    typeof lon === 'number' && Number.isFinite(lon) && Math.abs(lon) <= 180
+}
+/** 省级列表（表未加载时返回空数组）。 */
+const cnProvinces = () => (cnAreas ? cnAreas.slice() : []);
+/** 某个省下的地级市列表（未收录时返回空数组）。 */
+const cnCitiesOf = (province) => {
+  if (!cnAreas) return []
+  const hit = cnAreas.find((p) => p.name === province);
+  return hit ? hit.cities.slice() : []
+};
+/**
+ * 「省 + 市 + 半径」→ 一个关注点（表里查不到时返回 null）。
+ *
+ * 抽成纯函数是为了能直接断言级联的产物：用户点「添加」之后配置里到底会多出什么，
+ * 比"界面上出现了两个下拉框"重要得多。名称取「省·市」以免两个省的"城区"撞名。
+ */
+function cnPlaceOf(province, city, radiusKm) {
+  if (!cnAreas) return null
+  const p = cnAreas.find((x) => x.name === province);
+  if (!p) return null
+  const c = p.cities.find((x) => x.name === city);
+  if (!c) return null
+  const r = Number(radiusKm);
+  if (!Number.isFinite(r) || r < 1 || r > 2000) return null
+  return { name: province + '·' + city, lat: c.lat, lon: c.lon, radiusKm: r }
+}
+
 // ---------- addr → 市町村归一 ----------
 // 気象庁 / P2PQuake 的观测点名（551 的 points[].addr）与市町村全称有一批写法差异，
 // 匹配前先把 addr 归一到它所属的市町村全称；归一不了的（机场、区域名、未收录点）返回 null，
@@ -818,6 +944,9 @@ async function loadCityTable() {
     if (!setCityTable(payload)) throw new Error('payload 不含市町村表')
     // 0.3.0：河川予報区域表随同一份响应下发；缺失只影响洪水，不影响泥石流与既有功能
     if (isPlainObject(data) && Array.isArray(data.riverAreas)) setRiverAreas(data.riverAreas);
+    // 0.5.0：中国行政区划表（省 → 地级市 + 坐标），供设置页的三级级联。
+    // 缺失只影响大陆源的"选城市"这条路径（仍可手填坐标），不影响日本链路与既有功能。
+    if (isPlainObject(data) && Array.isArray(data.cnAreas)) setCnAreas(data.cnAreas);
     pruneUnknownCities();
   } catch (err) {
     // 插件卸载造成的中止不算"失败"：下次装载应当能重试
@@ -843,6 +972,7 @@ const resetCityTable = () => {
   abortCityTableLoad();
   cityTable = null; cityNameSet = null; cityTableState = 'idle';
   addrAliasIndex = null; addrAliasMax = 0; cityPrefIndex = null; riverAreas = null;
+  cnAreas = null;
 };
 
 // ============================================================================
@@ -1733,13 +1863,32 @@ function severityOfMagnitude(mag) {
 }
 
 /**
+ * 事件键里的「发震时刻（分钟）」必须先**归一到 UTC**再取分钟。
+ *
+ * 各源给的 ISO 字符串偏移不同：EMSC 是 `…Z`、USGS 经 toIso 也是 `…Z`，而 0.5.0 新接的大陆源是
+ * `+08:00`。直接切字符串前 16 位的话，同一场地震在两边会落进**相隔 8 小时**的两个桶里——
+ * 键永远不相等，跨源归并彻底失效，同一场地震响两次（实测样本里 cenc_eqlist 含境外地震，
+ * 福克斯群岛 M6.5 这类事件 USGS / EMSC 也会推，所以这条路径是走得到的，不是理论问题）。
+ *
+ * 无法解析时退回原串切片：宁可归并失败多响一次，也不能为了一致性把消息丢掉。
+ */
+function minuteKeyOf(timeIso) {
+  const s = String(timeIso === undefined || timeIso === null ? '' : timeIso);
+  const t = Date.parse(s);
+  if (!Number.isFinite(t)) return s.slice(0, 16)
+  return new Date(t).toISOString().slice(0, 16)
+}
+
+/**
  * 跨源事件键：同一场地震 EMSC 与 USGS 都会推，两边机构、编号、震级都可能不同，
  * 但「发震时刻（分钟）+ 震中（0.1 度 ≈ 11km）」是一致的。用它把两个全球源的同一次地震
  * 归并成一个事件，避免同一场地震因为接了第二个源而响两次。
  * 代价：跨分钟边界（两边测定的发震时刻差过一分钟）时归并会失败——宁可多响一次，不漏报。
+ * 0.5.0 起大陆源（cenc_eew / cenc_eqlist）也走同一把钥匙：它们的 **EventID 与 EEW 完全不同格式**
+ * （`202609182050.0001` vs `CD.20260918205536.056`），归并只能靠时间 + 震中。
  */
 function geoEventKey(timeIso, lat, lon) {
-  const min = String(timeIso || '').slice(0, 16); // 2026-09-12T02:15
+  const min = minuteKeyOf(timeIso);
   const la = (typeof lat === 'number' && Number.isFinite(lat)) ? lat.toFixed(1) : '?';
   const lo = (typeof lon === 'number' && Number.isFinite(lon)) ? lon.toFixed(1) : '?';
   return 'geo:' + min + '@' + la + ',' + lo
@@ -2059,6 +2208,196 @@ function parseTestGlobalMessage(msg) {
 }
 
 // ============================================================================
+// dsh-quake-alert · client/src/05e-cn-parsers.js
+//
+// 作用：把 Wolfx 转播的中国大陆地震源解析成与日本源 / 全球源同一套内部模型（Alert）。
+// 内容：`cenc_eew`（中国地震预警，秒级抢发）与 `cenc_eqlist`（中国地震速报，分钟级确认 / 补报）。
+// 依赖：01-constants（cnTimeToIso）、02-storage（isPlainObject）、05c-global-parsers（severityOfMagnitude、geoEventKey）。
+//
+// 为什么与全球源同路径而不是与日本源同路径（DESIGN 8.2 / 8.5）：
+//   · 大陆源**没有分区烈度表**——官方渠道是小程序 / OS 内置，第三方中继只给震中坐标 + 震级。
+//     所以只能走 `locator:'point'`（坐标 + 半径），与 EMSC / USGS 完全同一条匹配路径，
+//     也因此**不需要中国行政区划表**。这是数据源能力的客观差异，不是功能裁剪。
+//
+// 实测字段（samples/cn/，2026-09-18 真实数据）与踩过的坑：
+//   · `cenc_eew` 全部字段只有 10 个（加 WS 包裹的 type 共 11 个），数值都是 **number**。
+//   · `cenc_eqlist` 是一整张 50 条的**列表**（No1…No50 + md5），而且**所有字段都是字符串**
+//     （"magnitude":"3.7"、"latitude":"41.14"）——同一个上游的两种序列化风格，不能假定其一。
+//   · `MaxIntensity`（EEW，实测 5.8/5.9 连续小数）与 `intensity`（速报，实测 3…8 整数）是
+//     **中国地震烈度**（GB/T 17742-2020），不是日本震度、也不是震级。它是**震中附近的最大值**，
+//     不是用户所在地的烈度 —— **只入库、不上 UI**，否则会被读成后者的承诺。
+//   · `cenc_eqlist` 里**混有境外地震**（实测福克斯群岛 M6.5、印尼爪哇岛 M6.5、南桑威奇群岛 M6.2、
+//     台湾花莲县…）。所以它会与全球链路（EMSC / USGS）撞车——靠 geoEventKey 同一把钥匙归并。
+//   · 两个源的 **EventID 格式互不相干**：EEW 是 `202609182050.0001`，速报是 `CD.20260918205536.056`。
+//     同一场地震（实测四川甘孜州新龙县：EEW 20:50:23 M4.2 / 速报 20:50:24 M3.2）两边 ID 毫无关系，
+//     所以**归并只能靠「发震时刻 + 震中」**，绝不能靠 ID。这正是 geoEventKey 的用武之地。
+//   · **无取消 / 最终报标志**（既无 isCancel 也无 isFinal）。现有「取消只在此前提醒过时补一条」的
+//     链路对大陆源**失效**——这是安全相关的缺口，UI 必须如实说明（DESIGN 8.3 / 10.2），
+//     代码里不得假装能处理：cancelled 恒为 false。
+// ============================================================================
+
+
+/**
+ * 字符串或数字 → 有限数值；空串 / 垃圾值 / 缺失一律 null。
+ * **不能用 Number('')**——它等于 0，会把"没有震级"变成"震级 0"（震级 0 会让阈值闸门放行一个
+ * 根本不知道多大的事件，在大陆速报这种每条都要判阈值的链路上就是误报）。
+ * 速报整表字段全是字符串，所以这个转换是必需的而不是防御性的。
+ */
+function numOrNull(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  const s = String(v === undefined || v === null ? '' : v).trim();
+  if (!s) return null
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null
+}
+
+/** 人名可读的震级文案：未知时给 M—，绝不显示 "Mnull"。 */
+function magText(mag) {
+  return 'M' + (mag === null ? '—' : mag)
+}
+
+/** 震中名 + 深度 的公共 headline 片段。 */
+function placeText(name, depthKm) {
+  return (name ? ' · ' + name : '') + (depthKm === null ? '' : ' · 深 ' + Math.round(depthKm) + 'km')
+}
+
+/**
+ * 大陆地震预警（`cenc_eew`）→ Alert。
+ *
+ * @param {object} raw WS 推送包（含 `type:'cenc_eew'`）或 REST 快照（无 type）——**两种都接受**：
+ *   实测 REST 与 WS 的差别就是多一个 type 字段，其余 10 个字段完全一致。
+ * @returns {object|null} 结构不对时返回 null（由契约层的 schema 判据负责分类）
+ */
+function parseCencEew(raw) {
+  if (!isPlainObject(raw)) return null
+  const id = String(raw.ID === undefined || raw.ID === null ? '' : raw.ID).trim();
+  if (!id) return null
+  const lat = numOrNull(raw.Latitude);
+  const lon = numOrNull(raw.Longitude);
+  if (lat === null || lon === null) return null
+  const mag = numOrNull(raw.Magnitude);
+  const depth = numOrNull(raw.Depth);
+  const place = String(raw.HypoCenter === undefined || raw.HypoCenter === null ? '' : raw.HypoCenter).trim();
+  // OriginTime 是发震时刻，ReportTime 是发布时刻。实测两者**完全相同**——这是上游的填充习惯，
+  // **不能据此判定它"不是实时预警"**（DESIGN 8.3）。事件键用 OriginTime（与其它源同一口径）。
+  const originIso = cnTimeToIso(raw.OriginTime);
+  const reportIso = cnTimeToIso(raw.ReportTime);
+  const reportNum = numOrNull(raw.ReportNum);
+  const headline = magText(mag) + placeText(place, depth) +
+    (reportNum !== null && reportNum > 1 ? '（第 ' + reportNum + ' 报）' : '');
+  return {
+    // id 前缀 cenc: ——与速报的 EventID 是两套命名空间，实测不会撞（EEW 是 b4kybfnuqayyy 这类）
+    id: 'cenc:' + id,
+    code: 'cenc_eew',
+    kind: 'eew',
+    kindLabel: '大陆地震预警（CENC）',
+    source: 'cenc_eew',
+    // 无分区烈度 → 坐标 + 半径匹配（DESIGN 8.3）；
+    // 震级闸门共用 thresholds.globalMagnitude（DESIGN 8.4：它不是速报，与预警同档）
+    locator: 'point',
+    speedReport: false,
+    severity: severityOfMagnitude(mag),
+    issued: originIso,
+    reportTime: reportIso,
+    headline,
+    maxScale: -1,
+    level: 0,
+    geo: { lat, lon, depthKm: depth },
+    magnitude: mag,
+    magType: '',
+    hypo: { name: place, magnitude: mag },
+    regions: [],
+    eventKey: geoEventKey(originIso, lat, lon),
+    strength: mag === null ? 0 : mag,
+    // 中国地震烈度（震中附近最大值）：只入库、不上 UI。详见文件头。
+    intensity: numOrNull(raw.MaxIntensity),
+    reportNum,
+    cancelled: false, // 大陆源不提供取消 / 最终报标志——见文件头，不得假装能处理
+    raw,
+  }
+}
+
+/**
+ * 速报整表里的单项（`NoN`）→ Alert。
+ * 所有字段都是字符串（实测）；`location` 与 `placeName` 实测总是一样，取 placeName 优先、location 回退。
+ */
+function parseCencEqlistItem(item) {
+  if (!isPlainObject(item)) return null
+  const eventId = String(item.EventID === undefined || item.EventID === null ? '' : item.EventID).trim();
+  if (!eventId) return null
+  const lat = numOrNull(item.latitude);
+  const lon = numOrNull(item.longitude);
+  if (lat === null || lon === null) return null
+  const mag = numOrNull(item.magnitude);
+  const depth = numOrNull(item.depth);
+  const place = String(
+    (item.placeName === undefined || item.placeName === null ? '' : item.placeName) ||
+    (item.location === undefined || item.location === null ? '' : item.location)
+  ).trim();
+  // time 是发震时刻，ReportTime 是发布时刻。实测 lag 209–1643 秒（DESIGN 8.3 记为 240–1608）。
+  const originIso = cnTimeToIso(item.time);
+  const reportIso = cnTimeToIso(item.ReportTime);
+  const headline = magText(mag) + placeText(place, depth);
+  return {
+    id: 'cenc:' + eventId,
+    code: 'cenc_eqlist',
+    kind: 'quake',
+    kindLabel: '大陆地震速报（CENC）',
+    source: 'cenc_eqlist',
+    locator: 'point',
+    // 速报不是预警：它管分钟级确认与补报，用**独立**的震级门槛（thresholds.cnReportMagnitude），
+    // 否则会被 M2.5–M3.8 的小震频繁打扰（DESIGN 8.4）。
+    speedReport: true,
+    severity: severityOfMagnitude(mag),
+    issued: originIso,
+    reportTime: reportIso,
+    headline,
+    maxScale: -1,
+    level: 0,
+    geo: { lat, lon, depthKm: depth },
+    magnitude: mag,
+    magType: '',
+    hypo: { name: place, magnitude: mag },
+    regions: [],
+    eventKey: geoEventKey(originIso, lat, lon),
+    strength: mag === null ? 0 : mag,
+    intensity: numOrNull(item.intensity), // 中国地震烈度（整数档）：只入库、不上 UI
+    // 实测全是 "reviewed"。不认识的取值**不丢弃**——它仍然是同一场真实地震，
+    // 丢弃等于漏报；原样带上供诊断，是否收窄由将来的实测决定（那时才知道有哪些取值）。
+    reportType: String(item.type === undefined || item.type === null ? '' : item.type).trim(),
+    cancelled: false,
+    raw: item,
+  }
+}
+
+/**
+ * 速报整表 → 按 `No1…NoN` **数值序**（不是字典序，否则 No10 会排到 No2 前面）的条目数组。
+ * 实测 No1 是最新一条。非 `NoN` 键（type / md5）原样跳过。
+ * @param {object} json WS / REST 的整表载荷
+ * @returns {object[]} 原始条目（未解析），供逐条过契约
+ */
+function cencEqlistItems(json) {
+  if (!isPlainObject(json)) return []
+  const keys = Object.keys(json)
+    .map((k) => { const m = /^No(\d+)$/.exec(k); return m ? { k, n: Number(m[1]) } : null })
+    .filter(Boolean)
+    .sort((a, b) => a.n - b.n);
+  return keys.map((e) => json[e.k]).filter(isPlainObject)
+}
+
+/** 速报整表的变更指纹。实测存在；缺失时返回空串（**不**据此判 schema——见契约层的说明）。 */
+function cencEqlistMd5Of(json) {
+  if (!isPlainObject(json)) return ''
+  const v = json.md5;
+  return typeof v === 'string' ? v.trim() : ''
+}
+
+/** 速报整表 → Alert[]（逐条解析，坏条目跳过而不是整表作废）。 */
+function parseCencEqlist(json) {
+  return cencEqlistItems(json).map(parseCencEqlistItem).filter(Boolean)
+}
+
+// ============================================================================
 // dsh-quake-alert · client/src/05d-source-contracts.js
 //
 // 作用：**解析契约**与**每源校验约定**（0.4.1 的交付物之一，对应 DESIGN 4.5 与 11.1）。
@@ -2211,6 +2550,55 @@ const SOURCE_CONTRACTS = {
     staleAfterMs: null,
     staleReason: '事件列表只在有海啸时才有内容，"列表为空"是绝大多数时间的正常形态，不能据此判 stale。',
   },
+  // ---- 中国大陆源（0.5.0）----
+  // 与其它源的两处结构性差异，写在契约里而不是埋在解析器里：
+  //   ① 传输是 **Host 单点常连**（Wolfx 限 5–7 连接/IP），不是 Client 直连——见 DESIGN 5.3。
+  //   ② cenc_eqlist 的字段**全是字符串**，而 cenc_eew 的字段是 number；两个源来自同一上游，
+  //      所以不能按"同一家的风格"写解析，只能按实测样本写。
+  cenc_eew: {
+    label: 'Wolfx CENC 地震预警',
+    region: 'cn',
+    disasters: ['eew'],
+    transport: 'ws',
+    url: 'wss://ws-api.wolfx.jp/cenc_eew（REST 快照 https://api.wolfx.jp/cenc_eew.json）',
+    pollMs: null,
+    timezone: 'Asia/Shanghai（+08:00，无夏令时）—— OriginTime / ReportTime 是裸北京时间，由 cnTimeToIso 补偏移',
+    required: [
+      '接收两种形态：WS 推送包（含 type:"cenc_eew"）与 REST 快照（无 type），其余 10 个字段完全一致',
+      'ID string（消息唯一键，Alert 的 id 取 cenc: 前缀）',
+      'OriginTime / ReportTime 为可解析的北京时间串',
+      'Latitude / Longitude 为数值（实测 number）',
+      'Magnitude / Depth / ReportNum / MaxIntensity 为数值',
+      'HypoCenter 为 string',
+    ],
+    empty: '10 个字段一个都没有（只有 type 包裹或空对象）——源正常但当前没有预警。' +
+      '**这条未实测**：Wolfx 总是回最后一条预警（哪怕已过数天），从未见过"无预警"的返回形态，' +
+      '样本不足以确认。保守取此判据，是因为判反了会点亮一个用户根本处理不了的蓝点（DESIGN 4.5 的配色语义）。',
+    staleAfterMs: null,
+    staleReason: '预警稀疏（实测门槛约 M4.0，数天一次），"很久没消息"是常态，不能据此判死。' +
+      '活性由连接层负责（心跳实测精确 60 秒、200 秒内无服务端强断，超 120 秒无消息即重连）。' +
+      '中继是否存活由 cenc_eqlist 探（它每天都有数据）——这也是两个源都要接的原因之一。',
+  },
+  cenc_eqlist: {
+    label: 'Wolfx CENC 地震速报',
+    region: 'cn',
+    disasters: ['quake'],
+    transport: 'ws',
+    url: 'wss://ws-api.wolfx.jp/cenc_eqlist（REST 快照 https://api.wolfx.jp/cenc_eqlist.json）',
+    pollMs: null,
+    timezone: 'Asia/Shanghai（+08:00，无夏令时）—— time / ReportTime 是裸北京时间，由 cnTimeToIso 补偏移',
+    required: [
+      '整表载荷：No1…NoN（数值序，No1 最新）+ md5',
+      '每项：EventID string、time / ReportTime 为可解析的北京时间串',
+      '每项：magnitude / depth / latitude / longitude / intensity 为数字字符串（实测全为字符串）',
+      '每项：placeName 或 location 至少一个非空 string',
+    ],
+    empty: '整表里一个 NoN 都没有——源正常但当前没有速报数据',
+    staleAfterMs: 48 * 60 * 60 * 1000,
+    staleReason: '**本插件唯一真正有意义的新鲜度阈值，而且它探的是中继不是灾害**：速报每天都有数据，' +
+      '所以"超过 48 小时没有新批次"即判中继异常（fj_eew 那种连接正常但停更 4 个月的形态，' +
+      '靠连接检测完全发现不了）。实测发布 lag 209–1643 秒，阈值不能贴着 lag 取留出余量。',
+  },
 };
 
 // ---------------------------------------------------------------- Result 包装
@@ -2358,6 +2746,91 @@ function parseNoaaResult(xml, entry) {
     }
   }
   return okResult(alert)
+}
+
+/**
+ * Wolfx 大陆地震预警（`cenc_eew`）。
+ *
+ * 时间判据用 `cnTimeToIso` 之后的串去解析：裸的 `2026-09-18 20:50:23` 交给 `Date.parse` 会按
+ * **本机时区**解释，而它其实是北京时间——那样"客观不可能"这条判据就带上了本机时区的偏差。
+ */
+function parseCencEewResult(raw) {
+  if (!isPlainObject(raw)) return failResult('schema', '顶层不是对象')
+  if (raw.type !== undefined && String(raw.type) !== 'cenc_eew') {
+    return failResult('schema', 'type 不是 cenc_eew（收到 ' + String(raw.type) + '）')
+  }
+  // empty 判据：10 个字段一个都没有。理由与证据等级见 SOURCE_CONTRACTS.cenc_eew.empty。
+  const fields = ['ID', 'EventID', 'OriginTime', 'ReportTime', 'Latitude', 'Longitude', 'Magnitude', 'Depth', 'MaxIntensity', 'HypoCenter'];
+  const hasAny = fields.some((k) => {
+    const v = raw[k];
+    return v !== undefined && v !== null && String(v) !== ''
+  });
+  if (!hasAny) return failResult('empty', '载荷里没有任何预警字段（源正常但当前没有预警）')
+  const id = raw.ID;
+  if (typeof id !== 'string' || !id.trim()) return failResult('schema', '缺少 ID（string）')
+  const lat = numOf(raw.Latitude);
+  const lon = numOf(raw.Longitude);
+  if (lat === null || lon === null) return failResult('schema', '缺少 Latitude / Longitude（数值）')
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return failResult('value', '震中坐标越界：' + lat + ',' + lon)
+  if (numOf(raw.Magnitude) === null) return failResult('schema', '缺少 Magnitude（数值）')
+  const t = timeMsOf(cnTimeToIso(raw.OriginTime));
+  if (t === null) return failResult('schema', '缺少 OriginTime（可解析的北京时间）')
+  if (timeIsImpossible(t)) return failResult('value', '发震时刻客观不可能：' + String(raw.OriginTime))
+  const alert = parseCencEew(raw);
+  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  return okResult(alert)
+}
+
+/**
+ * 速报整表里的单项（`NoN`）。逐条过契约，便于定位"哪一项坏了"。
+ * 注意：单项失败**不等于整表坏**——批量语义见 parseCencEqlistResult。
+ */
+function parseCencEqlistItemResult(item) {
+  if (!isPlainObject(item)) return failResult('schema', '速报项不是对象')
+  const eventId = item.EventID;
+  if (typeof eventId !== 'string' || !eventId.trim()) return failResult('schema', '缺少 EventID（string）')
+  const lat = numOf(item.latitude);
+  const lon = numOf(item.longitude);
+  if (lat === null || lon === null) return failResult('schema', '缺少 latitude / longitude（数字字符串或数值）')
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return failResult('value', '震中坐标越界：' + lat + ',' + lon)
+  if (numOf(item.magnitude) === null) return failResult('schema', '缺少 magnitude（数字字符串或数值）')
+  const t = timeMsOf(cnTimeToIso(item.time));
+  if (t === null) return failResult('schema', '缺少 time（可解析的北京时间）')
+  if (timeIsImpossible(t)) return failResult('value', '发震时刻客观不可能：' + String(item.time))
+  const alert = parseCencEqlistItem(item);
+  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  return okResult(alert)
+}
+
+/**
+ * 速报整表 → 批量结果 `{ ok, alerts, dropped, md5 }`。
+ *
+ * **为什么批量与单项分开判**：整表 50 条，一条缺坐标就让整表作废等于漏掉另外 49 条真实地震
+ * ——0.4.2 已经就 551 的观测点定过同一口径（"存在则类型必须正确"，缺失容忍）。
+ * 所以：坏条目**逐条丢弃并计数**（`dropped`，不是静默），只有**一条都没解析出来**才判整表 schema。
+ * 整表一条都没有则判 empty——源正常但当前没有速报数据。
+ */
+function parseCencEqlistResult(json) {
+  if (!isPlainObject(json)) return failResult('schema', '顶层不是对象')
+  if (json.type !== undefined && String(json.type) !== 'cenc_eqlist') {
+    return failResult('schema', 'type 不是 cenc_eqlist（收到 ' + String(json.type) + '）')
+  }
+  const items = cencEqlistItems(json);
+  if (items.length === 0) return failResult('empty', '整表里没有 NoN 条目（源正常但当前没有速报数据）')
+  const alerts = [];
+  let dropped = 0;
+  let firstDetail = '';
+  for (const it of items) {
+    const res = parseCencEqlistItemResult(it);
+    if (res.ok) { alerts.push(res.alert); continue }
+    if (res.kind === 'empty') continue
+    dropped++;
+    if (!firstDetail) firstDetail = res.kind + '：' + res.detail;
+  }
+  if (alerts.length === 0) {
+    return failResult('schema', '整表 ' + items.length + ' 条全部无法解析（' + firstDetail + '）')
+  }
+  return { ok: true, alerts, dropped, md5: cencEqlistMd5Of(json), total: items.length }
 }
 
 // ---------------------------------------------------------------- 健康状态
@@ -2537,7 +3010,12 @@ function matchPointAlert(alert, cfg) {
       return { hit: false, reason: '海啸等级未达阈值（本条 ' + rank + ' < ' + minRank + '）' }
     }
   }
-  const minMag = (cfg.thresholds || {}).globalMagnitude;
+  // 震级门槛分两把（0.5.0）：坐标型**预警**（EMSC / USGS / cenc_eew）用 globalMagnitude，
+  // 大陆**速报**（cenc_eqlist，alert.speedReport）用独立的 cnReportMagnitude——速报覆盖低到
+  // M2.5 且每天都有数据，用预警门槛播报会被小震频繁打扰（DESIGN 8.4）。
+  const th = cfg.thresholds || {};
+  const minMag = alert.speedReport ? th.cnReportMagnitude : th.globalMagnitude;
+  const magName = alert.speedReport ? '速报震级阈值' : '全球震级阈值';
   const mag = typeof alert.magnitude === 'number' && Number.isFinite(alert.magnitude) ? alert.magnitude : null;
   // 震级阈值只作用于地震。海啸的严重性由它自己的等级决定（上面的闸门），
   // 不该被"引发它的那次地震有多大"过滤掉：NOAA 电文里那个前震震级只是参考值，而且用同一个
@@ -2545,7 +3023,7 @@ function matchPointAlert(alert, cfg) {
   // 而海啸恰恰是这里最不能漏的一类。
   const quakeLike = alert.kind === 'quake' || alert.kind === 'eew';
   if (quakeLike && mag !== null && typeof minMag === 'number' && mag < minMag) {
-    return { hit: false, reason: 'M' + mag + ' 低于全球震级阈值 M' + minMag }
+    return { hit: false, reason: 'M' + mag + ' 低于' + magName + ' M' + minMag }
   }
   let nearest = null;
   for (const g of pts) {
@@ -3122,13 +3600,56 @@ function areaLabelOf(region) {
 }
 
 /**
+ * 大陆源的产品名。日本源与大陆源虽然都叫"地震预警 / 速报"，却是**两家不同机构的不同产品**：
+ * 気象庁的是「緊急地震速報」，中国地震台网的是「地震预警」。把日方名称套到大陆源上，
+ * 用户会以为收到了日本气象厅的速报——在预警类产品里这是会误导行动的错误。
+ */
+function cnProductName(alert) {
+  if (!alert) return ''
+  if (alert.source === 'cenc_eew') return '大陆地震预警'
+  if (alert.source === 'cenc_eqlist') return '大陆地震速报'
+  return ''
+}
+
+/**
+ * 通知文案里的「官方发布」指哪家机构。
+ *
+ * 各源的主管机构完全不同。此前文案里硬编码了「气象厅」，于是希腊的一场 USGS 地震、
+ * 四川的一场 CENC 预警都会让用户"以气象厅官方发布为准"——免责声明里出现错误机构，
+ * 会直接削弱这份声明本身的可信度。这里按源给出机构名，认不出时退化成中性表述。
+ */
+const AUTHORITY_BY_SOURCE = {
+  emsc: '欧洲-地中海地震中心（EMSC）',
+  usgs: '美国地质调查局（USGS）',
+  noaa: '太平洋海啸警报中心（NOAA）',
+  cenc_eew: '中国地震台网（CENC）',
+  cenc_eqlist: '中国地震台网（CENC）',
+  jma: '気象庁',
+};
+function authorityOf(alert) {
+  if (!alert) return ''
+  const bySource = own(AUTHORITY_BY_SOURCE, String(alert.source || ''));
+  if (bySource) return bySource
+  const byCode = own(AUTHORITY_BY_SOURCE, String(alert.code === undefined ? '' : alert.code));
+  if (byCode) return byCode
+  // P2PQuake 的 551 / 552 / 556 都是转播気象庁的信息（它们只有数字 code，没有 source）
+  if (alert.code === 551 || alert.code === 552 || alert.code === 556) return '気象庁'
+  return ''
+}
+/** 「仅供参考」那一行。机构已知时点名，未知时用中性表述（不硬编码日本气象厅）。 */
+function disclaimerOf(alert) {
+  const a = authorityOf(alert);
+  return a ? '—— 仅供参考，请以' + a + '官方发布为准' : '—— 仅供参考，请以官方发布为准'
+}
+
+/**
  * 系统通知 / 页内 toast 的标题。抽成纯函数是为了能直接断言文案——
  * 旧写法把「地震情报 · 」与「各地震度」分开拼，非「各地」分支会留下一个悬空的分隔符。
  */
 function alertTitleOf(alert) {
   if (!alert) return '灾害预警'
   // kindLabel 本身已区分「地震速报·震度速报」「地震情报·各地震度」等，不需要再拼后缀
-  if (alert.kind === 'eew') return '⚠ 紧急地震速报（警报）'
+  if (alert.kind === 'eew') return '⚠ ' + (cnProductName(alert) || '紧急地震速报（警报）')
   if (alert.kind === 'quake') return '🌐 ' + alert.kindLabel
   if (alert.kind === 'tsunami') return '🌊 ' + alert.kindLabel
   if (alert.kind === 'weather') return '🌧 ' + alert.kindLabel
@@ -3215,9 +3736,10 @@ function handleCancelled(alert, cfg) {
     id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
     issued: alert.issued, headline: alert.headline, hit: true,
   });
-  const title = alert.kind === 'eew' ? '✅ 紧急地震速报已取消'
+  const title = alert.kind === 'eew'
+    ? '✅ ' + (cnProductName(alert) || '紧急地震速报') + '已取消'
     : (alert.kind === 'tsunami' ? '✅ 海啸预报已解除' : '✅ ' + alert.kindLabel);
-  const body = alert.headline + '\n此前发出的警报已作废。\n—— 仅供参考，请以气象厅官方发布为准';
+  const body = alert.headline + '\n此前发出的警报已作废。\n' + disclaimerOf(alert);
   if (cfg.notify.sound !== false) playSound('cancel', cfg.notify.volume);
   const pageVisible = typeof document !== 'undefined' && document.visibilityState === 'visible';
   if (pageVisible) {
@@ -3357,7 +3879,7 @@ function handleAlert(alert, cfg, opts) {
   else if (m.place) bodyLines.push('命中关注点：' + m.place.name + '（距震中约 ' + Math.round(m.distanceKm) + ' km）');
   if (alert.kind === 'tsunami') bodyLines.push('请立即远离海岸与河口');
   if (alert.kind === 'weather') bodyLines.push('请确认所在市町村的避难信息');
-  bodyLines.push('—— 仅供参考，请以气象厅官方发布为准');
+  bodyLines.push(disclaimerOf(alert));
   addEvent({
     id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
     issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
@@ -3941,6 +4463,624 @@ function createFeedClient(opts = {}) {
 }
 
 // ============================================================================
+// dsh-quake-alert · client/src/12c-cn-stream.js
+//
+// 作用：消费大陆源（Wolfx cenc_eew / cenc_eqlist）的 **SSE 推送**，解析成 Alert 后交给主链
+//       ——与 P2PQuake 的 551/552/556、気象庁的电文汇到同一个 handleAlert。
+// 内容：EventSource 生命周期、断线补齐（Last-Event-ID）、游标持久化、
+//       **降级到轮询**（EventSource 不可用 / 连不上 / 连上但不推流）。
+// 依赖：02-storage（游标落盘）、03-settings-bridge（currentCfg）、05d（解析契约与健康状态）、
+//       11-pipeline（handleAlert）、12b-feed-poll（降级用的轮询客户端）。
+//
+// 为什么用 SSE 而不是复用 12b 的轮询：EEW 的价值在秒级。轮询是 15 秒一轮，
+// 等于把"预警"变成"事后通知"——那正是这个源存在的理由（DESIGN 5.3 的三方案比较）。
+//
+// 为什么必须自带降级（而不是留给设计里的"降级开关"）：
+//   EventSource 是浏览器原生能力，但它**可能被中间设备掐掉**（代理缓冲流式响应、重置长连接），
+//   而 `/feed?source=cenc_eew` 那条普通 HTTPS 轮询往往仍然通（DESIGN 11.5）。没有自动降级的话，
+//   这些网络下的用户会**静默地只收到轮询源、永远收不到大陆预警**——正是本插件最不能接受的失败形态。
+//   所以这里的口径是：只要能证明"SSE 这条链路走不通"，就自动切到轮询，并且**把降级这件事说出来**
+//   （状态上报成 degraded），用户与 AI 都看得见。
+//   手动开关（用户强制选轮询）与只读诊断快照是 0.5.0 的后续增量。
+// ============================================================================
+
+
+/** Host 侧的 SSE 路由（与 lib/index.js 的 STREAM_PATH 对应）。 */
+const STREAM_PATH = '/dsh-quake-alert/stream';
+/** 每个源自己的游标键前缀（与 12b 的 FEED_CURSOR_KEY 同域、风格一致）。 */
+const CN_CURSOR_KEY = 'dsh.quakeAlert.streamCursor';
+/**
+ * 连上之后多久没收到首帧 `sync` 就判定"这条流不通"。
+ * 首帧是 Host 立刻写出的，正常情况几十毫秒就到；8 秒足够覆盖慢机器，
+ * 又远小于"用户会以为插件坏了"的心理阈值。
+ */
+const SSE_PROBE_MS = 8000;
+/** 连续失败到这个次数就降级到轮询。取 3：容忍一次网络抖动与一次 Host 重启。 */
+const SSE_MAX_FAILS = 3;
+/** 降级/停用期间的重探间隔：用户重新打开灾种开关后要能回来。 */
+const CN_RECHECK_MS = 5000;
+
+/** 读回持久化游标；任何脏数据一律当作"没有记录"。 */
+function loadCursorOf(key) {
+  const v = loadJSON(key, null);
+  return (typeof v === 'number' && Number.isFinite(v) && v >= 0) ? Math.floor(v) : null
+}
+function saveCursorOf(key, v) {
+  if (typeof v === 'number' && Number.isFinite(v) && v >= 0) saveJSON(key, Math.floor(v));
+}
+
+/**
+ * @param {object} opts
+ * @param {string} opts.id 源标识（`cenc_eew` / `cenc_eqlist`）
+ * @param {string} [opts.label] 状态文案里的源名
+ * @param {string} [opts.path] SSE 路由（含 `?source=`）
+ * @param {(entry: object, cfg: object) => boolean} [opts.apply] 逐条应用（15-entry 注入解析契约）
+ * @param {(cfg: object) => boolean} [opts.enabled] 该源当前是否需要消费（按灾种开关判断）
+ * @param {(patch: object) => void} [opts.onStatus] 状态上报
+ * @param {(err: Error) => void} [opts.onError]
+ * @param {(url: string) => object} [opts.createEventSource] 注入点（测试用）
+ * @param {() => object} [opts.createFallback] 降级客户端工厂（测试用；默认建一个 12b 的轮询客户端）
+ * @param {() => object} [opts.getCfg]
+ * @param {() => object} [opts.loadCursor] / @param {(v: number) => void} [opts.saveCursor]
+ * @param {number} [opts.probeMs] / @param {number} [opts.maxFails]
+ */
+function createCnStream(opts = {}) {
+  const id = opts.id;
+  const label = opts.label || id;
+  const path = opts.path || (STREAM_PATH + '?source=' + id);
+  const cursorKey = opts.cursorKey || (CN_CURSOR_KEY + '.' + id);
+  const getCfg = opts.getCfg || currentCfg;
+  const onError = opts.onError || (() => {});
+  const onStatus = opts.onStatus || (() => {});
+  const apply = opts.apply || (() => false);
+  const enabled = opts.enabled || (() => true);
+  const probeMs = opts.probeMs === undefined ? SSE_PROBE_MS : opts.probeMs;
+  const maxFails = opts.maxFails === undefined ? SSE_MAX_FAILS : opts.maxFails;
+  const loadCursor = opts.loadCursor || (() => loadCursorOf(cursorKey));
+  const saveCursor = opts.saveCursor || ((v) => saveCursorOf(cursorKey, v));
+  const createEventSource = opts.createEventSource
+    || ((url) => new window.EventSource(url));
+  // 定时器注入点：探针超时与周期检查都靠它，测试要能确定性地推进（不真等 8 秒 / 5 秒）
+  const setTimer = opts.setTimer || ((fn, ms) => setTimeout(fn, ms));
+  const clearTimer = opts.clearTimer || ((t) => clearTimeout(t));
+  // 降级工厂：默认按 12b 的轮询客户端建一个（`?source=` 分派，Host 侧早就支持）。
+  const createFallback = opts.createFallback || (() => createFeedClient({
+    id,
+    label,
+    path: FEED_PATH + '?source=' + id,
+    cursorKey: FEED_CURSOR_KEY + '.' + id,
+    enabled,
+    onStatus,
+    onError,
+    apply,
+  }));
+
+  let since = null;
+  try {
+    const stored = loadCursor();
+    if (typeof stored === 'number' && Number.isFinite(stored) && stored >= 0) since = Math.floor(stored);
+  } catch (err) { /* 读盘失败按首次启动处理 */ }
+
+  let running = false;
+  let source = null; // EventSource 实例
+  let probeTimer = null;
+  let tickTimer = null;
+  let fallbackClient = null;
+  let mode = 'idle'; // idle | sse | poll | disabled
+  let consecutiveFails = 0;
+  let sawSyncThisConn = false;
+  let lastStatusKey = '';
+  let inFallback = false;
+  /** 当前的轮询是"用户选的"还是"自动降级来的"——只有前者能自动升回 SSE。 */
+  let fallbackManual = false;
+  const stats = {
+    mode: 'idle', connections: 0, syncs: 0, received: 0, applied: 0, errors: 0,
+    sseErrors: 0, probeTimeouts: 0, fallbacks: 0, fallbackManual: false, truncated: 0, resets: 0,
+    lastAt: 0, lastEventAt: 0, cursor: 0, frozen: false, lastDetail: '',
+  };
+
+  /** 用户在设置页选了「强制轮询」（`cnTransport: 'poll'`）？默认 'auto'。 */
+  const wantPoll = (cfg) => String((cfg && cfg.cnTransport) || 'auto') === 'poll';
+
+  const cursorNow = () => (since === null ? 0 : since);
+  // 注册到表里（实时读取，见 cnStreamRegistry 的说明）
+  cnStreamRegistry[id] = {
+    stats: () => Object.assign({}, stats, { running, hasCursor: since !== null, fallbackActive: inFallback }),
+    mode: () => mode,
+  };
+  function setCursor(next) {
+    if (!(typeof next === 'number' && Number.isFinite(next) && next >= 0)) return
+    const v = Math.floor(next);
+    if (v === since) return
+    // 游标只前进：SSE 的补发与实况可能交错到达，回退会让"断线补齐"重复投递
+    if (since !== null && v < since) return
+    since = v;
+    stats.cursor = v;
+    try { saveCursor(v); } catch (err) { /* 隐私模式等写盘失败：本次仍以内存游标工作 */ }
+  }
+
+  /**
+   * 状态上报。`k` 是去重键，**不取 detail**：detail 里含"已收到 N 条"这类单调计数，
+   * 用它做键会每轮都判定为"变化"→ 设置页反复重渲。
+   * 但键也不能只取 status：降级（degraded）与"出错但正在自动重连"是同一个 status，
+   * 却是完全不同的两件事——后者能自己恢复，前者意味着链路已经变了、必须让用户知道。
+   * 所以由调用方给一个稳定的**语义**键，默认退回 status。
+   */
+  function reportStatus(patch, k) {
+    stats.lastDetail = String(patch.detail || '');
+    const eff = effectiveStatusOf(id, patch.status, patch.detail);
+    const key = k || eff.status;
+    if (key === lastStatusKey) return
+    lastStatusKey = key;
+    try { onStatus(Object.assign({ label }, eff)); } catch (err) { /* UI 回调异常不影响链路 */ }
+  }
+
+  function closeSource() {
+    if (probeTimer) { clearTimer(probeTimer); probeTimer = null; }
+    const s = source;
+    source = null;
+    if (s) {
+      try { s.onerror = null; s.onmessage = null; } catch (err) { /* 忽略 */ }
+      try { s.close(); } catch (err) { /* 已关闭 */ }
+    }
+  }
+
+  /**
+   * 切到轮询。
+   * @param {string} reason 人话原因（会出现在状态里，所以要说清是"哪条链路不行了"）
+   * @param {boolean} [manual] true = 用户在设置页选了「强制轮询」，false/缺省 = 自动降级。
+   *   区别只在能不能自动升回 SSE：自动降级不再升回（链路既然证明过不通，反复试探只是抖动），
+   *   而**手动**选择是可以撤销的——用户改回「自动」就该回到 SSE。
+   */
+  function activateFallback(reason, manual) {
+    if (inFallback) return
+    inFallback = true;
+    fallbackManual = manual === true;
+    stats.fallbacks += 1;
+    stats.fallbackManual = fallbackManual;
+    mode = 'poll';
+    stats.mode = mode;
+    closeSource();
+    try { fallbackClient = createFallback(); } catch (err) {
+      onError(err);
+      reportStatus({ status: 'unreachable', detail: '降级到轮询时建立客户端失败：' + String((err && err.message) || err) });
+      return
+    }
+    try { fallbackClient.start(); } catch (err) { onError(err); }
+    // 降级必须**说出来**：否则用户看到"一切正常"却收不到预警（本插件最不能接受的形态）。
+    // 去重键显式给 'fallback'：进入降级之前刚上报过 degraded（"出错、正在重连"）是同一个
+    // status，若按 status 去重，这条"已降级"会被自己的上一条吃掉——而降级是不能被静默的。
+    reportStatus({
+      status: fallbackManual ? 'disabled' : 'degraded',
+      detail: (fallbackManual ? '已按设置选择轮询' : 'SSE 推送不可用（' + reason + '）→ 已降级为轮询') +
+        '（延迟从秒级变为最长 15 秒）',
+    }, 'fallback');
+  }
+
+  /** 从轮询升回 SSE（只有**手动**选的轮询会被自动升回）。 */
+  function leaveFallback() {
+    if (!inFallback) return
+    inFallback = false;
+    fallbackManual = false;
+    if (fallbackClient) { try { fallbackClient.stop(); } catch (err) { /* 忽略 */ } }
+    fallbackClient = null;
+    mode = 'idle';
+    stats.mode = mode;
+    consecutiveFails = 0;
+    connectSse();
+  }
+
+  /**
+   * 单一的周期检查（每 5 秒）。用**一个**定时器同时管三个方向，因为它们会互相打架：
+   *   · 灾种开关被关掉 → 主动断开 SSE（不再读 `/stream`，Host 侧十分钟后自然断开与 Wolfx 的连接）
+   *   · 灾种开关又打开 → 恢复消费
+   *   · 设置页的「链路」选择变了 → 强制轮询 ↔ 自动（手动选择的可以撤销，自动降级的不再升回）
+   * 分成多个定时器容易写出"关掉之后再也回不来"这种半途状态。
+   */
+  function scheduleTick() {
+    if (!running) return
+    if (tickTimer) { clearTimer(tickTimer); tickTimer = null; }
+    tickTimer = setTimer(() => {
+      tickTimer = null;
+      if (!running) return
+      const cfg = getCfg();
+      const on = enabled(cfg);
+      if (!on) {
+        if (mode !== 'disabled') enterDisabled();
+      } else if (mode === 'disabled') {
+        consecutiveFails = 0;
+        if (inFallback) { if (fallbackClient) { try { fallbackClient.start(); } catch (err) { onError(err); } } }
+        else connectSse();
+      } else if (wantPoll(cfg)) {
+        // 用户选了「强制轮询」：从 SSE 切过去（已经在轮询就什么都不做）
+        if (!inFallback) activateFallback('设置里选择了强制轮询', true);
+      } else if (inFallback && fallbackManual) {
+        // 用户改回「自动」：手动选的轮询要能撤销。自动降级的不升回——那条链路已经证明过不通。
+        leaveFallback();
+      }
+      scheduleTick();
+    }, CN_RECHECK_MS);
+    if (tickTimer && typeof tickTimer.unref === 'function') tickTimer.unref();
+  }
+
+  function connectSse() {
+    if (!running || source) return
+    sawSyncThisConn = false;
+    stats.connections += 1;
+    const url = path + (path.indexOf('?') === -1 ? '?' : '&') +
+      // 页面首次建立连接时带上持久化游标：刷新 / 重开标签页都能补齐断线期间的事件。
+      // 之后浏览器自动重连时会带 `Last-Event-ID`，Host 优先用它（更准）。
+      'since=' + (since === null ? 'tail' : since);
+    let es;
+    try {
+      es = createEventSource(url);
+    } catch (err) {
+      onError(err);
+      consecutiveFails += 1;
+      reportStatus({ status: 'unreachable', detail: 'EventSource 建立失败：' + String((err && err.message) || err) });
+      return activateFallback('EventSource 建立失败')
+    }
+    if (!es || typeof es.addEventListener !== 'function') {
+      consecutiveFails += 1;
+      reportStatus({ status: 'unreachable', detail: '当前环境没有可用的 EventSource' });
+      return activateFallback('当前环境不支持 EventSource')
+    }
+    source = es;
+    mode = 'sse';
+    stats.mode = mode;
+    const onSync = (ev) => {
+      if (source !== es) return
+      sawSyncThisConn = true;
+      consecutiveFails = 0;
+      stats.syncs += 1;
+      stats.lastAt = Date.now();
+      let d = null;
+      try { d = JSON.parse(String(ev && ev.data)); } catch (err) { d = null; }
+      if (d && d.truncated) stats.truncated += 1;
+      if (d && d.reset) stats.resets += 1;
+      stats.frozen = !!(d && d.frozen);
+      // 没有补发条目 = 已经在线，游标就是 Host 的当前位置 → 对齐它，
+      // 这样刷新页面不会重复拉一段已经消费过的增量。
+      if (d && Number.isFinite(d.cursor) && (!d.replayed || d.replayed === 0)) setCursor(d.cursor);
+      const warn = [];
+      if (d && d.truncated) warn.push('有增量缺口（Host 环缓冲已淘汰旧条目）');
+      if (d && d.reset) warn.push('Host 游标重置过');
+      if (d && d.frozen) warn.push('Host 侧该源未在运行');
+      reportStatus({
+        status: warn.length ? 'degraded' : 'open',
+        detail: 'SSE 已连接' + (d ? '（补发 ' + (d.replayed || 0) + ' 条）' : '') +
+          ' · 已收到 ' + stats.received + ' 条' + (warn.length ? ' · ' + warn.join('；') : ''),
+      });
+    };
+    const onEntry = (ev) => {
+      if (source !== es) return
+      stats.lastAt = Date.now();
+      stats.lastEventAt = Date.now();
+      let entry = null;
+      try { entry = JSON.parse(String(ev && ev.data)); } catch (err) { entry = null; }
+      if (!entry || typeof entry !== 'object') {
+        stats.errors += 1;
+        noteParseResult(id, failResult('schema', 'SSE 帧不是合法 JSON'));
+        return
+      }
+      stats.received += 1;
+      if (Number.isFinite(entry.seq)) setCursor(entry.seq);
+      try {
+        if (apply(entry, getCfg())) stats.applied += 1;
+      } catch (err) {
+        // 单条事件解析失败不能影响后续条目，也不能让游标停住
+        stats.errors += 1;
+        onError(err);
+      }
+    };
+    const onErrorEv = (ev) => {
+      if (source !== es) return
+      stats.sseErrors += 1;
+      stats.errors += 1;
+      consecutiveFails += 1;
+      // EventSource 自己会按 readyState 重连；这里只负责"什么时候判定这条路走不通"。
+      // 已经收到过 sync 的连接再出错，多半是网络抖动或 Host 重启，交给浏览器重连；
+      // 一次 sync 都没收到就说明这条流从来没通过。
+      reportStatus({
+        status: 'degraded',
+        detail: 'SSE 连接中断（第 ' + consecutiveFails + ' 次）' + (sawSyncThisConn ? '，正在自动重连' : ''),
+      });
+      if (!sawSyncThisConn && consecutiveFails >= maxFails) activateFallback('连续 ' + consecutiveFails + ' 次未收到首帧');
+    };
+    try {
+      es.addEventListener('sync', onSync);
+      es.addEventListener('entry', onEntry);
+      es.addEventListener('error', onErrorEv);
+    } catch (err) { /* 极简实现可能不支持命名事件，下面由 probe 兜住 */ }
+    // 首帧探针：连上但**不推流**（代理把流缓冲住了）与"连不上"是两回事，
+    // 而 onerror 未必会来。没有这个探针，用户会停在"SSE 已连接"却永远收不到预警。
+    if (probeMs > 0) {
+      probeTimer = setTimer(() => {
+        probeTimer = null;
+        if (!running || source !== es || sawSyncThisConn) return
+        stats.probeTimeouts += 1;
+        consecutiveFails += 1;
+        closeSource();
+        reportStatus({ status: 'degraded', detail: 'SSE 连上但 ' + probeMs + 'ms 内没有收到任何数据（可能被代理缓冲）' });
+        if (consecutiveFails >= maxFails) activateFallback('连上但不推流');
+        else connectSse();
+      }, probeMs);
+    }
+  }
+
+  function enterDisabled(patch) {
+    mode = 'disabled';
+    stats.mode = mode;
+    closeSource();
+    // 停用轮询降级端：它在跑的话也会一直拉
+    if (fallbackClient) { try { fallbackClient.stop(); } catch (err) { /* 忽略 */ } fallbackClient = null; }
+    inFallback = false;
+    reportStatus({ status: 'disabled', detail: '灾种开关已关闭' });
+    // 关掉灾种开关 → 不再读 `/feed` 与 `/stream` → Host 侧 10 分钟后自然断开与 Wolfx 的连接
+  }
+
+  return {
+    id,
+    label,
+    path,
+    start() {
+      if (running) return
+      running = true;
+      stats.cursor = cursorNow();
+      scheduleTick();
+      const cfg = getCfg();
+      if (!enabled(cfg)) { enterDisabled(); return }
+      // 用户选了「强制轮询」→ 一开始就不建 SSE（也不必先连一次再切，那会白占一条 Wolfx 连接）
+      if (wantPoll(cfg)) { activateFallback('设置里选择了强制轮询', true); return }
+      connectSse();
+    },
+    stop() {
+      running = false;
+      closeSource();
+      if (tickTimer) { clearTimer(tickTimer); tickTimer = null; }
+      if (fallbackClient) { try { fallbackClient.stop(); } catch (err) { /* 忽略 */ } }
+      fallbackClient = null;
+      inFallback = false;
+      fallbackManual = false;
+      mode = 'idle';
+      stats.mode = mode;
+    },
+    /** 测试与诊断：当前处于哪条链路。 */
+    modeOf() { return mode },
+    /** 测试与诊断：当前轮询是用户选的还是自动降级来的。 */
+    fallbackIsManual() { return fallbackManual },
+    stats() {
+      return Object.assign({}, stats, {
+        running, hasCursor: since !== null, fallbackActive: inFallback, fallbackManual,
+      })
+    },
+    cursor() { return cursorNow() },
+    hasCursor() { return since !== null },
+  }
+}
+
+/**
+ * 大陆源客户端的注册表（id → { stats, mode }），供设置页与诊断快照**实时**读取。
+ *
+ * 为什么不做成"每隔 N 秒把 stats 拷进一个普通对象"：设置页与其它的源状态块已经是
+ * "按需读实时计数"的形态（见 12b 的 feedStatsOf 说明），拷贝出来的快照会滞后一轮，
+ * 而这里恰恰要靠计数判断"是不是根本没在收数据"。
+ */
+const cnStreamRegistry = {};
+
+// ============================================================================
+// dsh-quake-alert · client/src/16-diag.js
+//
+// 作用：**只读诊断快照**（DESIGN 11.3 的交付物之一）。
+// 内容：把 Client 侧的实时状态压成一份 JSON——聚合状态、逐源状态与数据健康、增量计数、
+//       大陆源的链路模式、关注点摘要、最近几条历史。
+// 依赖：03-settings-bridge、05d-source-contracts、07-store、12b-feed-poll、12c-cn-stream。
+//
+// 为什么需要它：`TROUBLESHOOTING.zh.md` 的读者是 **AI**，而 AI 只能看到用户粘贴给它的东西。
+// Host 侧的 `/feed?stats=1` 已经能读，但"浏览器这一半到底收到了什么、卡在哪一步"此前
+// 完全在界面里、靠人肉描述——而人肉描述恰恰是最不可靠的一环（"没响"可能是没收到、
+// 可能是解析失败、可能是没命中关注点、可能是被静默时段吞掉，四种原因在用户叙述里长得一样）。
+//
+// 三条纪律：
+//   ① **只读**：不修改任何状态、不发任何请求。诊断本身不能改变被诊断的东西。
+//   ② **永不抛错**：每个片段各自 try/catch。一个会抛错的诊断工具在真出事时最没用。
+//   ③ **只放可 JSON 化的叶子字段**：store / registry / cfg 都是活对象，直接 JSON.stringify
+//      会拖出整个模块图（也能成环）。逐字段取。
+//
+// 关于版本号：快照里**不含插件版本**——本项目的版本号只在 package.json / CHANGELOG /
+// README 三处（见约定），把它复制进 client bundle 会多出一个会漂移的位置。
+// `snapshot` 是这份**快照格式**的版本，用来判断字段含义。
+// ============================================================================
+
+
+/** 快照格式版本（与插件版本无关，见文件头）。 */
+const DIAG_SNAPSHOT_VERSION = 1;
+
+const str = (v) => String(v === undefined || v === null ? '' : v);
+const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+/** 每个片段都各自兜错：诊断工具在任何状态下都必须能产出东西。 */
+function safe(fn, fallback, warnings, label) {
+  try {
+    return fn()
+  } catch (err) {
+    warnings.push(label + '：' + str((err && err.message) || err));
+    return fallback
+  }
+}
+
+/** 来源标注：让 AI 知道这条状态是哪条链路报的，不用去猜字段顺序。 */
+function sourceRows() {
+  const out = {};
+  const srcs = (store && store.sources) || {};
+  for (const id of Object.keys(srcs)) {
+    const s = srcs[id] || {};
+    out[id] = { label: str(s.label), status: str(s.status), retries: num(s.retries), detail: str(s.detail) };
+  }
+  return out
+}
+
+/** 增量源的计数（12b）：只留诊断用得上的字段，host 那段原样带上（它就是 Host 的健康计数）。 */
+function feedRows() {
+  const out = {};
+  for (const id of Object.keys(feedStatsOf)) {
+    const f = feedStatsOf[id] || {};
+    out[id] = {
+      polls: num(f.polls), received: num(f.received), applied: num(f.applied),
+      errors: num(f.errors), truncated: num(f.truncated), resets: num(f.resets),
+      tailSync: num(f.tailSync), morePages: num(f.morePages),
+      lastAt: f.lastAt ? new Date(f.lastAt).toISOString() : null,
+      cursor: num(f.cursor), running: f.running === true,
+      host: f.host || null,
+    };
+  }
+  return out
+}
+
+/** 大陆源（12c）：**链路模式是这里最要紧的一列**——降级意味着延迟从秒级变成最长 15 秒。 */
+function streamRows() {
+  const out = {};
+  for (const id of Object.keys(cnStreamRegistry)) {
+    const reg = cnStreamRegistry[id];
+    const s = safe(() => reg.stats(), {}, [], 'stream:' + id) || {};
+    out[id] = {
+      mode: safe(() => reg.mode(), 'unknown', [], 'mode:' + id),
+      connections: num(s.connections), syncs: num(s.syncs),
+      received: num(s.received), applied: num(s.applied),
+      errors: num(s.errors), sseErrors: num(s.sseErrors), probeTimeouts: num(s.probeTimeouts),
+      fallbacks: num(s.fallbacks), truncated: num(s.truncated), resets: num(s.resets),
+      lastAt: s.lastAt ? new Date(s.lastAt).toISOString() : null,
+      lastEventAt: s.lastEventAt ? new Date(s.lastEventAt).toISOString() : null,
+      cursor: num(s.cursor), frozen: s.frozen === true,
+      running: s.running === true, fallbackActive: s.fallbackActive === true,
+      lastDetail: str(s.lastDetail),
+    };
+  }
+  return out
+}
+
+/** 关注点摘要。**坐标是有意保留的**：匹配失败通常就要靠"震中距最近关注点多少公里"来判，
+ *  去掉坐标等于把最有用的那一列删了。用户是主动粘贴这份快照的，界面上也写明了含坐标。 */
+function watchSummary(cfg) {
+  const w = (cfg && cfg.watch) || {};
+  const places = Array.isArray(w.places) ? w.places : [];
+  return {
+    prefectures: Array.isArray(w.prefectures) ? w.prefectures.slice(0, 50) : [],
+    citiesCount: Array.isArray(w.cities) ? w.cities.length : 0,
+    cities: Array.isArray(w.cities) ? w.cities.slice(0, 30) : [],
+    places: places.slice(0, 20).map((p) => ({
+      name: str(p && p.name), lat: num(p && p.lat), lon: num(p && p.lon), radiusKm: num(p && p.radiusKm),
+    })),
+    placesCount: places.length,
+  }
+}
+
+/** 最近几条历史：只留判定"到底播报没播报、为什么没播报"所需的字段。 */
+function historySummary() {
+  const evs = (store && Array.isArray(store.events)) ? store.events : [];
+  return {
+    count: evs.length,
+    recent: evs.slice(0, 5).map((e) => ({
+      kind: str(e && e.kind), label: str(e && e.label), severity: str(e && e.severity),
+      issued: str(e && e.issued), hit: e && e.hit === true,
+      suppressed: e && e.suppressed === true, suppressedReason: str(e && e.suppressedReason),
+      headline: str(e && e.headline).slice(0, 120),
+    })),
+  }
+}
+
+/** 页面环境：有些故障只在后台标签页或离线时出现。 */
+function pageEnv() {
+  const out = { visibility: 'unknown', online: null, hasEventSource: false, hasBroadcastChannel: false };
+  try {
+    if (typeof document !== 'undefined' && document && typeof document.visibilityState === 'string') {
+      out.visibility = document.visibilityState;
+    }
+  } catch (err) { /* 忽略 */ }
+  try {
+    if (typeof navigator !== 'undefined' && navigator && typeof navigator.onLine === 'boolean') out.online = navigator.onLine;
+  } catch (err) { /* 忽略 */ }
+  try {
+    out.hasEventSource = typeof window !== 'undefined' && typeof window.EventSource === 'function';
+    out.hasBroadcastChannel = typeof window !== 'undefined' && typeof window.BroadcastChannel === 'function';
+  } catch (err) { /* 忽略 */ }
+  return out
+}
+
+/**
+ * 生成诊断快照。
+ * @param {number} [now] 注入点（测试用）
+ * @returns {object} 可直接 JSON.stringify 的纯数据对象
+ */
+function buildDiagSnapshot(now) {
+  const warnings = [];
+  const cfg = safe(() => currentCfg() || {}, {}, warnings, 'cfg') || {};
+  const t = (typeof now === 'number' && Number.isFinite(now)) ? now : Date.now();
+  const cfgThresholds = (cfg && cfg.thresholds) || {};
+  const cfgDisasters = (cfg && cfg.disasters) || {};
+  const cfgNotify = (cfg && cfg.notify) || {};
+  const cfgDedupe = (cfg && cfg.dedupe) || {};
+  const cfgQuiet = (cfg && cfg.quietHours) || {};
+  const thresholds = {};
+  for (const k of Object.keys(cfgThresholds)) thresholds[k] = cfgThresholds[k];
+  const disasters = {};
+  for (const k of Object.keys(cfgDisasters)) disasters[k] = cfgDisasters[k];
+  return {
+    snapshot: DIAG_SNAPSHOT_VERSION,
+    at: new Date(t).toISOString(),
+    page: safe(pageEnv, {}, warnings, 'page'),
+    aggregate: safe(() => ({
+      status: str(store.status), retries: num(store.retries), detail: str(store.detail),
+      received: num(store.received),
+      weatherHint: store.weatherHint
+        ? { level: num(store.weatherHint.level), label: str(store.weatherHint.label), at: num(store.weatherHint.at) }
+        : null,
+    }), {}, warnings, 'aggregate'),
+    config: safe(() => ({
+      settingsStorage: str(settingsSync), // host（settings.yaml）| local | memory
+      source: str(cfg.source),
+      disasters,
+      thresholds,
+      notify: { sound: cfgNotify.sound !== false, system: cfgNotify.system !== false, volume: num(cfgNotify.volume) },
+      dedupe: { windowMinutes: num(cfgDedupe.windowMinutes) },
+      quietHours: {
+        enabled: cfgQuiet.enabled === true, start: str(cfgQuiet.start), end: str(cfgQuiet.end),
+        breakForSevere: cfgQuiet.breakForSevere !== false,
+      },
+      cnTransport: str(cfg.cnTransport) || 'auto', // 'auto'（默认，SSE 可自动降级）| 'poll'（用户强制轮询）
+      watch: safe(() => watchSummary(cfg), {}, warnings, 'watch'),
+    }), {}, warnings, 'config'),
+    sources: safe(sourceRows, {}, warnings, 'sources'),
+    // 数据健康：schema-error 的**原因**在这里（蓝点的解释）
+    dataHealth: safe(() => sourceHealthOf() || {}, {}, warnings, 'health'),
+    feed: safe(feedRows, {}, warnings, 'feed'),
+    streams: safe(streamRows, {}, warnings, 'streams'),
+    history: safe(historySummary, {}, warnings, 'history'),
+    // 生成过程中被兜住的异常：诊断工具自身的失败也要可见，不能假装一切正常
+    warnings,
+  }
+}
+
+/**
+ * 复制诊断快照到剪贴板。剪贴板不可用（沙箱 iframe / 权限被拒）时**不抛错**，
+ * 而是把文本交回调用方去显示成可手动复制的文本框——诊断的第一步不该卡在复制上。
+ * @returns {Promise<{ ok: boolean, text: string, error?: string }>}
+ */
+async function copyDiagSnapshot(now) {
+  const text = safe(() => JSON.stringify(buildDiagSnapshot(now), null, 2), '{}', [], 'stringify');
+  try {
+    if (typeof navigator !== 'undefined' && navigator && navigator.clipboard &&
+        typeof navigator.clipboard.writeText === 'function') {
+      await navigator.clipboard.writeText(text);
+      return { ok: true, text }
+    }
+  } catch (err) {
+    return { ok: false, text, error: str((err && err.message) || err) }
+  }
+  return { ok: false, text }
+}
+
+// ============================================================================
 // dsh-quake-alert · client/src/13-ui-settings.js
 //
 // 作用：设置页面板（设置 → 灾害预警）的全部 UI。
@@ -3980,8 +5120,11 @@ function settingsSyncLabel() {
 // 历史条目「类型」行显示的 P2PQuake code。气象电文不在此表里（它不是 P2PQuake 来源），
 // 索引一律经 own()，避免外部数据里的 'constructor' 之类的键命中原型链。
 const P2P_KIND_CODE = { quake: 551, eew: 556, tsunami: 552 };
-/** alert.code → 来源标注（全球源与 JMA 电文没有 P2PQuake 的 code）。 */
-const SOURCE_CODE_TEXT = { emsc: 'EMSC', usgs: 'USGS', noaa: 'NOAA CAP', jma: 'JMA 电文' };
+/** alert.code → 来源标注（全球源、JMA 电文与大陆源没有 P2PQuake 的 code）。 */
+const SOURCE_CODE_TEXT = {
+  emsc: 'EMSC', usgs: 'USGS', noaa: 'NOAA CAP', jma: 'JMA 电文',
+  cenc_eew: 'CENC 预警', cenc_eqlist: 'CENC 速报',
+};
 /**
  * 历史条目「类型」行的来源标注。
  *
@@ -4000,6 +5143,7 @@ function p2pCodeTextOf(kind, code, id) {
   if (idStr.indexOf('emsc:') === 0) return 'EMSC'
   if (idStr.indexOf('usgs:') === 0) return 'USGS'
   if (idStr.indexOf('noaa:') === 0) return 'NOAA CAP'
+  if (idStr.indexOf('cenc:') === 0) return 'CENC 大陆'
   const c = own(P2P_KIND_CODE, kind);
   if (c) return 'code ' + c
   return kind === 'weather' ? 'JMA 电文' : '—'
@@ -4031,11 +5175,22 @@ const s = {
 const SOURCE_LABELS = {
   p2pquake: 'P2PQuake（日本地震 / EEW / 海啸，实时推送）',
   emsc: 'EMSC（全球地震，实时推送）',
+  cenc_eew: '大陆地震预警（CENC，SSE 推送）',
+  cenc_eqlist: '大陆地震速报（CENC，SSE 推送）',
   jma: '気象庁（气象灾害，Host 轮询）',
   usgs: 'USGS（全球地震目录，Host 轮询）',
   noaa: 'NOAA（海啸 CAP，Host 轮询）',
 };
-
+/**
+ * 源状态区块里的源顺序与分组。**一处维护**：此前同样的列表在三个地方各写一遍
+ * （状态行、增量计数行、重试按钮），加一个源要改三处——漏掉任何一处就变成
+ * "某个源坏了但界面上看不见"，而"让失败可见"正是这个区块存在的全部理由。
+ */
+const SOURCE_ORDER = ['p2pquake', 'emsc', 'cenc_eew', 'cenc_eqlist', 'jma', 'usgs', 'noaa'];
+/** 走 `/feed` 增量计数的源（feedStatsOf 有快照）。大陆源走 SSE，另有自己的计数与链路模式。 */
+const FEED_STAT_ORDER = ['jma', 'usgs', 'noaa'];
+/** 走 SSE 的源（0.5.0）：状态从 cnStreamRegistry 实时读。 */
+const STREAM_ORDER = ['cenc_eew', 'cenc_eqlist'];
 /**
  * 源状态区块（0.4.1）。
  *
@@ -4056,13 +5211,13 @@ function SourceStatusBlock() {
   useEffect(() => store.subscribe(() => setTick((x) => x + 1)), []);
   const rows = [];
   const sources = store.sources || {};
-  for (const id of ['p2pquake', 'emsc', 'jma', 'usgs', 'noaa']) {
+  for (const id of SOURCE_ORDER) {
     const st = sources[id];
     if (!st) continue
     const meta = statusMetaOf(st.status, st.retries);
     rows.push((st.label || SOURCE_LABELS[id] || id) + '：' + meta.text + (st.detail ? ' · ' + st.detail : ''));
   }
-  for (const id of ['jma', 'usgs', 'noaa']) {
+  for (const id of FEED_STAT_ORDER) {
     const f = feedStatsOf[id];
     const st = sources[id];
     if (!f) {
@@ -4079,10 +5234,34 @@ function SourceStatusBlock() {
       (Number(host.detailDropped) ? '，Host 放弃详情 ' + host.detailDropped + ' 条' : '') +
       ' · 最近拉取 ' + ago);
   }
+  // 大陆源（0.5.0）：走 SSE，状态从注册表**实时**读。**链路模式必须显示出来**——
+  // 降级到轮询意味着延迟从秒级变成最长 15 秒，用户有权知道自己在哪条路上。
+  for (const id of STREAM_ORDER) {
+    const reg = cnStreamRegistry[id];
+    const st = sources[id];
+    if (!reg) {
+      if (!st) rows.push((SOURCE_LABELS[id] || id) + '：尚未启动');
+      continue
+    }
+    const c = reg.stats();
+    const modeText = c.mode === 'sse' ? 'SSE 推送'
+      : (c.mode === 'poll' ? '已降级为轮询'
+        : (c.mode === 'disabled' ? '已关闭（「地震」开关关掉了）' : '未连接'));
+    const ago = c.lastAt ? Math.max(0, Math.round((Date.now() - c.lastAt) / 1000)) + ' 秒前' : '—';
+    rows.push((SOURCE_LABELS[id] || id) + '：' + modeText +
+      ' · 已收到 ' + c.received + ' 条' +
+      (c.applied ? '，已播报 ' + c.applied : '') +
+      (c.errors ? '，失败 ' + c.errors + ' 次' : '') +
+      (c.fallbacks ? '，降级 ' + c.fallbacks + ' 次' : '') +
+      (c.probeTimeouts ? '，无首帧 ' + c.probeTimeouts + ' 次' : '') +
+      (c.truncated ? '，增量缺口 ' + c.truncated + ' 次' : '') +
+      (c.resets ? '，游标重置 ' + c.resets + ' 次' : '') +
+      ' · 最近数据 ' + ago);
+  }
   if (rows.length === 0) return null
   // 数据格式异常（schema-error）：按 DESIGN 5.4 提供**手动重试**——源改版后字段可能又回来了，
   // 用户不该为了清掉一个蓝点去重装插件。
-  const retryRows = ['p2pquake', 'emsc', 'jma', 'usgs', 'noaa']
+  const retryRows = SOURCE_ORDER
     .filter((id) => sources[id] && sources[id].status === 'schema-error')
     .map((id) => h('div', { key: 'retry-' + id, style: { marginTop: 4 } },
       s.btn('重试 ' + (sources[id].label || SOURCE_LABELS[id] || id) + ' 的数据解析', () => retrySource(id))));
@@ -4102,11 +5281,18 @@ function SettingsPanel() {
   const [weatherTestMsg, setWeatherTestMsg] = useState(''); // 「发送测试气象警报」的结果提示
   const [weatherTestSeq, setWeatherTestSeq] = useState(0); // 测试场景轮换游标
   // 全球关注点的输入草稿与反馈（0.4.0）：校验失败必须给出文字原因，不能静默吞掉用户输入
-  const [placeDraft, setPlaceDraft] = useState({ name: '', lat: '', lon: '', radiusKm: '300' });
+  // 半径默认值 0.5.0 起是 100（DESIGN 9.2）；**既有配置里的 radiusKm 不动**，只影响新建。
+  const [placeDraft, setPlaceDraft] = useState({ name: '', lat: '', lon: '', radiusKm: String(DEFAULT_PLACE_RADIUS_KM) });
   const [placeMsg, setPlaceMsg] = useState('');
+  // 中国大陆的三级级联（0.5.0）：省 → 地级市 → 半径。选完给出**表里的坐标**，
+  // 用户不需要知道经纬度（大陆源是坐标 + 半径匹配，见 DESIGN 8.3）。
+  const [cnPick, setCnPick] = useState({ province: '', city: '', radiusKm: DEFAULT_PLACE_RADIUS_KM });
+  const [cnMsg, setCnMsg] = useState('');
   // 全球链路的测试（0.4.0）：场景轮换游标与结果提示
   const [geTestSeq, setGeTestSeq] = useState(0);
   const [geTestMsg, setGeTestMsg] = useState('');
+  // 诊断快照（0.5.0）：{ text, msg } | null
+  const [diag, setDiag] = useState(null);
   // 「源状态」区块里的相对时间要自己走 —— 见 SourceStatusBlock（独立组件，避免每 5 秒
   // 重渲整个设置页，尤其是关注县较多时那几千个市町村按钮）
   // 音量滑块：拖动期间只改本地草稿，停手 300ms 后才落盘（避免每移动 1px 写一次 localStorage）
@@ -4200,6 +5386,32 @@ function SettingsPanel() {
       { timeout: 10000 },
     );
   };
+  /** 定位并**直接添加**一个关注点（大陆级联里的用法：半径已经在级联里选好了，
+   *  再让用户去另一个表单点一次「添加」是多余的一步）。 */
+  const addMyLocationPlace = () => {
+    const geo = (typeof navigator !== 'undefined') ? navigator.geolocation : null;
+    if (!geo || typeof geo.getCurrentPosition !== 'function') { setCnMsg('当前浏览器不支持定位，请选择省份与城市'); return }
+    setCnMsg('正在获取当前位置…');
+    geo.getCurrentPosition(
+      (pos) => {
+        const c = pos && pos.coords;
+        if (!c) { setCnMsg('定位失败：没有返回坐标'); return }
+        const lat = Math.round(c.latitude * 100) / 100;
+        const lon = Math.round(c.longitude * 100) / 100;
+        if ((cfg.watch.places || []).length >= MAX_WATCH_PLACES) { setCnMsg('最多 ' + MAX_WATCH_PLACES + ' 个关注点'); return }
+        setCfg((cf) => ({
+          ...cf,
+          watch: { ...cf.watch, places: (cf.watch.places || []).concat([{ name: '我的位置', lat, lon, radiusKm: cnPick.radiusKm }]) },
+        }));
+        // 台式机的定位靠 WiFi / IP 库，可能不准 —— 如实说，别让用户以为这就是精确位置
+        setCnMsg('已添加「我的位置」（' + lat + ', ' + lon + '，半径 ' + cnPick.radiusKm +
+          ' km）。定位可能不精确，请确认坐标或改用手动选择城市。');
+      },
+      (err) => setCnMsg('定位失败：' + ((err && err.message) || '被拒绝或不可用') + '（也可以手动选择省份与城市）'),
+      { timeout: 10000 },
+    );
+  };
+
   /** 关注点输入框（受控）：四个字段共用一份草稿。 */
   const placeField = (label, key, placeholder, width) => h('label', {
     style: { display: 'flex', flexDirection: 'column', gap: 2, fontSize: 11, color: '#9aa0a6' },
@@ -4213,6 +5425,85 @@ function SettingsPanel() {
       border: '1px solid #6b7280', borderRadius: 6, padding: '3px 6px', fontSize: 12,
     },
   }));
+
+  // ---------- 半径控件（0.5.0 / DESIGN 9.2）----------
+  /** 当前值是否正好是某个语义档。 */
+  const isRadiusPreset = (km) => RADIUS_PRESETS.some((o) => o.v === Number(km));
+  /**
+   * 半径选择：三档**语义标签** + 一个始终可见的数字输入。
+   *
+   * 为什么两者都要：普通用户不必理解"公里"，语义档就够；而"想精确控制的人有出口"
+   * 是 DESIGN 9.2 的硬要求——把数字藏进"自定义…"分支会让改一次半径多两步。
+   * 数字框是真实值，下拉只是快捷键；填了 150 这种非档位值时下拉自动显示「自定义」。
+   */
+  const radiusControl = (km, onChange, key) => h('div', {
+    key: key || 'radius',
+    style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#9aa0a6', flexWrap: 'wrap' },
+  },
+    h('span', null, '半径'),
+    s.select(isRadiusPreset(km) ? Number(km) : 'custom',
+      RADIUS_PRESETS.concat([{ v: 'custom', label: '自定义…' }]),
+      (v) => { if (v !== 'custom') onChange(Number(v)); },
+      (o) => o.label),
+    h('input', {
+      type: 'number', min: MIN_PLACE_RADIUS_KM, max: MAX_PLACE_RADIUS_KM, value: km,
+      onChange: (e) => {
+        const raw = String(e.target.value).trim();
+        if (raw === '') return // 输入中间态（全删）不写进配置，等用户填完
+        const v = Number(raw);
+        if (!Number.isFinite(v)) return
+        onChange(Math.min(MAX_PLACE_RADIUS_KM, Math.max(MIN_PLACE_RADIUS_KM, Math.round(v))));
+      },
+      style: {
+        width: 68, boxSizing: 'border-box', background: '#ffffff', color: '#1a1a1a',
+        border: '1px solid #6b7280', borderRadius: 6, padding: '3px 6px', fontSize: 12,
+      },
+    }),
+    h('span', null, 'km'),
+  );
+
+  // ---------- 中国大陆的三级级联（0.5.0）----------
+  const provinces = cnProvinces();
+  /** 选了省之后，市默认落在第一个上——否则用户会以为"选了省但没反应"。 */
+  const pickProvince = (province) => {
+    const cities = cnCitiesOf(province);
+    setCnPick((p) => ({ ...p, province, city: cities.length ? cities[0].name : '' }));
+    setCnMsg('');
+  };
+  const addCnPlace = () => {
+    const p = cnPlaceOf(cnPick.province, cnPick.city, cnPick.radiusKm);
+    if (!p) { setCnMsg('请先选择省份与城市（行政区划表未加载时请重启 dsh web）'); return }
+    if ((cfg.watch.places || []).length >= MAX_WATCH_PLACES) { setCnMsg('最多 ' + MAX_WATCH_PLACES + ' 个关注点'); return }
+    if ((cfg.watch.places || []).some((x) => x.name === p.name)) { setCnMsg('「' + p.name + '」已经在关注列表里了'); return }
+    setCfg((c) => ({ ...c, watch: { ...c.watch, places: (c.watch.places || []).concat([p]) } }));
+    setCnMsg('已添加「' + p.name + '」（' + p.lat + ', ' + p.lon + '，半径 ' + p.radiusKm + ' km）');
+  };
+  /** 国家 / 地区级联的第一级（中国）——省的选项。 */
+  const cnCascade = () => {
+    if (provinces.length === 0) {
+      return h('div', { style: { fontSize: 11, color: cityTableState === 'failed' ? '#d9a406' : '#9aa0a6', marginTop: 6 } },
+        cityTableState === 'failed'
+          ? '行政区划表加载失败 —— 可以改用下面的「其他地区」手填坐标（可重启 dsh web 重试）'
+          : '正在加载行政区划表…')
+    }
+    const cities = cnCitiesOf(cnPick.province);
+    const provOptions = [{ v: '', label: '请选择省份 / 直辖市 / 特别行政区' }]
+      .concat(provinces.map((p) => ({ v: p.name, label: p.name })));
+    const cityOptions = (cities.length ? cities : [{ name: '' }]).map((c) => ({ v: c.name, label: c.name || '（先选省份）' }));
+    return h('div', null,
+      h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' } },
+        s.select(cnPick.province, provOptions, pickProvince, (o) => o.label),
+        s.select(cnPick.city, cityOptions, (v) => { setCnPick((p) => ({ ...p, city: v })); setCnMsg(''); }, (o) => o.label),
+      ),
+      h('div', { style: { marginTop: 6 } },
+        radiusControl(cnPick.radiusKm, (v) => setCnPick((p) => ({ ...p, radiusKm: v })), 'cn-radius')),
+      h('div', { style: { marginTop: 8, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
+        s.btn('添加这个城市', addCnPlace),
+        s.btn('用我的位置', addMyLocationPlace, { fontSize: 11 }),
+      ),
+      cnMsg ? h('div', { style: { fontSize: 11, color: '#93c5fd', marginTop: 6 } }, cnMsg) : null,
+    )
+  };
   // 全球源状态（0.4.0）：用户看不出"链路到底在不在拉"，这是最常见的困惑来源——
   // 尤其全球地震本来就不频繁。feedStatsOf 不经过 store（见 12b 的注释），
   // 所以由 SourceStatusBlock 自己每 5 秒重读（见文件下方）。
@@ -4373,7 +5664,11 @@ function SettingsPanel() {
     ),
 
     // 关注地区
-    s.section('关注地区（都道府县 / 市区町村）',
+    // 关注地区按**国家 / 地区**分组（DESIGN 9 的"三级级联"：国家/地区 → 一级行政区 → 市/町村）。
+    // 为什么不做成一个统一的下拉级联组件：日本这一路是 47 个都道府县 + 1917 个市区町村的两级多选，
+    // 中国这一路是省 → 地级市，两者的**选择语义不同**（日本源按行政区名匹配，大陆源按坐标 + 半径）。
+    // 硬塞进同一个控件只会让两边都变得难用；这里保证的是**用户视角的三级结构一致**。
+    s.section('① 日本：都道府县 / 市区町村',
       h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 8 } },
         cfg.watch.prefectures.length === 0
           ? '未选择 → 将提醒全日本（按下方阈值过滤）。建议选择你所在/关注的地区以减少打扰。'
@@ -4399,11 +5694,22 @@ function SettingsPanel() {
     // 灾害类型（0.3.0）
     sectionDisasters(),
 
+    // 中国大陆（0.5.0）：省 → 地级市 → 半径。大陆源是坐标型，所以选完城市即得到坐标。
+    s.section('② 中国大陆：省 / 地级市',
+      h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 8, lineHeight: 1.6 } },
+        '中国地震台网的预警与速报按「震中坐标 + 半径」判定（大陆源没有分区烈度），' +
+        '所以这里选城市即可，不需要知道经纬度。表里的坐标是**行政区中心点**——' +
+        '面积特别大的州 / 市（如甘孜州、哈尔滨市）离城区可差一百多公里，住在边缘时请把半径调大，' +
+        '或用「用我的位置」。'),
+      cnCascade(),
+    ),
+
     // 全球关注点（0.4.0）：全球源是坐标型，关注表达是「位置 + 半径」
-    s.section('全球关注点（坐标 + 半径）',
+    s.section('③ 其他地区：坐标 + 半径',
       h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 8 } },
         (cfg.watch.places || []).length === 0
-          ? '未设置时，全球源（EMSC / USGS 地震、NOAA 海啸）的消息不会打扰你。添加你所在或关心的位置即可生效，不需要重启。'
+          ? '未设置时，全球源（EMSC / USGS 地震、NOAA 海啸）的消息不会打扰你。添加你所在或关心的位置即可生效，不需要重启。' +
+            '这里填的坐标与「② 中国大陆」加进来的城市是**同一份列表**。'
           : '已设置 ' + cfg.watch.places.length + ' 个位置：震中落在半径内才提醒。日本的地震 / 海啸不受这里影响，仍按上面的都道府县判定。'),
       ...(cfg.watch.places || []).map((p, i) => h('div', {
         key: 'place-' + i,
@@ -4417,10 +5723,12 @@ function SettingsPanel() {
         placeField('名称', 'name', '如 东京 / 家', 120),
         placeField('纬度', 'lat', '35.6812', 90),
         placeField('经度', 'lon', '139.7671', 90),
-        placeField('半径 km', 'radiusKm', '300', 80),
         s.btn('添加关注点', addPlace),
         s.btn('用当前位置', useMyLocation),
       ),
+      h('div', { style: { marginTop: 6 } },
+        radiusControl(Number(placeDraft.radiusKm) || DEFAULT_PLACE_RADIUS_KM,
+          (v) => setPlaceDraft((d) => ({ ...d, radiusKm: String(v) })), 'place-radius')),
       placeMsg ? h('div', { style: { fontSize: 11, color: '#93c5fd', marginTop: 6 } }, placeMsg) : null,
       // 全球源的地震不是随时都有，没法"等一条"来验证链路 —— 与气象链路一样给一个本地测试按钮。
       // 构造的是**源格式原文**（EMSC / USGS / NOAA 各一种），因此解析器与匹配引擎都被真实走过。
@@ -4463,6 +5771,25 @@ function SettingsPanel() {
       s.row(s.select(cfg.thresholds.globalMagnitude, GLOBAL_MAG_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, globalMagnitude: Number(v) } })), (o) => o.label)),
       h('div', { style: { fontSize: 11, color: '#9aa0a6' } },
         '全球源给的是震级、日本源给的是震度，两者不可换算，所以是两个独立旋钮。'),
+      s.label('大陆地震速报（最低震级，中国地震台网速报）'),
+      s.row(s.select(cfg.thresholds.cnReportMagnitude, CN_REPORT_MAG_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, cnReportMagnitude: Number(v) } })), (o) => o.label)),
+      h('div', { style: { fontSize: 11, color: '#9aa0a6' } },
+        '速报覆盖低到 M2.5 且每天都有数据，所以门槛与上面的预警分开，避免小震刷屏；' +
+        '大陆地震预警与全球源共用「全球地震」那个门槛。'),
+    ),
+
+    // 大陆源的链路选择（0.5.0）。这是一个**出口**：自动降级判不出的那几种网络
+    //（能连上、偶尔漏、整体像坏的）需要一个手动开关，否则用户只能重装或等更新。
+    s.section('大陆源链路',
+      s.label('取数方式（中国地震台网预警 / 速报）'),
+      s.row(s.select(cfg.cnTransport || 'auto', [
+        { v: 'auto', label: '自动：SSE 推送优先，走不通自动降级为轮询' },
+        { v: 'poll', label: '强制轮询（每 15 秒一次）' },
+      ], (v) => setCfg((c) => ({ ...c, cnTransport: v })), (o) => o.label)),
+      h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4, lineHeight: 1.6 } },
+        'SSE 推送的延迟是秒级，轮询最坏 15 秒——大陆预警抢的是这几秒，所以默认用推送。' +
+        '只有在推送被网络中间设备反复掐断、而普通请求仍然正常时，才需要强制轮询。' +
+        '当前实际走在哪条路上，看上面的「源状态」。'),
     ),
 
     // 通知与声音
@@ -4539,10 +5866,42 @@ function SettingsPanel() {
         '按浏览器本地时间判定；开始时间晚于结束时间表示跨午夜（如 23:00–07:00）。静默期间命中的预警仍会记入下方「最近预警记录」，只是不响铃、不弹通知。'),
     ),
 
+    // 诊断快照（0.5.0）：DESIGN 11.3 的交付物——让"运行时自己说话"。
+    // 界面上只做两件事：生成、以及**在剪贴板不可用时把文本显示出来**（沙箱 iframe 里
+    // navigator.clipboard 常常不可用，而"复制不了"不该成为诊断的第一步就卡住）。
+    s.section('诊断',
+      h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 6, lineHeight: 1.6 } },
+        '把这份快照贴给你的 AI 助手（配合 TROUBLESHOOTING.zh.md），它就能看到逐源状态、' +
+        '数据格式异常的原因、大陆源当前走哪条链路、以及最近几条记录为什么没有响铃。'),
+      s.row(s.btn('生成诊断快照', () => {
+        copyDiagSnapshot().then((r) => setDiag({
+          text: r.text,
+          msg: r.ok ? '已复制到剪贴板。' : ('剪贴板不可用' + (r.error ? '（' + r.error + '）' : '') + '，请手动全选下面的文本复制。'),
+        })).catch((err) => setDiag({ text: '', msg: '生成失败：' + String((err && err.message) || err) }));
+      })),
+      h('div', { style: { fontSize: 11, color: '#d9a406', marginTop: 4 } },
+        '⚠ 快照含你的关注地区名称与坐标——诊断"为什么没命中"必须要有它。分享前请自行确认。'),
+      diag ? h('div', { style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, diag.msg) : null,
+      diag && diag.text
+        ? h('textarea', {
+            readOnly: true, value: diag.text, rows: 10,
+            onFocus: (e) => { try { e.target.select(); } catch (err) { /* 忽略 */ } },
+            style: {
+              width: '100%', boxSizing: 'border-box', marginTop: 6, fontSize: 11,
+              fontFamily: 'ui-monospace, monospace', background: '#ffffff', color: '#1a1a1a',
+              border: '1px solid #6b7280', borderRadius: 6, padding: 8,
+            },
+          })
+        : null,
+    ),
+
     // 免责
     s.section('免责声明', h('div', { style: { color: '#9aa0a6', fontSize: 11, lineHeight: 1.6 } },
-      '预警数据由 P2PQuake 转播（非官方直接数据源），EEW 紧急地震速报等内容与配信品质无保证。' +
-      '本插件提醒仅供参考，请务必以日本气象厅（気象庁）官方发布为准。插件仅在 DSH 页面开启时工作。')),
+      '预警数据由 P2PQuake 转播、日本气象厅公开 XML 电文、EMSC / USGS / NOAA，' +
+      '以及 Wolfx 转播的中国地震台网（CENC）信息提供，均非官方直接推送；' +
+      '紧急地震速报（EEW）与大陆地震预警等内容与配信品质无保证。' +
+      '本插件提醒仅供参考，避险请以当地主管机构（日本气象厅 気象庁 / 中国地震台网 CENC / 美国 USGS・NOAA 等）官方发布为准。' +
+      '插件仅在 DSH 页面开启时工作。')),
 
     // 最近预警（点击条目展开详情；多条时可滚动）
     s.section('最近预警记录（' + store.events.length + ' 条）',
@@ -4828,6 +6187,49 @@ function apply(ctx) {
     return () => { for (const f of feeds) { try { f.stop(); } catch (err) {} } }
   }, 'dsh-quake-alert: feed clients');
 
+  // 大陆源（0.5.0）：Wolfx 的 cenc_eew（预警）+ cenc_eqlist（速报），走 Host 的 **SSE 推送**。
+  // 为什么不是像上面几行那样用轮询：EEW 的价值在秒级，15 秒一轮等于把预警变成事后通知。
+  // 为什么还留降级：某些网络下长连接会被中间设备掐掉，而普通 HTTPS 轮询仍然通（DESIGN 11.5）；
+  // 12c 在"能证明这条路走不通"时会自动切到 `?source=` 轮询并把降级状态**说出来**。
+  // 两者都跟「地震」开关：预警与速报都是地震，DESIGN 8.4 只给速报单独一个**震级门槛**，不给单独开关。
+  const cencApply = (sourceId, parseEntry) => (entry, cfg) => {
+    let raw;
+    try {
+      raw = JSON.parse(entry && entry.xml);
+    } catch (err) {
+      noteParseResult(sourceId, failResult('schema', 'Host 载荷不是合法 JSON'));
+      return false
+    }
+    const res = parseEntry(raw);
+    if (noteParseResult(sourceId, res)) return false
+    if (!res.ok) return false
+    noteSourceSuccess(sourceId);
+    handleAlert(res.alert, cfg);
+    return true
+  };
+  const cnEnabled = (cfg) => (cfg.disasters || {}).earthquake !== false;
+  const cencEew = createCnStream({
+    id: 'cenc_eew',
+    label: '大陆地震预警',
+    enabled: cnEnabled,
+    onStatus: feedStatus('cenc_eew'),
+    onError: feedError('cenc_eew'),
+    apply: cencApply('cenc_eew', parseCencEewResult),
+  });
+  const cencEqlist = createCnStream({
+    id: 'cenc_eqlist',
+    label: '大陆地震速报',
+    enabled: cnEnabled,
+    onStatus: feedStatus('cenc_eqlist'),
+    onError: feedError('cenc_eqlist'),
+    apply: cencApply('cenc_eqlist', parseCencEqlistItemResult),
+  });
+  ctx.effect(() => {
+    cencEew.start();
+    cencEqlist.start();
+    return () => { for (const c of [cencEew, cencEqlist]) { try { c.stop(); } catch (err) {} } }
+  }, 'dsh-quake-alert: cn streams');
+
   // 全球地震（0.4.0）：EMSC 的 WebSocket，复用与 P2PQuake 同一套连接管理（退避、建连看门狗、
   // 生命周期归还 fiber）。「久无数据」判据从 0（关闭）改为 3 小时（0.4.1 修正）：
   // 关掉之后就没有任何半开检测了——半开正是"没有 onclose"，而建连看门狗在 onopen 之后
@@ -4871,7 +6273,7 @@ function apply(ctx) {
 }
 
 // 单测钩子（客户端宿主忽略额外导出）
-const __test = { parse, parseQuake, parseEew, parseTsunami, parseJma, parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage, feedStatsOf, watchlessPoint, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn: maxLevelIn, jmaItemsOf: itemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf, matchAlert, matchPointAlert, distanceKm, validGeo, normalizePlaces, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, hitSeverityOf, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, inQuietHours, isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, ensureAlertChannel, broadcastHistoryCleared, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable, p2pTimeToIso, issuedToDate, formatIssuedLocal, audioState, SOURCE_CONTRACTS, parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, failResult, noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, P2P_TIME_RE, MIGRATED_KEY };
+const __test = { parse, parseQuake, parseEew, parseTsunami, parseJma, parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage, feedStatsOf, watchlessPoint, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn: maxLevelIn, jmaItemsOf: itemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf, matchAlert, matchPointAlert, distanceKm, validGeo, normalizePlaces, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, hitSeverityOf, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY, cnProductName, authorityOf, disclaimerOf, SOURCE_ORDER, SOURCE_LABELS, SOURCE_CODE_TEXT, SettingsPanel, statusMetaOf, buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION, inQuietHours, isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, ensureAlertChannel, broadcastHistoryCleared, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, p2pTimeToIso, cnTimeToIso, CN_TIME_RE, CN_REPORT_MAG_OPTIONS, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, issuedToDate, formatIssuedLocal, audioState, SOURCE_CONTRACTS, parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of, failResult, noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, P2P_TIME_RE, MIGRATED_KEY };
 
 // activeClient 是 12-websocket 的模块级 let：给 12 用的赋值出口（跨模块不能写 imported binding）
 // 由 12-websocket 提供 setter；这里仅保留引用以便阅读

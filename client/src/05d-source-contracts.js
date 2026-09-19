@@ -20,9 +20,11 @@
 // ============================================================================
 
 import { isPlainObject } from './02-storage.js'
+import { cnTimeToIso } from './01-constants.js'
 import { parse } from './05-parser.js'
 import { parseJma } from './05b-jma-parser.js'
 import { parseEmsc, parseUsgsFeature, parseNoaaCap } from './05c-global-parsers.js'
+import { parseCencEew, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of } from './05e-cn-parsers.js'
 import { store } from './07-store.js'
 
 // ---------------------------------------------------------------- 返回形态
@@ -155,6 +157,55 @@ export const SOURCE_CONTRACTS = {
     empty: 'msgType === "Test"（演练电文）；或事件列表为空（大多数时候没有海啸）',
     staleAfterMs: null,
     staleReason: '事件列表只在有海啸时才有内容，"列表为空"是绝大多数时间的正常形态，不能据此判 stale。',
+  },
+  // ---- 中国大陆源（0.5.0）----
+  // 与其它源的两处结构性差异，写在契约里而不是埋在解析器里：
+  //   ① 传输是 **Host 单点常连**（Wolfx 限 5–7 连接/IP），不是 Client 直连——见 DESIGN 5.3。
+  //   ② cenc_eqlist 的字段**全是字符串**，而 cenc_eew 的字段是 number；两个源来自同一上游，
+  //      所以不能按"同一家的风格"写解析，只能按实测样本写。
+  cenc_eew: {
+    label: 'Wolfx CENC 地震预警',
+    region: 'cn',
+    disasters: ['eew'],
+    transport: 'ws',
+    url: 'wss://ws-api.wolfx.jp/cenc_eew（REST 快照 https://api.wolfx.jp/cenc_eew.json）',
+    pollMs: null,
+    timezone: 'Asia/Shanghai（+08:00，无夏令时）—— OriginTime / ReportTime 是裸北京时间，由 cnTimeToIso 补偏移',
+    required: [
+      '接收两种形态：WS 推送包（含 type:"cenc_eew"）与 REST 快照（无 type），其余 10 个字段完全一致',
+      'ID string（消息唯一键，Alert 的 id 取 cenc: 前缀）',
+      'OriginTime / ReportTime 为可解析的北京时间串',
+      'Latitude / Longitude 为数值（实测 number）',
+      'Magnitude / Depth / ReportNum / MaxIntensity 为数值',
+      'HypoCenter 为 string',
+    ],
+    empty: '10 个字段一个都没有（只有 type 包裹或空对象）——源正常但当前没有预警。' +
+      '**这条未实测**：Wolfx 总是回最后一条预警（哪怕已过数天），从未见过"无预警"的返回形态，' +
+      '样本不足以确认。保守取此判据，是因为判反了会点亮一个用户根本处理不了的蓝点（DESIGN 4.5 的配色语义）。',
+    staleAfterMs: null,
+    staleReason: '预警稀疏（实测门槛约 M4.0，数天一次），"很久没消息"是常态，不能据此判死。' +
+      '活性由连接层负责（心跳实测精确 60 秒、200 秒内无服务端强断，超 120 秒无消息即重连）。' +
+      '中继是否存活由 cenc_eqlist 探（它每天都有数据）——这也是两个源都要接的原因之一。',
+  },
+  cenc_eqlist: {
+    label: 'Wolfx CENC 地震速报',
+    region: 'cn',
+    disasters: ['quake'],
+    transport: 'ws',
+    url: 'wss://ws-api.wolfx.jp/cenc_eqlist（REST 快照 https://api.wolfx.jp/cenc_eqlist.json）',
+    pollMs: null,
+    timezone: 'Asia/Shanghai（+08:00，无夏令时）—— time / ReportTime 是裸北京时间，由 cnTimeToIso 补偏移',
+    required: [
+      '整表载荷：No1…NoN（数值序，No1 最新）+ md5',
+      '每项：EventID string、time / ReportTime 为可解析的北京时间串',
+      '每项：magnitude / depth / latitude / longitude / intensity 为数字字符串（实测全为字符串）',
+      '每项：placeName 或 location 至少一个非空 string',
+    ],
+    empty: '整表里一个 NoN 都没有——源正常但当前没有速报数据',
+    staleAfterMs: 48 * 60 * 60 * 1000,
+    staleReason: '**本插件唯一真正有意义的新鲜度阈值，而且它探的是中继不是灾害**：速报每天都有数据，' +
+      '所以"超过 48 小时没有新批次"即判中继异常（fj_eew 那种连接正常但停更 4 个月的形态，' +
+      '靠连接检测完全发现不了）。实测发布 lag 209–1643 秒，阈值不能贴着 lag 取留出余量。',
   },
 }
 
@@ -303,6 +354,91 @@ export function parseNoaaResult(xml, entry) {
     }
   }
   return okResult(alert)
+}
+
+/**
+ * Wolfx 大陆地震预警（`cenc_eew`）。
+ *
+ * 时间判据用 `cnTimeToIso` 之后的串去解析：裸的 `2026-09-18 20:50:23` 交给 `Date.parse` 会按
+ * **本机时区**解释，而它其实是北京时间——那样"客观不可能"这条判据就带上了本机时区的偏差。
+ */
+export function parseCencEewResult(raw) {
+  if (!isPlainObject(raw)) return failResult('schema', '顶层不是对象')
+  if (raw.type !== undefined && String(raw.type) !== 'cenc_eew') {
+    return failResult('schema', 'type 不是 cenc_eew（收到 ' + String(raw.type) + '）')
+  }
+  // empty 判据：10 个字段一个都没有。理由与证据等级见 SOURCE_CONTRACTS.cenc_eew.empty。
+  const fields = ['ID', 'EventID', 'OriginTime', 'ReportTime', 'Latitude', 'Longitude', 'Magnitude', 'Depth', 'MaxIntensity', 'HypoCenter']
+  const hasAny = fields.some((k) => {
+    const v = raw[k]
+    return v !== undefined && v !== null && String(v) !== ''
+  })
+  if (!hasAny) return failResult('empty', '载荷里没有任何预警字段（源正常但当前没有预警）')
+  const id = raw.ID
+  if (typeof id !== 'string' || !id.trim()) return failResult('schema', '缺少 ID（string）')
+  const lat = numOf(raw.Latitude)
+  const lon = numOf(raw.Longitude)
+  if (lat === null || lon === null) return failResult('schema', '缺少 Latitude / Longitude（数值）')
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return failResult('value', '震中坐标越界：' + lat + ',' + lon)
+  if (numOf(raw.Magnitude) === null) return failResult('schema', '缺少 Magnitude（数值）')
+  const t = timeMsOf(cnTimeToIso(raw.OriginTime))
+  if (t === null) return failResult('schema', '缺少 OriginTime（可解析的北京时间）')
+  if (timeIsImpossible(t)) return failResult('value', '发震时刻客观不可能：' + String(raw.OriginTime))
+  const alert = parseCencEew(raw)
+  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  return okResult(alert)
+}
+
+/**
+ * 速报整表里的单项（`NoN`）。逐条过契约，便于定位"哪一项坏了"。
+ * 注意：单项失败**不等于整表坏**——批量语义见 parseCencEqlistResult。
+ */
+export function parseCencEqlistItemResult(item) {
+  if (!isPlainObject(item)) return failResult('schema', '速报项不是对象')
+  const eventId = item.EventID
+  if (typeof eventId !== 'string' || !eventId.trim()) return failResult('schema', '缺少 EventID（string）')
+  const lat = numOf(item.latitude)
+  const lon = numOf(item.longitude)
+  if (lat === null || lon === null) return failResult('schema', '缺少 latitude / longitude（数字字符串或数值）')
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return failResult('value', '震中坐标越界：' + lat + ',' + lon)
+  if (numOf(item.magnitude) === null) return failResult('schema', '缺少 magnitude（数字字符串或数值）')
+  const t = timeMsOf(cnTimeToIso(item.time))
+  if (t === null) return failResult('schema', '缺少 time（可解析的北京时间）')
+  if (timeIsImpossible(t)) return failResult('value', '发震时刻客观不可能：' + String(item.time))
+  const alert = parseCencEqlistItem(item)
+  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  return okResult(alert)
+}
+
+/**
+ * 速报整表 → 批量结果 `{ ok, alerts, dropped, md5 }`。
+ *
+ * **为什么批量与单项分开判**：整表 50 条，一条缺坐标就让整表作废等于漏掉另外 49 条真实地震
+ * ——0.4.2 已经就 551 的观测点定过同一口径（"存在则类型必须正确"，缺失容忍）。
+ * 所以：坏条目**逐条丢弃并计数**（`dropped`，不是静默），只有**一条都没解析出来**才判整表 schema。
+ * 整表一条都没有则判 empty——源正常但当前没有速报数据。
+ */
+export function parseCencEqlistResult(json) {
+  if (!isPlainObject(json)) return failResult('schema', '顶层不是对象')
+  if (json.type !== undefined && String(json.type) !== 'cenc_eqlist') {
+    return failResult('schema', 'type 不是 cenc_eqlist（收到 ' + String(json.type) + '）')
+  }
+  const items = cencEqlistItems(json)
+  if (items.length === 0) return failResult('empty', '整表里没有 NoN 条目（源正常但当前没有速报数据）')
+  const alerts = []
+  let dropped = 0
+  let firstDetail = ''
+  for (const it of items) {
+    const res = parseCencEqlistItemResult(it)
+    if (res.ok) { alerts.push(res.alert); continue }
+    if (res.kind === 'empty') continue
+    dropped++
+    if (!firstDetail) firstDetail = res.kind + '：' + res.detail
+  }
+  if (alerts.length === 0) {
+    return failResult('schema', '整表 ' + items.length + ' 条全部无法解析（' + firstDetail + '）')
+  }
+  return { ok: true, alerts, dropped, md5: cencEqlistMd5Of(json), total: items.length }
 }
 
 // ---------------------------------------------------------------- 健康状态

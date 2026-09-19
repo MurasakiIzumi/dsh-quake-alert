@@ -109,7 +109,12 @@ function matchPointAlert(alert, cfg) {
       return { hit: false, reason: '海啸等级未达阈值（本条 ' + rank + ' < ' + minRank + '）' }
     }
   }
-  const minMag = (cfg.thresholds || {}).globalMagnitude
+  // 震级门槛分两把（0.5.0）：坐标型**预警**（EMSC / USGS / cenc_eew）用 globalMagnitude，
+  // 大陆**速报**（cenc_eqlist，alert.speedReport）用独立的 cnReportMagnitude——速报覆盖低到
+  // M2.5 且每天都有数据，用预警门槛播报会被小震频繁打扰（DESIGN 8.4）。
+  const th = cfg.thresholds || {}
+  const minMag = alert.speedReport ? th.cnReportMagnitude : th.globalMagnitude
+  const magName = alert.speedReport ? '速报震级阈值' : '全球震级阈值'
   const mag = typeof alert.magnitude === 'number' && Number.isFinite(alert.magnitude) ? alert.magnitude : null
   // 震级阈值只作用于地震。海啸的严重性由它自己的等级决定（上面的闸门），
   // 不该被"引发它的那次地震有多大"过滤掉：NOAA 电文里那个前震震级只是参考值，而且用同一个
@@ -117,7 +122,7 @@ function matchPointAlert(alert, cfg) {
   // 而海啸恰恰是这里最不能漏的一类。
   const quakeLike = alert.kind === 'quake' || alert.kind === 'eew'
   if (quakeLike && mag !== null && typeof minMag === 'number' && mag < minMag) {
-    return { hit: false, reason: 'M' + mag + ' 低于全球震级阈值 M' + minMag }
+    return { hit: false, reason: 'M' + mag + ' 低于' + magName + ' M' + minMag }
   }
   let nearest = null
   for (const g of pts) {

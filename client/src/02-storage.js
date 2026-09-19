@@ -131,6 +131,9 @@ function normalizeCfg(input) {
   return {
     version: DEFAULT_CFG.version,
     source: stored.source === 'sandbox' ? 'sandbox' : 'prod',
+    // 大陆源的链路选择（0.5.0）：白名单，只认 'poll'，其余一律回 'auto'。
+    // 用白名单而不是"非 poll 即 auto"的等价写法，是为了让将来加第三种取值时不会静默错位。
+    cnTransport: stored.cnTransport === 'poll' ? 'poll' : 'auto',
     watch: {
       // 只保留 47 县中确实存在的名字，避免脏数据在设置页渲染出幽灵按钮
       prefectures: Array.isArray(w.prefectures)
@@ -158,6 +161,9 @@ function normalizeCfg(input) {
         : DEFAULT_CFG.thresholds.tsunamiGrade,
       // 全球源的最低震级（0.4.0）。0 是有意义的取值（来者不拒），所以下界是 0 而不是 1
       globalMagnitude: numOr(t.globalMagnitude, DEFAULT_CFG.thresholds.globalMagnitude, 0, 10),
+      // 大陆速报的独立门槛（0.5.0）。新增字段必须在这里同步，否则 applyCfg 会**静默丢弃**它
+      // ——这正是 DESIGN 11.6 第 10 条那个"有保护的残留"：忘了同步时回归断言会失败。
+      cnReportMagnitude: numOr(t.cnReportMagnitude, DEFAULT_CFG.thresholds.cnReportMagnitude, 0, 10),
     },
     notify: {
       sound: boolOr(n.sound, DEFAULT_CFG.notify.sound),

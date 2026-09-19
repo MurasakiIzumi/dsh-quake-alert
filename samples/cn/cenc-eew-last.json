@@ -1,0 +1,14 @@
+{
+  "type": "cenc_eew",
+  "ID": "b4kybfnuqayyy",
+  "EventID": "202609182050.0001",
+  "ReportTime": "2026-09-18 20:50:23",
+  "ReportNum": 2,
+  "OriginTime": "2026-09-18 20:50:23",
+  "HypoCenter": "四川甘孜州新龙县",
+  "Latitude": 30.887,
+  "Longitude": 99.89,
+  "Magnitude": 4.2,
+  "Depth": 14,
+  "MaxIntensity": 5.8
+}

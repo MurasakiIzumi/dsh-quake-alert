@@ -122,6 +122,75 @@ const riverAreaCities = (code) => {
   return hit ? hit.cities.slice() : []
 }
 
+// ---------- 中国行政区划表（0.5.0）：Host 随 /areas 一起下发 ----------
+// 与市区町村表同一理由：省 34 + 地级 384 共约 21KB，不内联进 client bundle。
+// 用途是设置页的三级级联（中国 → 省 → 地级市）与**关注点坐标填充**：
+// 大陆源（cenc_eew / cenc_eqlist）是坐标 + 半径匹配（DESIGN 8.3），
+// 让用户手填经纬度不现实，由这张表按所选城市给出坐标。
+// 表由 scripts/build-cn-areas.mjs 从 GeoNames 生成（含 TW/HK/MO），头部记着已知取舍。
+let cnAreas = null // [{ code, name, lat, lon, cities:[{name,lat,lon}] }]
+/**
+ * 注入并规整行政区划表。**逐字段校验**：表来自 Host 的 JSON，与 localStorage 一样属于
+ * "不可信的输入"——一个坏条目会让级联渲染出幽灵选项，或把用户带到错误的坐标上
+ *（后者在预警产品里是"该响的地方没响"）。规整失败的整体拒绝，不做部分接受。
+ */
+function setCnAreas(list) {
+  if (!Array.isArray(list)) return false
+  const out = []
+  const seenProv = new Set()
+  for (const p of list) {
+    if (!isPlainObject(p)) continue
+    const name = typeof p.name === 'string' ? p.name.trim() : ''
+    if (!name || seenProv.has(name)) continue
+    if (!validLatLon(p.lat, p.lon)) continue
+    const cities = []
+    const seenCity = new Set()
+    for (const c of (Array.isArray(p.cities) ? p.cities : [])) {
+      if (!isPlainObject(c)) continue
+      const cn2 = typeof c.name === 'string' ? c.name.trim() : ''
+      if (!cn2 || seenCity.has(cn2)) continue
+      if (!validLatLon(c.lat, c.lon)) continue
+      seenCity.add(cn2)
+      cities.push({ name: cn2, lat: c.lat, lon: c.lon })
+    }
+    // 没有下级的省级项在级联里是死路：直接丢弃，避免用户选中后按钮没反应
+    if (cities.length === 0) continue
+    seenProv.add(name)
+    out.push({ code: typeof p.code === 'string' ? p.code : '', name, lat: p.lat, lon: p.lon, cities })
+  }
+  if (out.length === 0) return false
+  cnAreas = out
+  return true
+}
+function validLatLon(lat, lon) {
+  return typeof lat === 'number' && Number.isFinite(lat) && Math.abs(lat) <= 90 &&
+    typeof lon === 'number' && Number.isFinite(lon) && Math.abs(lon) <= 180
+}
+/** 省级列表（表未加载时返回空数组）。 */
+const cnProvinces = () => (cnAreas ? cnAreas.slice() : [])
+/** 某个省下的地级市列表（未收录时返回空数组）。 */
+const cnCitiesOf = (province) => {
+  if (!cnAreas) return []
+  const hit = cnAreas.find((p) => p.name === province)
+  return hit ? hit.cities.slice() : []
+}
+/**
+ * 「省 + 市 + 半径」→ 一个关注点（表里查不到时返回 null）。
+ *
+ * 抽成纯函数是为了能直接断言级联的产物：用户点「添加」之后配置里到底会多出什么，
+ * 比"界面上出现了两个下拉框"重要得多。名称取「省·市」以免两个省的"城区"撞名。
+ */
+function cnPlaceOf(province, city, radiusKm) {
+  if (!cnAreas) return null
+  const p = cnAreas.find((x) => x.name === province)
+  if (!p) return null
+  const c = p.cities.find((x) => x.name === city)
+  if (!c) return null
+  const r = Number(radiusKm)
+  if (!Number.isFinite(r) || r < 1 || r > 2000) return null
+  return { name: province + '·' + city, lat: c.lat, lon: c.lon, radiusKm: r }
+}
+
 // ---------- addr → 市町村归一 ----------
 // 気象庁 / P2PQuake 的观测点名（551 的 points[].addr）与市町村全称有一批写法差异，
 // 匹配前先把 addr 归一到它所属的市町村全称；归一不了的（机场、区域名、未收录点）返回 null，
@@ -208,6 +277,9 @@ async function loadCityTable() {
     if (!setCityTable(payload)) throw new Error('payload 不含市町村表')
     // 0.3.0：河川予報区域表随同一份响应下发；缺失只影响洪水，不影响泥石流与既有功能
     if (isPlainObject(data) && Array.isArray(data.riverAreas)) setRiverAreas(data.riverAreas)
+    // 0.5.0：中国行政区划表（省 → 地级市 + 坐标），供设置页的三级级联。
+    // 缺失只影响大陆源的"选城市"这条路径（仍可手填坐标），不影响日本链路与既有功能。
+    if (isPlainObject(data) && Array.isArray(data.cnAreas)) setCnAreas(data.cnAreas)
     pruneUnknownCities()
   } catch (err) {
     // 插件卸载造成的中止不算"失败"：下次装载应当能重试
@@ -233,6 +305,7 @@ const resetCityTable = () => {
   abortCityTableLoad()
   cityTable = null; cityNameSet = null; cityTableState = 'idle'
   addrAliasIndex = null; addrAliasMax = 0; cityPrefIndex = null; riverAreas = null
+  cnAreas = null
 }
 
-export { AREAS_PATH, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, buildAddrIndex, lookupAddrCity, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState, resetCityTable }
+export { AREAS_PATH, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, buildAddrIndex, lookupAddrCity, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf }

@@ -52,6 +52,30 @@ const GLOBAL_MAG_OPTIONS = [
   { v: 4.5, label: 'M4.5 以上（默认）' }, { v: 5, label: 'M5.0 以上' }, { v: 5.5, label: 'M5.5 以上' },
   { v: 6, label: 'M6.0 以上' }, { v: 6.5, label: 'M6.5 以上' }, { v: 7, label: 'M7.0 以上' },
 ]
+// 大陆**地震速报**（cenc_eqlist）的最低震级。与预警分开的原因见 DESIGN 8.4：速报覆盖低到 M2.5，
+// 用预警阈值播报会被小震频繁打扰；而它又是 EEW 稀少时的唯一补报通道，所以两把旋钮而不是一把。
+// 档位比 GLOBAL_MAG_OPTIONS 少一档低值（M3.0）——大陆速报的取舍区间在 3.5–6.0。
+const CN_REPORT_MAG_OPTIONS = [
+  { v: 3.5, label: 'M3.5 以上' }, { v: 4, label: 'M4.0 以上' },
+  { v: 4.5, label: 'M4.5 以上（默认）' }, { v: 5, label: 'M5.0 以上' },
+  { v: 5.5, label: 'M5.5 以上' }, { v: 6, label: 'M6.0 以上' },
+]
+
+// ---------- 关注点半径（0.5.0 / DESIGN 9.2） ----------
+// 用语义标签而不是裸数字：普通用户不必理解"公里"，想精确控制的人有「自定义」这个出口。
+// 「本市及周边 100km」是**新建关注点**的默认值（旧值 300km 是为震中距设计的，
+// 套在城市上会把邻省地震也算进来）。既有配置里的 radiusKm 一律不动——
+// 静默把用户配好的半径从 300 改成 100 会让提醒变窄，那是漏报方向的变化。
+const RADIUS_PRESETS = [
+  { v: 30, label: '仅本地（约 30 km）' },
+  { v: 100, label: '本市及周边（约 100 km，默认）' },
+  { v: 300, label: '较大范围（约 300 km）' },
+]
+/** 新建关注点的默认半径（既有配置不动，见上）。 */
+const DEFAULT_PLACE_RADIUS_KM = 100
+/** 半径上下限，与 Host schema / normalizeCfg 的 1–2000 保持一致。 */
+const MIN_PLACE_RADIUS_KM = 1
+const MAX_PLACE_RADIUS_KM = 2000
 
 // 日本 47 都道府县：jp 为匹配用日文全称（P2PQuake pref 格式），zh 为界面显示
 const PREFECTURES = [
@@ -121,11 +145,29 @@ function p2pTimeToIso(raw) {
   return m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] +
     (ms ? '.' + ms : '') + P2P_TZ_OFFSET
 }
-/** 时间串 → Date：裸 JST 按 +09:00 解释，带偏移的 ISO 直接解析，其余返回 null。 */
+// ---------- 大陆源：中国标准时间（CST，UTC+8，无夏令时） ----------
+// Wolfx 的 `cenc_eew` / `cenc_eqlist` 给的是裸北京时间，形如 `2026-09-18 20:50:23`——与 P2PQuake
+// 的 `2023/09/05 06:16:32` **只有分隔符不同**，光看字符串完全无法区分是 JST 还是 CST（DESIGN 4.5）。
+// 所以同样由解析器补偏移，UI 只按本地时区渲染。中国全境单一时区、无夏令时，偏移恒为 +08:00。
+const CN_TZ_OFFSET = '+08:00'
+const CN_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?$/
+/** 大陆源的裸北京时间串 → 带 +08:00 偏移的 ISO 8601；认不出时**原样返回**（绝不丢信息）。 */
+function cnTimeToIso(raw) {
+  const s = String(raw === undefined || raw === null ? '' : raw).trim()
+  if (!s) return ''
+  const m = CN_TIME_RE.exec(s)
+  if (!m) return s
+  const ms = m[7] ? m[7].padEnd(3, '0').slice(0, 3) : ''
+  return m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] +
+    (ms ? '.' + ms : '') + CN_TZ_OFFSET
+}
+/** 时间串 → Date：裸 JST（P2PQuake）/ 裸北京时间（Wolfx）分别按各自偏移解释，其余交给 Date。
+ *  两个源的时间串**看起来只差分隔符**，所以这里是按各自的正则分别补偏移，不能只判一种。
+ *  漏掉大陆源那一支会让历史详情里的时间差 1 小时（且没有任何标注）。 */
 function issuedToDate(raw) {
   const s = String(raw === undefined || raw === null ? '' : raw).trim()
   if (!s) return null
-  const d = new Date(P2P_TIME_RE.test(s) ? p2pTimeToIso(s) : s)
+  const d = new Date(P2P_TIME_RE.test(s) ? p2pTimeToIso(s) : (CN_TIME_RE.test(s) ? cnTimeToIso(s) : s))
   return Number.isFinite(d.getTime()) ? d : null
 }
 /** 时间串 → 本地时区文案（历史详情用）；无法解析时原样返回，不把原文弄丢。 */
@@ -143,6 +185,10 @@ function formatIssuedLocal(raw) {
 const DEFAULT_CFG = {
   version: 1,
   source: 'prod', // prod | sandbox（沙箱回放 2023 年历史，约30秒/条，测试用）
+  // 大陆源的**链路选择**（0.5.0）：auto = SSE 优先、走不通自动降级为轮询；
+  // poll = 用户强制轮询。给出口的理由见 DESIGN 11.5——某些网络下长连接会被中间设备掐掉，
+  // 而"自动降级"判不出的那几种（能连上、偶尔漏、但整体像坏的）需要一个手动出口。
+  cnTransport: 'auto',
   // 两种关注模式并存：
   //   · 行政区（prefectures / cities）——日本源（P2PQuake、気象庁）用，粒度到市区町村
   //   · 坐标点（places）——全球源（EMSC / USGS / NOAA）用，判定方式是「震中距 ≤ radiusKm」
@@ -151,7 +197,12 @@ const DEFAULT_CFG = {
   disasters: { earthquake: true, tsunami: true, weather: true }, // weather = 气象灾害（泥石流 / 洪水 / 大雨 / 高潮…），固定 L4 以上播报
   // globalMagnitude：全球源（EMSC / USGS）的最低震级。日本源用的是震度（quakeScale），
   // 全球源只有震级——实测 EMSC 会推 M3.8 级别的事件，若沿用"来什么报什么"会明显吵闹。
-  thresholds: { quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch', globalMagnitude: 4.5 },
+  // cnReportMagnitude：大陆**速报**（cenc_eqlist）的独立震级门槛。大陆地震预警（cenc_eew）与
+  // 全球源共用 globalMagnitude（DESIGN 8.4）——它同样是"只有震级、没有分区烈度"的坐标型源。
+  thresholds: {
+    quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch',
+    globalMagnitude: 4.5, cnReportMagnitude: 4.5,
+  },
   notify: { sound: true, system: true, volume: 0.7 },
   dedupe: { windowMinutes: 10 },
   // 静默时段（0.2.0）：按浏览器本地时间判定；跨午夜用 start > end 表示（如 23:00–07:00）
@@ -159,4 +210,4 @@ const DEFAULT_CFG = {
 }
 
 
-export { React, h, useState, useEffect, useRef, WS_URL, SANDBOX_URL, EMSC_WS_URL, STORAGE_KEY, HISTORY_KEY, HISTORY_MAX, MAX_WATCH_CITIES, MAX_WATCH_PLACES, RECONNECT_BASE, RECONNECT_MAX, SCALE_TEXT, SCALE_OPTIONS, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, PREFECTURES, PREF_SET, PREF_SHORT, PREF_BY_CODE, prefOfCode, prefCodeOf, normalizePref, P2P_TZ_OFFSET, P2P_TIME_RE, p2pTimeToIso, issuedToDate, formatIssuedLocal, DEFAULT_CFG }
+export { React, h, useState, useEffect, useRef, WS_URL, SANDBOX_URL, EMSC_WS_URL, STORAGE_KEY, HISTORY_KEY, HISTORY_MAX, MAX_WATCH_CITIES, MAX_WATCH_PLACES, RECONNECT_BASE, RECONNECT_MAX, SCALE_TEXT, SCALE_OPTIONS, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, CN_REPORT_MAG_OPTIONS, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, PREFECTURES, PREF_SET, PREF_SHORT, PREF_BY_CODE, prefOfCode, prefCodeOf, normalizePref, P2P_TZ_OFFSET, P2P_TIME_RE, p2pTimeToIso, CN_TZ_OFFSET, CN_TIME_RE, cnTimeToIso, issuedToDate, formatIssuedLocal, DEFAULT_CFG }

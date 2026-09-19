@@ -68,13 +68,32 @@ function severityOfMagnitude(mag) {
 }
 
 /**
+ * 事件键里的「发震时刻（分钟）」必须先**归一到 UTC**再取分钟。
+ *
+ * 各源给的 ISO 字符串偏移不同：EMSC 是 `…Z`、USGS 经 toIso 也是 `…Z`，而 0.5.0 新接的大陆源是
+ * `+08:00`。直接切字符串前 16 位的话，同一场地震在两边会落进**相隔 8 小时**的两个桶里——
+ * 键永远不相等，跨源归并彻底失效，同一场地震响两次（实测样本里 cenc_eqlist 含境外地震，
+ * 福克斯群岛 M6.5 这类事件 USGS / EMSC 也会推，所以这条路径是走得到的，不是理论问题）。
+ *
+ * 无法解析时退回原串切片：宁可归并失败多响一次，也不能为了一致性把消息丢掉。
+ */
+function minuteKeyOf(timeIso) {
+  const s = String(timeIso === undefined || timeIso === null ? '' : timeIso)
+  const t = Date.parse(s)
+  if (!Number.isFinite(t)) return s.slice(0, 16)
+  return new Date(t).toISOString().slice(0, 16)
+}
+
+/**
  * 跨源事件键：同一场地震 EMSC 与 USGS 都会推，两边机构、编号、震级都可能不同，
  * 但「发震时刻（分钟）+ 震中（0.1 度 ≈ 11km）」是一致的。用它把两个全球源的同一次地震
  * 归并成一个事件，避免同一场地震因为接了第二个源而响两次。
  * 代价：跨分钟边界（两边测定的发震时刻差过一分钟）时归并会失败——宁可多响一次，不漏报。
+ * 0.5.0 起大陆源（cenc_eew / cenc_eqlist）也走同一把钥匙：它们的 **EventID 与 EEW 完全不同格式**
+ * （`202609182050.0001` vs `CD.20260918205536.056`），归并只能靠时间 + 震中。
  */
 function geoEventKey(timeIso, lat, lon) {
-  const min = String(timeIso || '').slice(0, 16) // 2026-09-12T02:15
+  const min = minuteKeyOf(timeIso)
   const la = (typeof lat === 'number' && Number.isFinite(lat)) ? lat.toFixed(1) : '?'
   const lo = (typeof lon === 'number' && Number.isFinite(lon)) ? lon.toFixed(1) : '?'
   return 'geo:' + min + '@' + la + ',' + lo
