@@ -28,6 +28,7 @@ import { currentCfg } from './03-settings-bridge.js'
 import { parseJma } from './05b-jma-parser.js'
 import { parseJmaResult } from './05d-source-contracts.js'
 import { noteParseResult, noteSourceSuccess, effectiveStatusOf, noteFreshness } from './05g-source-health.js'
+import { store } from './07-store.js'
 import { handleAlert } from './11-pipeline.js'
 
 /** Host 侧的电文增量路由（与 lib/index.js 的 FEED_PATH 对应）。 */
@@ -144,7 +145,13 @@ export function createFeedClient(opts = {}) {
     // key **只取状态**：detail 里含"已收到 N 条增量""Host 轮询 N 次"这类单调计数，
     // 用它做 key 会让每轮都判定为"变化"→ 每 15 秒整页重渲一次（正是拆 SourceStatusBlock
     // 想避免的事）。数字本身由 SourceStatusBlock 每 5 秒直接从 feedStatsOf 读，不依赖这里。
-    if (eff.status === lastStatusKey) return
+    //
+    // 除自己上一轮报出的状态，还要比 **store 里当前实际的状态**（0.5.4）：探针（12d）、
+    // 健康层（05g）与 WS 连接层（12-websocket）也会写同一个源。若它们刚把展示状态改成别的值，
+    // 而这里因为"自己的 eff 没变"就不上报，那个被覆盖的状态会**永久**留在界面上
+    //（实测：一条蓝点被探针的"数据已恢复"刷成绿色之后，此后再也不自愈）。
+    const cur = ((store.sources || {})[id] || {}).status
+    if (eff.status === lastStatusKey && cur === eff.status) return
     lastStatusKey = eff.status
     try { onStatus(Object.assign({ label }, eff)) } catch (err) { /* UI 回调异常不影响轮询 */ }
   }
@@ -322,6 +329,10 @@ export function createFeedClient(opts = {}) {
 
   function schedule(delay) {
     if (!running) return
+    // 与其他定时器一致的纪律（0.5.4）：排新的之前先清旧的。当前控制流（回调里先 timer=null
+    // 再递归，且 pollSerial 有 inFlight 守卫）保证不会双排，但少这一行就意味着"以后谁改了
+    // 一处控制流，就多一条各自自续的轮询链"（= 上游请求速率翻倍）。
+    if (timer) { clearTimeout(timer); timer = null }
     timer = setTimeout(async () => {
       timer = null
       // 灾种开关的判断放在 pollOnce 里：那里会如实上报「已关闭」状态（不产生任何网络请求），

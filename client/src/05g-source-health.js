@@ -32,6 +32,7 @@
 
 import { HEALTH_KEY } from './01-constants.js'
 import { loadJSON, saveJSON, isPlainObject } from './02-storage.js'
+import { SOURCE_CONTRACTS } from './05d-source-contracts.js'
 import { store } from './07-store.js'
 
 /**
@@ -125,6 +126,19 @@ export function loadHealth(now) {
 
 // ---------------------------------------------------------------- 数据层（解析失败）
 /**
+ * 连接层基线：清掉数据健康之后，展示状态该回到哪一个连接状态。
+ *
+ * store 里存的是**合成结果**，所以先看它是不是由数据层投出来的（`schema-error` / `stale`）——
+ * 是就说明连接层本身没有更好的信息，按 `open` 计；否则**沿用**当前值，否则会把
+ * `reconnecting` / `degraded` / `disabled` 这些真实的连接状态抹成绿色。
+ */
+function connBaseOf(sourceId) {
+  const cur = (store.sources && store.sources[sourceId]) || {}
+  const s = cur.status
+  return (s === 'schema-error' || s === 'stale' || !s) ? 'open' : s
+}
+
+/**
  * 清掉 data 层（成功解析 / empty / TTL 自愈都走这里）。
  * 只有**确实从异常恢复了**才上报——否则每条成功的数据都会触发一次设置页重渲。
  */
@@ -135,7 +149,9 @@ function clearData(sourceId, detail, t) {
   r.data = null
   r.consecutiveFail = 0
   persist()
-  if (wasEscalated) store.pushSource(sourceId, { status: 'open', detail })
+  // 走 publishStatus 而不是直接 pushSource：清掉蓝点之后该显示什么，得由合成规则决定——
+  // 若这个源此刻正停更（fresh.stale），展示状态应当是「数据已过期」而不是「已连接」。
+  if (wasEscalated) publishStatus(sourceId, { status: connBaseOf(sourceId), detail })
   return true
 }
 
@@ -174,7 +190,7 @@ export function noteParseResult(sourceId, res, now) {
       console.warn('[dsh-quake-alert] ' + sourceId + ' 连续解析失败（' + kind + '，' + count + ' 条）：' + res.detail)
     } catch (e) { /* 忽略 */ }
     persist()
-    store.pushSource(sourceId, { status: 'schema-error', detail: kind + '：' + res.detail })
+    publishStatus(sourceId, { status: connBaseOf(sourceId), detail: kind + '：' + res.detail })
   }
   return true
 }
@@ -202,7 +218,7 @@ export function pruneHealth(now) {
     r.consecutiveFail = 0
     healed += 1
     if (wasEscalated) {
-      store.pushSource(id, { status: 'open', detail: '数据格式异常已超过 24 小时没有复现，自动恢复' })
+      publishStatus(id, { status: connBaseOf(id), detail: '数据格式异常已超过 24 小时没有复现，自动恢复' })
     }
   }
   if (healed) persist()
@@ -266,6 +282,58 @@ export function effectiveStatusOf(sourceId, connStatus, detail) {
   return { status: connStatus, detail }
 }
 
+/**
+ * **统一的状态发布入口**（0.5.4）——任何要写 `store.sources` 的层都从这里走。
+ *
+ * 为什么必须统一：`store.pushSource` 是**整体替换** status + detail 的，而界面上那个状态是
+ * **合成**出来的（见 `effectiveStatusOf`：蓝点 > 停更 > 连接）。此前只有 12b / 12c 两个出口
+ * 走了合成，探针（12d）、健康层自身（本文件）与 12-websocket 都是直接写 store，于是后写的
+ * 那个会把前者的结论整个抹掉。实测两条路径都真实可达：
+ *   · 探针在「数据已过期 → 恢复」翻转时写 `open`，把一条 schema-error 蓝点永久刷成绿色
+ *     （12b 的去重键认定"自己的 eff 没变"，此后每一轮都不再上报）；
+ *   · P2PQuake 约每 10 分钟一次的**常态断线**写 `reconnecting`，同样把蓝点冲掉。
+ * 而 `sourceHealthOf()` 里 escalated 仍然是 true —— 也就是 DESIGN 11.9 A 那句
+ * 「schema-error 优先于连接状态」被绕过，「上游改了字段、要等插件更新」这个用户处理不了的
+ * 信号从界面上消失（设置页那个「重试」按钮也跟着消失）。
+ *
+ * 合成规则只有 `effectiveStatusOf` 一处，这里只负责"合成 + 写 store"。
+ *
+ * @param {string} sourceId
+ * @param {object} patch 至少给 status 与 detail 之一；其余字段（label / retries…）原样透传
+ * @returns {{status: string, detail: string}} 本次合成出的展示状态（调用方可用它做去重键）
+ */
+export function publishStatus(sourceId, patch) {
+  const p = Object.assign({}, patch)
+  // 探针（12d）与健康层（本文件）手里没有中文源名，而 07-store.pushSource 的兜底是**裸 id**。
+  // 不补的话，"刷新页面后立刻重发蓝点"（`republishDataHealth`）与"探针翻停更"这两条路径
+  // 会让侧边栏的悬停详情显示成「usgs：上游数据已过期…」。store 里已有 label 就沿用，
+  // 否则退到契约里的 label（同一份声明，比 id 可读），最后才是 id。
+  if (p.label === undefined) {
+    const cur = (store.sources && store.sources[sourceId]) || {}
+    const declared = SOURCE_CONTRACTS[sourceId]
+    p.label = cur.label || (declared && declared.label) || sourceId
+  }
+  const eff = effectiveStatusOf(sourceId, p.status, p.detail)
+  p.status = eff.status
+  p.detail = eff.detail
+  store.pushSource(sourceId, p)
+  return eff
+}
+
+/**
+ * 把已经升级的数据健康记录重新发布到 store——插件装载时调用。
+ *
+ * 刷新页面后 store 是空的，而蓝点存在 localStorage 里（DESIGN 11.9 A）。不重发的话，
+ * 要等该源下一次上报（feed 源首轮 3 秒 + 15 秒一轮）才显示出来，而「上游改了字段」这件事
+ * 与用户刷新页面毫无关系——"蓝点跨刷新存活"这条承诺应当是**立刻**成立，而不是十几秒后。
+ */
+export function republishDataHealth() {
+  for (const [id, r] of health) {
+    if (!r.data || !r.data.escalated) continue
+    publishStatus(id, { status: 'open' })
+  }
+}
+
 /** 手动重试（DESIGN 5.4）：清掉异常标记，等下一批数据自证。 */
 export function retrySource(sourceId, now) {
   const t = now === undefined ? Date.now() : now
@@ -273,7 +341,7 @@ export function retrySource(sourceId, now) {
   r.data = null
   r.consecutiveFail = 0
   persist()
-  store.pushSource(sourceId, { status: 'open', detail: '已手动重试，等待下一批数据' })
+  publishStatus(sourceId, { status: connBaseOf(sourceId), detail: '已手动重试，等待下一批数据' })
   return true
 }
 

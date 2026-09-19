@@ -99,8 +99,13 @@ const s = {
   row: (...children) => h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', margin: '4px 0' } }, ...children),
   checkbox: (checked, onChange, text) => h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer', color: '#dfe3e8' } },
     h('input', { type: 'checkbox', checked, onChange: (e) => onChange(e.target.checked) }), text),
-  select: (value, options, onChange, textOf) => h('select', {
+  // `label`（第 5 参）渲染成 `aria-label`（0.5.4）。此前每个下拉旁边只有一个视觉上的 div
+  // 文字，两者在 DOM 里没有任何关联——读屏软件念到的是"组合框"，用户无法知道哪个是震度阈值。
+  // 全库此前只有历史条目与状态点两处 aria 属性（CHANGELOG 记过），而 DESIGN 从未把无障碍
+  // 记为"有意不做"，所以这是遗漏而不是取舍。
+  select: (value, options, onChange, textOf, label) => h('select', {
     value, onChange: (e) => onChange(e.target.value),
+    'aria-label': label || undefined,
     style: { background: '#ffffff', color: '#1a1a1a', border: '1px solid #6b7280', borderRadius: 6, padding: '4px 8px', fontSize: 12, minWidth: 180 },
   }, options.map((o) => h('option', {
     key: String(o.v !== undefined ? o.v : o.g), value: String(o.v !== undefined ? o.v : o.g),
@@ -434,8 +439,8 @@ function SettingsPanel() {
     const cityOptions = (cities.length ? cities : [{ name: '' }]).map((c) => ({ v: c.name, label: c.name || '（先选省份）' }))
     return h('div', null,
       h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' } },
-        s.select(cnPick.province, provOptions, pickProvince, (o) => o.label),
-        s.select(cnPick.city, cityOptions, (v) => { setCnPick((p) => ({ ...p, city: v })); setCnMsg('') }, (o) => o.label),
+        s.select(cnPick.province, provOptions, pickProvince, (o) => o.label, '一级行政区（省 / 自治区 / 直辖市）'),
+        s.select(cnPick.city, cityOptions, (v) => { setCnPick((p) => ({ ...p, city: v })); setCnMsg('') }, (o) => o.label, '城市'),
       ),
       h('div', { style: { marginTop: 6 } },
         radiusControl(cnPick.radiusKm, (v) => setCnPick((p) => ({ ...p, radiusKm: v })), 'cn-radius')),
@@ -443,7 +448,7 @@ function SettingsPanel() {
         s.btn('添加这个城市', addCnPlace),
         s.btn('用我的位置', addMyLocationPlace, { fontSize: 11 }),
       ),
-      cnMsg ? h('div', { style: { fontSize: 11, color: '#93c5fd', marginTop: 6 } }, cnMsg) : null,
+      cnMsg ? h('div', { role: 'status', style: { fontSize: 11, color: '#93c5fd', marginTop: 6 } }, cnMsg) : null,
     )
   }
   // 全球源状态（0.4.0）：用户看不出"链路到底在不在拉"，这是最常见的困惑来源——
@@ -476,6 +481,7 @@ function SettingsPanel() {
             pref + '：' + (sel === 0 ? '全境（未细化）' : '已选 ' + sel + ' 个市町村')),
           h('input', {
             type: 'text', value: q, placeholder: '搜索 ' + pref + ' 的市町村…',
+            'aria-label': '搜索 ' + pref + ' 的市町村',
             onChange: (e) => setCityQuery((prev) => Object.assign({}, prev, { [pref]: e.target.value })),
             style: { width: '100%', boxSizing: 'border-box', background: '#ffffff', color: '#1a1a1a', border: '1px solid #6b7280', borderRadius: 6, padding: '3px 8px', fontSize: 12, marginBottom: 5 },
           }),
@@ -551,6 +557,12 @@ function SettingsPanel() {
       const alert = parseJma(buildTestTelegram(pref, ms, sc.key, city), { id: 'test-weather-' + ms })
       setWeatherTestSeq(weatherTestSeq + 1)
       if (!alert) { setWeatherTestMsg('测试电文解析失败 —— 请把这个情况反馈给开发者'); return }
+      // 事件键改成**每次都不同**（0.5.4），否则同一场景第二次就静默：汇总型电文的事件键是
+      // 「灾种 + 官署」（刻意不含发布时刻，见 05b 的说明），于是连点两次会算出同一个键，
+      // 被 `isEventRepeat` 判成"同一事件的后续发布（强度未升级）"而只记历史——与按钮文案
+      // "可反复点击"直接矛盾。全球链路早就显式改写过事件键（05c 的 parseTestGlobalMessage），
+      // 气象这条漏了。语义上也成立：每次点击本来就是一次独立的演示。
+      alert.eventKey = 'test-weather:' + ms + ':' + sc.key
       const res = handleAlert(alert, currentCfg(), { skipQuietHours: true })
       // 提示按**实际结果**生成，不写死"应看到弹窗"——开关关闭 / 未达 L4 / 静默 / 其它标签页
       // 已提醒时，实际就是不会响，提示必须如实说明，否则会让人以为插件坏了。
@@ -564,7 +576,7 @@ function SettingsPanel() {
       TEST_SCENARIOS.map((x) => x.label).join(' / ') +
       '。其中 L3 那条刻意不会响铃——用来演示 L1〜L3 的处理方式。'),
     weatherTestMsg
-      ? h('div', { style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, weatherTestMsg)
+      ? h('div', { role: 'status', style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, weatherTestMsg)
       : null,
   )
   const flushVolume = () => {
@@ -620,7 +632,7 @@ function SettingsPanel() {
             const c = activeClient // 模块级 live binding：插件停用时已被置为 null
             if (c) { try { c.restart() } catch (err) { /* 忽略 */ } }
           }, 80)
-        }, (o) => o.label),
+        }, (o) => o.label, '数据源'),
       ),
       h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 6 } },
         '配置存储：' + settingsSyncLabel()),
@@ -699,7 +711,7 @@ function SettingsPanel() {
       h('div', { style: { marginTop: 6 } },
         radiusControl(Number(placeDraft.radiusKm) || DEFAULT_PLACE_RADIUS_KM,
           (v) => setPlaceDraft((d) => ({ ...d, radiusKm: String(v) })), 'place-radius')),
-      placeMsg ? h('div', { style: { fontSize: 11, color: '#93c5fd', marginTop: 6 } }, placeMsg) : null,
+      placeMsg ? h('div', { role: 'status', style: { fontSize: 11, color: '#93c5fd', marginTop: 6 } }, placeMsg) : null,
       // 全球源的地震不是随时都有，没法"等一条"来验证链路 —— 与气象链路一样给一个本地测试按钮。
       // 构造的是**源格式原文**（EMSC / USGS / NOAA 各一种），因此解析器与匹配引擎都被真实走过。
       h('div', { style: { marginTop: 10, borderTop: '1px solid rgba(148,163,184,0.18)', paddingTop: 8 } },
@@ -723,8 +735,8 @@ function SettingsPanel() {
         h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4, lineHeight: 1.6 } },
           '测试消息在本地构造（EMSC / USGS / NOAA 三种源格式轮换），不发任何网络请求，可反复点击。场景依次为：' +
           TEST_GEO_SCENARIOS.map((x) => x.label).join(' / ') +
-          '。最后一条刻意落在半径之外——用来演示半径是怎么起作用的。'),
-        geTestMsg ? h('div', { style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, geTestMsg) : null,
+          '。最后一条约 550km 外——半径小于这个距离时不命中，大于命中：用来演示半径是怎么起作用的。'),
+        geTestMsg ? h('div', { role: 'status', style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, geTestMsg) : null,
       ),
       h(SourceStatusBlock, { key: 'source-status' }),
     ),
@@ -732,17 +744,17 @@ function SettingsPanel() {
     // 阈值
     s.section('提醒阈值',
       s.label('地震（实测震度最低值）'),
-      s.row(s.select(cfg.thresholds.quakeScale, SCALE_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, quakeScale: Number(v) } })), (o) => o.label)),
+      s.row(s.select(cfg.thresholds.quakeScale, SCALE_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, quakeScale: Number(v) } })), (o) => o.label, '地震（实测震度最低值）')),
       s.label('紧急地震速报（预测震度最低值）'),
-      s.row(s.select(cfg.thresholds.eewScale, SCALE_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, eewScale: Number(v) } })), (o) => o.label)),
+      s.row(s.select(cfg.thresholds.eewScale, SCALE_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, eewScale: Number(v) } })), (o) => o.label, '紧急地震速报（预测震度最低值）')),
       s.label('海啸'),
-      s.row(s.select(cfg.thresholds.tsunamiGrade, TSUNAMI_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, tsunamiGrade: v } })), (o) => o.label)),
+      s.row(s.select(cfg.thresholds.tsunamiGrade, TSUNAMI_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, tsunamiGrade: v } })), (o) => o.label, '海啸等级')),
       s.label('全球地震（最低震级，EMSC / USGS）'),
-      s.row(s.select(cfg.thresholds.globalMagnitude, GLOBAL_MAG_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, globalMagnitude: Number(v) } })), (o) => o.label)),
+      s.row(s.select(cfg.thresholds.globalMagnitude, GLOBAL_MAG_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, globalMagnitude: Number(v) } })), (o) => o.label, '全球地震（最低震级）')),
       h('div', { style: { fontSize: 11, color: '#9aa0a6' } },
         '全球源给的是震级、日本源给的是震度，两者不可换算，所以是两个独立旋钮。'),
       s.label('大陆地震速报（最低震级，中国地震台网速报）'),
-      s.row(s.select(cfg.thresholds.cnReportMagnitude, CN_REPORT_MAG_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, cnReportMagnitude: Number(v) } })), (o) => o.label)),
+      s.row(s.select(cfg.thresholds.cnReportMagnitude, CN_REPORT_MAG_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, cnReportMagnitude: Number(v) } })), (o) => o.label, '大陆地震速报（最低震级）')),
       h('div', { style: { fontSize: 11, color: '#9aa0a6' } },
         '速报覆盖低到 M2.5 且每天都有数据，所以门槛与上面的预警分开，避免小震刷屏；' +
         '大陆地震预警与全球源共用「全球地震」那个门槛。'),
@@ -755,7 +767,7 @@ function SettingsPanel() {
       s.row(s.select(cfg.cnTransport || 'auto', [
         { v: 'auto', label: '自动：SSE 推送优先，走不通自动降级为轮询' },
         { v: 'poll', label: '强制轮询（每 15 秒一次）' },
-      ], (v) => setCfg((c) => ({ ...c, cnTransport: v })), (o) => o.label)),
+      ], (v) => setCfg((c) => ({ ...c, cnTransport: v })), (o) => o.label, '大陆源取数方式')),
       h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4, lineHeight: 1.6 } },
         'SSE 推送的延迟是秒级，轮询最坏 15 秒——大陆预警抢的是这几秒，所以默认用推送。' +
         '只有在推送被网络中间设备反复掐断、而普通请求仍然正常时，才需要强制轮询。' +
@@ -772,6 +784,7 @@ function SettingsPanel() {
         type: 'range', min: 0, max: 100,
         value: Math.round(volShown * 100),
         onChange: (e) => onVolumeInput(Number(e.target.value) / 100),
+        'aria-label': '音量',
         style: { flex: 1, minWidth: 120 },
       }), h('span', { style: { color: '#9aa0a6', fontSize: 11, width: 34 } }, Math.round(volShown * 100) + '%')),
       s.row(
@@ -811,7 +824,7 @@ function SettingsPanel() {
         : (audioState() === 'unavailable'
           ? h('div', { style: { color: '#9aa0a6', fontSize: 11, marginTop: 4 } }, '当前环境不支持 Web Audio，提示音不可用。')
           : null),
-      testMsg ? h('div', { style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, testMsg) : null,
+      testMsg ? h('div', { role: 'status', style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, testMsg) : null,
     ),
 
     // 静默时段（0.2.0）
@@ -821,17 +834,19 @@ function SettingsPanel() {
         s.label('开始'),
         h('input', {
           type: 'time', value: cfg.quietHours.start,
+          'aria-label': '静默时段开始时间',
           onChange: (e) => setCfg((c) => ({ ...c, quietHours: { ...c.quietHours, start: e.target.value || c.quietHours.start } })),
           style: { background: '#ffffff', color: '#1a1a1a', border: '1px solid #6b7280', borderRadius: 6, padding: '4px 8px', fontSize: 12 },
         }),
         s.label('结束'),
         h('input', {
           type: 'time', value: cfg.quietHours.end,
+          'aria-label': '静默时段结束时间',
           onChange: (e) => setCfg((c) => ({ ...c, quietHours: { ...c.quietHours, end: e.target.value || c.quietHours.end } })),
           style: { background: '#ffffff', color: '#1a1a1a', border: '1px solid #6b7280', borderRadius: 6, padding: '4px 8px', fontSize: 12 },
         }),
       ),
-      s.row(s.checkbox(cfg.quietHours.breakForSevere, (v) => setCfg((c) => ({ ...c, quietHours: { ...c.quietHours, breakForSevere: v } })), '红色等级（EEW / 大海啸警报）仍提醒')),
+      s.row(s.checkbox(cfg.quietHours.breakForSevere, (v) => setCfg((c) => ({ ...c, quietHours: { ...c.quietHours, breakForSevere: v } })), '红色等级仍提醒（EEW / 海啸警报 / 震度6弱以上的地震 / L4 以上气象警报）')),
       h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 6 } },
         '按浏览器本地时间判定；开始时间晚于结束时间表示跨午夜（如 23:00–07:00）。静默期间命中的预警仍会记入下方「最近预警记录」，只是不响铃、不弹通知。'),
     ),
@@ -851,7 +866,7 @@ function SettingsPanel() {
       })),
       h('div', { style: { fontSize: 11, color: '#d9a406', marginTop: 4 } },
         '⚠ 快照含你的关注地区名称与坐标——诊断"为什么没命中"必须要有它。分享前请自行确认。'),
-      diag ? h('div', { style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, diag.msg) : null,
+      diag ? h('div', { role: 'status', style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, diag.msg) : null,
       diag && diag.text
         ? h('textarea', {
             readOnly: true, value: diag.text, rows: 10,

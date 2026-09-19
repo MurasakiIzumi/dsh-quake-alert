@@ -4713,6 +4713,247 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '0.5.3 校验机制检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
   }
 
+  console.log('== 0.5.4：状态合成 / 跨标签页清空 / 契约原型链 / JMA 标签 / 演示链路 ==')
+  try {
+    // ---- 1. 展示状态是**合成**出来的：蓝点不被探针或连接层抹掉 ----
+    {
+      const t = loadClientEx().exports.__test
+      const store = t.store
+      store.pushSource('usgs', { status: 'open' })
+      for (let i = 0; i < 5; i++) t.noteParseResult('usgs', { ok: false, kind: 'schema', detail: '上游把 properties.mag 改名了' })
+      assert(store.sources.usgs.status === 'schema-error', '（前置）连续 5 条同因失败 → 数据格式异常（蓝点）')
+      t.noteFreshness('usgs', Date.now() - 60 * 60 * 1000)
+      const probe = t.createHealthProbe()
+      probe.tick()
+      assert(store.sources.usgs.status === 'schema-error',
+        '探针判「数据已过期」不改展示状态 —— schema-error 优先于 stale')
+      t.noteFreshness('usgs', Date.now())
+      probe.tick()
+      assert(store.sources.usgs.status === 'schema-error',
+        '探针判「数据已恢复」也不会把蓝点刷成绿色（修复前正是这条：能力写了、但被后写者覆盖）')
+
+      // 连接层的常态上报（P2PQuake 约每 10 分钟一次断线）同样不能抹掉蓝点
+      const sockets = []
+      function FakeWs(url) { this.url = url; this.readyState = 0; sockets.push(this) }
+      FakeWs.prototype.close = function () { this.readyState = 3; if (this.onclose) { const f = this.onclose; this.onclose = null; f() } }
+      const t2 = loadClientEx(null, { window: { WebSocket: FakeWs } }).exports.__test
+      const ws = t2.createWsClient({ sourceId: 'emsc', urlOf: () => 'wss://example.invalid/ws', onRaw: () => {} })
+      ws.start()
+      sockets[0].onopen()
+      for (let i = 0; i < 5; i++) t2.noteParseResult('emsc', { ok: false, kind: 'schema', detail: '字段改名了' })
+      assert(t2.store.sources.emsc.status === 'schema-error', '（前置）EMSC 蓝点')
+      sockets[0].onclose()
+      assert(t2.store.sources.emsc.status === 'schema-error',
+        '一次常态断线（reconnecting）不会冲掉蓝点 —— 用户要看见的是"数据读不懂"，不是"正在重连"')
+      ws.stop()
+
+      // 跨刷新：蓝点落盘 → 重新加载 → 装载时立刻重发（而不是等该源下一次上报）
+      const first = loadClientEx()
+      const t3 = first.exports.__test
+      for (let i = 0; i < 5; i++) t3.noteParseResult('jma', { ok: false, kind: 'schema', detail: '结构变了' })
+      const second = loadClientEx(Object.fromEntries(first.storage))
+      const t4 = second.exports.__test
+      t4.republishDataHealth()
+      assert(!!(t4.store.sources.jma && t4.store.sources.jma.status === 'schema-error'),
+        '模拟页面重载 + republishDataHealth → 蓝点立刻回到 store')
+      assert(!!(t4.store.sources.jma && t4.store.sources.jma.label && t4.store.sources.jma.label !== 'jma'),
+        '重发的蓝点带上契约里的源名而不是裸 id：' + String(t4.store.sources.jma && t4.store.sources.jma.label))
+    }
+
+    // ---- 2. 跨标签页「清空记录」要真的清干净 ----
+    {
+      const mem = new Map()
+      const ls = {
+        getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+        setItem: (k, v) => mem.set(k, String(v)),
+        removeItem: (k) => mem.delete(k),
+      }
+      const chans = []
+      function FakeBC() { this.onmessage = null; chans.push(this) }
+      FakeBC.prototype.postMessage = function (d) { for (const c of chans) if (c !== this && c.onmessage) c.onmessage({ data: d }) }
+      FakeBC.prototype.close = function () {}
+      const A = loadClientEx(null, { window: { localStorage: ls, BroadcastChannel: FakeBC } }).exports.__test
+      const B = loadClientEx(null, { window: { localStorage: ls, BroadcastChannel: FakeBC } }).exports.__test
+      A.ensureAlertChannel(); B.ensureAlertChannel()
+      const ev = (id) => ({ id, code: 551, kind: 'quake', label: '地震速报·震度速报', severity: 'yellow', issued: '', headline: 'h', hit: true })
+      A.addEvent(ev('x1')); B.addEvent(ev('x1'))
+      A.store.push({ events: [] })
+      ls.setItem('dsh.quakeAlert.history', '[]')
+      A.broadcastHistoryCleared()
+      assert(B.store.events.length === 0,
+        '另一个标签页的内存历史也被清空（修复前只清了 alertedEvents，列表里仍显示着旧记录）')
+      B.addEvent(ev('x2'))
+      const disk = JSON.parse(mem.get('dsh.quakeAlert.history') || '[]')
+      assert(!disk.some((e) => e.id === 'x1'),
+        '被清掉的记录不会被另一个标签页的下一次 addEvent 写回磁盘（清空若出于隐私动机，这就是泄漏面）')
+    }
+
+    // ---- 3. 契约层查表不再命中原型链 ----
+    {
+      const base = { alertid: '53072441600000_x', title: '云南省丽江市宁蒗彝族自治县气象台发布暴雨橙色预警信号', issued: '2026-09-19T03:02:45+08:00' }
+      const r1 = T.parseNmcAlarmResult(Object.assign({}, base, { kind: 'constructor', level: 'orange' }))
+      assert(r1.ok === false && r1.kind === 'empty', 'kind=constructor 被判 empty（修复前直接放行，kindLabel 里嵌进函数源码）')
+      const r2 = T.parseNmcAlarmResult(Object.assign({}, base, { kind: 'rainstorm', level: 'constructor' }))
+      assert(r2.ok === false && r2.kind === 'schema', 'level=constructor 被判 schema（修复前 severity 变成函数对象）')
+      const ok = T.parseNmcAlarmResult(Object.assign({}, base, { kind: 'rainstorm', level: 'orange' }))
+      assert(ok.ok === true && ok.alert.cnRank === 3, '（对照）正常的 kind / level 仍然通过')
+    }
+
+    // ---- 4. JMA 汇总副本的标签按**级别**判 ----
+    {
+      const danger = fs.readFileSync(path.join(ROOT, 'samples', 'jma-vpww53-hyogo-danger-20260914.xml'), 'utf8')
+      const a = T.parseJma(danger, { id: 'jma-vpww53-hyogo-danger-20260914.xml' })
+      assert(!!a && a.level === 4, '（前置）兵庫県样本是 L4 危険警報')
+      assert(!!a && a.kindLabel !== '气象特别警报',
+        'L4 的 VPWW53 不再被标成「气象特别警报」（特別警報是 L5，最高级别）：' + String(a && a.kindLabel))
+      const special = fs.readFileSync(path.join(ROOT, 'samples', 'jma-vpww53-tokyo-special-20260907.xml'), 'utf8')
+      const b = T.parseJma(special, { id: 'jma-vpww53-tokyo-special-20260907.xml' })
+      assert(!!b && b.level === 5 && b.kindLabel === '气象特别警报', '真正的 L5 特別警報仍然显示为「气象特别警报」')
+      const heavy = fs.readFileSync(path.join(ROOT, 'samples', 'jma-vpww55-heavyrain.xml'), 'utf8')
+      const c = T.parseJma(heavy, { id: 'jma-vpww55-heavyrain.xml' })
+      assert(!!c && c.kindLabel === '大雨警报', '带灾种名的副本仍给出具体灾种（不被汇总分支抢走）：' + String(c && c.kindLabel))
+    }
+
+    // ---- 5. 未配置大陆关注点：不进历史，但判定要带 noWatch 标记 ----
+    {
+      const t = loadClientEx().exports.__test
+      const cfg = t.loadCfg()
+      assert(cfg.watch.places.length === 0, '（前置）默认配置里没有大陆关注点')
+      const alert = t.parseNmcAlarm({
+        alertid: '53072441600000_y', title: '云南省丽江市宁蒗彝族自治县气象台发布暴雨橙色预警信号',
+        issued: '2026-09-19T03:02:45+08:00', kind: 'rainstorm', level: 'orange', detail: '',
+      })
+      const m = t.matchAlert(alert, cfg)
+      assert(m.hit === false && m.noWatch === true, '「未设置中国大陆关注点」带 noWatch 标记')
+      const before = t.store.events.length
+      t.handleAlert(alert, cfg)
+      assert(t.store.events.length === before,
+        '未配置关注点时不写历史 —— 否则默认配置的用户每天被几十条无关大陆预警刷满「最近预警」')
+    }
+
+    // ---- 6. nmc 电文不会清空日本电文留下的 L3 提示 ----
+    {
+      const t = loadClientEx().exports.__test
+      const cfg = t.loadCfg()
+      const l3 = t.parseJma(t.buildTestTelegram('東京都', 1700000000000, 'landslide-l3', ''), { id: 'test-l3' })
+      t.updateWeatherHint(l3, cfg)
+      assert(!!(t.store.weatherHint && t.store.weatherHint.level === 3), '（前置）日本 L3 命中 → 侧边栏留一条提示')
+      const nmc = t.parseNmcAlarm({
+        alertid: '53072441600000_z', title: '云南省丽江市宁蒗彝族自治县气象台发布暴雨橙色预警信号',
+        issued: '2026-09-19T03:02:45+08:00', kind: 'rainstorm', level: 'orange', detail: '',
+      })
+      t.updateWeatherHint(nmc, cfg)
+      assert(!!(t.store.weatherHint && t.store.weatherHint.level === 3),
+        '大陆气象电文（regions 恒为空）不会把日本电文的 L3 提示清成 null')
+    }
+
+    // ---- 7. 测试按钮可反复点击（事件键带毫秒，与全球链路同口径） ----
+    {
+      const t = loadClientEx().exports.__test
+      const mk = (ms) => {
+        const a = t.parseJma(t.buildTestTelegram('東京都', ms, 'heavyrain', ''), { id: 'test-weather-' + ms })
+        a.eventKey = 'test-weather:' + ms + ':heavyrain'
+        return a
+      }
+      const r1 = t.handleAlert(mk(1700000000001), t.currentCfg(), { skipQuietHours: true })
+      const r2 = t.handleAlert(mk(1700000000002), t.currentCfg(), { skipQuietHours: true })
+      assert(r1.notified === true && r2.notified === true,
+        '同一场景连点两次都播报（修复前第二次会被判成"同一事件的后续发布"而静默）')
+    }
+
+    // ---- 8. 降级客户端建立失败要回滚，不能谎报「已降级为轮询」 ----
+    {
+      const t = loadClientEx().exports.__test
+      const stream = t.createCnStream({
+        id: 'cenc_eew',
+        createEventSource: () => { throw new Error('没有 EventSource') },
+        createFallback: () => { throw new Error('建立轮询客户端失败') },
+      })
+      stream.start()
+      assert(stream.modeOf() === 'idle',
+        '降级建立失败后回滚到 idle（修复前 mode 停在 poll：UI 说"已降级"，实际一条预警都收不到）')
+      stream.stop()
+    }
+
+    // ---- 9. WebSocket 客户端 stop 之后 start 是活的 ----
+    {
+      const sockets = []
+      function FakeWs2(url) { this.url = url; this.readyState = 0; sockets.push(this) }
+      FakeWs2.prototype.close = function () { this.readyState = 3 }
+      const t = loadClientEx(null, { window: { WebSocket: FakeWs2 } }).exports.__test
+      const c = t.createWsClient({ onRaw: () => {} })
+      c.start()
+      const n1 = sockets.length
+      c.stop()
+      c.start()
+      assert(sockets.length === n1 + 1, 'stop 之后再 start 会真的新建连接（修复前 start 不清 stopped，静默无效）')
+      c.stop()
+    }
+
+    // ---- 10. Host poller：空闲后停链 + markRead 唤醒（0.5.4 / DESIGN 5.2 的按需轮询） ----
+    {
+      const realSet = global.setTimeout
+      const realClear = global.clearTimeout
+      const pending = []
+      // poller 用模块内的全局 setTimeout，只能这样注入（跑完在 finally 里恢复）
+      global.setTimeout = (fn, ms) => { const t = { fn, ms, cleared: false, unref() {} }; pending.push(t); return t }
+      global.clearTimeout = (t) => { if (t) t.cleared = true }
+      try {
+        const pollerMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'poller.js')).href)
+        const poller = pollerMod.createPoller({
+          feedUrl: 'https://example.invalid/feed', parseFeed: () => [], singleStage: true,
+          idleMs: 60 * 1000, firstDelayMs: 1500, intervalMs: 60 * 1000,
+          fetchText: async () => '[]',
+        })
+        const runOne = async () => { const t = pending.shift(); if (t && !t.cleared) await t.fn() }
+        poller.start()
+        await runOne()
+        assert(pending.length === 0,
+          '空闲一轮之后不再自续（修复前每 5 秒一轮永远不停，idleSkips 一天 +17280 且显示成「节流跳过 N 次」）')
+        assert(poller.stats().idleSkips === 1, 'idleSkips 只记一次"进入空闲"：' + poller.stats().idleSkips)
+        assert(poller.stats().polls === 0, '（对照）空闲期间没有产生任何外部请求')
+        poller.markRead()
+        assert(pending.length === 1 && pending[0].ms === pollerMod.IDLE_RETRY_MS,
+          'markRead（/feed 被访问）唤醒轮询：排出一个短退避')
+        await runOne()
+        assert(poller.stats().polls === 1, '唤醒之后真的拉了源')
+        assert(pending.length === 1 && pending[0].ms === 60 * 1000, '成功一轮之后回到正常间隔')
+        poller.stop()
+      } finally {
+        global.setTimeout = realSet
+        global.clearTimeout = realClear
+      }
+    }
+
+    // ---- 11. Host settings 迁移标记：以 Host 为准时要认领，避免本地镜像日后复活 ----
+    {
+      const seed = { 'dsh.quakeAlert.v1': JSON.stringify({ version: 1, thresholds: { quakeScale: 30 } }) }
+      const first = loadClientEx(seed)
+      const t = first.exports.__test
+      let snap = {
+        status: 'ready', mode: 'host', writable: true,
+        value: { thresholds: { quakeScale: 55 } }, user: { thresholds: { quakeScale: 55 } },
+      }
+      let syncFn = null
+      const scope = {
+        getSnapshot: () => snap,
+        subscribe: (fn) => { syncFn = fn; return () => {} },
+        mutate: () => Promise.resolve(),
+      }
+      t.bindSettingsScope(scope)
+      assert(t.currentCfg().thresholds.quakeScale === 55, '（前置）Host 已有内容 → 以 Host 为准')
+      assert(first.storage.get('dsh.quakeAlert.hostMigrated') === '1',
+        '首次 bind 时 Host 已非空也要落「已认领」标记（修复前永不落盘）')
+      // Host 被清空（用户在别处恢复默认）→ 本地那份**过期**的镜像不该迁回去
+      snap = { status: 'ready', mode: 'host', writable: true, value: {}, user: {} }
+      if (typeof syncFn === 'function') syncFn()
+      assert(t.currentCfg().thresholds.quakeScale === 40,
+        'Host 清空后不会被本地旧值复活（修复前实测会写回 55）：' + t.currentCfg().thresholds.quakeScale)
+    }
+  } catch (e) {
+    assert(false, '0.5.4 检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
+  }
+
   console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败')
   process.exit(fail === 0 ? 0 : 1)
 })()

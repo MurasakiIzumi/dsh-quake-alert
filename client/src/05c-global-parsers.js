@@ -90,7 +90,8 @@ function minuteKeyOf(timeIso) {
  * 归并成一个事件，避免同一场地震因为接了第二个源而响两次。
  * 代价：跨分钟边界（两边测定的发震时刻差过一分钟）时归并会失败——宁可多响一次，不漏报。
  * 0.5.0 起大陆源（cenc_eew / cenc_eqlist）也走同一把钥匙：它们的 **EventID 与 EEW 完全不同格式**
- * （`202609182050.0001` vs `CD.20260918205536.056`），归并只能靠时间 + 震中。
+ * （EEW 是 `b4kybfnuqayyy` 这类随机串，速报是 `CD.20260918205536.056`；0.5.4 按样本修正，
+ * 此处原写 EEW 是 `202609182050.0001`），归并只能靠时间 + 震中。
  */
 /**
  * 0.1° 桶的字符串化。**必须把 "-0.0" 归一成 "0.0"**：`(-0.02).toFixed(1)` 得到 "-0.0"，
@@ -308,9 +309,12 @@ function parseNoaaCap(xml, entry) {
  */
 export const TEST_GEO_SCENARIOS = [
   { key: 'emsc', label: 'EMSC 地震（震中就在关注点）', note: 'M6.2', source: 'emsc' },
-  { key: 'usgs', label: 'USGS 地震（约 80km 外）', note: 'M5.6 · 仍在默认半径内', source: 'usgs' },
+  { key: 'usgs', label: 'USGS 地震（约 80km 外）', note: 'M5.6 · 近处，小半径也可能不命中', source: 'usgs' },
   { key: 'noaa', label: 'NOAA 海啸注意报', note: 'Tsunami Advisory', source: 'noaa' },
-  { key: 'emsc-far', label: 'EMSC 远地地震（约 550km 外）', note: 'M7.0 · 超出默认 300km 半径，刻意不命中', source: 'emsc' },
+  // 半径是可配的（1–2000km，新建默认 100km），所以这里**不能承诺"一定不命中"**：
+  // 旧的「超出默认 300km 半径，刻意不命中」既是 0.4.0 的旧默认值（0.5.0 起新建默认 100km），
+  // 也把半径 ≥556km 的用户引向相反的事实——那条测试会真的响铃（0.5.4 修正文案）。
+  { key: 'emsc-far', label: 'EMSC 远地地震（约 550km 外）', note: 'M7.0 · 用于演示半径：半径 < 550km 时不命中', source: 'emsc' },
 ]
 
 // 纬度偏移 1 度约 111km；夹在 ±89.5 以内，避免极端位置把纬度推到界外

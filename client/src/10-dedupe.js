@@ -9,6 +9,9 @@
 // ============================================================================
 
 import { validGeo, distanceKm } from './06-matcher.js'
+import { HISTORY_KEY } from './01-constants.js'
+import { saveJSON } from './02-storage.js'
+import { store } from './07-store.js'
 
 // ---------- 去重 ----------
 // 三层：① 消息 id（防重连重放）② 事件键（同一地震的多次发布）③ 跨标签页（多开 DSH 页面）
@@ -210,7 +213,15 @@ function ensureAlertChannel() {
       const d = ev && ev.data
       if (!d) return
       // 另一个标签页清空了历史 → 本标签页也要清（否则它的下一次 addEvent 会把整份记录写回磁盘）
-      if (d.type === 'history-cleared') { alertedEvents.clear(); return }
+      if (d.type === 'history-cleared') {
+        alertedEvents.clear()
+        // **内存副本与磁盘都要清**（0.5.4）：此前只清了 alertedEvents，于是本标签页的历史列表
+        // 仍然显示着那些条目，而下一次 addEvent 会把它们（连同新条目）重新写回 localStorage
+        // ——发起清空的那个标签页一刷新又看到了。「清空记录」若出于隐私动机，这就是实际的泄漏面。
+        store.push({ events: [] })
+        try { saveJSON(HISTORY_KEY, []) } catch (err) { /* 写盘失败：内存已清，下次 addEvent 会覆盖 */ }
+        return
+      }
       if (d.type !== 'alerted' || !d.key) return
       tabAlerted.set(String(d.key), Date.now())
       // 顺带同步事件键：其它标签页此前提醒过的事件，本标签页在收到取消消息时也要知道

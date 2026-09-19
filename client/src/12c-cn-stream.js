@@ -24,6 +24,7 @@ import { loadJSON, saveJSON } from './02-storage.js'
 import { currentCfg } from './03-settings-bridge.js'
 import { failResult } from './05d-source-contracts.js'
 import { noteParseResult, effectiveStatusOf, noteFreshness } from './05g-source-health.js'
+import { store } from './07-store.js'
 import { handleAlert } from './11-pipeline.js'
 import { createFeedClient, FEED_PATH, FEED_CURSOR_KEY } from './12b-feed-poll.js'
 
@@ -168,7 +169,11 @@ export function createCnStream(opts = {}) {
     stats.lastDetail = String(patch.detail || '')
     const eff = effectiveStatusOf(id, patch.status, patch.detail)
     const key = k || eff.status
-    if (key === lastStatusKey) return
+    // 除自己的去重键，还要比 **store 里当前实际的状态**（0.5.4）：探针（12d）、健康层（05g）
+    // 与 WS 连接层会写同一个源；若它们刚把展示状态改成别的值，而这里因为"自己的键没变"就
+    // 不上报，那个被覆盖的状态会永久留在界面上（12b 侧同款修正，理由见 12b-feed-poll.js）。
+    const cur = ((store.sources || {})[id] || {}).status
+    if (key === lastStatusKey && cur === eff.status) return
     lastStatusKey = key
     try { onStatus(Object.assign({ label }, eff)) } catch (err) { /* UI 回调异常不影响链路 */ }
   }
@@ -212,6 +217,26 @@ export function createCnStream(opts = {}) {
    */
   function activateFallback(reason, manual) {
     if (inFallback) return
+    // **先建客户端，成功之后才置位**（0.5.4）。原来的顺序是 `inFallback = true` → `mode='poll'`
+    // → `closeSource()` → 建客户端，而建失败时直接 return：于是 inFallback 锁死、SSE 已关、
+    // fallbackClient 仍是 null，tick 的四条分支没有一条能再建起链路（只有刷新页面），
+    // 而设置页与诊断显示的是"已降级为轮询"——用户以为在被保护，实际一条预警都收不到。
+    // 这恰是本文件头写明的、最不能接受的那种形态。
+    let client = null
+    try {
+      client = createFallback()
+    } catch (err) {
+      onError(err)
+      // 回滚到 idle 并如实上报。此后：用户显式选了「强制轮询」时 tick 会每 5 秒重试一次；
+      // 自动降级来的（wantPoll 为假）不再重试——SSE 已经证明不通、轮询客户端又建不起来，
+      // 此时显示"无法连接"就是全部能做的，继续静默地假装已降级才是错的。
+      inFallback = false
+      fallbackManual = false
+      mode = 'idle'
+      stats.mode = mode
+      reportStatus({ status: 'unreachable', detail: '降级到轮询时建立客户端失败：' + String((err && err.message) || err) })
+      return
+    }
     inFallback = true
     fallbackManual = manual === true
     stats.fallbacks += 1
@@ -219,11 +244,7 @@ export function createCnStream(opts = {}) {
     mode = 'poll'
     stats.mode = mode
     closeSource()
-    try { fallbackClient = createFallback() } catch (err) {
-      onError(err)
-      reportStatus({ status: 'unreachable', detail: '降级到轮询时建立客户端失败：' + String((err && err.message) || err) })
-      return
-    }
+    fallbackClient = client
     try { fallbackClient.start() } catch (err) { onError(err) }
     // 降级必须**说出来**：否则用户看到"一切正常"却收不到预警（本插件最不能接受的形态）。
     // 去重键显式给 'fallback'：进入降级之前刚上报过 degraded（"出错、正在重连"）是同一个
@@ -396,6 +417,11 @@ export function createCnStream(opts = {}) {
     }
     const onEntry = (ev) => {
       if (source !== es) return
+      // 收到真实数据即证明这条链路是通的（0.5.4）：这个计数同时被"连续 N 次没收到首帧"的
+      // 降级判定使用，而它此前只在 `sync` 帧归零。于是一条已经健康跑了很久的连接上零星累积的
+      // error 会留在计数里，下一次"连上但没首帧"的第一跳就可能直接 ≥ maxFails ——
+      // 降级理由写成"连续 N 次未收到首帧"，而实际只失败了一次。
+      consecutiveFails = 0
       stats.lastAt = Date.now()
       stats.lastEventAt = Date.now()
       let entry = null

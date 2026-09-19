@@ -38,6 +38,10 @@ function showToast(opts) {
     const el = doc.createElement('div')
     const id = 'quake-alert-toast-' + (++toastSeq)
     el.id = id
+    // role=alert（0.5.4）：页面可见时**只用 toast**（见 11-pipeline），而这正是读屏用户
+    // 唯一能收到警报的通道——没有 live region 语义，它就完全感知不到。
+    // 用 typeof 守卫：非浏览器的 DOM stub（回归测试）不一定实现 setAttribute。
+    if (typeof el.setAttribute === 'function') el.setAttribute('role', 'alert')
     const color = opts.color || '#e5484d'
     const style = el.style
     style.position = 'fixed'

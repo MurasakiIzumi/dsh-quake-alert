@@ -98,9 +98,16 @@ function pushCfgToHost(cfg) {
 //   ① Host 用户层已有内容 → 以 Host 为准（机器级配置是 source of truth）
 //   ② Host 为空、本地已有非默认配置 → 一次性把本地配置迁移到 Host
 //   ③ Host 不可用 → 保持 localStorage（settingsSync 停留在 local / memory）
+/**
+ * 迁移的尝试上限（0.5.4）。Host 持续拒绝写入时（revision 冲突等），不设上限会变成
+ * "每来一次 sync 就写一次"的循环；用尽之后保留本地镜像、交由用户下一次改配置时经
+ * `applyCfg` 直接写入 Host。
+ */
+const MIGRATE_MAX_ATTEMPTS = 3
+
 function bindSettingsScope(scope) {
   settingsScope = scope
-  let migrated = false
+  let migrateAttempts = 0
   const sync = () => {
     let snap = null
     try { snap = scope.getSnapshot() } catch (err) { return }
@@ -108,26 +115,53 @@ function bindSettingsScope(scope) {
     if (snap.mode !== 'host' || snap.writable !== true) { settingsSync = 'memory'; store.push({}); return }
     settingsSync = 'host'
     const user = isPlainObject(snap.user) ? snap.user : {}
-    if (Object.keys(user).length === 0 && !migrated) {
-      migrated = true
-      // 迁移**只能发生一次**，而且这个"一次"必须落盘（0.4.1 修正）。
-      // 原来只在本次 bind 里记一个局部标志，于是每次重载页面 / Host settings 重建都会重新判断，
-      // 结果是"用户显式清空 Host"会被本地镜像静默恢复——Host 作为 source of truth 的优先级
-      // 被本地反超（实测可复现：清空 Host 后重新 bind，Host 又变回 {quakeScale:55}）。
-      const already = loadJSON(MIGRATED_KEY, null) === 1
+    const claimed = loadJSON(MIGRATED_KEY, null) === 1
+    if (Object.keys(user).length === 0 && !claimed) {
+      // 迁移**只能发生一次**，而且这个"一次"必须落盘（0.4.1 修正）。原来只在本次 bind 里记
+      // 一个局部标志，于是每次重载页面 / Host settings 重建都会重新判断，结果是"用户显式清空
+      // Host"会被本地镜像静默恢复——Host 作为 source of truth 的优先级被本地反超
+      // （实测可复现：清空 Host 后重新 bind，Host 又变回 {quakeScale:55}）。
       const local = loadCfg()
-      if (!already && JSON.stringify(cfgToSection(local)) !== JSON.stringify(cfgToSection(freshCfg()))) {
+      if (JSON.stringify(cfgToSection(local)) !== JSON.stringify(cfgToSection(freshCfg()))) {
+        if (migrateAttempts >= MIGRATE_MAX_ATTEMPTS) {
+          // 重试用尽：**不落标记、也不用 Host 的空值覆盖本地镜像**——那等于把用户配置丢掉。
+          // 本地镜像保持原样，用户下一次改配置会经 applyCfg 直接写进 Host。
+          store.push({})
+          return
+        }
+        migrateAttempts += 1
         runtimeCfg = saveCfg(local)
         const pending = pushCfgToHost(runtimeCfg)
-        // **等 Host 确认接收之后再落"已迁移"标记**：先落标记再写的话，写入失败（磁盘 / 权限 /
-        // 瞬时冲突）会让本地配置既没进 Host、又因为标记而不再重试，随后被 Host 的空值覆盖
-        // ——永久且静默地丢配置。写失败就不写标记，下次加载还能再试一次。
-        if (pending) pending.then(() => { try { saveJSON(MIGRATED_KEY, 1) } catch (err) { /* 忽略 */ } })
-          .catch(() => { /* 写失败：不落标记，下次重试 */ })
+        // **等 Host 真的接收之后再落"已认领"标记**。两点都不能省（0.5.4）：
+        //  ① 先落标记再写的话，写入失败（磁盘 / 权限 / 瞬时冲突）会让本地配置既没进 Host、
+        //     又因为标记而不再重试，随后被 Host 的空值覆盖——永久且静默地丢配置；
+        //  ② **不能把 `pending` 的 resolve 当成功**：平台的 mutate 在 Host 拒绝时（`!response.ok`）
+        //     也是 resolve（它内部 recover 并重新推送）。所以 settle 之后回读一次：迁移的字段
+        //     确实出现在 Host 用户层里，才算迁移完成；否则不落标记，下一次 sync 重试。
+        if (pending) {
+          pending.then(() => {
+            let landed = false
+            try {
+              const after = scope.getSnapshot()
+              landed = !!(after && after.status === 'ready' && isPlainObject(after.user) && Object.keys(after.user).length > 0)
+            } catch (err) { landed = false }
+            if (!landed) return
+            try { saveJSON(MIGRATED_KEY, 1) } catch (err) { /* 忽略 */ }
+          }).catch(() => { /* 写失败：不落标记，下次重试 */ })
+        }
         store.push({})
         return
       }
-      if (!already) saveJSON(MIGRATED_KEY, 1)
+      // 本地就是默认值：Host 为空与本地等价，直接认领
+      saveJSON(MIGRATED_KEY, 1)
+    } else if (!claimed) {
+      // 走到这里说明"以 Host 为准"（Host 用户层已有内容）。**认领标记也必须在这一条路径上落**
+      // （0.5.4）：此前它只在"Host 为空 + 本地非默认"那条分支里写，于是"首次 bind 时 Host 已非空"
+      //（第二个浏览器 / 另一台配置 / 手写过 settings.yaml——settings.yaml 是机器级共享的）
+      // 永远不落标记。此后 Host 一旦变空（用户在别处恢复默认），本浏览器会把**过期**的本地镜像
+      // 重新迁回 Host，静默复活旧配置。实测：fresh localStorage + Host 非空 → 标记未落；
+      // 再把 Host 置空 → 本地旧值被写回 Host。
+      saveJSON(MIGRATED_KEY, 1)
     }
     const next = sectionToCfg(snap.value)
     runtimeCfg = saveCfg(next) // localStorage 保持为镜像：Host 掉线时仍能工作

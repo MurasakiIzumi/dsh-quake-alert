@@ -10,7 +10,7 @@
 
 import { WS_URL, SANDBOX_URL, RECONNECT_BASE, RECONNECT_MAX } from './01-constants.js'
 import { currentCfg } from './03-settings-bridge.js'
-import { store } from './07-store.js'
+import { publishStatus } from './05g-source-health.js'
 import { handleRaw } from './11-pipeline.js'
 
 /**
@@ -51,7 +51,11 @@ function createWsClient(opts) {
     ? '沙箱源：回放 2023 年历史（约30秒/条）'
     : '已连接 P2PQuake（约每 10 分钟自动重连）'))
   const onRaw = o.onRaw || ((raw, cfg) => handleRaw(raw, cfg))
-  const report = (patch) => store.pushSource(sourceId, Object.assign({ label }, patch))
+  // 上报经 publishStatus 合成（0.5.4）：本层只知道**连接**状态，而展示状态还要叠加
+  // 数据健康（蓝点）与停更。此前直接 pushSource，于是"一次常态断线"（P2PQuake 约每 10 分钟
+  // 必发生一次）就会把一条 schema-error 蓝点冲成 reconnecting，而上游其实一直在坏——
+  // 用户看到的是"链路在重连"，看不到"数据我们读不懂"（两者要采取的行动完全不同）。
+  const report = (patch) => publishStatus(sourceId, Object.assign({ label }, patch))
   let ws = null
   let timer = null
   let staleTimer = null
@@ -196,7 +200,17 @@ function createWsClient(opts) {
     if (ws) { try { ws.onclose = null; ws.close() } catch (err) {} ws = null }
   }
   return {
-    start() { bindVisibility(); connect() },
+    start() {
+      // start 必须是 stop 的逆操作（0.5.4）：原来只有 restart() 清 `stopped`，于是
+      // "stop 之后再 start"会静默地什么都不做（connect() 第一行就是 `if (stopped) return`）。
+      // 当前唯一调用点是入口的一次 start（重配走 restart），所以不是活缺陷——
+      // 但 start/stop 与 restart 的语义不对称，任何后来的"重新 start"都会被静默吞掉。
+      stopped = false
+      retries = 0
+      processFails = 0
+      bindVisibility()
+      connect()
+    },
     stop() {
       stopped = true
       teardown()

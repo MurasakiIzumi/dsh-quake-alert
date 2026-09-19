@@ -626,9 +626,16 @@ function pushCfgToHost(cfg) {
 //   ① Host 用户层已有内容 → 以 Host 为准（机器级配置是 source of truth）
 //   ② Host 为空、本地已有非默认配置 → 一次性把本地配置迁移到 Host
 //   ③ Host 不可用 → 保持 localStorage（settingsSync 停留在 local / memory）
+/**
+ * 迁移的尝试上限（0.5.4）。Host 持续拒绝写入时（revision 冲突等），不设上限会变成
+ * "每来一次 sync 就写一次"的循环；用尽之后保留本地镜像、交由用户下一次改配置时经
+ * `applyCfg` 直接写入 Host。
+ */
+const MIGRATE_MAX_ATTEMPTS = 3;
+
 function bindSettingsScope(scope) {
   settingsScope = scope;
-  let migrated = false;
+  let migrateAttempts = 0;
   const sync = () => {
     let snap = null;
     try { snap = scope.getSnapshot(); } catch (err) { return }
@@ -636,26 +643,53 @@ function bindSettingsScope(scope) {
     if (snap.mode !== 'host' || snap.writable !== true) { settingsSync = 'memory'; store.push({}); return }
     settingsSync = 'host';
     const user = isPlainObject(snap.user) ? snap.user : {};
-    if (Object.keys(user).length === 0 && !migrated) {
-      migrated = true;
-      // 迁移**只能发生一次**，而且这个"一次"必须落盘（0.4.1 修正）。
-      // 原来只在本次 bind 里记一个局部标志，于是每次重载页面 / Host settings 重建都会重新判断，
-      // 结果是"用户显式清空 Host"会被本地镜像静默恢复——Host 作为 source of truth 的优先级
-      // 被本地反超（实测可复现：清空 Host 后重新 bind，Host 又变回 {quakeScale:55}）。
-      const already = loadJSON(MIGRATED_KEY, null) === 1;
+    const claimed = loadJSON(MIGRATED_KEY, null) === 1;
+    if (Object.keys(user).length === 0 && !claimed) {
+      // 迁移**只能发生一次**，而且这个"一次"必须落盘（0.4.1 修正）。原来只在本次 bind 里记
+      // 一个局部标志，于是每次重载页面 / Host settings 重建都会重新判断，结果是"用户显式清空
+      // Host"会被本地镜像静默恢复——Host 作为 source of truth 的优先级被本地反超
+      // （实测可复现：清空 Host 后重新 bind，Host 又变回 {quakeScale:55}）。
       const local = loadCfg();
-      if (!already && JSON.stringify(cfgToSection(local)) !== JSON.stringify(cfgToSection(freshCfg()))) {
+      if (JSON.stringify(cfgToSection(local)) !== JSON.stringify(cfgToSection(freshCfg()))) {
+        if (migrateAttempts >= MIGRATE_MAX_ATTEMPTS) {
+          // 重试用尽：**不落标记、也不用 Host 的空值覆盖本地镜像**——那等于把用户配置丢掉。
+          // 本地镜像保持原样，用户下一次改配置会经 applyCfg 直接写进 Host。
+          store.push({});
+          return
+        }
+        migrateAttempts += 1;
         runtimeCfg = saveCfg(local);
         const pending = pushCfgToHost(runtimeCfg);
-        // **等 Host 确认接收之后再落"已迁移"标记**：先落标记再写的话，写入失败（磁盘 / 权限 /
-        // 瞬时冲突）会让本地配置既没进 Host、又因为标记而不再重试，随后被 Host 的空值覆盖
-        // ——永久且静默地丢配置。写失败就不写标记，下次加载还能再试一次。
-        if (pending) pending.then(() => { try { saveJSON(MIGRATED_KEY, 1); } catch (err) { /* 忽略 */ } })
-          .catch(() => { /* 写失败：不落标记，下次重试 */ });
+        // **等 Host 真的接收之后再落"已认领"标记**。两点都不能省（0.5.4）：
+        //  ① 先落标记再写的话，写入失败（磁盘 / 权限 / 瞬时冲突）会让本地配置既没进 Host、
+        //     又因为标记而不再重试，随后被 Host 的空值覆盖——永久且静默地丢配置；
+        //  ② **不能把 `pending` 的 resolve 当成功**：平台的 mutate 在 Host 拒绝时（`!response.ok`）
+        //     也是 resolve（它内部 recover 并重新推送）。所以 settle 之后回读一次：迁移的字段
+        //     确实出现在 Host 用户层里，才算迁移完成；否则不落标记，下一次 sync 重试。
+        if (pending) {
+          pending.then(() => {
+            let landed = false;
+            try {
+              const after = scope.getSnapshot();
+              landed = !!(after && after.status === 'ready' && isPlainObject(after.user) && Object.keys(after.user).length > 0);
+            } catch (err) { landed = false; }
+            if (!landed) return
+            try { saveJSON(MIGRATED_KEY, 1); } catch (err) { /* 忽略 */ }
+          }).catch(() => { /* 写失败：不落标记，下次重试 */ });
+        }
         store.push({});
         return
       }
-      if (!already) saveJSON(MIGRATED_KEY, 1);
+      // 本地就是默认值：Host 为空与本地等价，直接认领
+      saveJSON(MIGRATED_KEY, 1);
+    } else if (!claimed) {
+      // 走到这里说明"以 Host 为准"（Host 用户层已有内容）。**认领标记也必须在这一条路径上落**
+      // （0.5.4）：此前它只在"Host 为空 + 本地非默认"那条分支里写，于是"首次 bind 时 Host 已非空"
+      //（第二个浏览器 / 另一台配置 / 手写过 settings.yaml——settings.yaml 是机器级共享的）
+      // 永远不落标记。此后 Host 一旦变空（用户在别处恢复默认），本浏览器会把**过期**的本地镜像
+      // 重新迁回 Host，静默复活旧配置。实测：fresh localStorage + Host 非空 → 标记未落；
+      // 再把 Host 置空 → 本地旧值被写回 Host。
+      saveJSON(MIGRATED_KEY, 1);
     }
     const next = sectionToCfg(snap.value);
     runtimeCfg = saveCfg(next); // localStorage 保持为镜像：Host 掉线时仍能工作
@@ -1347,7 +1381,8 @@ function itemLevelOf(it) {
     regionKindLevel(it.kindName),
   )
 }
-// 电文标题 → 中文标签（M3 才做 i18n，这里与既有 kindLabel 一样先硬编码中文）
+// 电文标题 → 中文标签（M3 才做 i18n，这里与既有 kindLabel 一样先硬编码中文）。
+// **特别警报不在这个表里**：它不能只看标题，理由见 kindLabelOf（那是一个真实的文案缺陷）。
 const KIND_LABELS = [
   [/土砂災害警戒情報/, '泥石流警戒情报'],
   [/指定河川洪水予報/, '洪水预报'],
@@ -1361,8 +1396,6 @@ const KIND_LABELS = [
   [/（濃霧）/, '浓雾警报'],
   [/（乾燥）/, '干燥警报'],
   [/（なだれ）/, '雪崩警报'],
-  [/気象特別警報/, '气象特别警报'],
-  [/気象警報・注意報/, '气象警报'],
 ];
 
 // ---------- 最小 XML 取值工具（与 05-parser 的正则风格一致，不引依赖） ----------
@@ -1635,9 +1668,28 @@ function regionsOf(items, notice) {
   return applyNoticeLevels(out, notice)
 }
 
-function kindLabelOf(title) {
-  for (const [re, label] of KIND_LABELS) if (re.test(title)) return label
-  return title || '气象警报'
+/**
+ * 电文标题 → 中文标签。**特别警报必须结合级别判**（0.5.4）。
+ *
+ * 「気象特別警報・警報・注意報」是 VPWW53 的**产品名**（総括副本），它只说明"这份电文覆盖
+ * 特別警報／警報／注意報三类"，与这一条里到底有没有特別警報无关——实测 2026-09-14 兵庫県的
+ * 同名产品名承载的是「危険警報（大雨・土砂災害）」（L4），而特別警報是気象庁的**最高级别**
+ * （L5，命を守る行動）。只看标题就会把一条 L4 显示成「气象特别警报」，把官方等级说高一级
+ *（与 0.4.2 修过的"文案夸大成避难指示级"同形，方向相反）。反过来 VPWW54 的
+ *「気象警報・注意報（Ｈ２７）」在 L5 时只会显示成「气象警报」，是低估。
+ * 所以这一族（SUMMARY_TITLE 里的四种产品名）按**级别**取标签；带灾种名的分灾种副本
+ *（（大雨）／（土砂）…）仍按标题。
+ */
+function kindLabelOf(title, level) {
+  const t = String(title || '');
+  // ① 先按**灾种**匹配：带灾种名的副本（（大雨）／（土砂）／指定河川洪水予報…）给出的是具体
+  // 灾种，比"气象警报"这种概括标签有信息量，所以它们的优先级高于下面的汇总族。
+  for (const [re, label] of KIND_LABELS) if (re.test(t)) return label
+  // ② 汇总族（SUMMARY_TITLE 的四种产品名）与概括名「気象警報・注意報」本身不含灾种 → 按级别取。
+  if (SUMMARY_TITLE.test(t) || /気象警報・注意報/.test(t)) {
+    return (typeof level === 'number' && level >= 5) ? '气象特别警报' : '气象警报'
+  }
+  return t || '气象警报'
 }
 
 /**
@@ -1714,7 +1766,7 @@ function parseJma(xml, entry) {
 
   const regions = cancelled ? [] : regionsOf(items, notice);
   // 解除电文若展开不出区域，至少保留一个空区域条目，让事件键与提示仍可工作
-  const kindLabel = kindLabelOf(title);
+  const kindLabel = kindLabelOf(title, level);
   const first = String(headlineText || '').split(/[。\n]/)[0].trim();
   const levelText = level > 0 ? '（警戒レベル' + level + '）' : '';
   const headline = (kindLabel + levelText + (first ? ' · ' + first : '')).slice(0, 180);
@@ -1959,7 +2011,8 @@ function minuteKeyOf(timeIso) {
  * 归并成一个事件，避免同一场地震因为接了第二个源而响两次。
  * 代价：跨分钟边界（两边测定的发震时刻差过一分钟）时归并会失败——宁可多响一次，不漏报。
  * 0.5.0 起大陆源（cenc_eew / cenc_eqlist）也走同一把钥匙：它们的 **EventID 与 EEW 完全不同格式**
- * （`202609182050.0001` vs `CD.20260918205536.056`），归并只能靠时间 + 震中。
+ * （EEW 是 `b4kybfnuqayyy` 这类随机串，速报是 `CD.20260918205536.056`；0.5.4 按样本修正，
+ * 此处原写 EEW 是 `202609182050.0001`），归并只能靠时间 + 震中。
  */
 /**
  * 0.1° 桶的字符串化。**必须把 "-0.0" 归一成 "0.0"**：`(-0.02).toFixed(1)` 得到 "-0.0"，
@@ -2177,9 +2230,12 @@ function parseNoaaCap(xml, entry) {
  */
 const TEST_GEO_SCENARIOS = [
   { key: 'emsc', label: 'EMSC 地震（震中就在关注点）', note: 'M6.2', source: 'emsc' },
-  { key: 'usgs', label: 'USGS 地震（约 80km 外）', note: 'M5.6 · 仍在默认半径内', source: 'usgs' },
+  { key: 'usgs', label: 'USGS 地震（约 80km 外）', note: 'M5.6 · 近处，小半径也可能不命中', source: 'usgs' },
   { key: 'noaa', label: 'NOAA 海啸注意报', note: 'Tsunami Advisory', source: 'noaa' },
-  { key: 'emsc-far', label: 'EMSC 远地地震（约 550km 外）', note: 'M7.0 · 超出默认 300km 半径，刻意不命中', source: 'emsc' },
+  // 半径是可配的（1–2000km，新建默认 100km），所以这里**不能承诺"一定不命中"**：
+  // 旧的「超出默认 300km 半径，刻意不命中」既是 0.4.0 的旧默认值（0.5.0 起新建默认 100km），
+  // 也把半径 ≥556km 的用户引向相反的事实——那条测试会真的响铃（0.5.4 修正文案）。
+  { key: 'emsc-far', label: 'EMSC 远地地震（约 550km 外）', note: 'M7.0 · 用于演示半径：半径 < 550km 时不命中', source: 'emsc' },
 ];
 
 // 纬度偏移 1 度约 111km；夹在 ±89.5 以内，避免极端位置把纬度推到界外
@@ -2312,7 +2368,9 @@ function parseTestGlobalMessage(msg) {
 //     不是用户所在地的烈度 —— **只入库、不上 UI**，否则会被读成后者的承诺。
 //   · `cenc_eqlist` 里**混有境外地震**（实测福克斯群岛 M6.5、印尼爪哇岛 M6.5、南桑威奇群岛 M6.2、
 //     台湾花莲县…）。所以它会与全球链路（EMSC / USGS）撞车——靠 geoEventKey 同一把钥匙归并。
-//   · 两个源的 **EventID 格式互不相干**：EEW 是 `202609182050.0001`，速报是 `CD.20260918205536.056`。
+//   · 两个源的 **EventID 格式互不相干**：EEW 是随机串（仓库样本 `samples/cn/cenc-eew-last.json`
+//     实测 `b4kybfnuqayyy`），速报是 `CD.20260918205536.056` 这类带时刻的编号。
+//     （0.5.4 修正：此处原写 EEW 是 `202609182050.0001`，与样本不符。）
 //     同一场地震（实测四川甘孜州新龙县：EEW 20:50:23 M4.2 / 速报 20:50:24 M3.2）两边 ID 毫无关系，
 //     所以**归并只能靠「发震时刻 + 震中」**，绝不能靠 ID。这正是 geoEventKey 的用武之地。
 //   · **无取消 / 最终报标志**（既无 isCancel 也无 isFinal）。现有「取消只在此前提醒过时补一条」的
@@ -2562,9 +2620,9 @@ function parseNmcAlarm(raw) {
   if (!isPlainObject(raw)) return null
   const alertid = String(raw.alertid === undefined || raw.alertid === null ? '' : raw.alertid).trim();
   if (!alertid) return null
-  const kind = typeof raw.kind === 'string' && NMC_KIND_TEXT[raw.kind] ? raw.kind : '';
+  const kind = typeof raw.kind === 'string' && own(NMC_KIND_TEXT, raw.kind) ? raw.kind : '';
   if (!kind) return null
-  const level = typeof raw.level === 'string' && NMC_LEVEL_TEXT[raw.level] ? raw.level : '';
+  const level = typeof raw.level === 'string' && own(NMC_LEVEL_TEXT, raw.level) ? raw.level : '';
   if (!level) return null
   const issued = String(raw.issued === undefined || raw.issued === null ? '' : raw.issued).trim();
   const title = String(raw.title === undefined || raw.title === null ? '' : raw.title).trim();
@@ -2573,8 +2631,11 @@ function parseNmcAlarm(raw) {
   const area = org ? cnAreaOf(org) : null;
   // 机构名去掉表示发布主体的后缀即"发布地"：「云南省丽江市宁蒗彝族自治县气象台」→ 该县。
   const place = org.replace(/(?:气象台|气象局|预警中心)$/, '');
-  const rank = NMC_LEVEL_RANK[level] || 0;
-  const kindText = NMC_KIND_TEXT[kind];
+  // 查表一律走 own()（0.5.4）：上面两处白名单已经限定了取值，但这里同样是"外部数据当键"，
+  // 直查会让 'constructor' 这类键命中原型链返回函数对象（severity 变成函数、headline 里
+  // 嵌进函数源码）。契约层（05d）已同步改成 own()，两处是同一个约定。
+  const rank = own(NMC_LEVEL_RANK, level) || 0;
+  const kindText = own(NMC_KIND_TEXT, kind);
   return {
     // 前缀 nmc: ——与其它源的 id 命名空间分开（alertid 是纯数字串，不加前缀会与
     // P2PQuake 的数字 eventId 撞在同一个集合里，去重表可以按 id 建索引）。
@@ -2586,12 +2647,12 @@ function parseNmcAlarm(raw) {
     kindLabel: '大陆' + kindText + '预警（中央气象台）',
     source: 'nmc_alarm',
     locator: 'area',
-    severity: NMC_LEVEL_SEVERITY[level],
+    severity: own(NMC_LEVEL_SEVERITY, level),
     issued,
     reportTime: issued,
     // 文案用**发布地 + 灾种 + 等级**，不用行政区表里的名字：表里的名字是 GeoNames 的显示名，
     // 实测会挑到旧名（「思茅市」而气象台写「普洱市」），照搬会让用户对不上号。
-    headline: (place ? place + ' · ' : '') + kindText + NMC_LEVEL_TEXT[level] + '预警',
+    headline: (place ? place + ' · ' : '') + kindText + own(NMC_LEVEL_TEXT, level) + '预警',
     maxScale: -1,
     level: 0,
     // regions 是日本源的概念（都道府县 + 市町村）。大陆源不用它——归属放在 cnArea 里，
@@ -3117,8 +3178,12 @@ function parseNmcAlarmResult(raw) {
   const alertid = String(raw.alertid === undefined || raw.alertid === null ? '' : raw.alertid).trim();
   if (!alertid) return failResult('schema', '缺少 alertid（string）')
   if (typeof raw.kind !== 'string' || !raw.kind) return failResult('schema', '缺少 kind（string）')
-  if (!NMC_KIND_TEXT[raw.kind]) return failResult('empty', '灾种不在本插件范围内：' + raw.kind)
-  if (typeof raw.level !== 'string' || !NMC_LEVEL_TEXT[raw.level]) {
+  // 查表一律走 own()（0.5.4）：`NMC_KIND_TEXT['constructor']` 会命中原型链返回 Object 构造函数
+  // （truthy），于是 `kind: 'constructor'` 这样的脏数据会**绕过 empty / schema 判据**被放行，
+  // 一路带进 Alert 的 kindLabel / severity（实测能得到「大陆function Object()…预警」这种文案）。
+  // 契约层存在的意义就是"Host 的 JSON 属于不可信输入"，所以这里不能直查。
+  if (!own(NMC_KIND_TEXT, raw.kind)) return failResult('empty', '灾种不在本插件范围内：' + raw.kind)
+  if (typeof raw.level !== 'string' || !own(NMC_LEVEL_TEXT, raw.level)) {
     return failResult('schema', '缺少或无法识别的 level：' + String(raw.level))
   }
   const title = String(raw.title === undefined || raw.title === null ? '' : raw.title).trim();
@@ -3262,6 +3327,19 @@ function loadHealth(now) {
 
 // ---------------------------------------------------------------- 数据层（解析失败）
 /**
+ * 连接层基线：清掉数据健康之后，展示状态该回到哪一个连接状态。
+ *
+ * store 里存的是**合成结果**，所以先看它是不是由数据层投出来的（`schema-error` / `stale`）——
+ * 是就说明连接层本身没有更好的信息，按 `open` 计；否则**沿用**当前值，否则会把
+ * `reconnecting` / `degraded` / `disabled` 这些真实的连接状态抹成绿色。
+ */
+function connBaseOf(sourceId) {
+  const cur = (store.sources && store.sources[sourceId]) || {};
+  const s = cur.status;
+  return (s === 'schema-error' || s === 'stale' || !s) ? 'open' : s
+}
+
+/**
  * 清掉 data 层（成功解析 / empty / TTL 自愈都走这里）。
  * 只有**确实从异常恢复了**才上报——否则每条成功的数据都会触发一次设置页重渲。
  */
@@ -3272,7 +3350,9 @@ function clearData(sourceId, detail, t) {
   r.data = null;
   r.consecutiveFail = 0;
   persist();
-  if (wasEscalated) store.pushSource(sourceId, { status: 'open', detail });
+  // 走 publishStatus 而不是直接 pushSource：清掉蓝点之后该显示什么，得由合成规则决定——
+  // 若这个源此刻正停更（fresh.stale），展示状态应当是「数据已过期」而不是「已连接」。
+  if (wasEscalated) publishStatus(sourceId, { status: connBaseOf(sourceId), detail });
   return true
 }
 
@@ -3311,7 +3391,7 @@ function noteParseResult(sourceId, res, now) {
       console.warn('[dsh-quake-alert] ' + sourceId + ' 连续解析失败（' + kind + '，' + count + ' 条）：' + res.detail);
     } catch (e) { /* 忽略 */ }
     persist();
-    store.pushSource(sourceId, { status: 'schema-error', detail: kind + '：' + res.detail });
+    publishStatus(sourceId, { status: connBaseOf(sourceId), detail: kind + '：' + res.detail });
   }
   return true
 }
@@ -3338,7 +3418,7 @@ function pruneHealth(now) {
     r.consecutiveFail = 0;
     healed += 1;
     if (wasEscalated) {
-      store.pushSource(id, { status: 'open', detail: '数据格式异常已超过 24 小时没有复现，自动恢复' });
+      publishStatus(id, { status: connBaseOf(id), detail: '数据格式异常已超过 24 小时没有复现，自动恢复' });
     }
   }
   if (healed) persist();
@@ -3402,13 +3482,65 @@ function effectiveStatusOf(sourceId, connStatus, detail) {
   return { status: connStatus, detail }
 }
 
+/**
+ * **统一的状态发布入口**（0.5.4）——任何要写 `store.sources` 的层都从这里走。
+ *
+ * 为什么必须统一：`store.pushSource` 是**整体替换** status + detail 的，而界面上那个状态是
+ * **合成**出来的（见 `effectiveStatusOf`：蓝点 > 停更 > 连接）。此前只有 12b / 12c 两个出口
+ * 走了合成，探针（12d）、健康层自身（本文件）与 12-websocket 都是直接写 store，于是后写的
+ * 那个会把前者的结论整个抹掉。实测两条路径都真实可达：
+ *   · 探针在「数据已过期 → 恢复」翻转时写 `open`，把一条 schema-error 蓝点永久刷成绿色
+ *     （12b 的去重键认定"自己的 eff 没变"，此后每一轮都不再上报）；
+ *   · P2PQuake 约每 10 分钟一次的**常态断线**写 `reconnecting`，同样把蓝点冲掉。
+ * 而 `sourceHealthOf()` 里 escalated 仍然是 true —— 也就是 DESIGN 11.9 A 那句
+ * 「schema-error 优先于连接状态」被绕过，「上游改了字段、要等插件更新」这个用户处理不了的
+ * 信号从界面上消失（设置页那个「重试」按钮也跟着消失）。
+ *
+ * 合成规则只有 `effectiveStatusOf` 一处，这里只负责"合成 + 写 store"。
+ *
+ * @param {string} sourceId
+ * @param {object} patch 至少给 status 与 detail 之一；其余字段（label / retries…）原样透传
+ * @returns {{status: string, detail: string}} 本次合成出的展示状态（调用方可用它做去重键）
+ */
+function publishStatus(sourceId, patch) {
+  const p = Object.assign({}, patch);
+  // 探针（12d）与健康层（本文件）手里没有中文源名，而 07-store.pushSource 的兜底是**裸 id**。
+  // 不补的话，"刷新页面后立刻重发蓝点"（`republishDataHealth`）与"探针翻停更"这两条路径
+  // 会让侧边栏的悬停详情显示成「usgs：上游数据已过期…」。store 里已有 label 就沿用，
+  // 否则退到契约里的 label（同一份声明，比 id 可读），最后才是 id。
+  if (p.label === undefined) {
+    const cur = (store.sources && store.sources[sourceId]) || {};
+    const declared = SOURCE_CONTRACTS[sourceId];
+    p.label = cur.label || (declared && declared.label) || sourceId;
+  }
+  const eff = effectiveStatusOf(sourceId, p.status, p.detail);
+  p.status = eff.status;
+  p.detail = eff.detail;
+  store.pushSource(sourceId, p);
+  return eff
+}
+
+/**
+ * 把已经升级的数据健康记录重新发布到 store——插件装载时调用。
+ *
+ * 刷新页面后 store 是空的，而蓝点存在 localStorage 里（DESIGN 11.9 A）。不重发的话，
+ * 要等该源下一次上报（feed 源首轮 3 秒 + 15 秒一轮）才显示出来，而「上游改了字段」这件事
+ * 与用户刷新页面毫无关系——"蓝点跨刷新存活"这条承诺应当是**立刻**成立，而不是十几秒后。
+ */
+function republishDataHealth() {
+  for (const [id, r] of health) {
+    if (!r.data || !r.data.escalated) continue
+    publishStatus(id, { status: 'open' });
+  }
+}
+
 /** 手动重试（DESIGN 5.4）：清掉异常标记，等下一批数据自证。 */
 function retrySource(sourceId, now) {
   const r = ensure(sourceId);
   r.data = null;
   r.consecutiveFail = 0;
   persist();
-  store.pushSource(sourceId, { status: 'open', detail: '已手动重试，等待下一批数据' });
+  publishStatus(sourceId, { status: connBaseOf(sourceId), detail: '已手动重试，等待下一批数据' });
   return true
 }
 
@@ -3645,7 +3777,12 @@ function matchCnAreaAlert(alert, cfg) {
   if (cnPlaces.length === 0) {
     // 与坐标型源同一条原则：没有关注点就明确说明怎么加，**不静默**——
     // "配错了关注点"看起来像"根本没有预警"是这套系统最该避免的误解之一。
-    return { hit: false, reason: '未设置中国大陆关注点（设置 → 灾害预警 → 中国大陆 → 选省与城市）' }
+    // `noWatch` 让 11-pipeline 能把这一类和"命中了但不在列表里"区分开（前者不进历史，0.5.4）。
+    return {
+      hit: false,
+      noWatch: true,
+      reason: '未设置中国大陆关注点（设置 → 灾害预警 → 中国大陆 → 选省与城市）',
+    }
   }
   const area = alert.cnArea || {};
   const province = String(area.province || '');
@@ -4079,7 +4216,15 @@ function ensureAlertChannel() {
       const d = ev && ev.data;
       if (!d) return
       // 另一个标签页清空了历史 → 本标签页也要清（否则它的下一次 addEvent 会把整份记录写回磁盘）
-      if (d.type === 'history-cleared') { alertedEvents.clear(); return }
+      if (d.type === 'history-cleared') {
+        alertedEvents.clear();
+        // **内存副本与磁盘都要清**（0.5.4）：此前只清了 alertedEvents，于是本标签页的历史列表
+        // 仍然显示着那些条目，而下一次 addEvent 会把它们（连同新条目）重新写回 localStorage
+        // ——发起清空的那个标签页一刷新又看到了。「清空记录」若出于隐私动机，这就是实际的泄漏面。
+        store.push({ events: [] });
+        try { saveJSON(HISTORY_KEY, []); } catch (err) { /* 写盘失败：内存已清，下次 addEvent 会覆盖 */ }
+        return
+      }
       if (d.type !== 'alerted' || !d.key) return
       tabAlerted.set(String(d.key), Date.now());
       // 顺带同步事件键：其它标签页此前提醒过的事件，本标签页在收到取消消息时也要知道
@@ -4155,6 +4300,10 @@ function showToast(opts) {
     const el = doc.createElement('div');
     const id = 'quake-alert-toast-' + (++toastSeq);
     el.id = id;
+    // role=alert（0.5.4）：页面可见时**只用 toast**（见 11-pipeline），而这正是读屏用户
+    // 唯一能收到警报的通道——没有 live region 语义，它就完全感知不到。
+    // 用 typeof 守卫：非浏览器的 DOM stub（回归测试）不一定实现 setAttribute。
+    if (typeof el.setAttribute === 'function') el.setAttribute('role', 'alert');
     const color = opts.color || '#e5484d';
     const style = el.style;
     style.position = 'fixed';
@@ -4312,6 +4461,11 @@ function hitSeverityOf(alert, m) {
 // 就与事实自相矛盾——这是加测试按钮后暴露出来的问题。
 function updateWeatherHint(alert, cfg) {
   if (alert.kind !== 'weather' || alert.cancelled) return
+  // 只对**日本气象电文**生效（0.5.4）：大陆气象源（nmc_alarm，`locator === 'area'`）的
+  // `regions` 恒为空数组（归属在 cnArea 里），于是这里的 `hit` 恒为 undefined，
+  // 每一条大陆预警都会走到下面的"清空提示"分支，把日本电文刚留下的
+  // 「L3 正在升级、未达 L4」抹成 null——两家机构、两个地区的两件事，不该互相清。
+  if (alert.locator === 'area') return
   if ((cfg.disasters || {}).weather === false) return
   const w = cfg.watch || {};
   const lvOf = (r) => (typeof r.level === 'number' ? r.level : alert.level);
@@ -4438,7 +4592,14 @@ function handleAlert(alert, cfg, opts) {
     // **但「坐标缺失」是例外**——那不是"离得远"，而是"根本没法判定"。DESIGN 3.1 要求
     // 这种情况不猜、如实说明；若也丢进 /dev/null，用户看到的就是"根本没有地震"，
     // 与"未设置关注点"（更早由 watchlessPoint 拦下，有意不回历史）是完全不同的两件事。
-    if (alert.locator !== 'point' || !validGeo(alert.geo)) {
+    //
+    // 0.5.4：`m.noWatch`（**未配置**关注点，命中概率恒为 0）同样不进历史。大陆气象源
+    // （nmc_alarm）走行政区匹配，不在 watchlessPoint 的覆盖范围内，而它默认就在拉——
+    // 一条都没配大陆关注点的用户，每天会有几十条「未命中：未设置中国大陆关注点」挤进
+    // HISTORY_MAX=30 的「最近预警」，真正的地震 / 海啸提醒被挤出去。这与坐标型源那条
+    // 「真正的提醒会被刷掉」是同一个失败形态（DESIGN 3.2 对 point 源已定过这个口径）。
+    // 与坐标型的差别是**不整条丢弃**：设置页与诊断仍需要"有预警、但你没配关注点"这个信息。
+    if (!m.noWatch && (alert.locator !== 'point' || !validGeo(alert.geo))) {
       addEvent({
         id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
         issued: alert.issued, headline: alert.headline + '（未命中：' + m.reason + '）', hit: false,
@@ -4472,11 +4633,17 @@ function handleAlert(alert, cfg, opts) {
   }
   // 事件级去重没拦下、但记忆说"这个事件在 24 小时内已经真正播报过" → 判为跨会话重放
   // （Host 重启按回看窗口重投），只记历史不响铃。
+  //
+  // 0.5.4 修正**文案**：`looksReplayed` 的判据是 24 小时的已提醒记忆，它覆盖的不只是
+  // Host 回看窗口的重投，还包括"同一官署同一灾种在 3 小时事件窗口之后、24 小时之内等强度的
+  // 第二次独立发布"（气象事件尤其如此）。旧文案把原因写成"Host 重启 / 重连后的重放"，
+  // 会让排查的人去翻 Host 重启日志，而真正生效的是长期事件记忆。行为方向是安全的
+  // （不重复响铃），所以只改措辞、不改判据。
   if (looksReplayed) {
     addEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
-      suppressed: true, suppressedReason: '同一事件在最近 24 小时内已提醒过（Host 重启 / 重连后的重放）',
+      suppressed: true, suppressedReason: '同一事件在最近 24 小时内已提醒过（等强度，不重复响铃）',
     });
     return { notified: false, reason: 'replayed', detail: '该事件在最近 24 小时内已经提醒过，本次只记历史' }
   }
@@ -4580,7 +4747,11 @@ function createWsClient(opts) {
     ? '沙箱源：回放 2023 年历史（约30秒/条）'
     : '已连接 P2PQuake（约每 10 分钟自动重连）'));
   const onRaw = o.onRaw || ((raw, cfg) => handleRaw(raw, cfg));
-  const report = (patch) => store.pushSource(sourceId, Object.assign({ label }, patch));
+  // 上报经 publishStatus 合成（0.5.4）：本层只知道**连接**状态，而展示状态还要叠加
+  // 数据健康（蓝点）与停更。此前直接 pushSource，于是"一次常态断线"（P2PQuake 约每 10 分钟
+  // 必发生一次）就会把一条 schema-error 蓝点冲成 reconnecting，而上游其实一直在坏——
+  // 用户看到的是"链路在重连"，看不到"数据我们读不懂"（两者要采取的行动完全不同）。
+  const report = (patch) => publishStatus(sourceId, Object.assign({ label }, patch));
   let ws = null;
   let timer = null;
   let staleTimer = null;
@@ -4725,7 +4896,17 @@ function createWsClient(opts) {
     if (ws) { try { ws.onclose = null; ws.close(); } catch (err) {} ws = null; }
   };
   return {
-    start() { bindVisibility(); connect(); },
+    start() {
+      // start 必须是 stop 的逆操作（0.5.4）：原来只有 restart() 清 `stopped`，于是
+      // "stop 之后再 start"会静默地什么都不做（connect() 第一行就是 `if (stopped) return`）。
+      // 当前唯一调用点是入口的一次 start（重配走 restart），所以不是活缺陷——
+      // 但 start/stop 与 restart 的语义不对称，任何后来的"重新 start"都会被静默吞掉。
+      stopped = false;
+      retries = 0;
+      processFails = 0;
+      bindVisibility();
+      connect();
+    },
     stop() {
       stopped = true;
       teardown();
@@ -4889,7 +5070,13 @@ function createFeedClient(opts = {}) {
     // key **只取状态**：detail 里含"已收到 N 条增量""Host 轮询 N 次"这类单调计数，
     // 用它做 key 会让每轮都判定为"变化"→ 每 15 秒整页重渲一次（正是拆 SourceStatusBlock
     // 想避免的事）。数字本身由 SourceStatusBlock 每 5 秒直接从 feedStatsOf 读，不依赖这里。
-    if (eff.status === lastStatusKey) return
+    //
+    // 除自己上一轮报出的状态，还要比 **store 里当前实际的状态**（0.5.4）：探针（12d）、
+    // 健康层（05g）与 WS 连接层（12-websocket）也会写同一个源。若它们刚把展示状态改成别的值，
+    // 而这里因为"自己的 eff 没变"就不上报，那个被覆盖的状态会**永久**留在界面上
+    //（实测：一条蓝点被探针的"数据已恢复"刷成绿色之后，此后再也不自愈）。
+    const cur = ((store.sources || {})[id] || {}).status;
+    if (eff.status === lastStatusKey && cur === eff.status) return
     lastStatusKey = eff.status;
     try { onStatus(Object.assign({ label }, eff)); } catch (err) { /* UI 回调异常不影响轮询 */ }
   }
@@ -5067,6 +5254,10 @@ function createFeedClient(opts = {}) {
 
   function schedule(delay) {
     if (!running) return
+    // 与其他定时器一致的纪律（0.5.4）：排新的之前先清旧的。当前控制流（回调里先 timer=null
+    // 再递归，且 pollSerial 有 inFlight 守卫）保证不会双排，但少这一行就意味着"以后谁改了
+    // 一处控制流，就多一条各自自续的轮询链"（= 上游请求速率翻倍）。
+    if (timer) { clearTimeout(timer); timer = null; }
     timer = setTimeout(async () => {
       timer = null;
       // 灾种开关的判断放在 pollOnce 里：那里会如实上报「已关闭」状态（不产生任何网络请求），
@@ -5267,7 +5458,11 @@ function createCnStream(opts = {}) {
     stats.lastDetail = String(patch.detail || '');
     const eff = effectiveStatusOf(id, patch.status, patch.detail);
     const key = k || eff.status;
-    if (key === lastStatusKey) return
+    // 除自己的去重键，还要比 **store 里当前实际的状态**（0.5.4）：探针（12d）、健康层（05g）
+    // 与 WS 连接层会写同一个源；若它们刚把展示状态改成别的值，而这里因为"自己的键没变"就
+    // 不上报，那个被覆盖的状态会永久留在界面上（12b 侧同款修正，理由见 12b-feed-poll.js）。
+    const cur = ((store.sources || {})[id] || {}).status;
+    if (key === lastStatusKey && cur === eff.status) return
     lastStatusKey = key;
     try { onStatus(Object.assign({ label }, eff)); } catch (err) { /* UI 回调异常不影响链路 */ }
   }
@@ -5311,6 +5506,26 @@ function createCnStream(opts = {}) {
    */
   function activateFallback(reason, manual) {
     if (inFallback) return
+    // **先建客户端，成功之后才置位**（0.5.4）。原来的顺序是 `inFallback = true` → `mode='poll'`
+    // → `closeSource()` → 建客户端，而建失败时直接 return：于是 inFallback 锁死、SSE 已关、
+    // fallbackClient 仍是 null，tick 的四条分支没有一条能再建起链路（只有刷新页面），
+    // 而设置页与诊断显示的是"已降级为轮询"——用户以为在被保护，实际一条预警都收不到。
+    // 这恰是本文件头写明的、最不能接受的那种形态。
+    let client = null;
+    try {
+      client = createFallback();
+    } catch (err) {
+      onError(err);
+      // 回滚到 idle 并如实上报。此后：用户显式选了「强制轮询」时 tick 会每 5 秒重试一次；
+      // 自动降级来的（wantPoll 为假）不再重试——SSE 已经证明不通、轮询客户端又建不起来，
+      // 此时显示"无法连接"就是全部能做的，继续静默地假装已降级才是错的。
+      inFallback = false;
+      fallbackManual = false;
+      mode = 'idle';
+      stats.mode = mode;
+      reportStatus({ status: 'unreachable', detail: '降级到轮询时建立客户端失败：' + String((err && err.message) || err) });
+      return
+    }
     inFallback = true;
     fallbackManual = manual === true;
     stats.fallbacks += 1;
@@ -5318,11 +5533,7 @@ function createCnStream(opts = {}) {
     mode = 'poll';
     stats.mode = mode;
     closeSource();
-    try { fallbackClient = createFallback(); } catch (err) {
-      onError(err);
-      reportStatus({ status: 'unreachable', detail: '降级到轮询时建立客户端失败：' + String((err && err.message) || err) });
-      return
-    }
+    fallbackClient = client;
     try { fallbackClient.start(); } catch (err) { onError(err); }
     // 降级必须**说出来**：否则用户看到"一切正常"却收不到预警（本插件最不能接受的形态）。
     // 去重键显式给 'fallback'：进入降级之前刚上报过 degraded（"出错、正在重连"）是同一个
@@ -5495,6 +5706,11 @@ function createCnStream(opts = {}) {
     };
     const onEntry = (ev) => {
       if (source !== es) return
+      // 收到真实数据即证明这条链路是通的（0.5.4）：这个计数同时被"连续 N 次没收到首帧"的
+      // 降级判定使用，而它此前只在 `sync` 帧归零。于是一条已经健康跑了很久的连接上零星累积的
+      // error 会留在计数里，下一次"连上但没首帧"的第一跳就可能直接 ≥ maxFails ——
+      // 降级理由写成"连续 N 次未收到首帧"，而实际只失败了一次。
+      consecutiveFails = 0;
       stats.lastAt = Date.now();
       stats.lastEventAt = Date.now();
       let entry = null;
@@ -5684,14 +5900,18 @@ function humanMinutes(ms) {
  * @param {number} [opts.intervalMs]
  * @param {(fn: Function, ms: number) => any} [opts.setTimer]
  * @param {(t: any) => void} [opts.clearTimer]
- * @param {(id: string, patch: object) => void} [opts.pushSource]
+ * @param {(id: string, patch: object) => void} [opts.pushSource] 注入点（测试用）。**默认不走它**：
+ *   生产路径必须经 `publishStatus` 合成（见下），注入时保持"原样推送"以便断言原始 patch。
  */
 function createHealthProbe(opts = {}) {
   const now = opts.now || (() => Date.now());
   const intervalMs = opts.intervalMs === undefined ? PROBE_INTERVAL_MS : opts.intervalMs;
   const setTimer = opts.setTimer || ((fn, ms) => setInterval(fn, ms));
   const clearTimer = opts.clearTimer || ((t) => clearInterval(t));
-  const push = opts.pushSource || ((id, patch) => store.pushSource(id, patch));
+  // 默认经 publishStatus（0.5.4）：探针报的是**新鲜度**这一层，而展示状态要把它与连接层、
+  // 数据健康层合成。此前直接 pushSource，于是"数据已恢复更新"这一句会把一条 schema-error
+  // 蓝点整个刷掉，而 health 里 escalated 仍为 true —— 用户再也看不到"上游改版"的信号。
+  const push = opts.pushSource || ((id, patch) => publishStatus(id, patch));
   let timer = null;
 
   /**
@@ -6038,8 +6258,13 @@ const s = {
   row: (...children) => h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', margin: '4px 0' } }, ...children),
   checkbox: (checked, onChange, text) => h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer', color: '#dfe3e8' } },
     h('input', { type: 'checkbox', checked, onChange: (e) => onChange(e.target.checked) }), text),
-  select: (value, options, onChange, textOf) => h('select', {
+  // `label`（第 5 参）渲染成 `aria-label`（0.5.4）。此前每个下拉旁边只有一个视觉上的 div
+  // 文字，两者在 DOM 里没有任何关联——读屏软件念到的是"组合框"，用户无法知道哪个是震度阈值。
+  // 全库此前只有历史条目与状态点两处 aria 属性（CHANGELOG 记过），而 DESIGN 从未把无障碍
+  // 记为"有意不做"，所以这是遗漏而不是取舍。
+  select: (value, options, onChange, textOf, label) => h('select', {
     value, onChange: (e) => onChange(e.target.value),
+    'aria-label': label || undefined,
     style: { background: '#ffffff', color: '#1a1a1a', border: '1px solid #6b7280', borderRadius: 6, padding: '4px 8px', fontSize: 12, minWidth: 180 },
   }, options.map((o) => h('option', {
     key: String(o.v !== undefined ? o.v : o.g), value: String(o.v !== undefined ? o.v : o.g),
@@ -6373,8 +6598,8 @@ function SettingsPanel() {
     const cityOptions = (cities.length ? cities : [{ name: '' }]).map((c) => ({ v: c.name, label: c.name || '（先选省份）' }));
     return h('div', null,
       h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' } },
-        s.select(cnPick.province, provOptions, pickProvince, (o) => o.label),
-        s.select(cnPick.city, cityOptions, (v) => { setCnPick((p) => ({ ...p, city: v })); setCnMsg(''); }, (o) => o.label),
+        s.select(cnPick.province, provOptions, pickProvince, (o) => o.label, '一级行政区（省 / 自治区 / 直辖市）'),
+        s.select(cnPick.city, cityOptions, (v) => { setCnPick((p) => ({ ...p, city: v })); setCnMsg(''); }, (o) => o.label, '城市'),
       ),
       h('div', { style: { marginTop: 6 } },
         radiusControl(cnPick.radiusKm, (v) => setCnPick((p) => ({ ...p, radiusKm: v })), 'cn-radius')),
@@ -6382,7 +6607,7 @@ function SettingsPanel() {
         s.btn('添加这个城市', addCnPlace),
         s.btn('用我的位置', addMyLocationPlace, { fontSize: 11 }),
       ),
-      cnMsg ? h('div', { style: { fontSize: 11, color: '#93c5fd', marginTop: 6 } }, cnMsg) : null,
+      cnMsg ? h('div', { role: 'status', style: { fontSize: 11, color: '#93c5fd', marginTop: 6 } }, cnMsg) : null,
     )
   };
   // 全球源状态（0.4.0）：用户看不出"链路到底在不在拉"，这是最常见的困惑来源——
@@ -6415,6 +6640,7 @@ function SettingsPanel() {
             pref + '：' + (sel === 0 ? '全境（未细化）' : '已选 ' + sel + ' 个市町村')),
           h('input', {
             type: 'text', value: q, placeholder: '搜索 ' + pref + ' 的市町村…',
+            'aria-label': '搜索 ' + pref + ' 的市町村',
             onChange: (e) => setCityQuery((prev) => Object.assign({}, prev, { [pref]: e.target.value })),
             style: { width: '100%', boxSizing: 'border-box', background: '#ffffff', color: '#1a1a1a', border: '1px solid #6b7280', borderRadius: 6, padding: '3px 8px', fontSize: 12, marginBottom: 5 },
           }),
@@ -6490,6 +6716,12 @@ function SettingsPanel() {
       const alert = parseJma(buildTestTelegram(pref, ms, sc.key, city), { id: 'test-weather-' + ms });
       setWeatherTestSeq(weatherTestSeq + 1);
       if (!alert) { setWeatherTestMsg('测试电文解析失败 —— 请把这个情况反馈给开发者'); return }
+      // 事件键改成**每次都不同**（0.5.4），否则同一场景第二次就静默：汇总型电文的事件键是
+      // 「灾种 + 官署」（刻意不含发布时刻，见 05b 的说明），于是连点两次会算出同一个键，
+      // 被 `isEventRepeat` 判成"同一事件的后续发布（强度未升级）"而只记历史——与按钮文案
+      // "可反复点击"直接矛盾。全球链路早就显式改写过事件键（05c 的 parseTestGlobalMessage），
+      // 气象这条漏了。语义上也成立：每次点击本来就是一次独立的演示。
+      alert.eventKey = 'test-weather:' + ms + ':' + sc.key;
       const res = handleAlert(alert, currentCfg(), { skipQuietHours: true });
       // 提示按**实际结果**生成，不写死"应看到弹窗"——开关关闭 / 未达 L4 / 静默 / 其它标签页
       // 已提醒时，实际就是不会响，提示必须如实说明，否则会让人以为插件坏了。
@@ -6503,7 +6735,7 @@ function SettingsPanel() {
       TEST_SCENARIOS.map((x) => x.label).join(' / ') +
       '。其中 L3 那条刻意不会响铃——用来演示 L1〜L3 的处理方式。'),
     weatherTestMsg
-      ? h('div', { style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, weatherTestMsg)
+      ? h('div', { role: 'status', style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, weatherTestMsg)
       : null,
   );
   const flushVolume = () => {
@@ -6559,7 +6791,7 @@ function SettingsPanel() {
             const c = activeClient; // 模块级 live binding：插件停用时已被置为 null
             if (c) { try { c.restart(); } catch (err) { /* 忽略 */ } }
           }, 80);
-        }, (o) => o.label),
+        }, (o) => o.label, '数据源'),
       ),
       h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 6 } },
         '配置存储：' + settingsSyncLabel()),
@@ -6638,7 +6870,7 @@ function SettingsPanel() {
       h('div', { style: { marginTop: 6 } },
         radiusControl(Number(placeDraft.radiusKm) || DEFAULT_PLACE_RADIUS_KM,
           (v) => setPlaceDraft((d) => ({ ...d, radiusKm: String(v) })), 'place-radius')),
-      placeMsg ? h('div', { style: { fontSize: 11, color: '#93c5fd', marginTop: 6 } }, placeMsg) : null,
+      placeMsg ? h('div', { role: 'status', style: { fontSize: 11, color: '#93c5fd', marginTop: 6 } }, placeMsg) : null,
       // 全球源的地震不是随时都有，没法"等一条"来验证链路 —— 与气象链路一样给一个本地测试按钮。
       // 构造的是**源格式原文**（EMSC / USGS / NOAA 各一种），因此解析器与匹配引擎都被真实走过。
       h('div', { style: { marginTop: 10, borderTop: '1px solid rgba(148,163,184,0.18)', paddingTop: 8 } },
@@ -6662,8 +6894,8 @@ function SettingsPanel() {
         h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4, lineHeight: 1.6 } },
           '测试消息在本地构造（EMSC / USGS / NOAA 三种源格式轮换），不发任何网络请求，可反复点击。场景依次为：' +
           TEST_GEO_SCENARIOS.map((x) => x.label).join(' / ') +
-          '。最后一条刻意落在半径之外——用来演示半径是怎么起作用的。'),
-        geTestMsg ? h('div', { style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, geTestMsg) : null,
+          '。最后一条约 550km 外——半径小于这个距离时不命中，大于命中：用来演示半径是怎么起作用的。'),
+        geTestMsg ? h('div', { role: 'status', style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, geTestMsg) : null,
       ),
       h(SourceStatusBlock, { key: 'source-status' }),
     ),
@@ -6671,17 +6903,17 @@ function SettingsPanel() {
     // 阈值
     s.section('提醒阈值',
       s.label('地震（实测震度最低值）'),
-      s.row(s.select(cfg.thresholds.quakeScale, SCALE_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, quakeScale: Number(v) } })), (o) => o.label)),
+      s.row(s.select(cfg.thresholds.quakeScale, SCALE_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, quakeScale: Number(v) } })), (o) => o.label, '地震（实测震度最低值）')),
       s.label('紧急地震速报（预测震度最低值）'),
-      s.row(s.select(cfg.thresholds.eewScale, SCALE_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, eewScale: Number(v) } })), (o) => o.label)),
+      s.row(s.select(cfg.thresholds.eewScale, SCALE_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, eewScale: Number(v) } })), (o) => o.label, '紧急地震速报（预测震度最低值）')),
       s.label('海啸'),
-      s.row(s.select(cfg.thresholds.tsunamiGrade, TSUNAMI_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, tsunamiGrade: v } })), (o) => o.label)),
+      s.row(s.select(cfg.thresholds.tsunamiGrade, TSUNAMI_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, tsunamiGrade: v } })), (o) => o.label, '海啸等级')),
       s.label('全球地震（最低震级，EMSC / USGS）'),
-      s.row(s.select(cfg.thresholds.globalMagnitude, GLOBAL_MAG_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, globalMagnitude: Number(v) } })), (o) => o.label)),
+      s.row(s.select(cfg.thresholds.globalMagnitude, GLOBAL_MAG_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, globalMagnitude: Number(v) } })), (o) => o.label, '全球地震（最低震级）')),
       h('div', { style: { fontSize: 11, color: '#9aa0a6' } },
         '全球源给的是震级、日本源给的是震度，两者不可换算，所以是两个独立旋钮。'),
       s.label('大陆地震速报（最低震级，中国地震台网速报）'),
-      s.row(s.select(cfg.thresholds.cnReportMagnitude, CN_REPORT_MAG_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, cnReportMagnitude: Number(v) } })), (o) => o.label)),
+      s.row(s.select(cfg.thresholds.cnReportMagnitude, CN_REPORT_MAG_OPTIONS, (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, cnReportMagnitude: Number(v) } })), (o) => o.label, '大陆地震速报（最低震级）')),
       h('div', { style: { fontSize: 11, color: '#9aa0a6' } },
         '速报覆盖低到 M2.5 且每天都有数据，所以门槛与上面的预警分开，避免小震刷屏；' +
         '大陆地震预警与全球源共用「全球地震」那个门槛。'),
@@ -6694,7 +6926,7 @@ function SettingsPanel() {
       s.row(s.select(cfg.cnTransport || 'auto', [
         { v: 'auto', label: '自动：SSE 推送优先，走不通自动降级为轮询' },
         { v: 'poll', label: '强制轮询（每 15 秒一次）' },
-      ], (v) => setCfg((c) => ({ ...c, cnTransport: v })), (o) => o.label)),
+      ], (v) => setCfg((c) => ({ ...c, cnTransport: v })), (o) => o.label, '大陆源取数方式')),
       h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4, lineHeight: 1.6 } },
         'SSE 推送的延迟是秒级，轮询最坏 15 秒——大陆预警抢的是这几秒，所以默认用推送。' +
         '只有在推送被网络中间设备反复掐断、而普通请求仍然正常时，才需要强制轮询。' +
@@ -6711,6 +6943,7 @@ function SettingsPanel() {
         type: 'range', min: 0, max: 100,
         value: Math.round(volShown * 100),
         onChange: (e) => onVolumeInput(Number(e.target.value) / 100),
+        'aria-label': '音量',
         style: { flex: 1, minWidth: 120 },
       }), h('span', { style: { color: '#9aa0a6', fontSize: 11, width: 34 } }, Math.round(volShown * 100) + '%')),
       s.row(
@@ -6750,7 +6983,7 @@ function SettingsPanel() {
         : (audioState() === 'unavailable'
           ? h('div', { style: { color: '#9aa0a6', fontSize: 11, marginTop: 4 } }, '当前环境不支持 Web Audio，提示音不可用。')
           : null),
-      testMsg ? h('div', { style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, testMsg) : null,
+      testMsg ? h('div', { role: 'status', style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, testMsg) : null,
     ),
 
     // 静默时段（0.2.0）
@@ -6760,17 +6993,19 @@ function SettingsPanel() {
         s.label('开始'),
         h('input', {
           type: 'time', value: cfg.quietHours.start,
+          'aria-label': '静默时段开始时间',
           onChange: (e) => setCfg((c) => ({ ...c, quietHours: { ...c.quietHours, start: e.target.value || c.quietHours.start } })),
           style: { background: '#ffffff', color: '#1a1a1a', border: '1px solid #6b7280', borderRadius: 6, padding: '4px 8px', fontSize: 12 },
         }),
         s.label('结束'),
         h('input', {
           type: 'time', value: cfg.quietHours.end,
+          'aria-label': '静默时段结束时间',
           onChange: (e) => setCfg((c) => ({ ...c, quietHours: { ...c.quietHours, end: e.target.value || c.quietHours.end } })),
           style: { background: '#ffffff', color: '#1a1a1a', border: '1px solid #6b7280', borderRadius: 6, padding: '4px 8px', fontSize: 12 },
         }),
       ),
-      s.row(s.checkbox(cfg.quietHours.breakForSevere, (v) => setCfg((c) => ({ ...c, quietHours: { ...c.quietHours, breakForSevere: v } })), '红色等级（EEW / 大海啸警报）仍提醒')),
+      s.row(s.checkbox(cfg.quietHours.breakForSevere, (v) => setCfg((c) => ({ ...c, quietHours: { ...c.quietHours, breakForSevere: v } })), '红色等级仍提醒（EEW / 海啸警报 / 震度6弱以上的地震 / L4 以上气象警报）')),
       h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 6 } },
         '按浏览器本地时间判定；开始时间晚于结束时间表示跨午夜（如 23:00–07:00）。静默期间命中的预警仍会记入下方「最近预警记录」，只是不响铃、不弹通知。'),
     ),
@@ -6790,7 +7025,7 @@ function SettingsPanel() {
       })),
       h('div', { style: { fontSize: 11, color: '#d9a406', marginTop: 4 } },
         '⚠ 快照含你的关注地区名称与坐标——诊断"为什么没命中"必须要有它。分享前请自行确认。'),
-      diag ? h('div', { style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, diag.msg) : null,
+      diag ? h('div', { role: 'status', style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, diag.msg) : null,
       diag && diag.text
         ? h('textarea', {
             readOnly: true, value: diag.text, rows: 10,
@@ -6971,6 +7206,10 @@ function apply(ctx) {
   // 永远没人看见（DESIGN 11.9 A）。连接与新鲜度才是"重启即无意义"的那两层。
   store.clearSources();
   resetConnHealth();
+  // 立刻把已升级的数据健康重新发布出来（0.5.4）：store 刚被清空，而蓝点存在 localStorage 里。
+  // 不重发的话要等该源下一次上报（feed 首轮 3 秒 + 15 秒一轮）才显示，而"上游改了字段"这件事
+  // 与刷新页面无关——DESIGN 11.9 A 的"蓝点跨刷新存活"应当是立刻成立，而不是十几秒后。
+  republishDataHealth();
 
   // 健康探针（0.5.3 / DESIGN 11.9 B）：按**契约里的阈值**判定各源的数据新鲜度，并驱动蓝点的
   // TTL 自愈。把它放进 effect 是因为它有一个定时器——定时器归 fiber，停用即回收。
@@ -7045,8 +7284,10 @@ function apply(ctx) {
     }
   }, 'dsh-quake-alert: ws client');
 
-  /** 轮询源的状态上报：把每个源的连接 / 失败情况送进 store，参与整体状态聚合（0.4.1）。 */
-  const feedStatus = (sourceId) => (patch) => store.pushSource(sourceId, patch);
+  /** 轮询源的状态上报：把每个源的连接 / 失败情况送进 store，参与整体状态聚合（0.4.1）。
+   *  经 publishStatus 合成（0.5.4）——12b 自己也算了一遍 effectiveStatusOf（它要用结果做去重键），
+   *  这里再过一次是幂等的，但保证了"写 store 的每一处都走同一个合成规则"。 */
+  const feedStatus = (sourceId) => (patch) => publishStatus(sourceId, patch);
   const feedError = (name) => (err) => {
     try { console.warn('[dsh-quake-alert] ' + name + ' 增量拉取失败：' + String((err && err.message) || err)); } catch (e) {}
   };
@@ -7228,7 +7469,7 @@ function apply(ctx) {
 const __test = {
   // 0.5.3：机制层（统一健康记录 + 探针 + 升级阈值）
   createHealthProbe, staleAfterOf, PROBE_INTERVAL_MS,
-  resetConnHealth, pruneHealth, noteFreshness, noteStale, loadHealth,
+  resetConnHealth, pruneHealth, noteFreshness, noteStale, loadHealth, publishStatus, republishDataHealth,
   SCHEMA_ESCALATE_COUNT, SCHEMA_ESCALATE_CONSECUTIVE, SCHEMA_ESCALATE_WINDOW_MS, HEALTH_TTL_MS,
   // 0.5.2：大陆气象源（nmc.cn）—— 解析层 / 契约 / 行政区层级匹配
   parseNmcAlarm, orgOf, parseNmcAlarmResult, matchCnAreaAlert, cnPlaceParts, cnAreaOf, normAliases,

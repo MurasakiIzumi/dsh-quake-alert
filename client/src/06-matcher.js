@@ -210,7 +210,12 @@ function matchCnAreaAlert(alert, cfg) {
   if (cnPlaces.length === 0) {
     // 与坐标型源同一条原则：没有关注点就明确说明怎么加，**不静默**——
     // "配错了关注点"看起来像"根本没有预警"是这套系统最该避免的误解之一。
-    return { hit: false, reason: '未设置中国大陆关注点（设置 → 灾害预警 → 中国大陆 → 选省与城市）' }
+    // `noWatch` 让 11-pipeline 能把这一类和"命中了但不在列表里"区分开（前者不进历史，0.5.4）。
+    return {
+      hit: false,
+      noWatch: true,
+      reason: '未设置中国大陆关注点（设置 → 灾害预警 → 中国大陆 → 选省与城市）',
+    }
   }
   const area = alert.cnArea || {}
   const province = String(area.province || '')

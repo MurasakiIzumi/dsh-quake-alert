@@ -124,6 +124,11 @@ function hitSeverityOf(alert, m) {
 // 就与事实自相矛盾——这是加测试按钮后暴露出来的问题。
 function updateWeatherHint(alert, cfg) {
   if (alert.kind !== 'weather' || alert.cancelled) return
+  // 只对**日本气象电文**生效（0.5.4）：大陆气象源（nmc_alarm，`locator === 'area'`）的
+  // `regions` 恒为空数组（归属在 cnArea 里），于是这里的 `hit` 恒为 undefined，
+  // 每一条大陆预警都会走到下面的"清空提示"分支，把日本电文刚留下的
+  // 「L3 正在升级、未达 L4」抹成 null——两家机构、两个地区的两件事，不该互相清。
+  if (alert.locator === 'area') return
   if ((cfg.disasters || {}).weather === false) return
   const w = cfg.watch || {}
   const lvOf = (r) => (typeof r.level === 'number' ? r.level : alert.level)
@@ -250,7 +255,14 @@ function handleAlert(alert, cfg, opts) {
     // **但「坐标缺失」是例外**——那不是"离得远"，而是"根本没法判定"。DESIGN 3.1 要求
     // 这种情况不猜、如实说明；若也丢进 /dev/null，用户看到的就是"根本没有地震"，
     // 与"未设置关注点"（更早由 watchlessPoint 拦下，有意不回历史）是完全不同的两件事。
-    if (alert.locator !== 'point' || !validGeo(alert.geo)) {
+    //
+    // 0.5.4：`m.noWatch`（**未配置**关注点，命中概率恒为 0）同样不进历史。大陆气象源
+    // （nmc_alarm）走行政区匹配，不在 watchlessPoint 的覆盖范围内，而它默认就在拉——
+    // 一条都没配大陆关注点的用户，每天会有几十条「未命中：未设置中国大陆关注点」挤进
+    // HISTORY_MAX=30 的「最近预警」，真正的地震 / 海啸提醒被挤出去。这与坐标型源那条
+    // 「真正的提醒会被刷掉」是同一个失败形态（DESIGN 3.2 对 point 源已定过这个口径）。
+    // 与坐标型的差别是**不整条丢弃**：设置页与诊断仍需要"有预警、但你没配关注点"这个信息。
+    if (!m.noWatch && (alert.locator !== 'point' || !validGeo(alert.geo))) {
       addEvent({
         id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
         issued: alert.issued, headline: alert.headline + '（未命中：' + m.reason + '）', hit: false,
@@ -284,11 +296,17 @@ function handleAlert(alert, cfg, opts) {
   }
   // 事件级去重没拦下、但记忆说"这个事件在 24 小时内已经真正播报过" → 判为跨会话重放
   // （Host 重启按回看窗口重投），只记历史不响铃。
+  //
+  // 0.5.4 修正**文案**：`looksReplayed` 的判据是 24 小时的已提醒记忆，它覆盖的不只是
+  // Host 回看窗口的重投，还包括"同一官署同一灾种在 3 小时事件窗口之后、24 小时之内等强度的
+  // 第二次独立发布"（气象事件尤其如此）。旧文案把原因写成"Host 重启 / 重连后的重放"，
+  // 会让排查的人去翻 Host 重启日志，而真正生效的是长期事件记忆。行为方向是安全的
+  // （不重复响铃），所以只改措辞、不改判据。
   if (looksReplayed) {
     addEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
-      suppressed: true, suppressedReason: '同一事件在最近 24 小时内已提醒过（Host 重启 / 重连后的重放）',
+      suppressed: true, suppressedReason: '同一事件在最近 24 小时内已提醒过（等强度，不重复响铃）',
     })
     return { notified: false, reason: 'replayed', detail: '该事件在最近 24 小时内已经提醒过，本次只记历史' }
   }

@@ -86,7 +86,8 @@ function itemLevelOf(it) {
     regionKindLevel(it.kindName),
   )
 }
-// 电文标题 → 中文标签（M3 才做 i18n，这里与既有 kindLabel 一样先硬编码中文）
+// 电文标题 → 中文标签（M3 才做 i18n，这里与既有 kindLabel 一样先硬编码中文）。
+// **特别警报不在这个表里**：它不能只看标题，理由见 kindLabelOf（那是一个真实的文案缺陷）。
 const KIND_LABELS = [
   [/土砂災害警戒情報/, '泥石流警戒情报'],
   [/指定河川洪水予報/, '洪水预报'],
@@ -100,8 +101,6 @@ const KIND_LABELS = [
   [/（濃霧）/, '浓雾警报'],
   [/（乾燥）/, '干燥警报'],
   [/（なだれ）/, '雪崩警报'],
-  [/気象特別警報/, '气象特别警报'],
-  [/気象警報・注意報/, '气象警报'],
 ]
 
 // ---------- 最小 XML 取值工具（与 05-parser 的正则风格一致，不引依赖） ----------
@@ -374,9 +373,28 @@ function regionsOf(items, notice) {
   return applyNoticeLevels(out, notice)
 }
 
-function kindLabelOf(title) {
-  for (const [re, label] of KIND_LABELS) if (re.test(title)) return label
-  return title || '气象警报'
+/**
+ * 电文标题 → 中文标签。**特别警报必须结合级别判**（0.5.4）。
+ *
+ * 「気象特別警報・警報・注意報」是 VPWW53 的**产品名**（総括副本），它只说明"这份电文覆盖
+ * 特別警報／警報／注意報三类"，与这一条里到底有没有特別警報无关——实测 2026-09-14 兵庫県的
+ * 同名产品名承载的是「危険警報（大雨・土砂災害）」（L4），而特別警報是気象庁的**最高级别**
+ * （L5，命を守る行動）。只看标题就会把一条 L4 显示成「气象特别警报」，把官方等级说高一级
+ *（与 0.4.2 修过的"文案夸大成避难指示级"同形，方向相反）。反过来 VPWW54 的
+ *「気象警報・注意報（Ｈ２７）」在 L5 时只会显示成「气象警报」，是低估。
+ * 所以这一族（SUMMARY_TITLE 里的四种产品名）按**级别**取标签；带灾种名的分灾种副本
+ *（（大雨）／（土砂）…）仍按标题。
+ */
+function kindLabelOf(title, level) {
+  const t = String(title || '')
+  // ① 先按**灾种**匹配：带灾种名的副本（（大雨）／（土砂）／指定河川洪水予報…）给出的是具体
+  // 灾种，比"气象警报"这种概括标签有信息量，所以它们的优先级高于下面的汇总族。
+  for (const [re, label] of KIND_LABELS) if (re.test(t)) return label
+  // ② 汇总族（SUMMARY_TITLE 的四种产品名）与概括名「気象警報・注意報」本身不含灾种 → 按级别取。
+  if (SUMMARY_TITLE.test(t) || /気象警報・注意報/.test(t)) {
+    return (typeof level === 'number' && level >= 5) ? '气象特别警报' : '气象警报'
+  }
+  return t || '气象警报'
 }
 
 /**
@@ -453,7 +471,7 @@ function parseJma(xml, entry) {
 
   const regions = cancelled ? [] : regionsOf(items, notice)
   // 解除电文若展开不出区域，至少保留一个空区域条目，让事件键与提示仍可工作
-  const kindLabel = kindLabelOf(title)
+  const kindLabel = kindLabelOf(title, level)
   const first = String(headlineText || '').split(/[。\n]/)[0].trim()
   const levelText = level > 0 ? '（警戒レベル' + level + '）' : ''
   const headline = (kindLabel + levelText + (first ? ' · ' + first : '')).slice(0, 180)

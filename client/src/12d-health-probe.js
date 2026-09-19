@@ -33,8 +33,7 @@
 // ============================================================================
 
 import { SOURCE_CONTRACTS } from './05d-source-contracts.js'
-import { sourceHealthOf, noteStale, pruneHealth } from './05g-source-health.js'
-import { store } from './07-store.js'
+import { sourceHealthOf, noteStale, pruneHealth, publishStatus } from './05g-source-health.js'
 
 /**
  * 探针周期。30 秒的依据：最短的阈值是 USGS 的 30 分钟，30 秒的分辨率足以让"刚过期"和
@@ -71,14 +70,18 @@ function humanMinutes(ms) {
  * @param {number} [opts.intervalMs]
  * @param {(fn: Function, ms: number) => any} [opts.setTimer]
  * @param {(t: any) => void} [opts.clearTimer]
- * @param {(id: string, patch: object) => void} [opts.pushSource]
+ * @param {(id: string, patch: object) => void} [opts.pushSource] 注入点（测试用）。**默认不走它**：
+ *   生产路径必须经 `publishStatus` 合成（见下），注入时保持"原样推送"以便断言原始 patch。
  */
 export function createHealthProbe(opts = {}) {
   const now = opts.now || (() => Date.now())
   const intervalMs = opts.intervalMs === undefined ? PROBE_INTERVAL_MS : opts.intervalMs
   const setTimer = opts.setTimer || ((fn, ms) => setInterval(fn, ms))
   const clearTimer = opts.clearTimer || ((t) => clearInterval(t))
-  const push = opts.pushSource || ((id, patch) => store.pushSource(id, patch))
+  // 默认经 publishStatus（0.5.4）：探针报的是**新鲜度**这一层，而展示状态要把它与连接层、
+  // 数据健康层合成。此前直接 pushSource，于是"数据已恢复更新"这一句会把一条 schema-error
+  // 蓝点整个刷掉，而 health 里 escalated 仍为 true —— 用户再也看不到"上游改版"的信号。
+  const push = opts.pushSource || ((id, patch) => publishStatus(id, patch))
   let timer = null
 
   /**

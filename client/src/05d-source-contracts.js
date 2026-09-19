@@ -22,7 +22,7 @@
 // 核心原则：解析层严格，匹配层宽松。结构不符时任何"智能猜测"都可能把垃圾数据变成误报。
 // ============================================================================
 
-import { isPlainObject } from './02-storage.js'
+import { isPlainObject, own } from './02-storage.js'
 import { cnTimeToIso } from './01-constants.js'
 import { parse } from './05-parser.js'
 import { parseJma } from './05b-jma-parser.js'
@@ -503,8 +503,12 @@ export function parseNmcAlarmResult(raw) {
   const alertid = String(raw.alertid === undefined || raw.alertid === null ? '' : raw.alertid).trim()
   if (!alertid) return failResult('schema', '缺少 alertid（string）')
   if (typeof raw.kind !== 'string' || !raw.kind) return failResult('schema', '缺少 kind（string）')
-  if (!NMC_KIND_TEXT[raw.kind]) return failResult('empty', '灾种不在本插件范围内：' + raw.kind)
-  if (typeof raw.level !== 'string' || !NMC_LEVEL_TEXT[raw.level]) {
+  // 查表一律走 own()（0.5.4）：`NMC_KIND_TEXT['constructor']` 会命中原型链返回 Object 构造函数
+  // （truthy），于是 `kind: 'constructor'` 这样的脏数据会**绕过 empty / schema 判据**被放行，
+  // 一路带进 Alert 的 kindLabel / severity（实测能得到「大陆function Object()…预警」这种文案）。
+  // 契约层存在的意义就是"Host 的 JSON 属于不可信输入"，所以这里不能直查。
+  if (!own(NMC_KIND_TEXT, raw.kind)) return failResult('empty', '灾种不在本插件范围内：' + raw.kind)
+  if (typeof raw.level !== 'string' || !own(NMC_LEVEL_TEXT, raw.level)) {
     return failResult('schema', '缺少或无法识别的 level：' + String(raw.level))
   }
   const title = String(raw.title === undefined || raw.title === null ? '' : raw.title).trim()

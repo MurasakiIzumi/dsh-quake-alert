@@ -17,7 +17,7 @@ import { parseJma, buildTestTelegram, TEST_SCENARIOS, maxLevelIn as jmaMaxLevelI
 import { parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage } from './05c-global-parsers.js'
 import { parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseNmcAlarmResult, failResult, SOURCE_CONTRACTS } from './05d-source-contracts.js'
 // 0.5.3：健康状态（机制层）与契约（约定层）现在是两个模块，调用方分别 import。
-import { noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, resetConnHealth, pruneHealth, noteFreshness, noteStale, loadHealth, SCHEMA_ESCALATE_COUNT, SCHEMA_ESCALATE_CONSECUTIVE, SCHEMA_ESCALATE_WINDOW_MS, HEALTH_TTL_MS } from './05g-source-health.js'
+import { noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, resetConnHealth, pruneHealth, noteFreshness, noteStale, loadHealth, publishStatus, republishDataHealth, SCHEMA_ESCALATE_COUNT, SCHEMA_ESCALATE_CONSECUTIVE, SCHEMA_ESCALATE_WINDOW_MS, HEALTH_TTL_MS } from './05g-source-health.js'
 import { parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of } from './05e-cn-parsers.js'
 import { parseNmcAlarm, orgOf, NMC_KIND_TEXT, NMC_LEVEL_TEXT, NMC_LEVEL_RANK, NMC_BROADCAST_MIN_RANK } from './05f-nmc-parsers.js'
 import { matchAlert, matchPointAlert, matchCnAreaAlert, cnPlaceParts, distanceKm, validGeo } from './06-matcher.js'
@@ -65,6 +65,10 @@ export function apply(ctx) {
   // 永远没人看见（DESIGN 11.9 A）。连接与新鲜度才是"重启即无意义"的那两层。
   store.clearSources()
   resetConnHealth()
+  // 立刻把已升级的数据健康重新发布出来（0.5.4）：store 刚被清空，而蓝点存在 localStorage 里。
+  // 不重发的话要等该源下一次上报（feed 首轮 3 秒 + 15 秒一轮）才显示，而"上游改了字段"这件事
+  // 与刷新页面无关——DESIGN 11.9 A 的"蓝点跨刷新存活"应当是立刻成立，而不是十几秒后。
+  republishDataHealth()
 
   // 健康探针（0.5.3 / DESIGN 11.9 B）：按**契约里的阈值**判定各源的数据新鲜度，并驱动蓝点的
   // TTL 自愈。把它放进 effect 是因为它有一个定时器——定时器归 fiber，停用即回收。
@@ -139,8 +143,10 @@ export function apply(ctx) {
     }
   }, 'dsh-quake-alert: ws client')
 
-  /** 轮询源的状态上报：把每个源的连接 / 失败情况送进 store，参与整体状态聚合（0.4.1）。 */
-  const feedStatus = (sourceId) => (patch) => store.pushSource(sourceId, patch)
+  /** 轮询源的状态上报：把每个源的连接 / 失败情况送进 store，参与整体状态聚合（0.4.1）。
+   *  经 publishStatus 合成（0.5.4）——12b 自己也算了一遍 effectiveStatusOf（它要用结果做去重键），
+   *  这里再过一次是幂等的，但保证了"写 store 的每一处都走同一个合成规则"。 */
+  const feedStatus = (sourceId) => (patch) => publishStatus(sourceId, patch)
   const feedError = (name) => (err) => {
     try { console.warn('[dsh-quake-alert] ' + name + ' 增量拉取失败：' + String((err && err.message) || err)) } catch (e) {}
   }
@@ -322,7 +328,7 @@ export function apply(ctx) {
 export const __test = {
   // 0.5.3：机制层（统一健康记录 + 探针 + 升级阈值）
   createHealthProbe, staleAfterOf, PROBE_INTERVAL_MS,
-  resetConnHealth, pruneHealth, noteFreshness, noteStale, loadHealth,
+  resetConnHealth, pruneHealth, noteFreshness, noteStale, loadHealth, publishStatus, republishDataHealth,
   SCHEMA_ESCALATE_COUNT, SCHEMA_ESCALATE_CONSECUTIVE, SCHEMA_ESCALATE_WINDOW_MS, HEALTH_TTL_MS,
   // 0.5.2：大陆气象源（nmc.cn）—— 解析层 / 契约 / 行政区层级匹配
   parseNmcAlarm, orgOf, parseNmcAlarmResult, matchCnAreaAlert, cnPlaceParts, cnAreaOf, normAliases,

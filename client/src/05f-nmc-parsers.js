@@ -32,7 +32,7 @@
 //     按省级兜底放行（见 06-matcher），而不是丢弃这条预警。
 // ============================================================================
 
-import { isPlainObject } from './02-storage.js'
+import { isPlainObject, own } from './02-storage.js'
 import { cnAreaOf } from './04-city-table.js'
 
 /** 灾种标识 → 中文（与 Host 的 NMC_KINDS 值域对齐）。 */
@@ -77,9 +77,9 @@ function parseNmcAlarm(raw) {
   if (!isPlainObject(raw)) return null
   const alertid = String(raw.alertid === undefined || raw.alertid === null ? '' : raw.alertid).trim()
   if (!alertid) return null
-  const kind = typeof raw.kind === 'string' && NMC_KIND_TEXT[raw.kind] ? raw.kind : ''
+  const kind = typeof raw.kind === 'string' && own(NMC_KIND_TEXT, raw.kind) ? raw.kind : ''
   if (!kind) return null
-  const level = typeof raw.level === 'string' && NMC_LEVEL_TEXT[raw.level] ? raw.level : ''
+  const level = typeof raw.level === 'string' && own(NMC_LEVEL_TEXT, raw.level) ? raw.level : ''
   if (!level) return null
   const issued = String(raw.issued === undefined || raw.issued === null ? '' : raw.issued).trim()
   const title = String(raw.title === undefined || raw.title === null ? '' : raw.title).trim()
@@ -88,8 +88,11 @@ function parseNmcAlarm(raw) {
   const area = org ? cnAreaOf(org) : null
   // 机构名去掉表示发布主体的后缀即"发布地"：「云南省丽江市宁蒗彝族自治县气象台」→ 该县。
   const place = org.replace(/(?:气象台|气象局|预警中心)$/, '')
-  const rank = NMC_LEVEL_RANK[level] || 0
-  const kindText = NMC_KIND_TEXT[kind]
+  // 查表一律走 own()（0.5.4）：上面两处白名单已经限定了取值，但这里同样是"外部数据当键"，
+  // 直查会让 'constructor' 这类键命中原型链返回函数对象（severity 变成函数、headline 里
+  // 嵌进函数源码）。契约层（05d）已同步改成 own()，两处是同一个约定。
+  const rank = own(NMC_LEVEL_RANK, level) || 0
+  const kindText = own(NMC_KIND_TEXT, kind)
   return {
     // 前缀 nmc: ——与其它源的 id 命名空间分开（alertid 是纯数字串，不加前缀会与
     // P2PQuake 的数字 eventId 撞在同一个集合里，去重表可以按 id 建索引）。
@@ -101,12 +104,12 @@ function parseNmcAlarm(raw) {
     kindLabel: '大陆' + kindText + '预警（中央气象台）',
     source: 'nmc_alarm',
     locator: 'area',
-    severity: NMC_LEVEL_SEVERITY[level],
+    severity: own(NMC_LEVEL_SEVERITY, level),
     issued,
     reportTime: issued,
     // 文案用**发布地 + 灾种 + 等级**，不用行政区表里的名字：表里的名字是 GeoNames 的显示名，
     // 实测会挑到旧名（「思茅市」而气象台写「普洱市」），照搬会让用户对不上号。
-    headline: (place ? place + ' · ' : '') + kindText + NMC_LEVEL_TEXT[level] + '预警',
+    headline: (place ? place + ' · ' : '') + kindText + own(NMC_LEVEL_TEXT, level) + '预警',
     maxScale: -1,
     level: 0,
     // regions 是日本源的概念（都道府县 + 市町村）。大陆源不用它——归属放在 cnArea 里，
