@@ -60,6 +60,9 @@ const timeIsImpossible = (ms, now) => {
  *   timezone    —— 源时区。契约要求解析器把时间转成**带偏移**的 ISO 8601（DESIGN 第 4 节）。
  *   staleAfterMs—— 新鲜度阈值（stale 判据）；null = 这条链路不适用，理由写在 staleReason。
  *   empty       —— 什么形态算"源正常但当前无数据"（不计失败）。
+ *   tolerant    —— 可选：**明确不判 schema** 的字段范围。它与 required 是一对——required 只该列
+ *                  实现里真的会拦下的字段，否则契约就变成"比实现严"的文档，后来者按它写测试会
+ *                  误判"某字段必需"（0.5.1 修正）。
  *   pollMs      —— 传输层的轮询 / 推送周期（诊断文档引用）。
  */
 export const SOURCE_CONTRACTS = {
@@ -172,13 +175,16 @@ export const SOURCE_CONTRACTS = {
     pollMs: null,
     timezone: 'Asia/Shanghai（+08:00，无夏令时）—— OriginTime / ReportTime 是裸北京时间，由 cnTimeToIso 补偏移',
     required: [
-      '接收两种形态：WS 推送包（含 type:"cenc_eew"）与 REST 快照（无 type），其余 10 个字段完全一致',
-      'ID string（消息唯一键，Alert 的 id 取 cenc: 前缀）',
-      'OriginTime / ReportTime 为可解析的北京时间串',
-      'Latitude / Longitude 为数值（实测 number）',
-      'Magnitude / Depth / ReportNum / MaxIntensity 为数值',
-      'HypoCenter 为 string',
+      '接收两种形态：WS 推送包（含 type:"cenc_eew"）与 REST 快照（无 type）',
+      'ID string 非空（消息唯一键，Alert 的 id 取 cenc: 前缀）',
+      'Latitude / Longitude 为数值，且落在合法范围内',
+      'Magnitude 为数值（缺它这条预警就没有阈值可判 → 判 schema）',
+      'OriginTime 为可解析的北京时间串，且不是客观不可能的时刻',
     ],
+    tolerant: 'Depth / ReportNum / MaxIntensity / HypoCenter / ReportTime 缺失或类型不对**不判 schema**' +
+      '——沿用 0.4.2 对 551 观测点定的同一口径（"存在则类型必须正确"，缺失容忍）：' +
+      '整条丢弃在预警产品里的代价是漏报。取不到值时解析器给 null / 空串，文案退化成 M— / 无地名。' +
+      '（0.5.1 修正：此前 required 把这几项也写成必需，与实现的校验范围不符。）',
     empty: '10 个字段一个都没有（只有 type 包裹或空对象）——源正常但当前没有预警。' +
       '**这条未实测**：Wolfx 总是回最后一条预警（哪怕已过数天），从未见过"无预警"的返回形态，' +
       '样本不足以确认。保守取此判据，是因为判反了会点亮一个用户根本处理不了的蓝点（DESIGN 4.5 的配色语义）。',
@@ -197,10 +203,14 @@ export const SOURCE_CONTRACTS = {
     timezone: 'Asia/Shanghai（+08:00，无夏令时）—— time / ReportTime 是裸北京时间，由 cnTimeToIso 补偏移',
     required: [
       '整表载荷：No1…NoN（数值序，No1 最新）+ md5',
-      '每项：EventID string、time / ReportTime 为可解析的北京时间串',
-      '每项：magnitude / depth / latitude / longitude / intensity 为数字字符串（实测全为字符串）',
-      '每项：placeName 或 location 至少一个非空 string',
+      '每项：EventID string 非空',
+      '每项：latitude / longitude 为数字字符串或数值，且落在合法范围内',
+      '每项：magnitude 为数字字符串或数值（缺它这条速报就没有阈值可判）',
+      '每项：time 为可解析的北京时间串，且不是客观不可能的时刻',
     ],
+    tolerant: 'placeName / location / depth / intensity / ReportTime / type 缺失或类型不对**不判 schema**' +
+      '（同上：保留一条真实地震比丢弃它重要）。地名取 placeName 优先、location 兜底，都没有则留空。' +
+      '注意本判据是**逐项**的——线上由 Host 把整表拆成逐条 entry，整表级的"全坏"由 Host 侧判（见 wolfx-source）。',
     empty: '整表里一个 NoN 都没有——源正常但当前没有速报数据',
     staleAfterMs: 48 * 60 * 60 * 1000,
     staleReason: '**本插件唯一真正有意义的新鲜度阈值，而且它探的是中继不是灾害**：速报每天都有数据，' +

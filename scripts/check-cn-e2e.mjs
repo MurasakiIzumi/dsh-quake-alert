@@ -59,13 +59,19 @@ async function readSse(url, lastEventId) {
   const dec = new TextDecoder()
   let buf = ''
   const frames = []
-  const deadline = Date.now() + 6000
-  while (Date.now() < deadline && frames.length < 8) {
+  // 帧数上限给足：一次补发是 1 帧 sync + 环缓冲里的全部 entry（上限 120）。
+  // 原来写死 8 帧，只有在"一次 TCP 读把整批吞下"时才够用——分片读取会把健康的系统判成 FAIL。
+  // 结束条件因此改成：读到足够多 / 连续 1.5 秒没有新数据 / 整体超时。
+  const deadline = Date.now() + 10000
+  while (Date.now() < deadline && frames.length < 200) {
     const chunk = await Promise.race([
       reader.read(),
-      new Promise((r) => setTimeout(() => r({ done: true, value: undefined }), 1500)),
+      new Promise((r) => setTimeout(() => r({ timeout: true }), 1500)),
     ])
-    if (chunk.done) { if (chunk.value === undefined) continue; break }
+    // 连续 1.5 秒没有新数据 → 补发已经结束（之后只有 60 秒一次的 keep-alive），可以收工。
+    // 不能等流自己结束：SSE 是长连接，服务端会一直挂着。
+    if (chunk.timeout) { if (frames.length > 0) break; continue }
+    if (chunk.done) break
     buf += dec.decode(chunk.value, { stream: true })
     let idx
     while ((idx = buf.indexOf('\n\n')) !== -1) {

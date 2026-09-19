@@ -74,19 +74,28 @@ function findPrevEvent(alert, allowSameSource) {
   return null
 }
 
-function isEventRepeat(alert, windowMinutes) {
+/**
+ * @param {number} [nowMs] 注入点（测试用）。`Date.now()` 不可注入时，"窗口是否过期"这类跨时间
+ *   行为只能靠读码验证——而这正是 0.5.1 review 漏掉 D 类残留的原因之一（见 CHANGELOG）。
+ */
+function isEventRepeat(alert, windowMinutes, nowMs) {
   if (!alert.eventKey) return false
-  const now = Date.now()
+  const now = (typeof nowMs === 'number' && Number.isFinite(nowMs)) ? nowMs : Date.now()
   const win = Math.max(1, windowMinutes || 10) * 60 * 1000
   for (const [k, v] of eventSeen) {
     if (v.ts > now) { v.ts = now; continue }
-    if (now - v.ts > win) eventSeen.delete(k)
+    // 清理要用**这条记录自己的窗口**，而不是本次调用的窗口。此前用的是本次的 `win`，
+    // 于是一条按 3 小时窗口记住的气象事件，会被 10 分钟后任意一条"命中"地震带着的
+    // 10 分钟窗口清掉——随后 L4 的更新就被判成新事件，重复响铃（0.5.1 review 的 D 类残留）。
+    // 旧记录没有 win 字段时退回本次调用的窗口，行为与修复前一致（不会突然留得更久）。
+    const own = typeof v.win === 'number' ? v.win : win
+    if (now - v.ts > own) eventSeen.delete(k)
   }
   const prev = findPrevEvent(alert, false)
   if (prev && alert.strength <= prev.strength) return true
   const at = issuedMsOf(alert)
   const geo = (alert.locator === 'point' && validGeo(alert.geo)) ? { lat: alert.geo.lat, lon: alert.geo.lon } : null
-  eventSeen.set(alert.eventKey, { ts: now, strength: alert.strength, at, geo, source: String(alert.source || '') })
+  eventSeen.set(alert.eventKey, { ts: now, strength: alert.strength, at, geo, source: String(alert.source || ''), win })
   return false
 }
 

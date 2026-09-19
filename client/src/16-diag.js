@@ -87,6 +87,9 @@ function streamRows() {
       lastAt: s.lastAt ? new Date(s.lastAt).toISOString() : null,
       lastEventAt: s.lastEventAt ? new Date(s.lastEventAt).toISOString() : null,
       cursor: num(s.cursor), frozen: s.frozen === true,
+      // stale 由 Host 的 sync / status 帧告知（Client 自己判不出"没有数据"与"没有地震"）
+      stale: s.stale === true,
+      dataTime: s.dataTime ? new Date(s.dataTime).toISOString() : null,
       running: s.running === true, fallbackActive: s.fallbackActive === true,
       lastDetail: str(s.lastDetail),
     }

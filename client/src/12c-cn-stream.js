@@ -85,13 +85,20 @@ export function createCnStream(opts = {}) {
   const setTimer = opts.setTimer || ((fn, ms) => setTimeout(fn, ms))
   const clearTimer = opts.clearTimer || ((t) => clearTimeout(t))
   // 降级工厂：默认按 12b 的轮询客户端建一个（`?source=` 分派，Host 侧早就支持）。
-  const createFallback = opts.createFallback || (() => createFeedClient({
+  // createFeedClient 也可注入：这样"降级客户端拿了哪个游标键"能被直接断言——那正是
+  // "降级期间静默漏掉一段条目"的成因，光看 mode 有没有变成 poll 是测不出来的。
+  const makeFeedClient = opts.createFeedClient || createFeedClient
+  const createFallback = opts.createFallback || (() => makeFeedClient({
     id,
     label,
     path: FEED_PATH + '?source=' + id,
-    cursorKey: FEED_CURSOR_KEY + '.' + id,
+    // 与 SSE 用**同一个**游标键：两侧的 seq 都来自 Host 同一个源的游标，所以降级时能无缝接续。
+    // 用各自独立的键（原先的 FEED_CURSOR_KEY）会让轮询从 `since=tail` 起步，SSE 挂掉到降级生效
+    // 之间 Host 缓冲里的条目被静默跳过——那是一个真实的漏报窗口。
+    cursorKey: CN_CURSOR_KEY + '.' + id,
     enabled,
-    onStatus,
+    // 不是 onStatus：降级态下轮询侧的 "open" 会把"已降级"盖掉，必须合成一条（见 fallbackStatus）。
+    onStatus: fallbackStatus,
     onError,
     apply,
   }))
@@ -117,6 +124,9 @@ export function createCnStream(opts = {}) {
   const stats = {
     mode: 'idle', connections: 0, syncs: 0, received: 0, applied: 0, errors: 0,
     sseErrors: 0, probeTimeouts: 0, fallbacks: 0, fallbackManual: false, truncated: 0, resets: 0,
+    // stale（源可达但数据是旧的）：由 Host 的 sync / status 帧告知，Client 自己判不出来
+    // ——"没有新 entry"与"这几天确实没有地震"在本地长得一模一样。
+    stale: false, dataTime: 0,
     lastAt: 0, lastEventAt: 0, cursor: 0, frozen: false, lastDetail: '',
   }
 
@@ -129,12 +139,18 @@ export function createCnStream(opts = {}) {
     stats: () => Object.assign({}, stats, { running, hasCursor: since !== null, fallbackActive: inFallback }),
     mode: () => mode,
   }
-  function setCursor(next) {
+  /**
+   * @param {number} next
+   * @param {boolean} [force] Host 明确说"游标重置过"（它重启 / 时钟回拨）时**必须允许回退**，
+   *   否则本地游标永远卡在一个比 Host 大的值上，之后每次重连都触发 reset + 全量重放。
+   *   12b 的轮询路径有等价的自愈（`regressed`），SSE 这条此前缺失（0.5.1 review 的 D 类残留）。
+   */
+  function setCursor(next, force) {
     if (!(typeof next === 'number' && Number.isFinite(next) && next >= 0)) return
     const v = Math.floor(next)
     if (v === since) return
     // 游标只前进：SSE 的补发与实况可能交错到达，回退会让"断线补齐"重复投递
-    if (since !== null && v < since) return
+    if (!force && since !== null && v < since) return
     since = v
     stats.cursor = v
     try { saveCursor(v) } catch (err) { /* 隐私模式等写盘失败：本次仍以内存游标工作 */ }
@@ -154,6 +170,26 @@ export function createCnStream(opts = {}) {
     if (key === lastStatusKey) return
     lastStatusKey = key
     try { onStatus(Object.assign({ label }, eff)) } catch (err) { /* UI 回调异常不影响链路 */ }
+  }
+
+  /**
+   * 降级态下，轮询客户端（12b）的上报要经过这一层再出去。
+   *
+   * 为什么必须包一层：12b 的客户端有**自己独立的**状态去重键（初值空），所以降级之后它第一次
+   * 成功轮询就会报一条 `open`——"轮询这条路通了"本身是真的，但它会把 12c 刚报出去的
+   * "已降级为轮询"整条覆盖掉：聚合状态回绿、侧边栏悬停详情里只剩正常源。而 DESIGN 11.5 要求
+   * 降级**必须让用户看见**（它意味着延迟从秒级变成最长 15 秒）。
+   * 处理方式是把两者**合并成一条**：状态取"降级"（或用户手动选择），细节把轮询侧的信息附上。
+   * 键带上轮询侧的状态，这样它自己从 open 变 degraded / schema-error 时仍会重新上报。
+   */
+  function fallbackStatus(patch) {
+    if (!inFallback) return
+    const p = patch || {}
+    reportStatus({
+      status: fallbackManual ? 'disabled' : 'degraded',
+      detail: (fallbackManual ? '已按设置选择轮询' : 'SSE 推送不可用 → 已降级为轮询') +
+        '（延迟最长 15 秒）' + (p.detail ? ' · ' + String(p.detail) : ''),
+    }, 'fallback:' + String(p.status || ''))
   }
 
   function closeSource() {
@@ -224,21 +260,36 @@ export function createCnStream(opts = {}) {
     tickTimer = setTimer(() => {
       tickTimer = null
       if (!running) return
-      const cfg = getCfg()
-      const on = enabled(cfg)
-      if (!on) {
-        if (mode !== 'disabled') enterDisabled()
-      } else if (mode === 'disabled') {
-        consecutiveFails = 0
-        if (inFallback) { if (fallbackClient) { try { fallbackClient.start() } catch (err) { onError(err) } } }
-        else connectSse()
-      } else if (wantPoll(cfg)) {
-        // 用户选了「强制轮询」：从 SSE 切过去（已经在轮询就什么都不做）
-        if (!inFallback) activateFallback('设置里选择了强制轮询', true)
-      } else if (inFallback && fallbackManual) {
-        // 用户改回「自动」：手动选的轮询要能撤销。自动降级的不升回——那条链路已经证明过不通。
-        leaveFallback()
-      }
+      // 整段兜错：这个 tick 是**唯一**的恢复链（灾种开关往返、手动 / 自动链路切换都靠它），
+      // 一次抛错就会让它不再 self-reschedule，之后所有恢复都失效。12b 的等价处（schedule）
+      // 也包了 try/catch。reschedule 放在 catch 之外，保证无论成败都会重排。
+      try {
+        const cfg = getCfg()
+        const on = enabled(cfg)
+        if (!on) {
+          if (mode !== 'disabled') enterDisabled()
+        } else if (mode === 'disabled') {
+          consecutiveFails = 0
+          // 恢复消费时**同样要先看用户的链路选择**：选了「强制轮询」就不该先建一条 SSE
+          //（那既白占一条 Wolfx 连接，又会在 8 秒探针超时后谎报一次"连上但不推流"）。
+          // 这与 start() 里"一开始就不建 SSE"是同一个不变量。
+          if (wantPoll(cfg)) activateFallback('设置里选择了强制轮询', true)
+          else connectSse()
+        } else if (wantPoll(cfg)) {
+          // 用户选了「强制轮询」。**已经在轮询（自动降级来的）时也要认下这个选择**：
+          // 否则 fallbackManual 永远是 false，用户之后改回「自动」时下面那条 leaveFallback
+          // 分支不成立 → 永久停在轮询，只能刷新页面才回得去。
+          if (!inFallback) activateFallback('设置里选择了强制轮询', true)
+          else if (!fallbackManual) {
+            fallbackManual = true
+            stats.fallbackManual = true
+            reportStatus({ status: 'disabled', detail: '已按设置选择轮询（延迟最长 15 秒）' }, 'fallback:manual')
+          }
+        } else if (inFallback && fallbackManual) {
+          // 用户改回「自动」：手动选的轮询要能撤销。自动降级的不升回——那条链路已经证明过不通。
+          leaveFallback()
+        }
+      } catch (err) { onError(err) }
       scheduleTick()
     }, CN_RECHECK_MS)
     if (tickTimer && typeof tickTimer.unref === 'function') tickTimer.unref()
@@ -269,6 +320,14 @@ export function createCnStream(opts = {}) {
     source = es
     mode = 'sse'
     stats.mode = mode
+    /**
+     * sync 帧算出的告警（增量缺口 / 游标重置 / Host 侧未在运行）。
+     *
+     * **必须留到 status 帧继续带上**：store.pushSource 是整体替换 status + detail 的，而 status 帧
+     * 每 15 秒就来一次；若它只报"已连接"，这三条"有消息被跳过""Host 那边没在跑"的告警会在 15 秒后
+     * 自己消失——而它们的条件其实仍然成立。（键相同则不会重新上报，所以正常的降级/恢复去重不受影响。）
+     */
+    let connWarn = []
     const onSync = (ev) => {
       if (source !== es) return
       sawSyncThisConn = true
@@ -280,17 +339,53 @@ export function createCnStream(opts = {}) {
       if (d && d.truncated) stats.truncated += 1
       if (d && d.reset) stats.resets += 1
       stats.frozen = !!(d && d.frozen)
-      // 没有补发条目 = 已经在线，游标就是 Host 的当前位置 → 对齐它，
+      stats.stale = !!(d && d.stale)
+      if (d && Number.isFinite(d.dataTime)) stats.dataTime = d.dataTime
+      // Host 明确说重置过（它重启 / 时钟回拨）→ **允许游标回退**并对齐到它的当前位置，
+      // 否则本地游标卡在比 Host 大的值上，每次重连都会 reset + 全量重放。
+      // 没有补发条目 = 已经在线，游标就是 Host 的当前位置 → 同样对齐，
       // 这样刷新页面不会重复拉一段已经消费过的增量。
-      if (d && Number.isFinite(d.cursor) && (!d.replayed || d.replayed === 0)) setCursor(d.cursor)
+      if (d && d.reset && Number.isFinite(d.cursor)) setCursor(d.cursor, true)
+      else if (d && Number.isFinite(d.cursor) && (!d.replayed || d.replayed === 0)) setCursor(d.cursor)
       const warn = []
       if (d && d.truncated) warn.push('有增量缺口（Host 环缓冲已淘汰旧条目）')
       if (d && d.reset) warn.push('Host 游标重置过')
       if (d && d.frozen) warn.push('Host 侧该源未在运行')
+      connWarn = warn
+      // stale 有**自己的状态**（中灰「数据已过期」），不折叠进 degraded：它表示"源在响应、
+      // 但给的是旧数据"，与"链路有故障"是两类。口径与 12b 的轮询路径一致。
       reportStatus({
-        status: warn.length ? 'degraded' : 'open',
+        status: stats.stale ? 'stale' : (warn.length ? 'degraded' : 'open'),
         detail: 'SSE 已连接' + (d ? '（补发 ' + (d.replayed || 0) + ' 条）' : '') +
-          ' · 已收到 ' + stats.received + ' 条' + (warn.length ? ' · ' + warn.join('；') : ''),
+          ' · 已收到 ' + stats.received + ' 条' +
+          (stats.stale ? ' · 上游数据已过期（中继停更）' : '') +
+          (warn.length ? ' · ' + warn.join('；') : ''),
+      })
+    }
+    /**
+     * Host 的周期状态帧（每 15 秒，兼作 SSE keep-alive）。
+     *
+     * 它存在的唯一理由是**停更**：停更的形态就是"不再有新 entry"，只看 entry 的话状态会永远
+     * 停在连接那一刻；而 48 小时的停更探针是 cenc_eqlist 这个源存在的意义之一（见契约里的
+     * staleReason）。Host 不推这一帧的话，默认（SSE）路径下这件事在界面上完全不可见——
+     * 只有降级到轮询之后才读得到 /feed 的 stats。
+     */
+    const onStatusFrame = (ev) => {
+      if (source !== es) return
+      let d = null
+      try { d = JSON.parse(String(ev && ev.data)) } catch (err) { d = null }
+      if (!d || typeof d !== 'object') return
+      stats.stale = d.stale === true
+      if (Number.isFinite(d.dataTime)) stats.dataTime = d.dataTime
+      // 有意**不更新** stats.lastAt：它表示"最近一条数据"，而状态帧每 15 秒必到一次，
+      // 更新它会让设置页永远显示"最近数据 0 秒前"，恰好把"其实很久没有数据了"盖掉。
+      // 状态里同时带上 sync 那一刻算出的 connected 告警（见 connWarn）：只报"已连接"会把
+      // 增量缺口 / 游标重置 / Host 未运行这三条在 15 秒后抹掉，而它们的条件仍然成立。
+      reportStatus({
+        status: stats.stale ? 'stale' : (connWarn.length ? 'degraded' : 'open'),
+        detail: 'SSE 已连接 · 已收到 ' + stats.received + ' 条' +
+          (stats.stale ? ' · 上游数据已过期（中继停更）' : '') +
+          (connWarn.length ? ' · ' + connWarn.join('；') : ''),
       })
     }
     const onEntry = (ev) => {
@@ -333,6 +428,9 @@ export function createCnStream(opts = {}) {
       es.addEventListener('entry', onEntry)
       es.addEventListener('error', onErrorEv)
     } catch (err) { /* 极简实现可能不支持命名事件，下面由 probe 兜住 */ }
+    // status 与上面分开注册：它是最可有可无的一帧（少了它只是看不到"停更"这一种状态），
+    // 不该因为某个实现不认这个事件名而把 sync / entry 的注册一起带走。
+    try { es.addEventListener('status', onStatusFrame) } catch (err) { /* 忽略 */ }
     // 首帧探针：连上但**不推流**（代理把流缓冲住了）与"连不上"是两回事，
     // 而 onerror 未必会来。没有这个探针，用户会停在"SSE 已连接"却永远收不到预警。
     if (probeMs > 0) {
@@ -346,6 +444,8 @@ export function createCnStream(opts = {}) {
         if (consecutiveFails >= maxFails) activateFallback('连上但不推流')
         else connectSse()
       }, probeMs)
+      // 与 tickTimer 一致地 unref：这个 8 秒探针不该把 Node 侧的测试进程拖住。
+      if (probeTimer && typeof probeTimer.unref === 'function') probeTimer.unref()
     }
   }
 

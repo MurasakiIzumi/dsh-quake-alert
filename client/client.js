@@ -1887,11 +1887,21 @@ function minuteKeyOf(timeIso) {
  * 0.5.0 起大陆源（cenc_eew / cenc_eqlist）也走同一把钥匙：它们的 **EventID 与 EEW 完全不同格式**
  * （`202609182050.0001` vs `CD.20260918205536.056`），归并只能靠时间 + 震中。
  */
+/**
+ * 0.1° 桶的字符串化。**必须把 "-0.0" 归一成 "0.0"**：`(-0.02).toFixed(1)` 得到 "-0.0"，
+ * 而 `(0.02).toFixed(1)` 得到 "0.0" —— 赤道与本初子午线两侧的震中会落进两个不同的桶，
+ * 事件键永远不相等 → 跨源归并失败、同一场地震响两次。近似归并（±2 分钟 + 50km）通常还能
+ * 兜住，所以它表现为概率性重复而不是稳定故障（0.5.1 修）。
+ */
+function oneDp(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return '?'
+  const s = n.toFixed(1);
+  return s === '-0.0' ? '0.0' : s
+}
+
 function geoEventKey(timeIso, lat, lon) {
   const min = minuteKeyOf(timeIso);
-  const la = (typeof lat === 'number' && Number.isFinite(lat)) ? lat.toFixed(1) : '?';
-  const lo = (typeof lon === 'number' && Number.isFinite(lon)) ? lon.toFixed(1) : '?';
-  return 'geo:' + min + '@' + la + ',' + lo
+  return 'geo:' + min + '@' + oneDp(lat) + ',' + oneDp(lon)
 }
 
 /** epoch 毫秒或 ISO 字符串 → ISO 字符串（USGS 给毫秒，EMSC 给字符串，统一到后者）。 */
@@ -2296,7 +2306,11 @@ function parseCencEew(raw) {
     // 震级闸门共用 thresholds.globalMagnitude（DESIGN 8.4：它不是速报，与预警同档）
     locator: 'point',
     speedReport: false,
-    severity: severityOfMagnitude(mag),
+    // **恒 red，与日本 556 同口径**（DESIGN 2 节：「EEW → red（警报本质）」）。severity 决定两件事：
+    // 通知配色，以及**静默时段能否穿透**（只有 red 穿透）。按震级分档会让一场 M4.2 的预警在夜间
+    // 被静默掉（severityOfMagnitude 给 info），而同配置下的日本 EEW 照常穿透——那是漏报方向。
+    // 速报（分钟级确认，不是警报）仍按震级分档。
+    severity: 'red',
     issued: originIso,
     reportTime: reportIso,
     headline,
@@ -2452,6 +2466,9 @@ const timeIsImpossible = (ms, now) => {
  *   timezone    —— 源时区。契约要求解析器把时间转成**带偏移**的 ISO 8601（DESIGN 第 4 节）。
  *   staleAfterMs—— 新鲜度阈值（stale 判据）；null = 这条链路不适用，理由写在 staleReason。
  *   empty       —— 什么形态算"源正常但当前无数据"（不计失败）。
+ *   tolerant    —— 可选：**明确不判 schema** 的字段范围。它与 required 是一对——required 只该列
+ *                  实现里真的会拦下的字段，否则契约就变成"比实现严"的文档，后来者按它写测试会
+ *                  误判"某字段必需"（0.5.1 修正）。
  *   pollMs      —— 传输层的轮询 / 推送周期（诊断文档引用）。
  */
 const SOURCE_CONTRACTS = {
@@ -2564,13 +2581,16 @@ const SOURCE_CONTRACTS = {
     pollMs: null,
     timezone: 'Asia/Shanghai（+08:00，无夏令时）—— OriginTime / ReportTime 是裸北京时间，由 cnTimeToIso 补偏移',
     required: [
-      '接收两种形态：WS 推送包（含 type:"cenc_eew"）与 REST 快照（无 type），其余 10 个字段完全一致',
-      'ID string（消息唯一键，Alert 的 id 取 cenc: 前缀）',
-      'OriginTime / ReportTime 为可解析的北京时间串',
-      'Latitude / Longitude 为数值（实测 number）',
-      'Magnitude / Depth / ReportNum / MaxIntensity 为数值',
-      'HypoCenter 为 string',
+      '接收两种形态：WS 推送包（含 type:"cenc_eew"）与 REST 快照（无 type）',
+      'ID string 非空（消息唯一键，Alert 的 id 取 cenc: 前缀）',
+      'Latitude / Longitude 为数值，且落在合法范围内',
+      'Magnitude 为数值（缺它这条预警就没有阈值可判 → 判 schema）',
+      'OriginTime 为可解析的北京时间串，且不是客观不可能的时刻',
     ],
+    tolerant: 'Depth / ReportNum / MaxIntensity / HypoCenter / ReportTime 缺失或类型不对**不判 schema**' +
+      '——沿用 0.4.2 对 551 观测点定的同一口径（"存在则类型必须正确"，缺失容忍）：' +
+      '整条丢弃在预警产品里的代价是漏报。取不到值时解析器给 null / 空串，文案退化成 M— / 无地名。' +
+      '（0.5.1 修正：此前 required 把这几项也写成必需，与实现的校验范围不符。）',
     empty: '10 个字段一个都没有（只有 type 包裹或空对象）——源正常但当前没有预警。' +
       '**这条未实测**：Wolfx 总是回最后一条预警（哪怕已过数天），从未见过"无预警"的返回形态，' +
       '样本不足以确认。保守取此判据，是因为判反了会点亮一个用户根本处理不了的蓝点（DESIGN 4.5 的配色语义）。',
@@ -2589,10 +2609,14 @@ const SOURCE_CONTRACTS = {
     timezone: 'Asia/Shanghai（+08:00，无夏令时）—— time / ReportTime 是裸北京时间，由 cnTimeToIso 补偏移',
     required: [
       '整表载荷：No1…NoN（数值序，No1 最新）+ md5',
-      '每项：EventID string、time / ReportTime 为可解析的北京时间串',
-      '每项：magnitude / depth / latitude / longitude / intensity 为数字字符串（实测全为字符串）',
-      '每项：placeName 或 location 至少一个非空 string',
+      '每项：EventID string 非空',
+      '每项：latitude / longitude 为数字字符串或数值，且落在合法范围内',
+      '每项：magnitude 为数字字符串或数值（缺它这条速报就没有阈值可判）',
+      '每项：time 为可解析的北京时间串，且不是客观不可能的时刻',
     ],
+    tolerant: 'placeName / location / depth / intensity / ReportTime / type 缺失或类型不对**不判 schema**' +
+      '（同上：保留一条真实地震比丢弃它重要）。地名取 placeName 优先、location 兜底，都没有则留空。' +
+      '注意本判据是**逐项**的——线上由 Host 把整表拆成逐条 entry，整表级的"全坏"由 Host 侧判（见 wolfx-source）。',
     empty: '整表里一个 NoN 都没有——源正常但当前没有速报数据',
     staleAfterMs: 48 * 60 * 60 * 1000,
     staleReason: '**本插件唯一真正有意义的新鲜度阈值，而且它探的是中继不是灾害**：速报每天都有数据，' +
@@ -3325,19 +3349,28 @@ function findPrevEvent(alert, allowSameSource) {
   return null
 }
 
-function isEventRepeat(alert, windowMinutes) {
+/**
+ * @param {number} [nowMs] 注入点（测试用）。`Date.now()` 不可注入时，"窗口是否过期"这类跨时间
+ *   行为只能靠读码验证——而这正是 0.5.1 review 漏掉 D 类残留的原因之一（见 CHANGELOG）。
+ */
+function isEventRepeat(alert, windowMinutes, nowMs) {
   if (!alert.eventKey) return false
-  const now = Date.now();
+  const now = (typeof nowMs === 'number' && Number.isFinite(nowMs)) ? nowMs : Date.now();
   const win = Math.max(1, windowMinutes || 10) * 60 * 1000;
   for (const [k, v] of eventSeen) {
     if (v.ts > now) { v.ts = now; continue }
-    if (now - v.ts > win) eventSeen.delete(k);
+    // 清理要用**这条记录自己的窗口**，而不是本次调用的窗口。此前用的是本次的 `win`，
+    // 于是一条按 3 小时窗口记住的气象事件，会被 10 分钟后任意一条"命中"地震带着的
+    // 10 分钟窗口清掉——随后 L4 的更新就被判成新事件，重复响铃（0.5.1 review 的 D 类残留）。
+    // 旧记录没有 win 字段时退回本次调用的窗口，行为与修复前一致（不会突然留得更久）。
+    const own = typeof v.win === 'number' ? v.win : win;
+    if (now - v.ts > own) eventSeen.delete(k);
   }
   const prev = findPrevEvent(alert, false);
   if (prev && alert.strength <= prev.strength) return true
   const at = issuedMsOf(alert);
   const geo = (alert.locator === 'point' && validGeo(alert.geo)) ? { lat: alert.geo.lat, lon: alert.geo.lon } : null;
-  eventSeen.set(alert.eventKey, { ts: now, strength: alert.strength, at, geo, source: String(alert.source || '') });
+  eventSeen.set(alert.eventKey, { ts: now, strength: alert.strength, at, geo, source: String(alert.source || ''), win });
   return false
 }
 
@@ -4544,13 +4577,20 @@ function createCnStream(opts = {}) {
   const setTimer = opts.setTimer || ((fn, ms) => setTimeout(fn, ms));
   const clearTimer = opts.clearTimer || ((t) => clearTimeout(t));
   // 降级工厂：默认按 12b 的轮询客户端建一个（`?source=` 分派，Host 侧早就支持）。
-  const createFallback = opts.createFallback || (() => createFeedClient({
+  // createFeedClient 也可注入：这样"降级客户端拿了哪个游标键"能被直接断言——那正是
+  // "降级期间静默漏掉一段条目"的成因，光看 mode 有没有变成 poll 是测不出来的。
+  const makeFeedClient = opts.createFeedClient || createFeedClient;
+  const createFallback = opts.createFallback || (() => makeFeedClient({
     id,
     label,
     path: FEED_PATH + '?source=' + id,
-    cursorKey: FEED_CURSOR_KEY + '.' + id,
+    // 与 SSE 用**同一个**游标键：两侧的 seq 都来自 Host 同一个源的游标，所以降级时能无缝接续。
+    // 用各自独立的键（原先的 FEED_CURSOR_KEY）会让轮询从 `since=tail` 起步，SSE 挂掉到降级生效
+    // 之间 Host 缓冲里的条目被静默跳过——那是一个真实的漏报窗口。
+    cursorKey: CN_CURSOR_KEY + '.' + id,
     enabled,
-    onStatus,
+    // 不是 onStatus：降级态下轮询侧的 "open" 会把"已降级"盖掉，必须合成一条（见 fallbackStatus）。
+    onStatus: fallbackStatus,
     onError,
     apply,
   }));
@@ -4576,6 +4616,9 @@ function createCnStream(opts = {}) {
   const stats = {
     mode: 'idle', connections: 0, syncs: 0, received: 0, applied: 0, errors: 0,
     sseErrors: 0, probeTimeouts: 0, fallbacks: 0, fallbackManual: false, truncated: 0, resets: 0,
+    // stale（源可达但数据是旧的）：由 Host 的 sync / status 帧告知，Client 自己判不出来
+    // ——"没有新 entry"与"这几天确实没有地震"在本地长得一模一样。
+    stale: false, dataTime: 0,
     lastAt: 0, lastEventAt: 0, cursor: 0, frozen: false, lastDetail: '',
   };
 
@@ -4588,12 +4631,18 @@ function createCnStream(opts = {}) {
     stats: () => Object.assign({}, stats, { running, hasCursor: since !== null, fallbackActive: inFallback }),
     mode: () => mode,
   };
-  function setCursor(next) {
+  /**
+   * @param {number} next
+   * @param {boolean} [force] Host 明确说"游标重置过"（它重启 / 时钟回拨）时**必须允许回退**，
+   *   否则本地游标永远卡在一个比 Host 大的值上，之后每次重连都触发 reset + 全量重放。
+   *   12b 的轮询路径有等价的自愈（`regressed`），SSE 这条此前缺失（0.5.1 review 的 D 类残留）。
+   */
+  function setCursor(next, force) {
     if (!(typeof next === 'number' && Number.isFinite(next) && next >= 0)) return
     const v = Math.floor(next);
     if (v === since) return
     // 游标只前进：SSE 的补发与实况可能交错到达，回退会让"断线补齐"重复投递
-    if (since !== null && v < since) return
+    if (!force && since !== null && v < since) return
     since = v;
     stats.cursor = v;
     try { saveCursor(v); } catch (err) { /* 隐私模式等写盘失败：本次仍以内存游标工作 */ }
@@ -4613,6 +4662,26 @@ function createCnStream(opts = {}) {
     if (key === lastStatusKey) return
     lastStatusKey = key;
     try { onStatus(Object.assign({ label }, eff)); } catch (err) { /* UI 回调异常不影响链路 */ }
+  }
+
+  /**
+   * 降级态下，轮询客户端（12b）的上报要经过这一层再出去。
+   *
+   * 为什么必须包一层：12b 的客户端有**自己独立的**状态去重键（初值空），所以降级之后它第一次
+   * 成功轮询就会报一条 `open`——"轮询这条路通了"本身是真的，但它会把 12c 刚报出去的
+   * "已降级为轮询"整条覆盖掉：聚合状态回绿、侧边栏悬停详情里只剩正常源。而 DESIGN 11.5 要求
+   * 降级**必须让用户看见**（它意味着延迟从秒级变成最长 15 秒）。
+   * 处理方式是把两者**合并成一条**：状态取"降级"（或用户手动选择），细节把轮询侧的信息附上。
+   * 键带上轮询侧的状态，这样它自己从 open 变 degraded / schema-error 时仍会重新上报。
+   */
+  function fallbackStatus(patch) {
+    if (!inFallback) return
+    const p = patch || {};
+    reportStatus({
+      status: fallbackManual ? 'disabled' : 'degraded',
+      detail: (fallbackManual ? '已按设置选择轮询' : 'SSE 推送不可用 → 已降级为轮询') +
+        '（延迟最长 15 秒）' + (p.detail ? ' · ' + String(p.detail) : ''),
+    }, 'fallback:' + String(p.status || ''));
   }
 
   function closeSource() {
@@ -4683,21 +4752,36 @@ function createCnStream(opts = {}) {
     tickTimer = setTimer(() => {
       tickTimer = null;
       if (!running) return
-      const cfg = getCfg();
-      const on = enabled(cfg);
-      if (!on) {
-        if (mode !== 'disabled') enterDisabled();
-      } else if (mode === 'disabled') {
-        consecutiveFails = 0;
-        if (inFallback) { if (fallbackClient) { try { fallbackClient.start(); } catch (err) { onError(err); } } }
-        else connectSse();
-      } else if (wantPoll(cfg)) {
-        // 用户选了「强制轮询」：从 SSE 切过去（已经在轮询就什么都不做）
-        if (!inFallback) activateFallback('设置里选择了强制轮询', true);
-      } else if (inFallback && fallbackManual) {
-        // 用户改回「自动」：手动选的轮询要能撤销。自动降级的不升回——那条链路已经证明过不通。
-        leaveFallback();
-      }
+      // 整段兜错：这个 tick 是**唯一**的恢复链（灾种开关往返、手动 / 自动链路切换都靠它），
+      // 一次抛错就会让它不再 self-reschedule，之后所有恢复都失效。12b 的等价处（schedule）
+      // 也包了 try/catch。reschedule 放在 catch 之外，保证无论成败都会重排。
+      try {
+        const cfg = getCfg();
+        const on = enabled(cfg);
+        if (!on) {
+          if (mode !== 'disabled') enterDisabled();
+        } else if (mode === 'disabled') {
+          consecutiveFails = 0;
+          // 恢复消费时**同样要先看用户的链路选择**：选了「强制轮询」就不该先建一条 SSE
+          //（那既白占一条 Wolfx 连接，又会在 8 秒探针超时后谎报一次"连上但不推流"）。
+          // 这与 start() 里"一开始就不建 SSE"是同一个不变量。
+          if (wantPoll(cfg)) activateFallback('设置里选择了强制轮询', true);
+          else connectSse();
+        } else if (wantPoll(cfg)) {
+          // 用户选了「强制轮询」。**已经在轮询（自动降级来的）时也要认下这个选择**：
+          // 否则 fallbackManual 永远是 false，用户之后改回「自动」时下面那条 leaveFallback
+          // 分支不成立 → 永久停在轮询，只能刷新页面才回得去。
+          if (!inFallback) activateFallback('设置里选择了强制轮询', true);
+          else if (!fallbackManual) {
+            fallbackManual = true;
+            stats.fallbackManual = true;
+            reportStatus({ status: 'disabled', detail: '已按设置选择轮询（延迟最长 15 秒）' }, 'fallback:manual');
+          }
+        } else if (inFallback && fallbackManual) {
+          // 用户改回「自动」：手动选的轮询要能撤销。自动降级的不升回——那条链路已经证明过不通。
+          leaveFallback();
+        }
+      } catch (err) { onError(err); }
       scheduleTick();
     }, CN_RECHECK_MS);
     if (tickTimer && typeof tickTimer.unref === 'function') tickTimer.unref();
@@ -4728,6 +4812,14 @@ function createCnStream(opts = {}) {
     source = es;
     mode = 'sse';
     stats.mode = mode;
+    /**
+     * sync 帧算出的告警（增量缺口 / 游标重置 / Host 侧未在运行）。
+     *
+     * **必须留到 status 帧继续带上**：store.pushSource 是整体替换 status + detail 的，而 status 帧
+     * 每 15 秒就来一次；若它只报"已连接"，这三条"有消息被跳过""Host 那边没在跑"的告警会在 15 秒后
+     * 自己消失——而它们的条件其实仍然成立。（键相同则不会重新上报，所以正常的降级/恢复去重不受影响。）
+     */
+    let connWarn = [];
     const onSync = (ev) => {
       if (source !== es) return
       sawSyncThisConn = true;
@@ -4739,17 +4831,53 @@ function createCnStream(opts = {}) {
       if (d && d.truncated) stats.truncated += 1;
       if (d && d.reset) stats.resets += 1;
       stats.frozen = !!(d && d.frozen);
-      // 没有补发条目 = 已经在线，游标就是 Host 的当前位置 → 对齐它，
+      stats.stale = !!(d && d.stale);
+      if (d && Number.isFinite(d.dataTime)) stats.dataTime = d.dataTime;
+      // Host 明确说重置过（它重启 / 时钟回拨）→ **允许游标回退**并对齐到它的当前位置，
+      // 否则本地游标卡在比 Host 大的值上，每次重连都会 reset + 全量重放。
+      // 没有补发条目 = 已经在线，游标就是 Host 的当前位置 → 同样对齐，
       // 这样刷新页面不会重复拉一段已经消费过的增量。
-      if (d && Number.isFinite(d.cursor) && (!d.replayed || d.replayed === 0)) setCursor(d.cursor);
+      if (d && d.reset && Number.isFinite(d.cursor)) setCursor(d.cursor, true);
+      else if (d && Number.isFinite(d.cursor) && (!d.replayed || d.replayed === 0)) setCursor(d.cursor);
       const warn = [];
       if (d && d.truncated) warn.push('有增量缺口（Host 环缓冲已淘汰旧条目）');
       if (d && d.reset) warn.push('Host 游标重置过');
       if (d && d.frozen) warn.push('Host 侧该源未在运行');
+      connWarn = warn;
+      // stale 有**自己的状态**（中灰「数据已过期」），不折叠进 degraded：它表示"源在响应、
+      // 但给的是旧数据"，与"链路有故障"是两类。口径与 12b 的轮询路径一致。
       reportStatus({
-        status: warn.length ? 'degraded' : 'open',
+        status: stats.stale ? 'stale' : (warn.length ? 'degraded' : 'open'),
         detail: 'SSE 已连接' + (d ? '（补发 ' + (d.replayed || 0) + ' 条）' : '') +
-          ' · 已收到 ' + stats.received + ' 条' + (warn.length ? ' · ' + warn.join('；') : ''),
+          ' · 已收到 ' + stats.received + ' 条' +
+          (stats.stale ? ' · 上游数据已过期（中继停更）' : '') +
+          (warn.length ? ' · ' + warn.join('；') : ''),
+      });
+    };
+    /**
+     * Host 的周期状态帧（每 15 秒，兼作 SSE keep-alive）。
+     *
+     * 它存在的唯一理由是**停更**：停更的形态就是"不再有新 entry"，只看 entry 的话状态会永远
+     * 停在连接那一刻；而 48 小时的停更探针是 cenc_eqlist 这个源存在的意义之一（见契约里的
+     * staleReason）。Host 不推这一帧的话，默认（SSE）路径下这件事在界面上完全不可见——
+     * 只有降级到轮询之后才读得到 /feed 的 stats。
+     */
+    const onStatusFrame = (ev) => {
+      if (source !== es) return
+      let d = null;
+      try { d = JSON.parse(String(ev && ev.data)); } catch (err) { d = null; }
+      if (!d || typeof d !== 'object') return
+      stats.stale = d.stale === true;
+      if (Number.isFinite(d.dataTime)) stats.dataTime = d.dataTime;
+      // 有意**不更新** stats.lastAt：它表示"最近一条数据"，而状态帧每 15 秒必到一次，
+      // 更新它会让设置页永远显示"最近数据 0 秒前"，恰好把"其实很久没有数据了"盖掉。
+      // 状态里同时带上 sync 那一刻算出的 connected 告警（见 connWarn）：只报"已连接"会把
+      // 增量缺口 / 游标重置 / Host 未运行这三条在 15 秒后抹掉，而它们的条件仍然成立。
+      reportStatus({
+        status: stats.stale ? 'stale' : (connWarn.length ? 'degraded' : 'open'),
+        detail: 'SSE 已连接 · 已收到 ' + stats.received + ' 条' +
+          (stats.stale ? ' · 上游数据已过期（中继停更）' : '') +
+          (connWarn.length ? ' · ' + connWarn.join('；') : ''),
       });
     };
     const onEntry = (ev) => {
@@ -4792,6 +4920,9 @@ function createCnStream(opts = {}) {
       es.addEventListener('entry', onEntry);
       es.addEventListener('error', onErrorEv);
     } catch (err) { /* 极简实现可能不支持命名事件，下面由 probe 兜住 */ }
+    // status 与上面分开注册：它是最可有可无的一帧（少了它只是看不到"停更"这一种状态），
+    // 不该因为某个实现不认这个事件名而把 sync / entry 的注册一起带走。
+    try { es.addEventListener('status', onStatusFrame); } catch (err) { /* 忽略 */ }
     // 首帧探针：连上但**不推流**（代理把流缓冲住了）与"连不上"是两回事，
     // 而 onerror 未必会来。没有这个探针，用户会停在"SSE 已连接"却永远收不到预警。
     if (probeMs > 0) {
@@ -4805,6 +4936,8 @@ function createCnStream(opts = {}) {
         if (consecutiveFails >= maxFails) activateFallback('连上但不推流');
         else connectSse();
       }, probeMs);
+      // 与 tickTimer 一致地 unref：这个 8 秒探针不该把 Node 侧的测试进程拖住。
+      if (probeTimer && typeof probeTimer.unref === 'function') probeTimer.unref();
     }
   }
 
@@ -4952,6 +5085,9 @@ function streamRows() {
       lastAt: s.lastAt ? new Date(s.lastAt).toISOString() : null,
       lastEventAt: s.lastEventAt ? new Date(s.lastEventAt).toISOString() : null,
       cursor: num(s.cursor), frozen: s.frozen === true,
+      // stale 由 Host 的 sync / status 帧告知（Client 自己判不出"没有数据"与"没有地震"）
+      stale: s.stale === true,
+      dataTime: s.dataTime ? new Date(s.dataTime).toISOString() : null,
       running: s.running === true, fallbackActive: s.fallbackActive === true,
       lastDetail: str(s.lastDetail),
     };
@@ -5701,6 +5837,13 @@ function SettingsPanel() {
         '所以这里选城市即可，不需要知道经纬度。表里的坐标是**行政区中心点**——' +
         '面积特别大的州 / 市（如甘孜州、哈尔滨市）离城区可差一百多公里，住在边缘时请把半径调大，' +
         '或用「用我的位置」。'),
+      // 无取消机制是**安全相关**的缺口：DESIGN 8.3 / 10.2 明确要求 UI 如实说明，不得假装能处理。
+      // 不写这一句的话，用户"没收到取消"会自然读成"警报仍然有效"，而真实原因是这一路数据
+      // 根本没有取消 / 最终报字段（日本 EEW 与海啸有那条链路，大陆源没有）。
+      h('div', { style: { fontSize: 11, color: '#d9a406', marginBottom: 8, lineHeight: 1.6 } },
+        '⚠ 这一路数据**没有取消 / 最终报标志**：此前播报过的预警若被上游撤销或修订，' +
+        '插件不会补一条「已作废」（日本 EEW / 海啸有这条链路，大陆源没有）。' +
+        '收到大陆预警后，请以中国地震台网（CENC）官方发布为准。'),
       cnCascade(),
     ),
 
@@ -6273,7 +6416,7 @@ function apply(ctx) {
 }
 
 // 单测钩子（客户端宿主忽略额外导出）
-const __test = { parse, parseQuake, parseEew, parseTsunami, parseJma, parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage, feedStatsOf, watchlessPoint, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn: maxLevelIn, jmaItemsOf: itemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf, matchAlert, matchPointAlert, distanceKm, validGeo, normalizePlaces, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, hitSeverityOf, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY, cnProductName, authorityOf, disclaimerOf, SOURCE_ORDER, SOURCE_LABELS, SOURCE_CODE_TEXT, SettingsPanel, statusMetaOf, buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION, inQuietHours, isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, ensureAlertChannel, broadcastHistoryCleared, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, p2pTimeToIso, cnTimeToIso, CN_TIME_RE, CN_REPORT_MAG_OPTIONS, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, issuedToDate, formatIssuedLocal, audioState, SOURCE_CONTRACTS, parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of, failResult, noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, P2P_TIME_RE, MIGRATED_KEY };
+const __test = { parse, parseQuake, parseEew, parseTsunami, parseJma, parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage, feedStatsOf, watchlessPoint, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn: maxLevelIn, jmaItemsOf: itemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf, matchAlert, matchPointAlert, distanceKm, validGeo, normalizePlaces, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, hitSeverityOf, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY, cnProductName, authorityOf, disclaimerOf, SOURCE_ORDER, SOURCE_LABELS, SOURCE_CODE_TEXT, SettingsPanel, statusMetaOf, buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION, inQuietHours, isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, ensureAlertChannel, broadcastHistoryCleared, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, p2pTimeToIso, cnTimeToIso, CN_TIME_RE, CN_REPORT_MAG_OPTIONS, issuedToDate, formatIssuedLocal, audioState, SOURCE_CONTRACTS, parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of, failResult, noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, P2P_TIME_RE, MIGRATED_KEY };
 
 // activeClient 是 12-websocket 的模块级 let：给 12 用的赋值出口（跨模块不能写 imported binding）
 // 由 12-websocket 提供 setter；这里仅保留引用以便阅读

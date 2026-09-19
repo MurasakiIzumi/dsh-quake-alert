@@ -90,7 +90,11 @@ function parseCencEew(raw) {
     // 震级闸门共用 thresholds.globalMagnitude（DESIGN 8.4：它不是速报，与预警同档）
     locator: 'point',
     speedReport: false,
-    severity: severityOfMagnitude(mag),
+    // **恒 red，与日本 556 同口径**（DESIGN 2 节：「EEW → red（警报本质）」）。severity 决定两件事：
+    // 通知配色，以及**静默时段能否穿透**（只有 red 穿透）。按震级分档会让一场 M4.2 的预警在夜间
+    // 被静默掉（severityOfMagnitude 给 info），而同配置下的日本 EEW 照常穿透——那是漏报方向。
+    // 速报（分钟级确认，不是警报）仍按震级分档。
+    severity: 'red',
     issued: originIso,
     reportTime: reportIso,
     headline,

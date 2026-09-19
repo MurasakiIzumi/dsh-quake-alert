@@ -92,11 +92,21 @@ function minuteKeyOf(timeIso) {
  * 0.5.0 起大陆源（cenc_eew / cenc_eqlist）也走同一把钥匙：它们的 **EventID 与 EEW 完全不同格式**
  * （`202609182050.0001` vs `CD.20260918205536.056`），归并只能靠时间 + 震中。
  */
+/**
+ * 0.1° 桶的字符串化。**必须把 "-0.0" 归一成 "0.0"**：`(-0.02).toFixed(1)` 得到 "-0.0"，
+ * 而 `(0.02).toFixed(1)` 得到 "0.0" —— 赤道与本初子午线两侧的震中会落进两个不同的桶，
+ * 事件键永远不相等 → 跨源归并失败、同一场地震响两次。近似归并（±2 分钟 + 50km）通常还能
+ * 兜住，所以它表现为概率性重复而不是稳定故障（0.5.1 修）。
+ */
+function oneDp(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return '?'
+  const s = n.toFixed(1)
+  return s === '-0.0' ? '0.0' : s
+}
+
 function geoEventKey(timeIso, lat, lon) {
   const min = minuteKeyOf(timeIso)
-  const la = (typeof lat === 'number' && Number.isFinite(lat)) ? lat.toFixed(1) : '?'
-  const lo = (typeof lon === 'number' && Number.isFinite(lon)) ? lon.toFixed(1) : '?'
-  return 'geo:' + min + '@' + la + ',' + lo
+  return 'geo:' + min + '@' + oneDp(lat) + ',' + oneDp(lon)
 }
 
 /** epoch 毫秒或 ISO 字符串 → ISO 字符串（USGS 给毫秒，EMSC 给字符串，统一到后者）。 */

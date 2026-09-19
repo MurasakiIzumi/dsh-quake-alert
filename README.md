@@ -137,9 +137,13 @@ last poll; hovering the sidebar status dot shows the same (abnormal sources firs
 - Several DSH pages **share the same per-source cursors**: a telegram or earthquake already handled by one page is not replayed in another (cross-tab de-duplication only ever lets one page announce it). The trade-off is that a page opened or reloaded later does not add those already-consumed entries to its own "Recent alerts" list.
 - Hypocenter-only reports (551 "hypocenter information" / "distant earthquake") carry no intensity data and cannot be evaluated against thresholds; they are recorded in "Recent alerts" with an explanatory note.
 - System notification permission must be granted once via "Test system notification"; the alert tone requires one user interaction before the browser allows it (autoplay policy).
-- **Coverage**: Japanese earthquakes / EEW / tsunamis come from P2PQuake over a WebSocket, and weather alerts from the JMA's Atom feed (polled by the Host half about once a minute). Outside Japan, coverage comes from EMSC (live push), USGS (global catalog, polled by the Host every 2 minutes) and NOAA (tsunami CAP, polled every 5 minutes). Regional weather sources (the US NWS, Europe's MeteoAlarm, and so on) are planned for a later version.
+- **Coverage**: Japanese earthquakes / EEW / tsunamis come from P2PQuake over a WebSocket, and weather alerts from the JMA's Atom feed (polled by the Host half about once a minute). Outside Japan, coverage comes from EMSC (live push), USGS (global catalog, polled by the Host every 2 minutes) and NOAA (tsunami CAP, polled every 5 minutes). Earthquakes in **mainland China** come from Wolfx relaying CENC (the China Earthquake Networks Center): the Host half holds one persistent connection per source and streams it to the page over SSE. Regional weather sources (the US NWS, Europe's MeteoAlarm, and so on) are planned for a later version.
 - **Global sources are coarser than Japanese ones**: they carry only an epicenter and a magnitude, with nothing down to the municipality; tsunamis are expressed as NOAA sea areas (such as `SCOTIA SEA`) rather than Japan's 津波予報区; and landslides / floods outside Japan have no ingestion channel yet.
 - **The same earthquake may be reported by both global sources**: if EMSC's and USGS's origin times fall on opposite sides of a minute boundary, the merge fails. The trade-off is deliberate — better to alert twice than to miss one.
+- **The Chinese sources carry no cancellation or final-report flag (safety-relevant)**: neither CENC stream has a "cancelled" or "final" field, so **if an alert already announced to you is later withdrawn or revised upstream, the plugin cannot send a follow-up saying it is void** — the cancellation path that exists for Japanese EEW / tsunamis does not apply here. That is a gap in the source itself, not something an implementation can paper over. For anything you receive, defer to CENC's own official release.
+- **Mainland China's EEW threshold sits around M4.0**: the warnings themselves are sparse (a few days apart in practice), so you will receive noticeably fewer alerts than for Japan. The reports stream (which does have data daily) has its own magnitude threshold, M4.5 by default and adjustable in the settings.
+- **The Chinese push channel can be downgraded**: the page uses an SSE long connection (seconds of latency); if a network middlebox cuts it (EventSource unavailable, no first frame after repeated attempts, or connected but not streaming), the plugin automatically falls back to 15-second polling and says so under "Source status" in the settings. You can also force polling there.
+- **CENC's warning and report streams are independent**: if both cover the same earthquake they are merged by origin time (minute) plus epicentre (0.1°) so you are alerted once; if they fall on opposite sides of a minute boundary, or the epicentres differ by more than 0.1°, the merge fails and the same earthquake may alert twice. Same trade-off as the global sources: better twice than never.
 - **The EMSC connection does not use the "no data" check**: an M4+ event arrives roughly every 30 minutes worldwide, so silence says nothing about connection health. Real disconnects are still detected and reconnected.
 - Weather alerts are deliberately threshold-free: the cut-off is fixed at level 4, so there is no slider to tune — the switch is simply on or off.
 - The sandbox replays mostly small, low-intensity earthquakes, so long periods without a match under the default "intensity 4 or higher" threshold are expected.
@@ -201,9 +205,10 @@ node tests/sync-test.cjs               # regression tests (679 assertions)
 
 ## Changelog
 
-Current version **0.4.2** (a review of the 0.4.1 fixes themselves: several missed-alert, false-alert
-and status bugs they introduced were fixed, and the parsing contracts were re-verified against real
-live data). See [CHANGELOG.md](./CHANGELOG.md) for the details of each release.
+Current version **0.5.1** (a review of 0.5.0: three independent adversarial passes found and fixed
+two missed alerts, four silent failures, five false alerts and five smaller rate / resource /
+consistency bugs; the regression suite went from 946 to 966 assertions). See
+[CHANGELOG.md](./CHANGELOG.md) for the details of each release.
 
 ## Data sources
 

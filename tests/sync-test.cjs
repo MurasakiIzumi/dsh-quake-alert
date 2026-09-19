@@ -2538,6 +2538,27 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const a3 = Object.assign({}, a2, { eventKey: 'geo:k3', issued: '2026-09-13T12:30:00Z' })
     assert(t.isEventRepeat(a3, 10) === false, '时间差 2.5 小时 → 按新事件处理')
 
+    // ④b 事件记忆按**各自**的窗口过期（0.5.1 修 D 类残留）
+    // 此前清理用的是"本次调用的窗口"：一条按 3 小时窗口记住的气象事件，会被 10 分钟后任意一条
+    // "命中"地震带着的 10 分钟窗口清掉，随后 L4 的更新被判成新事件 → 重复响铃。
+    {
+      const t0 = 1700000000000
+      const wxA = {
+        eventKey: 'jma:test-大雨:office-x', strength: 4, kind: 'weather', source: 'jma',
+        issued: new Date(t0 - 60 * 1000).toISOString(),
+      }
+      assert(t.isEventRepeat(wxA, 180, t0) === false, '（前置）气象事件首次登记 → 不判重复')
+      const q1 = {
+        id: 'q1', eventKey: 'geo:2026-09-18T20:00@35.0,139.0', strength: 5, kind: 'quake',
+        locator: 'point', source: 'usgs', issued: new Date(t0).toISOString(), geo: { lat: 35, lon: 139 },
+      }
+      t.isEventRepeat(q1, 10, t0 + 11 * 60 * 1000) // 11 分钟后的一条地震，走 10 分钟窗口
+      assert(t.isEventRepeat(wxA, 180, t0 + 12 * 60 * 1000) === true,
+        '气象事件按自己的 3 小时窗口记忆：10 分钟后的一条地震不得把它清掉（否则 L4 更新会重复响铃）')
+      assert(t.isEventRepeat(wxA, 180, t0 + 4 * 60 * 60 * 1000) === false,
+        '超过自己的 3 小时窗口后确实过期，按新事件处理')
+    }
+
     // ⑤ 解析契约：empty / schema / value 三类的区分（DESIGN 4.5）
     const emptyCode = t.parseEpspResult({ code: 554, id: 'x' })
     assert(emptyCode.ok === false && emptyCode.kind === 'empty', 'P2PQuake 其他 code → empty（不计故障）')
@@ -2922,6 +2943,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       '只有 type 包裹 → empty（源正常但当前没有预警，不计失败）')
     assert(T.parseCencEewResult({ type: 'cenc_eqlist', ID: 'x' }).kind === 'schema',
       'type 串源 → schema（防止两个源的载荷串台）')
+    // cenc_eew 的 severity **恒 red**，与日本 556 同口径（DESIGN 2 节「EEW → red（警报本质）」）。
+    // severity 决定通知配色，也决定**静默时段能否穿透**（只有 red 穿透）：按震级分档会让一场
+    // M4.2 的大陆预警在夜间被静默掉，而同配置下的日本 EEW 照常穿透——那是漏报方向（0.5.1 修）。
+    const cencEewAlert = T.parseCencEewResult(eewRaw).alert
+    assert(cencEewAlert.magnitude < 5 && cencEewAlert.severity === 'red',
+      '大陆预警 severity 恒 red —— 不因为实测样本只有 M4.2 就降级成 info')
+    assert(T.hitSeverityOf(cencEewAlert, { region: null, place: null }) === 'red',
+      '命中判定之后仍是 red（静默时段的红色穿透因此对它有效）')
 
     // ⑤ cenc_eqlist：真实整表 50 条
     const listRes = T.parseCencEqlistResult(listRaw)
@@ -3250,6 +3279,116 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '窗口内的新事件照常进缓冲（闸门是"时效闸门"，不是"一律不推"）')
     }
 
+    // ④b 停更探针必须由**时钟**推动，不能只在"内容有变化的帧"上求值（0.5.1 修）
+    // 中继停更的两种真实形态都不产生"有变化的新帧"：① 转发同一张旧表（被 md5 短路）；
+    // ② 干脆不再推数据帧。只在收帧时算一次的话，这个探针在最需要它的时候永远停在 false。
+    {
+      // ① md5 未变（中继一直转发同一张旧表）
+      const clock3 = { t: Date.parse('2026-09-18T15:32:31Z') } // 距表内最新事件 1 小时
+      const sched3 = makeSched(clock3)
+      const sockets3 = []
+      const src3 = wx.createWolfxSource({
+        id: 'cenc_eqlist', now: () => clock3.t,
+        setTimer: (f, m) => sched3.set(f, m), clearTimer: (k) => sched3.clear(k),
+        createSocket: () => { const x = makeSocket(); sockets3.push(x); return x },
+        idleMs: 0, firstDelayMs: 0, connectTimeoutMs: 0, heartbeatTimeoutMs: 0,
+      })
+      src3.markRead(); src3.start(); sched3.advance(0)
+      sockets3[0].onopen()
+      sockets3[0].onmessage({ data: JSON.stringify(listRaw) })
+      assert(src3.stats().stale === false, '（前置）距最新事件 1 小时 → 不判停更')
+      clock3.t += 50 * 60 * 60 * 1000
+      sockets3[0].onmessage({ data: JSON.stringify(listRaw) }) // 同一帧：md5 相同 → 走短路分支
+      assert(src3.stats().stale === true && src3.stats().staleSince > 0,
+        '整表 md5 未变但时钟走过 50 小时 → 仍要判停更（md5 短路只该省掉逐条比对，不能连探针一起跳过）')
+
+      // ② 中继不再推任何数据帧（"连得上但停更 4 个月"那种形态）：只能靠例行检查推动
+      const clock4 = { t: Date.parse('2026-09-18T15:32:31Z') }
+      const sched4 = makeSched(clock4)
+      const sockets4 = []
+      const src4 = wx.createWolfxSource({
+        id: 'cenc_eqlist', now: () => clock4.t,
+        setTimer: (f, m) => sched4.set(f, m), clearTimer: (k) => sched4.clear(k),
+        createSocket: () => { const x = makeSocket(); sockets4.push(x); return x },
+        idleMs: 0, firstDelayMs: 0, connectTimeoutMs: 0, heartbeatTimeoutMs: 0,
+      })
+      src4.markRead(); src4.start(); sched4.advance(0)
+      sockets4[0].onopen()
+      sockets4[0].onmessage({ data: JSON.stringify(listRaw) })
+      assert(src4.stats().stale === false, '（前置）不 stale')
+      clock4.t += 50 * 60 * 60 * 1000
+      src4.housekeeping() // 心跳定时器驱动的例行检查（这里手动跑一次，不真等 30 秒）
+      assert(src4.stats().stale === true,
+        '中继不再推任何帧时，停更由例行检查（时钟）推动 —— 心跳检查关掉也不该把它一起关掉')
+    }
+
+    // ④c 静默失效与速率约束（0.5.1 修）
+    {
+      // 整表"有 NoN 项却一条都解析不出来"必须与"空表"**不同形**（DESIGN 4.5）：字段改名会让
+      // 整表 50 条全被丢弃，而它此前 errors 不涨、dataTime 停在 0，用户看到绿色"已连接"
+      // 却一条都收不到 —— 正是最不该静默的那一类失败。
+      const h = harness('cenc_eqlist')
+      h.src.markRead(); h.src.start(); h.sched.advance(0)
+      const s = h.sockets[0]
+      s.onopen()
+      const renamed = JSON.parse(JSON.stringify(listRaw))
+      for (const k of Object.keys(renamed)) {
+        if (/^No\d+$/.test(k)) { renamed[k].Latitude = renamed[k].latitude; delete renamed[k].latitude }
+      }
+      const errBefore = h.src.stats().errors
+      s.onmessage({ data: JSON.stringify(renamed) })
+      assert(h.src.stats().errors === errBefore + 1 && h.src.stats().schemaSkipped === 1,
+        '整表有 NoN 项但全部解析失败 → 计入 errors（与"空表是正常的"必须不同形）')
+      // 对照：真正的空表仍走"正常但没数据"，不计失败
+      const err2 = h.src.stats().errors
+      s.onmessage({ data: JSON.stringify({ type: 'cenc_eqlist' }) })
+      assert(h.src.stats().errors === err2, '空表仍不计失败（源正常但当前没有速报数据）')
+      h.src.stop()
+
+      // pruneSeen 必须真的被调用：TTL 是"记忆时长"而不是装饰（poller 每轮清一次）
+      const h2 = harness('cenc_eqlist', { seenTtlMs: 1000 })
+      h2.src.markRead(); h2.src.start(); h2.sched.advance(0)
+      const s2 = h2.sockets[0]
+      s2.onopen()
+      s2.onmessage({ data: JSON.stringify(listRaw) })
+      const added1 = h2.src.stats().lastAdded
+      assert(added1 === 3, '（前置）冷启动放行窗口内的 3 条')
+      s2.onmessage({ data: JSON.stringify(listRaw) })
+      assert(h2.src.stats().lastAdded === 0, '（前置）md5 未变 → 短路，无新增')
+      h2.clock.t += 100 * 1000 // 远超 1 秒的 TTL
+      const changed = JSON.parse(JSON.stringify(listRaw))
+      changed.md5 = 'zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz' // 绕过 md5 短路，逼它逐条比对
+      s2.onmessage({ data: JSON.stringify(changed) })
+      assert(h2.src.stats().lastAdded === added1,
+        '去重键过了 TTL 之后重新入缓冲（pruneSeen 真的被调用，seenTtlMs 不是假选项）')
+      h2.src.stop()
+
+      // markRead 不能把正在等待的退避重置为 0：/feed 每 15 秒调一次它，否则"上游连不上时
+      // 不能死循环猛敲"（DESIGN 5.3）这条约束会被压平成 15 秒。
+      const h3 = harness('cenc_eew')
+      h3.src.markRead(); h3.src.start(); h3.sched.advance(0)
+      h3.sockets[0].onopen()
+      h3.sockets[0].onclose({ code: 1006 }) // 断开 → 排 1 秒退避
+      const n3 = h3.sockets.length
+      h3.clock.t += 500 // 退避还没到点
+      h3.src.markRead() // 模拟 /feed 的一次读取
+      h3.sched.advance(0)
+      assert(h3.sockets.length === n3, 'markRead 不取消正在等待的退避（否则退避被压平成 /feed 周期）')
+      h3.sched.advance(600)
+      assert(h3.sockets.length === n3 + 1, '退避到点后照常重连')
+      h3.src.stop()
+
+      // 空闲断开是正常行为，不该被写成 lastError（排障脚本会把它当故障打印）
+      const h4 = harness('cenc_eqlist', { idleMs: 60 * 1000 })
+      h4.src.markRead(); h4.src.start(); h4.sched.advance(0)
+      h4.sockets[0].onopen()
+      h4.clock.t += 120 * 1000
+      h4.src.housekeeping()
+      assert(h4.src.stats().idleSkips >= 1 && h4.src.stats().lastError === '',
+        '空闲断开只计 idleSkips，不写 lastError（它不是故障）')
+      h4.src.stop()
+    }
+
     // ⑤ 心跳看门狗 + 空闲断开
     {
       const h = harness('cenc_eew', { heartbeatTimeoutMs: 120 * 1000, heartbeatCheckMs: 30 * 1000 })
@@ -3355,6 +3494,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '/stream 返回 200 + text/event-stream（该类型在 dsh-host-webserver 里被显式跳过压缩）')
       assert(res.frames[0].indexOf('event: sync') === 0 && res.frames[0].indexOf('"cursor":100') !== -1,
         '首帧是 sync（告诉 Client 游标与缓冲状态，供诊断与判断要不要改走 /feed）')
+      assert(res.frames[0].indexOf('"stale":false') !== -1 && res.frames[0].indexOf('"dataTime":null') !== -1,
+        'sync 首帧带上数据健康（这个假源没有 stats()，按"不 stale"兜底——诊断字段缺失不该把整条流弄断）')
       assert(res.frames[1].indexOf('id: 99') === 0 && res.frames[1].indexOf('event: entry') !== -1,
         '随后按 seq 补发环缓冲里的条目（断线补齐，靠 id: 让浏览器重连时带回）')
       assert(src.reads === 1 && src.subs.length === 1, '订阅会 markRead（保持 WS 存活）并挂上订阅者')
@@ -3395,6 +3536,32 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const cs = fakeRes()
       h5({ url: '/dsh-quake-alert/stream?source=cenc_eew', headers: {} }, cs)
       assert(cs.status === 403, '跨站请求被拒绝（这条路由有保持外部连接的副作用）')
+
+      // keep-alive 帧同时承载**停更状态**（0.5.0 的 48 小时停更探针在默认路径上的可见性）。
+      // 停更的形态就是"不再有新 entry"，只看 sync / entry 的话状态会永远停在连接那一刻；
+      // 而"源可达但数据是旧的"与"这几天确实没有地震"在 Client 侧长得一模一样，只能由 Host 判。
+      const tickers = []
+      const srcS = {
+        markRead() {},
+        snapshot() { return { cursor: 7, entries: [], truncated: false, reset: false, frozen: false } },
+        subscribe() { return () => {} },
+        stats() { return { cursor: 7, stale: true, dataTime: 1700000000000 } },
+      }
+      const hS = host.createStreamHandler({
+        sources: { cenc_eqlist: srcS },
+        keepAliveMs: 1000,
+        setInterval: (fn) => { tickers.push(fn); return tickers.length },
+        clearInterval: () => {},
+      })
+      const rS = fakeRes()
+      hS({ url: '/dsh-quake-alert/stream?source=cenc_eqlist', headers: {} }, rS)
+      assert(rS.frames[0].indexOf('"stale":true') !== -1 && rS.frames[0].indexOf('"dataTime":1700000000000') !== -1,
+        'sync 首帧把 Host 判定的 stale / dataTime 带给 Client')
+      assert(tickers.length === 1, 'keep-alive 定时器已排上')
+      tickers[0]()
+      const ka = rS.frames[rS.frames.length - 1]
+      assert(ka.indexOf('event: status') === 0 && ka.indexOf('"stale":true') !== -1,
+        '周期 status 帧兼作 keep-alive：停更状态必须由 Host 推，否则 SSE 路径下它在界面上永远不可见')
     }
 
     // ⑨ 两个源都进了同一张 pollers 表 → /feed?source=cenc_* 天然可用（这就是 WS→HTTP 降级通道）
@@ -3504,8 +3671,85 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       T.resetSourceHealth()
       h.created[0].emit('entry', { seq: 502, id: 'cenc:z', xml: '{}' })
       assert(h.client.cursor() === 502, '坏帧之后照常继续处理（不让游标停住）')
+      // status 帧（Host 每 15 秒推一次，兼作 keep-alive）：停更只能由 Host 告知 ——
+      // "源可达但数据是旧的"与"这几天确实没有地震"在 Client 侧长得一模一样。
+      const nStatus = h.statuses.length
+      h.created[0].emit('status', { source: 'cenc_eew', cursor: 502, stale: true, dataTime: 1700000000000 })
+      assert(h.statuses.length === nStatus + 1 && h.statuses[h.statuses.length - 1].status === 'stale',
+        'Host 的 status 帧说停更 → 上报 stale（中灰「数据已过期」，不折叠进 degraded）')
+      assert(h.client.stats().stale === true, 'stale 进入 stats（诊断快照与源状态行要能读到）')
+      h.created[0].emit('status', { source: 'cenc_eew', cursor: 503, stale: false, dataTime: 0 })
+      assert(h.statuses[h.statuses.length - 1].status === 'open', '恢复新鲜 → 回到 open（中灰点不会永久挂着）')
+      // status 帧不能顶替"最近一条数据"的时刻，否则设置页会一直显示"最近数据 0 秒前"，
+      // 恰好把"其实很久没有数据了"盖掉
+      const lastAtBefore = h.client.stats().lastAt
+      h.created[0].emit('status', { source: 'cenc_eew', stale: false })
+      assert(h.client.stats().lastAt === lastAtBefore, 'status 帧不更新 lastAt（它表示"最近一条数据"）')
       h.client.stop()
       assert(h.created[0].closed === true, 'stop() 关掉在飞的 EventSource')
+
+      // 首帧 sync 就带 stale 时也要认（连接那一刻上游已经是旧的）
+      const h2 = cnHarness({})
+      h2.client.start()
+      h2.created[0].emit('sync', {
+        source: 'cenc_eew', cursor: 9, reset: false, truncated: false, frozen: false, replayed: 0,
+        stale: true, dataTime: 1700000000000,
+      })
+      assert(h2.statuses.some((p) => p.status === 'stale'), 'sync 首帧带 stale → 直接上报 stale')
+      h2.client.stop()
+    }
+
+    // ①b 状态帧不得抹掉 sync 的告警；降级客户端必须与 SSE 共用游标键（0.5.1 修）
+    {
+      // store.pushSource 是整体替换 status + detail 的，而 status 帧每 15 秒就来一次：
+      // 若它只报"已连接"，sync 那一刻报出的"增量缺口 / 游标重置 / Host 未运行"会在 15 秒后
+      // 自己消失——而它们的条件其实仍然成立。
+      const h = cnHarness({})
+      h.client.start()
+      h.created[0].emit('sync', {
+        source: 'cenc_eew', cursor: 5, reset: true, truncated: true, frozen: true, replayed: 3, stale: false,
+      })
+      const lastOf = (x) => x.statuses[x.statuses.length - 1]
+      assert(lastOf(h).status === 'degraded' && lastOf(h).detail.indexOf('增量缺口') !== -1,
+        'sync 的告警先上报（增量缺口 / 游标重置 / Host 未运行）')
+      h.created[0].emit('status', { source: 'cenc_eew', cursor: 6, stale: false, dataTime: 0 })
+      assert(lastOf(h).status === 'degraded' && lastOf(h).detail.indexOf('增量缺口') !== -1,
+        'status 帧不得把 sync 的告警抹成"已连接"（条件仍然成立）')
+      h.client.stop()
+
+      // 降级客户端必须继承 SSE 的游标：否则降级瞬间从 `since=tail` 起步，
+      // SSE 挂掉到降级生效之间 Host 缓冲里的条目会被静默跳过（真实的漏报窗口）。
+      const captured = []
+      const h2 = cnHarness({ cursor: 501, over: {
+        // 覆盖掉 harness 默认的假 createFallback，逼它走 12c 的**默认降级工厂**
+        //（游标键就在那条路径上，用假工厂测不到）
+        createFallback: undefined,
+        createFeedClient: (o) => { captured.push(o); return { start() {}, stop() {} } },
+      } })
+      h2.client.start()
+      h2.created[0].emitRaw('error', '')
+      h2.created[0].emitRaw('error', '')
+      h2.created[0].emitRaw('error', '')
+      assert(h2.client.modeOf() === 'poll' && captured.length === 1, '连续拿不到首帧 → 降级并建立轮询客户端')
+      assert(captured[0].cursorKey === T.CN_CURSOR_KEY + '.cenc_eew',
+        '降级客户端与 SSE 共用同一个游标键（否则降级期间会静默跳过一段条目）')
+      h2.client.stop()
+    }
+
+    // ①c Host 说"游标重置过"时必须允许回退（0.5.1 修 D 类残留）
+    {
+      const h = cnHarness({ cursor: 900 })
+      h.client.start()
+      assert(h.client.cursor() === 900, '（前置）从持久化游标起步')
+      h.created[0].emit('sync', {
+        source: 'cenc_eew', cursor: 300, reset: true, truncated: false, frozen: false, replayed: 0, stale: false,
+      })
+      assert(h.client.cursor() === 300,
+        'Host 明确 reset → 游标回退到它的当前位置（否则本地卡在更大的值上，每次重连都全量重放）')
+      // 没有 reset 时仍然只前进——防止把"回退保护"一起改坏
+      h.created[0].emit('entry', { seq: 200, id: 'cenc:old', xml: '{}' })
+      assert(h.client.cursor() === 300, '没有 reset 时游标仍然只前进（回退会让"断线补齐"重复投递）')
+      h.client.stop()
     }
 
     // ② 页面刷新：从持久化游标续传，不重放
