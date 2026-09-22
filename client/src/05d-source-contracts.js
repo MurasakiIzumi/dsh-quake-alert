@@ -274,12 +274,19 @@ export const SOURCE_CONTRACTS = {
     required: [
       'properties 是对象（一条 CAP 电文）',
       'properties.event string 且**精确命中 8 类洪水白名单**（未命中判 empty，见下）',
-      'properties.id string 非空（CAP identifier，去重与事件键的基础）',
+      // 0.6.1 review 订正：实现会退回 GeoJSON 外层的 `id`（实测外层给的是
+      // `https://api.weather.gov/alerts/urn:oid:…`，解析器会剥掉 URL 前缀），所以
+      // "properties.id 必需"是**比实现更严**的声明——后来者按它写测试会误判某个字段必需。
+      '`properties.id` 或 GeoJSON 外层的 `id` 至少有一个非空（去重与消息级 id 的基础）',
       'properties.sent 可解析的 ISO 时间（带偏移）',
     ],
     tolerant: 'severity 缺失或不在 {Extreme,Severe,Moderate,Minor} 内 → 退回 info，**不判 schema**：' +
       '宁可让一条真实洪水预警少一个颜色，也不要因为上游少给一个枚举值就整源停播（漏报方向）。' +
       'headline / areaDesc / description / instruction / geocode / ends / senderName 缺失一律不判 schema。' +
+      '**事件键（eventKey）取 `parameters.VTEC` 的事件追踪号** `<office>.<phenom>.<sig>.<ETN>`' +
+      '（`/O.<ACTION>.KRLX.FA.W.0137.….` → `KRLX.FA.W.0137`，ACTION 段刻意剔除：它随' +
+      ' NEW→EXT→CON→CAN 变化）；VTEC 缺失或解析不出时退回 CAP 的 `references`（取 `sent` 最早的一条）、' +
+      '再退回自身 identifier——**三级兜底都不判 schema**。' +
       '`properties.eventCode` 是对象（`{SAME:[…],NationalWeatherService:[…]}`）且实测 `Flood Warning` 的 ' +
       'SAME 给的是 `FLS`——它只作诊断，**不参与任何判据**。',
     empty: '`properties.event` 不在白名单——它是**向前兼容的兜底**而不是异常：全量 359 条里海事通告占' +
@@ -312,7 +319,11 @@ export const SOURCE_CONTRACTS = {
     ],
     tolerant: 'alert_text_en 为空 → detail 只留署名行，**不判 schema**（正文是"该怎么做"的说明，' +
       '它的缺失不该让一条真实预警消失）。feature_id / province / confidence_en / impact_en / status_en ' +
-      '缺失一律不判 schema——**事件键会在 feature_id 缺失时退回区域名**（见 05h 的 ecccEventKeyOf）。',
+      '缺失一律不判 schema——**事件键会在 feature_id 缺失时退回区域名**（见 05h 的 ecccEventKeyOf；' +
+      '两个都缺时会退到 province，这时同省同码同日期的两条不同 warning 会算出同一个事件键而被' +
+      '当成"后续发布"——已知的边界，等真实样本出现再校准）。' +
+      '**事件键按 UTC 发布日分桶**（`eccc:<code>:<areaKey>:<YYYY-MM-DD>`）：同一天内的更新同键、' +
+      '不重复响铃；跨 UTC 日界的持续过程会换键，最多多响一次（保守方向）。',
     empty: '两类都判 empty（向前兼容，不点亮蓝点）：① `alert_type !== "warning"`——ECCC 的 advisory 按官方' +
       '定义是「generally not considered hazardous」，实测当前 116 条里 114 条是 frost advisory；' +
       '② `alert_name_en` 不在白名单（风 / 高温 / 雷暴 / 雾…）。' +

@@ -121,8 +121,10 @@ Body Notice 与 Warning 的结构与原文一致）。它锁定两个真实缺�
 | 文件 | 来源 | 说明 |
 |---|---|---|
 | `nws/nws-flood-alerts.geojson` | `https://api.weather.gov/alerts/active?event=<8 类洪水>` | **裁剪版**：74 条里每个 event 类型各留 1 条（7 类）。结构与真实响应**同形**（`{type:'FeatureCollection', features:[…]}`），properties 与 geometry 都**完整保留**——正文（`description` / `instruction`）是解析目标，裁掉就测不到 |
-| `nws/nws-point-alerts.geojson` | 同日 `?point=29.7604,-95.3698` | 运行时真正用的形态（按点查询）。5KB 一条，正好说明"为什么用 point 而不是全量"（全量 1.67MB） |
+| `nws/nws-point-alerts.geojson` | 同日 `?point=29.7604,-95.3698` | 运行时真正用的形态（按点查询）。5KB 一条，正好说明"为什么用 point 而不是全量"（全量 1.67MB）。**内容是 `Air Quality Alert`**——即"按点查到的、不在本插件白名单内的真实响应"，用来钉白名单的**否定方向**（判 `empty` 而不是 schema / 放行） |
 | `eccc/eccc-alerts.geojson` | `https://api.weather.gc.ca/collections/weather-alerts/items?f=json&limit=200` | **裁剪版**：每种 `alert_code` 各留 1 条（当前季节只有 FTA / WDW / CFW），**保留 Polygon**——它 100% 带几何，是匹配的输入 |
+| `nws/nws-event-chain.geojson` | 同一次洪水预警的**连续两版**（`/alerts/active` 取一条 Update，再按它的 `references` 拉上一版） | 0.6.1 新增。存在的理由：0.6.0 的算法是用"同一 serial 递增 version"的**合成**样本验证的，而实测的链是**逐版串联**的——合成样本永远发现不了那件事。两版的 identifier / sent 都不同，**VTEC 追踪号相同** |
+| `nws/nws-cancel-chain.geojson` | 一条 `messageType=Cancel` + 它 `references` 的那条警报 | 0.6.1 新增。两者的 VTEC 只有 ACTION 段不同（`EXT` → `CAN`）、CAP identifier 完全不同：这是"用 VTEC 做事件键"才能匹配上"此前播报的警报已作废"的证据 |
 
 解析要点（实现见 `client/src/05h-overseas-parsers.js` 与 `12e-overseas-poll.js`）：
 
@@ -133,13 +135,20 @@ Body Notice 与 Warning 的结构与原文一致）。它锁定两个真实缺�
   且实测 `Flood Warning` 的 SAME 给的是 `FLS`，所以它只作诊断、不参与任何判据。
 - **NWS 的时间自带偏移**（`2026-09-22T06:51:00-04:00`，随州与夏令时变化）——直接 `Date.parse`，
   **不要补本地时区**。这是本插件第一个"时刻完整"的源（JMA / nmc / Wolfx 给的都是裸本地时间）。
-- **NWS 的事件键去掉 identifier 末尾的版本段**：实测 identifier 形如
-  `urn:oid:2.49.0.1.840.0.<40hex>.<serial>.<version>`，同一次事件的 Update 递增 version，
-  用 `references` 指回被取代的那几版。去掉 `.<version>` 之后，同一事件的 Alert 与 Update 同键
-  （靠 `strength` 判升级），不同 serial 仍是不同事件。
+- **NWS 的事件键取 VTEC 的** `<office>.<phenom>.<sig>.<ETN>`（如 `/O.EXT.KRLX.FA.W.0137.…/` →
+  `KRLX.FA.W.0137`），**剔除 ACTION 段**：它从 `NEW` → `EXT` → `CON` → `CAN` 全程在变，
+  放进去等于每次更新换一个键。这是 NWS 官方的事件追踪标识，实测 80/80 条活跃洪水类电文都有
+  标准 7 段 VTEC，且同一条链的每个版本完全一致（`nws-event-chain.geojson` 就是这条证据），
+  Cancel 与被取消的那条也一致（`nws-cancel-chain.geojson`）。
+  **不要用 CAP 的 `references` 做事件键**（0.6.0 的做法，已被实测否定）：`references` 指向的是
+  **被本条取代的那条消息**，而实测的链是**逐版串联**的——"取 `sent` 最早的一条"只能回溯一步，
+  8 条真实链里 7 条会算出每版不同的键（症状：同一场洪水随每次更新重复响铃）。它现在只作为
+  VTEC 缺失时的兜底（再下一级是自身 identifier）。
 - **ECCC 只接 `alert_type === 'warning'`**：`advisory` 按 ECCC 自己的定义是
   「generally not considered hazardous」（霜冻、雾、高温都在里面）。实测当前 116 条里 114 条是
   frost advisory——不排除它，这个源就是噪声源。
+  **注意 `wind warning` 是 warning**（只有霜冻 / 雾是 advisory）：它被排除是因为**不在本插件的
+  灾种范围内**，不是因为"不危险"——这两件事不能混成一句。
 - **ECCC 的白名单按 `alert_name_en` 关键词**（`/rain|flood|surge|hydrolog|water/`，并排除
   frost / fog / wind / heat…）。**不要按三字母 `alert_code` 猜**：它没有官方枚举，
   而 0.6.0 的调研阶段正是靠猜码把 `CFW` 当成了洪水（实际是 **storm surge warning**）。
@@ -151,4 +160,4 @@ Body Notice 与 Warning 的结构与原文一致）。它锁定两个真实缺�
 - **当前季节没有降雨类样本**：ECCC 的降雨预警长什么样，这份 fixture **回答不了**
   （DESIGN 4.6.3 已登记这个缺口）。等它真实出现时用采集脚本重抓，并把 `alert_code` 补进白名单。
 - fixture 随季节与生效集合变化，diff 天然是噪音；要固定的是**字段形态**，
-  那由 `tests/sync-test.cjs` 的 0.6.0 断言来钉。
+  那由 `tests/sync-test.cjs` 的 0.6.0 / 0.6.1 断言来钉（含真实事件链的同键断言）。

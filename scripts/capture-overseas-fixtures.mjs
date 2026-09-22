@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// dsh-quake-alert · 海外气象源 fixture 抓取（0.6.0）
+// dsh-quake-alert · 海外气象源 fixture 抓取（0.6.0；0.6.1 追加两条事件链）
 //
 // 用途：把美国 NWS 与加拿大 ECCC 的**真实响应**存进 `samples/`，作为解析器与回归断言的输入。
 // 形态遵循 samples/nmc/ 的既有做法（0.5.2）：**裁剪但保持与真实响应同形**——
@@ -81,6 +81,67 @@ async function captureNws() {
   if (p.status === 200) {
     try { JSON.parse(p.text); write('samples/nws/nws-point-alerts.geojson', p.text) } catch (e) { console.log('  point 响应不是 JSON') }
   }
+
+  await captureNwsEventChains(j)
+}
+
+/**
+ * 两条**事件链** fixture（0.6.1）。存在的理由：0.6.0 的事件键算法是用"同一 serial 递增 version"
+ * 的**合成**样本验证的，而实测的链是**逐版串联**的（每条只 `references` 紧邻的上一版）——
+ * 合成样本永远发现不了那件事，真实链一抓就露。所以这两条 fixture 是**证据**，不是装饰：
+ *   ① 同一次洪水预警的连续两版：identifier / sent 都不同，**VTEC 追踪号相同**；
+ *   ② 一条 Cancel + 它 `references` 的那条警报：VTEC 只有 ACTION 段不同（EXT/CON → CAN）。
+ * 任何一条重新抓都要能重现"同键"这个结论，否则说明上游换了事件标识的语义（DESIGN 4.7.4）。
+ */
+async function captureNwsEventChains(activeJson) {
+  const feats = (activeJson && activeJson.features) || []
+  const upd = feats.find((f) => /Warning$/.test(f.properties.event) &&
+    f.properties.messageType === 'Update' && (f.properties.references || []).length > 0)
+  if (upd) {
+    const prev = await getAlertJson(upd.properties.references[0].identifier)
+    if (prev) {
+      write('samples/nws/nws-event-chain.geojson', JSON.stringify({
+        type: 'FeatureCollection',
+        note: '真实的 NWS 事件链：同一次洪水预警的两个连续版本（都是 Update）。两版的 VTEC 追踪号' +
+          '（<office>.<phenom>.<sig>.<ETN>）相同，而 CAP identifier / sent / ends 每次都不同 —— ' +
+          '事件键必须落在 VTEC 上（用 references 只能回溯一步，见 05h 的 nwsEventKeyOf）。',
+        features: [prev, upd],
+      }, null, 2) + '\n')
+      console.log('  事件链：' + upd.properties.event + ' · ' +
+        JSON.stringify((upd.properties.parameters || {}).VTEC || null))
+    }
+  } else {
+    console.log('  事件链：当前活跃集里没有带 references 的 Warning 类，跳过（下次再抓）')
+  }
+
+  const r = await get('https://api.weather.gov/alerts?message_type=cancel&event=' +
+    encodeURIComponent('Flood Warning') +
+    '&start=' + encodeURIComponent(new Date(Date.now() - 7 * 864e5).toISOString()) +
+    '&end=' + encodeURIComponent(new Date().toISOString()) + '&limit=5')
+  if (r.status !== 200) { console.log('  Cancel 列表：HTTP ' + r.status + '（跳过）'); return }
+  let cj
+  try { cj = JSON.parse(r.text) } catch (e) { console.log('  Cancel 列表不是 JSON'); return }
+  const can = (cj.features || []).find((f) => (f.properties.references || []).length > 0)
+  if (!can) { console.log('  Cancel 列表里没有可用样本，跳过'); return }
+  const orig = await getAlertJson(can.properties.references[0].identifier)
+  if (!orig) { console.log('  被取消的消息拉取失败，跳过'); return }
+  write('samples/nws/nws-cancel-chain.geojson', JSON.stringify({
+    type: 'FeatureCollection',
+    note: '真实的 NWS 取消链路：Cancel 与它取消的那条警报。两者的 VTEC 追踪号相同（ACTION 段' +
+      '从 EXT/NEW 变成 CAN），CAP identifier 则完全不同 —— 用 VTEC 做事件键，' +
+      'wasRecentlyAlerted 才能认出"此前播报过的警报已作废"。',
+    features: [orig, can],
+  }, null, 2) + '\n')
+  console.log('  Cancel 链：' + JSON.stringify((can.properties.parameters || {}).VTEC || null))
+}
+
+async function getAlertJson(id) {
+  const r = await get('https://api.weather.gov/alerts/' + encodeURIComponent(id))
+  if (r.status !== 200) return null
+  try {
+    const j = JSON.parse(r.text)
+    return j && j.properties ? j : null
+  } catch (e) { return null }
 }
 
 // ---------------------------------------------------------------------------

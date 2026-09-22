@@ -77,11 +77,14 @@ function feedRows() {
  * 海外源（12e，0.6.0）：Client 直连的 REST 轮询。
  *
  * 三个字段是这个形态**独有**的，也是排障时最先要看的：
- *   · `uncovered` —— NWS 对"覆盖范围之外"的坐标回 400（实测多伦多 / 温哥华 / 伦敦），
- *     它不是故障；数字涨说明有人的关注点不在这个源的服务范围内。
- *   · `ageSkipped` —— 被年龄闸门拦下的条数（打开页面时已发布超过 6 小时的那些，
- *     只进历史不响铃）。它解释"为什么我看到预警但没响"。
- *   · `gated` —— 这个源进入过几次"首轮 / 休眠恢复"状态（每次进入都会重新按 6 小时判）。
+ *   · `rejected` —— 被上游用 HTTP 400 拒绝的请求数（实测多伦多 / 温哥华 / 伦敦的坐标都被
+ *     NWS 这样答过）。**它不代表"这个点不在覆盖范围"**（也可能是我们的参数被拒），
+ *     文案与代码都不替上游断言原因。（0.6.1 review：此处此前写作 `uncovered` ——
+ *     那是 12e 内部 Map 的名字，快照里从来没有这个字段。）
+ *   · `ageSkipped` —— 被年龄闸门拦下的、**本来会播报**的条数（打开页面时已发布超过 6 小时
+ *     的那些，只进历史不响铃）。它解释"为什么我看到预警但没响"。
+ *   · `gated` —— 这个源**进入**过几次"首轮 / 休眠恢复"状态（每次进入都会重新按 6 小时判）。
+ *   · `truncated` —— 上游返回的条目数超过每次请求上限、被我们截断的轮数（ECCC 的 limit=200）。
  */
 function overseasRows() {
   const out = {}
@@ -94,6 +97,8 @@ function overseasRows() {
       // 也可能是我们的参数被拒；响应体前 160 字在 lastError 里）。
       rejected: num(o.rejected),
       ageSkipped: num(o.ageSkipped),
+      // 上游条目数超过每次请求上限、被我们截断的轮数（ECCC 的 limit=200）
+      truncated: num(o.truncated),
       // 两个 throttle 计数分开：Last 是本轮、Total 是累计（0.6.0 review B-6）
       throttledLast: num(o.throttledLast), throttledTotal: num(o.throttledTotal), gated: num(o.gated),
       lastAt: o.lastAt ? new Date(o.lastAt).toISOString() : null,

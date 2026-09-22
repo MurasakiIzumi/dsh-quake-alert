@@ -1,0 +1,320 @@
+{
+  "type": "FeatureCollection",
+  "note": "真实的 NWS 事件链：同一次洪水预警的两个连续版本（均为 Update）。两条的 VTEC 前三段+ETN 相同（这就是 NWS 的官方事件标识），而 CAP identifier / sent / ends 每次都不同 —— 事件键必须落在 VTEC 上。",
+  "features": [
+    {
+      "@context": [
+        "https://geojson.org/geojson-ld/geojson-context.jsonld",
+        {
+          "@version": "1.1",
+          "wx": "https://api.weather.gov/ontology#",
+          "@vocab": "https://api.weather.gov/ontology#"
+        }
+      ],
+      "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.a0fa716c294a6d5d6723a5bba707cfc7c9ea122a.001.1",
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -82.3,
+              39.3
+            ],
+            [
+              -82.47,
+              39.32
+            ],
+            [
+              -82.47,
+              39.39
+            ],
+            [
+              -82.34,
+              39.39
+            ],
+            [
+              -82.29,
+              39.38
+            ],
+            [
+              -82.28,
+              39.47
+            ],
+            [
+              -81.84,
+              39.45
+            ],
+            [
+              -81.85,
+              39.38
+            ],
+            [
+              -81.85,
+              39.29
+            ],
+            [
+              -82.14,
+              39.29
+            ],
+            [
+              -82.26,
+              39.3
+            ],
+            [
+              -82.3,
+              39.3
+            ]
+          ]
+        ]
+      },
+      "properties": {
+        "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.a0fa716c294a6d5d6723a5bba707cfc7c9ea122a.001.1",
+        "@type": "wx:Alert",
+        "id": "urn:oid:2.49.0.1.840.0.a0fa716c294a6d5d6723a5bba707cfc7c9ea122a.001.1",
+        "areaDesc": "Athens, OH; Morgan, OH; Vinton, OH; Washington, OH",
+        "geocode": {
+          "SAME": [
+            "039009",
+            "039115",
+            "039163",
+            "039167"
+          ],
+          "UGC": [
+            "OHC009",
+            "OHC115",
+            "OHC163",
+            "OHC167"
+          ]
+        },
+        "affectedZones": [
+          "https://api.weather.gov/zones/county/OHC009",
+          "https://api.weather.gov/zones/county/OHC115",
+          "https://api.weather.gov/zones/county/OHC163",
+          "https://api.weather.gov/zones/county/OHC167"
+        ],
+        "references": [
+          {
+            "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.7c004b6358407e1f16a729d51c3ed4ee77e27ea6.001.1",
+            "identifier": "urn:oid:2.49.0.1.840.0.7c004b6358407e1f16a729d51c3ed4ee77e27ea6.001.1",
+            "sender": "w-nws.webmaster@noaa.gov",
+            "sent": "2026-09-21T17:31:00-04:00"
+          }
+        ],
+        "sent": "2026-09-21T21:18:00-04:00",
+        "effective": "2026-09-21T21:18:00-04:00",
+        "onset": "2026-09-21T21:18:00-04:00",
+        "expires": "2026-09-22T09:00:00-04:00",
+        "ends": "2026-09-22T09:00:00-04:00",
+        "status": "Actual",
+        "messageType": "Update",
+        "category": "Met",
+        "severity": "Severe",
+        "certainty": "Likely",
+        "urgency": "Expected",
+        "event": "Flood Warning",
+        "sender": "w-nws.webmaster@noaa.gov",
+        "senderName": "NWS Charleston WV",
+        "headline": "Flood Warning issued September 21 at 9:18PM EDT until September 22 at 9:00AM EDT by NWS Charleston WV",
+        "description": "* WHAT...Flooding caused by excessive rainfall continues.\n\n* WHERE...Central Athens County in southeastern Ohio...\nSouthwestern Morgan County in southeastern Ohio...\nNortheastern Vinton County in southeastern Ohio...\nWest Central Washington County in southeastern Ohio...\n\n* WHEN...Until 900 AM EDT Tuesday.\n\n* IMPACTS...Flooding of rivers, creeks, streams, and other low-lying\nand flood-prone locations is occurring. Numerous roads remain\nclosed due to flooding.\n\n* ADDITIONAL DETAILS...\n- At 917 PM EDT, local law enforcement reported numerous roads that\nwere flooded in the warned area due to heavy rain from earlier\nthunderstorms. Flooding is ongoing.\n- Some locations that will experience flooding include...\nAthens, Nelsonville, Lake Hope State Park, Chauncey, Buchtel,\nAmesville, The Plains, and Stroud Run State Park.\n- http://www.weather.gov/safety/flood",
+        "instruction": "Turn around, don't drown when encountering flooded roads. Most flood\ndeaths occur in vehicles.\n\nBe especially cautious at night when it is harder to recognize the\ndangers of flooding.\n\nReport flooding to the National Weather Service by calling toll free,\n800 401 9535, when you can do so safely.",
+        "response": "Avoid",
+        "note": null,
+        "parameters": {
+          "AWIPSidentifier": [
+            "FLWRLX"
+          ],
+          "WMOidentifier": [
+            "WGUS41 KRLX 220118"
+          ],
+          "NWSheadline": [
+            "FLOOD WARNING NOW IN EFFECT UNTIL 9 AM EDT TUESDAY"
+          ],
+          "BLOCKCHANNEL": [
+            "EAS",
+            "NWEM",
+            "CMAS"
+          ],
+          "EAS-ORG": [
+            "WXR"
+          ],
+          "VTEC": [
+            "/O.EXT.KRLX.FA.W.0137.000000T0000Z-260922T1300Z/"
+          ],
+          "eventEndingTime": [
+            "2026-09-22T09:00:00-04:00"
+          ],
+          "expiredReferences": [
+            "w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.7101c7ef93df889e4eac8b2207e522aafacdb51f.001.1,2026-09-21T13:49:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.fa2df36696678d4220d8c89d7ded7d016554688e.001.1,2026-09-21T10:43:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.15be5a5a0dbf8fd982a812f88a300864b6d243e7.001.1,2026-09-21T04:46:00-04:00"
+          ]
+        },
+        "scope": "Public",
+        "code": "IPAWSv1.0",
+        "language": "en-US",
+        "web": "http://www.weather.gov",
+        "eventCode": {
+          "SAME": [
+            "FLW"
+          ],
+          "NationalWeatherService": [
+            "FAW"
+          ]
+        },
+        "replacedBy": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.1edf79ab522c51d6e3e1d971996869334b52fed9.001.1",
+        "replacedAt": "2026-09-22T08:07:00-04:00"
+      }
+    },
+    {
+      "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.1edf79ab522c51d6e3e1d971996869334b52fed9.001.1",
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -82.3,
+              39.3
+            ],
+            [
+              -82.47,
+              39.32
+            ],
+            [
+              -82.47,
+              39.39
+            ],
+            [
+              -82.34,
+              39.39
+            ],
+            [
+              -82.29,
+              39.38
+            ],
+            [
+              -82.28,
+              39.47
+            ],
+            [
+              -81.84,
+              39.45
+            ],
+            [
+              -81.85,
+              39.38
+            ],
+            [
+              -81.85,
+              39.29
+            ],
+            [
+              -82.14,
+              39.29
+            ],
+            [
+              -82.26,
+              39.3
+            ],
+            [
+              -82.3,
+              39.3
+            ]
+          ]
+        ]
+      },
+      "properties": {
+        "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.1edf79ab522c51d6e3e1d971996869334b52fed9.001.1",
+        "@type": "wx:Alert",
+        "id": "urn:oid:2.49.0.1.840.0.1edf79ab522c51d6e3e1d971996869334b52fed9.001.1",
+        "areaDesc": "Athens, OH; Morgan, OH; Vinton, OH; Washington, OH",
+        "geocode": {
+          "SAME": [
+            "039009",
+            "039115",
+            "039163",
+            "039167"
+          ],
+          "UGC": [
+            "OHC009",
+            "OHC115",
+            "OHC163",
+            "OHC167"
+          ]
+        },
+        "affectedZones": [
+          "https://api.weather.gov/zones/county/OHC009",
+          "https://api.weather.gov/zones/county/OHC115",
+          "https://api.weather.gov/zones/county/OHC163",
+          "https://api.weather.gov/zones/county/OHC167"
+        ],
+        "references": [
+          {
+            "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.a0fa716c294a6d5d6723a5bba707cfc7c9ea122a.001.1",
+            "identifier": "urn:oid:2.49.0.1.840.0.a0fa716c294a6d5d6723a5bba707cfc7c9ea122a.001.1",
+            "sender": "w-nws.webmaster@noaa.gov",
+            "sent": "2026-09-21T21:18:00-04:00"
+          }
+        ],
+        "sent": "2026-09-22T08:07:00-04:00",
+        "effective": "2026-09-22T08:07:00-04:00",
+        "onset": "2026-09-22T08:07:00-04:00",
+        "expires": "2026-09-22T21:00:00-04:00",
+        "ends": "2026-09-22T21:00:00-04:00",
+        "status": "Actual",
+        "messageType": "Update",
+        "category": "Met",
+        "severity": "Severe",
+        "certainty": "Likely",
+        "urgency": "Expected",
+        "event": "Flood Warning",
+        "sender": "w-nws.webmaster@noaa.gov",
+        "senderName": "NWS Charleston WV",
+        "headline": "Flood Warning issued September 22 at 8:07AM EDT until September 22 at 9:00PM EDT by NWS Charleston WV",
+        "description": "* WHAT...Flooding caused by excessive rainfall continues.\n\n* WHERE...Central Athens County in southeastern Ohio...\nSouthwestern Morgan County in southeastern Ohio...\nNortheastern Vinton County in southeastern Ohio...\nWest Central Washington County in southeastern Ohio...\n\n* WHEN...Until 900 PM EDT Tuesday.\n\n* IMPACTS...Flooding of rivers, creeks, streams, and other low-lying\nand flood-prone locations is imminent or occurring. Numerous roads\nremain closed due to flooding.\n\n* ADDITIONAL DETAILS...\n- At 806 AM EDT, local law enforcement reported flooding was\ncontinuing across much of the county from previous heavy rains.\n- Some locations that will experience flooding include...\nAthens, Nelsonville, Lake Hope State Park, Chauncey, Buchtel,\nAmesville, The Plains and Stroud Run State Park.\n- http://www.weather.gov/safety/flood",
+        "instruction": "Turn around, don't drown when encountering flooded roads. Most flood\ndeaths occur in vehicles.\n\nBe especially cautious at night when it is harder to recognize the\ndangers of flooding.\n\nReport flooding to the National Weather Service by calling toll free,\n800 401 9535, when you can do so safely.",
+        "response": "Avoid",
+        "note": null,
+        "parameters": {
+          "AWIPSidentifier": [
+            "FLWRLX"
+          ],
+          "WMOidentifier": [
+            "WGUS41 KRLX 221207"
+          ],
+          "NWSheadline": [
+            "FLOOD WARNING NOW IN EFFECT UNTIL 9 PM EDT THIS EVENING"
+          ],
+          "BLOCKCHANNEL": [
+            "EAS",
+            "NWEM",
+            "CMAS"
+          ],
+          "EAS-ORG": [
+            "WXR"
+          ],
+          "VTEC": [
+            "/O.EXT.KRLX.FA.W.0137.000000T0000Z-260923T0100Z/"
+          ],
+          "eventEndingTime": [
+            "2026-09-22T21:00:00-04:00"
+          ],
+          "expiredReferences": [
+            "w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.7c004b6358407e1f16a729d51c3ed4ee77e27ea6.001.1,2026-09-21T17:31:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.7101c7ef93df889e4eac8b2207e522aafacdb51f.001.1,2026-09-21T13:49:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.fa2df36696678d4220d8c89d7ded7d016554688e.001.1,2026-09-21T10:43:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.15be5a5a0dbf8fd982a812f88a300864b6d243e7.001.1,2026-09-21T04:46:00-04:00"
+          ]
+        },
+        "scope": "Public",
+        "code": "IPAWSv1.0",
+        "language": "en-US",
+        "web": "http://www.weather.gov",
+        "eventCode": {
+          "SAME": [
+            "FLW"
+          ],
+          "NationalWeatherService": [
+            "FAW"
+          ]
+        }
+      }
+    }
+  ]
+}

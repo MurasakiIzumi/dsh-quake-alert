@@ -261,6 +261,10 @@ function matchCnAreaAlert(alert, cfg) {
 function matchOverseasAlert(alert, cfg) {
   const d = cfg.disasters || {}
   if (d.overseasWeather === false) return { hit: false, reason: '海外气象提醒已关闭' }
+  // **防御性守卫，不是本函数的正常输入路径**（0.6.1 review 订正注释）：取消 / 解除消息由
+  // 11-pipeline 的 handleAlert 在 matchAlert **之前**就交给 handleCancelled 了，所以线上
+  // 走到这里的一定不是 cancelled。保留它是为了守住 matchAlert 的对外不变量——"cancelled 的
+  // 消息永远不返回 hit"，避免将来多一条调用路径时把一条"已作废"当成新警报播出去。
   if (alert.cancelled) return { hit: false, reason: '取消消息不提醒' }
   const places = (cfg.watch && cfg.watch.places) || []
   if (places.length === 0) {

@@ -197,9 +197,9 @@ function SourceStatusBlock() {
       (Number(host.detailDropped) ? '，Host 放弃详情 ' + host.detailDropped + ' 条' : '') +
       ' · 最近拉取 ' + ago)
   }
-  // 海外源（0.6.0）：按关注点查询外部 REST。显示"查了几轮 / 发了多少请求 / 收到几条"，
-  // 以及两个只有这个形态才有的计数：**过老只记历史**（年龄闸门）与**不在覆盖范围**
-  // （NWS 对覆盖外的坐标回 400——那不是故障，见 12e 的说明）。
+  // 海外源（0.6.0）：按关注点查询外部 REST。显示"查了几轮 / 发了多少请求 / 收到多少响应条目"，
+  // 以及几个只有这个形态才有的计数：**过老只记历史**（年龄闸门）、**被上游拒绝**（HTTP 400，
+  // 不替上游断言"这个点不在覆盖范围"）、**被分页上限截断的轮数**（ECCC 的 limit=200）。
   for (const id of OVERSEAS_STAT_ORDER) {
     const o = overseasStatsOf[id]
     const st = sources[id]
@@ -208,11 +208,14 @@ function SourceStatusBlock() {
       continue
     }
     const ago = o.lastAt ? Math.max(0, Math.round((Date.now() - o.lastAt) / 1000)) + ' 秒前' : '—'
+    // 「响应条目」而不是「收到 N 条」（0.6.1 review）：NWS 是按点的 5 个采样点各查一次，
+    // 同一批预警会被重复计入，写成"收到 35 条"会让用户以为收到了 35 条不同预警。
     rows.push((SOURCE_LABELS[id] || id) + '：已查询 ' + (o.polls || 0) + ' 轮 · 请求 ' + (o.requests || 0) +
-      ' 次 · 收到 ' + (o.received || 0) + ' 条' +
+      ' 次 · 响应条目 ' + (o.received || 0) +
       (o.applied ? '，交给主链 ' + o.applied + ' 条' : '') +
       (o.ageSkipped ? '，过老只记历史 ' + o.ageSkipped + ' 条' : '') +
       (o.rejected ? '，被上游拒绝 ' + o.rejected + ' 次' : '') +
+      (o.truncated ? '，上游结果被分页上限截断 ' + o.truncated + ' 轮' : '') +
       (o.throttledLast ? '，本轮超上限跳过 ' + o.throttledLast + ' 个请求' : '') +
       (o.errors ? '，失败 ' + o.errors + ' 次' : '') +
       ' · 最近查询 ' + ago)
@@ -598,8 +601,12 @@ function SettingsPanel() {
       '半径 ≥ 25km 时会在中心点之外补查 4 个方位点，所以半径对它是近似（不保证覆盖半径内的所有县）；' +
       '加拿大源把半径换算成一个矩形范围向 ECCC 查询，凡与该范围相交的预警都算命中。' +
       '美国只播报 Flood / Flash Flood / Coastal Flood Warning，Watch、Advisory、Statement 只记入历史；' +
-      '加拿大只接 warning 类的降雨 / 洪水 / 风暴潮（霜冻、雾、大风等既非危险天气、也不在本插件灾种内）。' +
-      '打开页面时若某条预警已发布超过 6 小时，只记入历史、不响铃。' +
+      // 措辞订正（0.6.1 review）：原句把"霜冻 / 雾 / 大风"一律说成"非危险天气"，但 ECCC 的
+      // wind warning 确实是 warning（只有霜冻 / 雾是 advisory）——它被排除是因为**不在本插件的
+      // 灾种范围内**，不是因为它不危险。把两件事混成一句会让用户误判这个源的取舍。
+      '加拿大只接 warning 类的降雨 / 洪水 / 风暴潮：霜冻、雾属于 ECCC 的 advisory（官方定义即' +
+      '「非危险天气」），大风、高温、雷暴等虽是 warning 但不在本插件的灾种范围内。' +
+      '打开页面时若某条预警已发布超过 6 小时，只记入历史、不响铃；页面休眠超过 30 分钟再恢复时同样按这条规则处理。' +
       '数据来源：美国国家气象局（NWS）；加拿大环境与气候变化部（ECCC，Data Source: Environment and Climate Change Canada）。'),
     // 无灾情时也能验证整条链路：用本地构造的电文走完 解析 → 匹配 → 播报 → 历史，
     // 不产生任何外部请求。每次点击轮换一种场景，覆盖级别落点与区域粒度的不同分支。
@@ -1010,6 +1017,12 @@ function SettingsPanel() {
                       h('div', { style: { display: 'flex', gap: 6, marginTop: 2 } },
                         h('span', { style: { color: '#9aa0a6', width: 44 } }, '内容'),
                         h('span', { style: { color: '#e6e6e8', flex: 1, wordBreak: 'break-all' } }, head)),
+                      // 官方正文（0.6.1）：NWS 的 description + instruction、ECCC 的正文 + 署名。
+                      // 此前 alert.detail 在整条链路上**没有任何消费者**——用户看不到洪水预警里
+                      // "该怎么做"那一段，ECCC 许可要求的署名也进不了界面（见 05h 的文件头）。
+                      e.detail ? h('div', { style: { display: 'flex', gap: 6, marginTop: 4 } },
+                        h('span', { style: { color: '#9aa0a6', width: 44, flexShrink: 0 } }, '正文'),
+                        h('span', { style: { color: '#c8ccd4', flex: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, String(e.detail))) : null,
                     ),
               )
             }),

@@ -1,4 +1,4 @@
-// ============================================================================
+﻿// ============================================================================
 // dsh-quake-alert · client/src/11-pipeline.js
 //
 // 作用：主链——收到一条原始消息后的完整处理顺序。
@@ -67,6 +67,10 @@ const AUTHORITY_BY_SOURCE = {
   // 免责声明里点名"中央气象台（中国气象局）"而不是泛泛的"气象厅"——后者是日本的机构，
   // 出现在一条云南暴雨预警的免责声明里会直接削弱这份声明的可信度（同上一段的理由）。
   nmc_alarm: '中央气象台（中国气象局）',
+  // 0.6.1：海外气象源。不登记的话，一条美国洪水预警的免责声明会退化成泛泛的
+  // 「请以官方发布为准」——用户看不出该找哪家机构（与上面 nmc 的理由相同）。
+  nws_alerts: '美国国家气象局（NWS）',
+  eccc_alerts: '加拿大环境与气候变化部（ECCC）',
   jma: '気象庁',
 }
 function authorityOf(alert) {
@@ -152,11 +156,23 @@ function updateWeatherHint(alert, cfg) {
 function handleCancelled(alert, cfg) {
   if (alert.kind !== 'eew' && alert.kind !== 'tsunami' && alert.kind !== 'weather') return
   const disasters = cfg.disasters || {}
+  // 历史条目带上解析层给出的正文（0.6.1 review）：NWS 的 description + instruction、ECCC 的
+  // 正文 + 署名此前**没有任何消费者**——`addEvent` 会被 normalizeHistoryEntry 过滤掉未列出的
+  // 字段，展开详情也只渲染 headline。而 instruction 恰恰是"该怎么做"，署名是 ECCC 许可
+  //（End-use Licence v2.1.1）的硬要求。见 07-store / 02-storage 的 detail 字段。
+  const pushEvent = (fields) => addEvent(Object.assign({ detail: alert.detail }, fields))
   if (alert.kind === 'eew' && disasters.earthquake === false) return
   if (alert.kind === 'tsunami' && disasters.tsunami === false) return
-  if (alert.kind === 'weather' && disasters.weather === false) return
+  // 气象的开关按**来源**分岔（0.6.1 review）：海外源由它自己的 `overseasWeather` 管
+  // （见 12e 的 enabled 判定与 13-ui 的设置项）。此前统一看日本气象的 `weather`，
+  // 于是"关掉日本气象、保留海外源"的用户收到过洪水播报，却永远收不到它的作废提醒——
+  // 取消链路承诺的正是这一条（CHANGELOG 0.6.0「此前播报的警报已作废」）。
+  if (alert.kind === 'weather') {
+    const off = alert.locator === 'overseas' ? disasters.overseasWeather === false : disasters.weather === false
+    if (off) return
+  }
   if (!wasRecentlyAlerted(alert)) {
-    addEvent({
+    pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
       issued: alert.issued, headline: alert.headline + '（未命中：取消 / 解除消息，且此前未提醒过该事件）', hit: false,
     })
@@ -164,7 +180,7 @@ function handleCancelled(alert, cfg) {
   }
   // 取消 / 解除消息不穿透静默（它不是紧急警报，静默期间只记历史）
   if (inQuietHours(cfg)) {
-    addEvent({
+    pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
       issued: alert.issued, headline: alert.headline, hit: true,
       suppressed: true,
@@ -176,14 +192,14 @@ function handleCancelled(alert, cfg) {
   // 灾害过程已结束：忘掉事件键，这样"解除之后再次发布"会被当成新事件而不是重复（见 10-dedupe）
   forgetEvent(cancelKeyOf(alert))
   if (!claimAlertForTab('cancel:' + (alert.id || cancelKeyOf(alert)), '')) {
-    addEvent({
+    pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
       issued: alert.issued, headline: alert.headline, hit: true,
       suppressed: true, suppressedReason: '其它 DSH 标签页已提醒',
     })
     return
   }
-  addEvent({
+  pushEvent({
     id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
     issued: alert.issued, headline: alert.headline, hit: true,
   })
@@ -229,6 +245,8 @@ function watchlessPoint(alert, cfg) {
 
 function handleAlert(alert, cfg, opts) {
   const options = opts || {}
+  // 历史条目统一带上解析层的正文（0.6.1 review，理由同 handleCancelled 里的说明）。
+  const pushEvent = (fields) => addEvent(Object.assign({ detail: alert.detail }, fields))
   if (watchlessPoint(alert, cfg)) {
     return { notified: false, reason: 'no-watch-point', detail: '全球源消息，但未设置全球关注点' }
   }
@@ -246,13 +264,17 @@ function handleAlert(alert, cfg, opts) {
     return { notified: false, reason: 'cancelled', detail: '这是取消 / 解除消息' }
   }
   const m = matchAlert(alert, cfg)
+  // 气象强度的**回落**要在命中与未命中两条路径上都写回事件记忆（0.6.1 review）。
+  // 日本气象电文的命中闸门与强度是同一个 level（L4），回落必然走 !m.hit 分支，所以只在那里
+  // 下调曾经是对的；而海外气象源的**档位**由 event 名（NWS）或颜色档（ECCC）决定、**强度**
+  // 由 severity 决定——两条正交。于是"NWS 的 Flood Warning 从 Severe 降到 Moderate"仍然命中
+  // （档位不变），记忆强度不会被下调；随后回升时 `isStrengthUpgrade` 判 false → 永久静默，
+  // 正是 weakenEvent 注释里声明要防住的那条漏报。它只在强度确实更低时下调，所以对未命中
+  // 路径（"关注地区未命中"）没有副作用。
+  if (alert.kind === 'weather') weakenEvent(alert)
   if (!m.hit) {
     // 气象警报：即使不播报（L3 及以下），也把"正在升级"留给侧边栏 tooltip
     updateWeatherHint(alert, cfg)
-    // 气象的**降级**（L4 → L3 → L2）要记进事件键：否则"降级之后再次升级"会被当成
-    // 强度未升级的重复发布而永久静默（见 10-dedupe 的 weakenEvent）。
-    // 只在强度确实更低时下调，所以"关注地区未命中"这类 not-hit 不会有副作用。
-    if (alert.kind === 'weather') weakenEvent(alert)
     // 全球源（坐标型）的"未命中"通常不进历史：USGS 的 24 小时目录有近百条 M2.5+，
     // 逐条记"未命中"会把历史列表刷满与用户无关的地震，真正该看的提醒反而被挤掉。
     // **但「坐标缺失」是例外**——那不是"离得远"，而是"根本没法判定"。DESIGN 3.1 要求
@@ -266,7 +288,7 @@ function handleAlert(alert, cfg, opts) {
     // 「真正的提醒会被刷掉」是同一个失败形态（DESIGN 3.2 对 point 源已定过这个口径）。
     // 与坐标型的差别是**不整条丢弃**：设置页与诊断仍需要"有预警、但你没配关注点"这个信息。
     if (!m.noWatch && (alert.locator !== 'point' || !validGeo(alert.geo))) {
-      addEvent({
+      pushEvent({
         id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
         issued: alert.issued, headline: alert.headline + '（未命中：' + m.reason + '）', hit: false,
       })
@@ -290,7 +312,7 @@ function handleAlert(alert, cfg, opts) {
     ? Math.max(cfg.dedupe.windowMinutes || 10, WEATHER_EVENT_WINDOW_MINUTES)
     : cfg.dedupe.windowMinutes
   if (isEventRepeat(alert, repeatWindow)) {
-    addEvent({
+    pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true, suppressedReason: '同一地震的后续发布（强度未升级）',
@@ -306,7 +328,7 @@ function handleAlert(alert, cfg, opts) {
   // 会让排查的人去翻 Host 重启日志，而真正生效的是长期事件记忆。行为方向是安全的
   // （不重复响铃），所以只改措辞、不改判据。
   if (looksReplayed) {
-    addEvent({
+    pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true, suppressedReason: '同一事件在最近 24 小时内已提醒过（等强度，不重复响铃）',
@@ -331,7 +353,7 @@ function handleAlert(alert, cfg, opts) {
     //（洪水有效期中位 12.6 小时 → 一天可能响 3〜4 次，而用户刚被告知"只记历史，不打扰"）。
     // 记进这条记忆之后，后面的 `looksReplayed` 分支会把它拦住。
     rememberAlerted(alert)
-    addEvent({
+    pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true,
@@ -341,7 +363,7 @@ function handleAlert(alert, cfg, opts) {
   }
   // 静默时段：命中但不响铃、不弹通知，只记历史。红色等级（EEW、大海啸警报）默认可穿透。
   if (!options.skipQuietHours && inQuietHours(cfg) && !(hitSeverity === 'red' && cfg.quietHours.breakForSevere !== false)) {
-    addEvent({
+    pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true,
@@ -353,7 +375,7 @@ function handleAlert(alert, cfg, opts) {
   // 其它 DSH 标签页已经播报过同一条消息 → 本标签页静默，避免多个页面同时响铃。
   // 用消息 id 而不是事件键：多标签页收到的是同一条消息，而同一事件的不同消息（如强度升级）不应被拦。
   if (!claimAlertForTab(alert.id, cancelKeyOf(alert))) {
-    addEvent({
+    pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true, suppressedReason: '其它 DSH 标签页已提醒',
@@ -365,12 +387,26 @@ function handleAlert(alert, cfg, opts) {
   const bodyLines = [alert.headline]
   if (hitPref) bodyLines.push('命中关注地区：' + prefZh + (prefZh !== hitPref ? '（' + hitPref + '）' : ''))
   // 全球源没有行政区，命中依据是「距某个关注点多少公里」——把距离说出来，
-  // 用户才能判断这条提醒是否可信（半径是自己设的）
-  else if (m.place) bodyLines.push('命中关注点：' + m.place.name + '（距震中约 ' + Math.round(m.distanceKm) + ' km）')
+  // 用户才能判断这条提醒是否可信（半径是自己设的）。
+  //
+  // 0.6.1 review：海外气象源（`locator === 'overseas'`）**也**带 `m.place`，但它没有
+  // distanceKm（命中在取数时就已确定，见 06-matcher 的 matchOverseasAlert），
+  // 于是这里会拼出「距震中约 NaN km」，还把一条洪水预警说成"震中"——用户可见的错误文案。
+  // 它必须单独分岔：说清判定依据是"该点所在地的官方预警"，而不是距离。
+  else if (m.place && alert.locator === 'overseas') {
+    bodyLines.push('命中关注点：' + m.place.name + '（该点所在地的官方预警）')
+  } else if (m.place) bodyLines.push('命中关注点：' + m.place.name + '（距震中约 ' + Math.round(m.distanceKm) + ' km）')
   if (alert.kind === 'tsunami') bodyLines.push('请立即远离海岸与河口')
-  if (alert.kind === 'weather') bodyLines.push('请确认所在市町村的避难信息')
+  // 提醒动作同样分岔（0.6.1 review）：日本气象电文对应的是市町村级的避难信息，
+  // 而美国 / 加拿大的洪水预警由当地应急部门（county / 省）发布——对海外用户说
+  // 「确认所在市町村的避难信息」既找不到对应入口，也把日本制度套到了别国。
+  if (alert.kind === 'weather') {
+    bodyLines.push(alert.locator === 'overseas'
+      ? '请关注当地官方发布的避难与撤离指引'
+      : '请确认所在市町村的避难信息')
+  }
   bodyLines.push(disclaimerOf(alert))
-  addEvent({
+  pushEvent({
     id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
     issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
   })

@@ -48,8 +48,9 @@ jobs:
 
       # 核心回归套件（0.5.4 补）。它是**零依赖**的：自己用 vm 加载已提交的 client/client.js，
       # 只需要 Node 内置模块与仓库里的 area-tables.cjs——所以不必 pnpm install。
-      # 此前 CI 只有契约自检，1070 条断言（去重 / 匹配 / 解析 / 健康机制）全在本地跑：
-      # PR 破坏了这些逻辑，CI 不会红。实测在 UTC 时区下也全绿（脚本里没有依赖本机时区的断言）。
+      # 此前 CI 只有契约自检，1070 条断言（0.6.0 起 1242、0.6.1 起 1315；去重 / 匹配 / 解析 /
+      # 健康机制）全在本地跑：PR 破坏了这些逻辑，CI 不会红。实测在 UTC 时区下也全绿
+      # （脚本里没有依赖本机时区与**当天日期**的断言——0.6.1 修掉了一条依赖 fixture 绝对日期的）。
       - name: 核心回归套件
         run: node tests/sync-test.cjs
 
@@ -59,10 +60,10 @@ jobs:
       - name: 离线契约自检（不联网）
         run: node scripts/check-contracts.mjs --offline
 
-      # 在线检查：真实拉取 8 个源。只在手动触发时跑——PR 上跑会让上游的网络抖动
+      # 在线检查：真实拉取 10 个源。只在手动触发时跑——PR 上跑会让上游的网络抖动
       # 变成与改动无关的红灯（而网络问题按设计不算失败，那这个 job 就没有信息量了）。
       # 判定规则见脚本头部：只有 schema / value（= 上游改版）会让它失败，
       # 网络不可达 / 超时只记 skip。
-      - name: 在线契约检查（真实拉取 8 个源）
+      - name: 在线契约检查（真实拉取 10 个源）
         if: github.event_name == 'workflow_dispatch'
         run: node scripts/check-contracts.mjs

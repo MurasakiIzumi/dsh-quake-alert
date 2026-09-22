@@ -75,7 +75,15 @@ async function probeNws() {
   if (all.status !== 200) { problems.push('NWS /alerts/active HTTP ' + all.status); console.log('  ✗ HTTP ' + all.status); return }
   let json
   try { json = JSON.parse(all.text) } catch (err) { problems.push('NWS 全量不是合法 JSON'); console.log('  ✗ 返回不是 JSON（可能是拦截页）'); return }
-  const feats = Array.isArray(json.features) ? json.features : []
+  // 顶层形状判据（0.6.1 review）：缺了它，`{oops:1}` 会被当成"0 条"走完整个函数，
+  // 输出"本插件关心的洪水类：0 条"、`problems` 为空、脚本 exit 0 —— 而"上游改版"与
+  // "这一刻确实没有预警"在这份输出里完全同形，本脚本唯一的自动化职责就静默失效了。
+  if (!json || !Array.isArray(json.features)) {
+    problems.push('NWS /alerts/active 缺少 features 数组（结构变了）')
+    console.log('  ✗ 缺少 features 数组（上游结构变了，契约要复核）')
+    return
+  }
+  const feats = json.features
   const byEvent = {}
   let noGeom = 0
   let noZones = 0
@@ -185,7 +193,12 @@ async function probeEccc() {
   if (r.status !== 200) { problems.push('ECCC HTTP ' + r.status); console.log('  ✗ HTTP ' + r.status); return }
   let json
   try { json = JSON.parse(r.text) } catch (err) { problems.push('ECCC 返回不是合法 JSON'); console.log('  ✗ 不是 JSON'); return }
-  const feats = Array.isArray(json.features) ? json.features : []
+  if (!json || !Array.isArray(json.features)) {
+    problems.push('ECCC 缺少 features 数组（结构变了）')
+    console.log('  ✗ 缺少 features 数组（上游结构变了，契约要复核）')
+    return
+  }
+  const feats = json.features
   const combos = {}
   let noGeom = 0
   for (const f of feats) {
@@ -228,7 +241,12 @@ async function probeGdacs() {
   if (r.status !== 200) { problems.push('GDACS HTTP ' + r.status); console.log('  ✗ HTTP ' + r.status); return }
   let json
   try { json = JSON.parse(r.text) } catch (err) { problems.push('GDACS 返回不是合法 JSON'); console.log('  ✗ 不是 JSON'); return }
-  const feats = Array.isArray(json.features) ? json.features : []
+  if (!json || !Array.isArray(json.features)) {
+    problems.push('GDACS 缺少 features 数组（结构变了）')
+    console.log('  ✗ 缺少 features 数组（上游结构变了，契约要复核）')
+    return
+  }
+  const feats = json.features
   const byType = {}
   for (const f of feats) byType[f.properties.eventtype] = (byType[f.properties.eventtype] || 0) + 1
   const NAMES = { EQ: '地震', FL: '洪水', TC: '台风', WF: '山火', DR: '干旱', VO: '火山' }

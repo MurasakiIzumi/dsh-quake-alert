@@ -291,6 +291,15 @@ function saveJSON(key, value) {
 // 历史记录必须是「对象数组」，且每个字段必须是渲染层能直接交给 React 的基本类型：
 // 元素为 null 会抛错；字段是对象/数组则会让 React 抛「Objects are not valid as a React child」。
 const strOr = (v, fallback) => (typeof v === 'string' ? v : (typeof v === 'number' || typeof v === 'boolean' ? String(v) : fallback));
+/**
+ * 历史条目里正文的保留上限（0.6.1）。
+ *
+ * `detail` 是解析层给出的官方正文（NWS 的 description + instruction；ECCC 的正文 + 署名），
+ * 展开条目时给用户看"该怎么做"。必须截断：历史最多 30 条、写进 localStorage，
+ * NWS 的 description + instruction 单条实测可达数 KB，不设上限会让这条 key 轻易撑爆配额
+ *（超配额时 saveJSON 是**静默失败**的，整份历史会停止落盘）。
+ */
+const HISTORY_DETAIL_MAX = 1200;
 function normalizeHistoryEntry(e, i) {
   const key = strOr(e.key, '') || strOr(e.id, '');
   return {
@@ -305,6 +314,9 @@ function normalizeHistoryEntry(e, i) {
     severity: strOr(e.severity, ''),
     issued: strOr(e.issued, ''),
     headline: strOr(e.headline, ''),
+    // 官方正文（0.6.1）：NWS 的 description + instruction / ECCC 的正文 + 署名。
+    // 旧条目没有这个字段 → 空串，展示层不渲染那一行。
+    detail: strOr(e.detail, '').slice(0, HISTORY_DETAIL_MAX),
     pref: strOr(e.pref, ''),
     hit: e.hit === true,
     suppressed: e.suppressed === true,
@@ -2722,7 +2734,13 @@ function parseNmcAlarm(raw) {
 //      而 Update / Cancel 会**换一条新的 identifier**（2026-09-22 实测过去 7 天 500 条：
 //      11 个多消息事件组里 **0 组**是"同一 serial 只递增 version"，Cancel 的 identifier
 //      与它引用的原消息连 40 位 hash 都不同）。
-//      → 所以事件键**必须用 CAP 的 `references`**（指向被取代的原消息），见 nwsEventKeyOf。
+//      → 事件键落在 **VTEC 的事件追踪号**上：`<office>.<phenom>.<sig>.<ETN>`。它是 NWS 官方的
+//      事件标识，从 NEW → EXT → CON → CAN 全程不变（只改 ACTION 段），实测 80/80 条洪水类电文
+//      都有标准 7 段 VTEC。**0.6.0 曾改用 CAP 的 `references`，0.6.1 review 证伪并撤回**：
+//      实测的链是逐版串联的（每条只引用上一版），"取 sent 最早的一条"只能回溯一步，
+//      8 条真实链里 7 条每个版本各得一个不同的键 → 同一场洪水随每次 Update 重复响铃。
+//      证据与回归数据：`samples/nws/nws-event-chain.geojson`、`nws-cancel-chain.geojson`。
+//      见 nwsEventKeyOf（VTEC → references → 自身 identifier 三级兜底）。
 //    · ECCC 的 API **没有稳定的 alert id**（只有 `alert_code` + `feature_id`），
 //      → 事件键 = 码 + 区域 + **发布日**：同一天内的更新同键（不重复响），跨天的新过程换键。
 //    消息级 id 仍保留完整信息（含版本 / 发布时刻），供"同一条消息重复到达"去重。
@@ -2786,23 +2804,51 @@ const NWS_KIND_TEXT = Object.fromEntries(
 );
 
 /**
- * NWS 的事件键。**必须优先用 CAP 的 `references`**（0.6.0 review 修正）。
+ * NWS 的 **VTEC 事件追踪键**：`<office>.<phenom>.<significance>.<ETN>`。
  *
- * 实测（2026-09-22，过去 7 天的 500 条 Flood / Flash Flood / Coastal Flood 电文）：
- * **11 个多消息事件组里 0 组是"同一 serial 只递增 version"**，而 Cancel 消息的 identifier
- * 与它 `references` 的那条原消息**连 40 位 hash 都不同**（例：Cancel `a27ba9d7…` 引用
- * `d17b28bf…`）。所以"去掉末尾版本段"这条规则**关联不上原警报**：
- * 播报时记下的键是原 Alert 的，Cancel 到达时算出的是另一个键 → `wasRecentlyAlerted` 恒为假
- * → 用户永远收不到"此前播报的警报已作废"（与 nmc 的缺口一模一样，而当时的设计正好相反地
- * 宣称"NWS 有真正的取消语义"）。
+ * VTEC 是 NWS 官方的事件追踪机制，段位是
+ * `/O.<ACTION>.<OFFICE>.<PHENOM>.<SIG>.<ETN>.<BEGIN>-<END>/`
+ * （实测 2026-09-22 的 80 条活跃洪水类电文：**80/80 都有 VTEC，且都是标准 7 段**）。
  *
- * 正确做法就是 CAP 语义本身：Update / Cancel 的 `<references>` 指向**被它取代的消息**。
- * 取其中 `sent` 最早的一条作为事件链的根（并列时按 identifier 字典序，保证确定性），
- * 再去掉末尾的 `.<version>` —— 最后这一步是兜底：万一某条 references 只指向上一版
- * （而不是原始那条），去版本段之后仍与更早的版本同键。
- * 没有 references 的（就是原始 Alert）用自身 identifier。
+ * 关键在于 **ACTION 之外的四段是事件级的、跨版本稳定**：同一次洪水从
+ * `NEW` → `EXT` → `CON` → `CAN` 只改 ACTION 段，`OFFICE / PHENOM / SIG / ETN` 全程不变。
+ * 所以键**必须剔除 ACTION 段**，否则每次 Update 都会换键。
+ *
+ * @param {unknown} vtecList `properties.parameters.VTEC`（字符串数组）
+ * @returns {string} 解析不出来时返回 ''（调用方退到兜底）
  */
-function nwsEventKeyOf(id, references) {
+function nwsVtecKeyOf(vtecList) {
+  if (!Array.isArray(vtecList)) return ''
+  for (const raw of vtecList) {
+    // 不在行首锚定：实测存在一条字符串里带多段 VTEC 的产品，取第一段即可。
+    const m = /\/O\.[A-Z]{3}\.([A-Z0-9]{4})\.([A-Z]{2})\.([A-Z])\.(\d{4})\./.exec(String(raw || ''));
+    if (m) return m[1] + '.' + m[2] + '.' + m[3] + '.' + m[4]
+  }
+  return ''
+}
+
+/**
+ * NWS 的事件键。**首选 VTEC 的事件追踪号**（0.6.1 修正；0.6.0 用的是 references，已证伪）。
+ *
+ * 为什么不能用 CAP 的 `references`（0.6.0 的做法）：CAP 的 `<references>` 指向的是
+ * **被本条取代的那条消息**，而 NWS 实测是**逐版串联**的链——每条只引用紧邻的上一版
+ * （见 `samples/nws/nws-event-chain.geojson`：第 N 版 → 第 N-1 版 → … → 原始 Alert）。
+ * 于是"取 references 里 sent 最早的一条"**只能回溯一步**，算出的键每版都不同：
+ * 实测追 8 条真实事件链（2026-09-22 的活跃 Flood Warning），**7 条链上每个版本各得一个不同的键**
+ * → `isEventRepeat` 永远认为"这是新事件" → 同一场洪水随每次 Update 重复响铃
+ * （每次 Update 都在 24 小时"已播报"记忆里留下新键，`looksReplayed` 也拦不住）。
+ * 它唯一看起来成立的场景是 Cancel：Cancel 引用的正是上一版，于是与"最后一次播报的那一版"
+ * 偶然同键 —— 那是巧合，不是归并（原始 `Alert` 版从未被记住过）。
+ *
+ * 兜底顺序（VTEC 缺失时按序退让，**都不判 schema**，见契约的 tolerant）：
+ *   ① VTEC 追踪号；
+ *   ② references 里 `sent` 最早的一条（去掉末尾 `.<version>`）——保留给没有 VTEC 的产品，
+ *      例如部分非 VTEC 的海事 / 特殊电文；
+ *   ③ 自身 identifier（去掉末尾 `.<version>`）。
+ */
+function nwsEventKeyOf(id, references, vtecList) {
+  const vtec = nwsVtecKeyOf(vtecList);
+  if (vtec) return 'nws:' + vtec
   const refs = Array.isArray(references) ? references : [];
   let best = null;
   for (const r of refs) {
@@ -2856,6 +2902,9 @@ function parseNwsAlert(feature, opts) {
   const instruction = String(p.instruction || '').trim();
   const detail = [description, instruction].filter(Boolean).join('\n\n');
   const place = opts && isPlainObject(opts.place) ? opts.place : null;
+  // 事件键的来源（见 nwsEventKeyOf）：VTEC 优先，references / 自身 identifier 兜底。
+  const vtecList = isPlainObject(p.parameters) ? own(p.parameters, 'VTEC') : null;
+  const vtecKey = nwsVtecKeyOf(vtecList);
   return {
     id: 'nws:' + id,
     code: 'nws_alerts',
@@ -2872,7 +2921,7 @@ function parseNwsAlert(feature, opts) {
     maxScale: -1,
     level: 0,
     regions: [],
-    eventKey: nwsEventKeyOf(id, p.references),
+    eventKey: nwsEventKeyOf(id, p.references, vtecList),
     strength: (sev && own(NWS_SEV_RANK, sev)) || 0,
     // 海外源特有：这条预警属于哪个关注点（取数时确定），以及供 UI / 诊断用的原始标签。
     originPlace: place,
@@ -2887,6 +2936,8 @@ function parseNwsAlert(feature, opts) {
       senderName: String(p.senderName || ''),
       ends: String(p.ends || p.expires || ''),
       ugc: isPlainObject(p.geocode) && Array.isArray(p.geocode.UGC) ? p.geocode.UGC : [],
+      // 事件键的来源（供设置页 / 诊断核对"这条属于哪一次事件"），解析不出来时为空串。
+      vtecKey,
     },
     // 播报档位：Warning 类 = 3，Watch / Advisory / Statement = 1（见文件头 ②）。
     overseasRank: rule.rank,
@@ -3240,12 +3291,19 @@ const SOURCE_CONTRACTS = {
     required: [
       'properties 是对象（一条 CAP 电文）',
       'properties.event string 且**精确命中 8 类洪水白名单**（未命中判 empty，见下）',
-      'properties.id string 非空（CAP identifier，去重与事件键的基础）',
+      // 0.6.1 review 订正：实现会退回 GeoJSON 外层的 `id`（实测外层给的是
+      // `https://api.weather.gov/alerts/urn:oid:…`，解析器会剥掉 URL 前缀），所以
+      // "properties.id 必需"是**比实现更严**的声明——后来者按它写测试会误判某个字段必需。
+      '`properties.id` 或 GeoJSON 外层的 `id` 至少有一个非空（去重与消息级 id 的基础）',
       'properties.sent 可解析的 ISO 时间（带偏移）',
     ],
     tolerant: 'severity 缺失或不在 {Extreme,Severe,Moderate,Minor} 内 → 退回 info，**不判 schema**：' +
       '宁可让一条真实洪水预警少一个颜色，也不要因为上游少给一个枚举值就整源停播（漏报方向）。' +
       'headline / areaDesc / description / instruction / geocode / ends / senderName 缺失一律不判 schema。' +
+      '**事件键（eventKey）取 `parameters.VTEC` 的事件追踪号** `<office>.<phenom>.<sig>.<ETN>`' +
+      '（`/O.<ACTION>.KRLX.FA.W.0137.….` → `KRLX.FA.W.0137`，ACTION 段刻意剔除：它随' +
+      ' NEW→EXT→CON→CAN 变化）；VTEC 缺失或解析不出时退回 CAP 的 `references`（取 `sent` 最早的一条）、' +
+      '再退回自身 identifier——**三级兜底都不判 schema**。' +
       '`properties.eventCode` 是对象（`{SAME:[…],NationalWeatherService:[…]}`）且实测 `Flood Warning` 的 ' +
       'SAME 给的是 `FLS`——它只作诊断，**不参与任何判据**。',
     empty: '`properties.event` 不在白名单——它是**向前兼容的兜底**而不是异常：全量 359 条里海事通告占' +
@@ -3278,7 +3336,11 @@ const SOURCE_CONTRACTS = {
     ],
     tolerant: 'alert_text_en 为空 → detail 只留署名行，**不判 schema**（正文是"该怎么做"的说明，' +
       '它的缺失不该让一条真实预警消失）。feature_id / province / confidence_en / impact_en / status_en ' +
-      '缺失一律不判 schema——**事件键会在 feature_id 缺失时退回区域名**（见 05h 的 ecccEventKeyOf）。',
+      '缺失一律不判 schema——**事件键会在 feature_id 缺失时退回区域名**（见 05h 的 ecccEventKeyOf；' +
+      '两个都缺时会退到 province，这时同省同码同日期的两条不同 warning 会算出同一个事件键而被' +
+      '当成"后续发布"——已知的边界，等真实样本出现再校准）。' +
+      '**事件键按 UTC 发布日分桶**（`eccc:<code>:<areaKey>:<YYYY-MM-DD>`）：同一天内的更新同键、' +
+      '不重复响铃；跨 UTC 日界的持续过程会换键，最多多响一次（保守方向）。',
     empty: '两类都判 empty（向前兼容，不点亮蓝点）：① `alert_type !== "warning"`——ECCC 的 advisory 按官方' +
       '定义是「generally not considered hazardous」，实测当前 116 条里 114 条是 frost advisory；' +
       '② `alert_name_en` 不在白名单（风 / 高温 / 雷暴 / 雾…）。' +
@@ -4247,6 +4309,10 @@ function matchCnAreaAlert(alert, cfg) {
 function matchOverseasAlert(alert, cfg) {
   const d = cfg.disasters || {};
   if (d.overseasWeather === false) return { hit: false, reason: '海外气象提醒已关闭' }
+  // **防御性守卫，不是本函数的正常输入路径**（0.6.1 review 订正注释）：取消 / 解除消息由
+  // 11-pipeline 的 handleAlert 在 matchAlert **之前**就交给 handleCancelled 了，所以线上
+  // 走到这里的一定不是 cancelled。保留它是为了守住 matchAlert 的对外不变量——"cancelled 的
+  // 消息永远不返回 hit"，避免将来多一条调用路径时把一条"已作废"当成新警报播出去。
   if (alert.cancelled) return { hit: false, reason: '取消消息不提醒' }
   const places = (cfg.watch && cfg.watch.places) || [];
   if (places.length === 0) {
@@ -4873,6 +4939,10 @@ const AUTHORITY_BY_SOURCE = {
   // 免责声明里点名"中央气象台（中国气象局）"而不是泛泛的"气象厅"——后者是日本的机构，
   // 出现在一条云南暴雨预警的免责声明里会直接削弱这份声明的可信度（同上一段的理由）。
   nmc_alarm: '中央气象台（中国气象局）',
+  // 0.6.1：海外气象源。不登记的话，一条美国洪水预警的免责声明会退化成泛泛的
+  // 「请以官方发布为准」——用户看不出该找哪家机构（与上面 nmc 的理由相同）。
+  nws_alerts: '美国国家气象局（NWS）',
+  eccc_alerts: '加拿大环境与气候变化部（ECCC）',
   jma: '気象庁',
 };
 function authorityOf(alert) {
@@ -4958,11 +5028,23 @@ function updateWeatherHint(alert, cfg) {
 function handleCancelled(alert, cfg) {
   if (alert.kind !== 'eew' && alert.kind !== 'tsunami' && alert.kind !== 'weather') return
   const disasters = cfg.disasters || {};
+  // 历史条目带上解析层给出的正文（0.6.1 review）：NWS 的 description + instruction、ECCC 的
+  // 正文 + 署名此前**没有任何消费者**——`addEvent` 会被 normalizeHistoryEntry 过滤掉未列出的
+  // 字段，展开详情也只渲染 headline。而 instruction 恰恰是"该怎么做"，署名是 ECCC 许可
+  //（End-use Licence v2.1.1）的硬要求。见 07-store / 02-storage 的 detail 字段。
+  const pushEvent = (fields) => addEvent(Object.assign({ detail: alert.detail }, fields));
   if (alert.kind === 'eew' && disasters.earthquake === false) return
   if (alert.kind === 'tsunami' && disasters.tsunami === false) return
-  if (alert.kind === 'weather' && disasters.weather === false) return
+  // 气象的开关按**来源**分岔（0.6.1 review）：海外源由它自己的 `overseasWeather` 管
+  // （见 12e 的 enabled 判定与 13-ui 的设置项）。此前统一看日本气象的 `weather`，
+  // 于是"关掉日本气象、保留海外源"的用户收到过洪水播报，却永远收不到它的作废提醒——
+  // 取消链路承诺的正是这一条（CHANGELOG 0.6.0「此前播报的警报已作废」）。
+  if (alert.kind === 'weather') {
+    const off = alert.locator === 'overseas' ? disasters.overseasWeather === false : disasters.weather === false;
+    if (off) return
+  }
   if (!wasRecentlyAlerted(alert)) {
-    addEvent({
+    pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
       issued: alert.issued, headline: alert.headline + '（未命中：取消 / 解除消息，且此前未提醒过该事件）', hit: false,
     });
@@ -4970,7 +5052,7 @@ function handleCancelled(alert, cfg) {
   }
   // 取消 / 解除消息不穿透静默（它不是紧急警报，静默期间只记历史）
   if (inQuietHours(cfg)) {
-    addEvent({
+    pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
       issued: alert.issued, headline: alert.headline, hit: true,
       suppressed: true,
@@ -4982,14 +5064,14 @@ function handleCancelled(alert, cfg) {
   // 灾害过程已结束：忘掉事件键，这样"解除之后再次发布"会被当成新事件而不是重复（见 10-dedupe）
   forgetEvent(cancelKeyOf(alert));
   if (!claimAlertForTab('cancel:' + (alert.id || cancelKeyOf(alert)), '')) {
-    addEvent({
+    pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
       issued: alert.issued, headline: alert.headline, hit: true,
       suppressed: true, suppressedReason: '其它 DSH 标签页已提醒',
     });
     return
   }
-  addEvent({
+  pushEvent({
     id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
     issued: alert.issued, headline: alert.headline, hit: true,
   });
@@ -5035,6 +5117,8 @@ function watchlessPoint(alert, cfg) {
 
 function handleAlert(alert, cfg, opts) {
   const options = opts || {};
+  // 历史条目统一带上解析层的正文（0.6.1 review，理由同 handleCancelled 里的说明）。
+  const pushEvent = (fields) => addEvent(Object.assign({ detail: alert.detail }, fields));
   if (watchlessPoint(alert, cfg)) {
     return { notified: false, reason: 'no-watch-point', detail: '全球源消息，但未设置全球关注点' }
   }
@@ -5052,13 +5136,17 @@ function handleAlert(alert, cfg, opts) {
     return { notified: false, reason: 'cancelled', detail: '这是取消 / 解除消息' }
   }
   const m = matchAlert(alert, cfg);
+  // 气象强度的**回落**要在命中与未命中两条路径上都写回事件记忆（0.6.1 review）。
+  // 日本气象电文的命中闸门与强度是同一个 level（L4），回落必然走 !m.hit 分支，所以只在那里
+  // 下调曾经是对的；而海外气象源的**档位**由 event 名（NWS）或颜色档（ECCC）决定、**强度**
+  // 由 severity 决定——两条正交。于是"NWS 的 Flood Warning 从 Severe 降到 Moderate"仍然命中
+  // （档位不变），记忆强度不会被下调；随后回升时 `isStrengthUpgrade` 判 false → 永久静默，
+  // 正是 weakenEvent 注释里声明要防住的那条漏报。它只在强度确实更低时下调，所以对未命中
+  // 路径（"关注地区未命中"）没有副作用。
+  if (alert.kind === 'weather') weakenEvent(alert);
   if (!m.hit) {
     // 气象警报：即使不播报（L3 及以下），也把"正在升级"留给侧边栏 tooltip
     updateWeatherHint(alert, cfg);
-    // 气象的**降级**（L4 → L3 → L2）要记进事件键：否则"降级之后再次升级"会被当成
-    // 强度未升级的重复发布而永久静默（见 10-dedupe 的 weakenEvent）。
-    // 只在强度确实更低时下调，所以"关注地区未命中"这类 not-hit 不会有副作用。
-    if (alert.kind === 'weather') weakenEvent(alert);
     // 全球源（坐标型）的"未命中"通常不进历史：USGS 的 24 小时目录有近百条 M2.5+，
     // 逐条记"未命中"会把历史列表刷满与用户无关的地震，真正该看的提醒反而被挤掉。
     // **但「坐标缺失」是例外**——那不是"离得远"，而是"根本没法判定"。DESIGN 3.1 要求
@@ -5072,7 +5160,7 @@ function handleAlert(alert, cfg, opts) {
     // 「真正的提醒会被刷掉」是同一个失败形态（DESIGN 3.2 对 point 源已定过这个口径）。
     // 与坐标型的差别是**不整条丢弃**：设置页与诊断仍需要"有预警、但你没配关注点"这个信息。
     if (!m.noWatch && (alert.locator !== 'point' || !validGeo(alert.geo))) {
-      addEvent({
+      pushEvent({
         id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
         issued: alert.issued, headline: alert.headline + '（未命中：' + m.reason + '）', hit: false,
       });
@@ -5096,7 +5184,7 @@ function handleAlert(alert, cfg, opts) {
     ? Math.max(cfg.dedupe.windowMinutes || 10, WEATHER_EVENT_WINDOW_MINUTES)
     : cfg.dedupe.windowMinutes;
   if (isEventRepeat(alert, repeatWindow)) {
-    addEvent({
+    pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true, suppressedReason: '同一地震的后续发布（强度未升级）',
@@ -5112,7 +5200,7 @@ function handleAlert(alert, cfg, opts) {
   // 会让排查的人去翻 Host 重启日志，而真正生效的是长期事件记忆。行为方向是安全的
   // （不重复响铃），所以只改措辞、不改判据。
   if (looksReplayed) {
-    addEvent({
+    pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true, suppressedReason: '同一事件在最近 24 小时内已提醒过（等强度，不重复响铃）',
@@ -5137,7 +5225,7 @@ function handleAlert(alert, cfg, opts) {
     //（洪水有效期中位 12.6 小时 → 一天可能响 3〜4 次，而用户刚被告知"只记历史，不打扰"）。
     // 记进这条记忆之后，后面的 `looksReplayed` 分支会把它拦住。
     rememberAlerted(alert);
-    addEvent({
+    pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true,
@@ -5147,7 +5235,7 @@ function handleAlert(alert, cfg, opts) {
   }
   // 静默时段：命中但不响铃、不弹通知，只记历史。红色等级（EEW、大海啸警报）默认可穿透。
   if (!options.skipQuietHours && inQuietHours(cfg) && !(hitSeverity === 'red' && cfg.quietHours.breakForSevere !== false)) {
-    addEvent({
+    pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true,
@@ -5159,7 +5247,7 @@ function handleAlert(alert, cfg, opts) {
   // 其它 DSH 标签页已经播报过同一条消息 → 本标签页静默，避免多个页面同时响铃。
   // 用消息 id 而不是事件键：多标签页收到的是同一条消息，而同一事件的不同消息（如强度升级）不应被拦。
   if (!claimAlertForTab(alert.id, cancelKeyOf(alert))) {
-    addEvent({
+    pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true, suppressedReason: '其它 DSH 标签页已提醒',
@@ -5171,12 +5259,26 @@ function handleAlert(alert, cfg, opts) {
   const bodyLines = [alert.headline];
   if (hitPref) bodyLines.push('命中关注地区：' + prefZh + (prefZh !== hitPref ? '（' + hitPref + '）' : ''));
   // 全球源没有行政区，命中依据是「距某个关注点多少公里」——把距离说出来，
-  // 用户才能判断这条提醒是否可信（半径是自己设的）
-  else if (m.place) bodyLines.push('命中关注点：' + m.place.name + '（距震中约 ' + Math.round(m.distanceKm) + ' km）');
+  // 用户才能判断这条提醒是否可信（半径是自己设的）。
+  //
+  // 0.6.1 review：海外气象源（`locator === 'overseas'`）**也**带 `m.place`，但它没有
+  // distanceKm（命中在取数时就已确定，见 06-matcher 的 matchOverseasAlert），
+  // 于是这里会拼出「距震中约 NaN km」，还把一条洪水预警说成"震中"——用户可见的错误文案。
+  // 它必须单独分岔：说清判定依据是"该点所在地的官方预警"，而不是距离。
+  else if (m.place && alert.locator === 'overseas') {
+    bodyLines.push('命中关注点：' + m.place.name + '（该点所在地的官方预警）');
+  } else if (m.place) bodyLines.push('命中关注点：' + m.place.name + '（距震中约 ' + Math.round(m.distanceKm) + ' km）');
   if (alert.kind === 'tsunami') bodyLines.push('请立即远离海岸与河口');
-  if (alert.kind === 'weather') bodyLines.push('请确认所在市町村的避难信息');
+  // 提醒动作同样分岔（0.6.1 review）：日本气象电文对应的是市町村级的避难信息，
+  // 而美国 / 加拿大的洪水预警由当地应急部门（county / 省）发布——对海外用户说
+  // 「确认所在市町村的避难信息」既找不到对应入口，也把日本制度套到了别国。
+  if (alert.kind === 'weather') {
+    bodyLines.push(alert.locator === 'overseas'
+      ? '请关注当地官方发布的避难与撤离指引'
+      : '请确认所在市町村的避难信息');
+  }
   bodyLines.push(disclaimerOf(alert));
-  addEvent({
+  pushEvent({
     id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
     issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
   });
@@ -6492,12 +6594,15 @@ function createHealthProbe(opts = {}) {
 const NWS_ALERTS_BASE = 'https://api.weather.gov/alerts/active';
 /** ECCC 的预警集合（OGC API - Features）。 */
 const ECCC_ALERTS_BASE = 'https://api.weather.gc.ca/collections/weather-alerts/items';
-/** NWS 的 `?event=` 白名单参数（与 05h 的 NWS_EVENT_WHITELIST 同源，但这里必须显式列出——
- *  Host / Client 是两个半边，而 NWS 的过滤在**服务端**做，能省掉三分之二的海事通告）。 */
-const NWS_EVENT_QUERY = [
-  'Flood Warning', 'Flash Flood Warning', 'Coastal Flood Warning',
-  'Flood Watch', 'Flood Advisory', 'Coastal Flood Watch', 'Coastal Flood Advisory', 'Coastal Flood Statement',
-].join(',');
+/**
+ * NWS 的 `?event=` 白名单参数——**从 05h 的白名单派生**，不再手抄一份（0.6.1 review）。
+ *
+ * 为什么必须派生：这个参数是**发给上游的服务端过滤**。将来往白名单里加一类（例如新出现的
+ * 洪水类产品）而忘了同步这里，上游不会报错、只是永远不返回那一类；客户端白名单也不会因为
+ * "缺了它"而报 schema / empty —— 整条链路静默漏报（DESIGN 3.2 最反对的形态）。
+ * 派生成同一个集合之后，"加灾种"这件事只剩一处可改。
+ */
+const NWS_EVENT_QUERY = Object.keys(NWS_EVENT_WHITELIST).join(',');
 
 const NWS_POLL_MS = 120 * 1000;
 const ECCC_POLL_MS = 300 * 1000;
@@ -6539,11 +6644,18 @@ const overseasStatsOf = {};
  * 覆盖范围包围盒。**宁可宽一点也不精确**：盒外的关注点不产生请求（用户没配那个国家就不查），
  * 盒内重叠（美加边境）会让同一个点查两个源——多一次请求，NWS 对覆盖外的点回 400，
  * 由 pollOnce 的 `uncovered` 分类兜住（不会显示成故障）。
+ *
+ * 0.6.1 review 补上三个**海外领地**（此前只有本土 / 阿拉斯加 / 夏威夷）：波多黎各与美属维尔京群岛、
+ * 关岛与北马里亚纳、美属萨摩亚都是 NWS 的正式预报区（各有 WFO），但原先全部落在盒外 →
+ * 配了圣胡安的用户会看到「未设置美国关注点」，而那个点明明就在设置页的列表里。
  */
 const US_BOXES = [
   { minLat: 24, maxLat: 50, minLon: -125, maxLon: -66 }, // 本土
   { minLat: 51, maxLat: 72, minLon: -170, maxLon: -129 }, // 阿拉斯加
   { minLat: 18, maxLat: 23, minLon: -161, maxLon: -154 }, // 夏威夷
+  { minLat: 17, maxLat: 19, minLon: -68, maxLon: -64 }, // 波多黎各 / 美属维尔京群岛
+  { minLat: 13, maxLat: 21, minLon: 144, maxLon: 146 }, // 关岛 / 北马里亚纳
+  { minLat: -15, maxLat: -13, minLon: -171, maxLon: -169 }, // 美属萨摩亚
 ];
 const CA_BOX = { minLat: 41, maxLat: 84, minLon: -141, maxLon: -52 };
 
@@ -6569,12 +6681,22 @@ function lonDegreesOf(km, lat) {
   return km / (KM_PER_DEG * Math.max(0.05, c))
 }
 
+// 采样点 / bbox 的坐标夹取（0.6.1 review）：半径最大 2000km 时，高纬度的方位点会算出
+// `lon < -180`（安克雷奇 → -186 之类）。那样的 URL 会被上游回 400，于是我们自己生成的
+// 非法参数被归类成"被上游拒绝"——诊断会把错误指向对方。夹到合法范围即可（方位点略微
+// 偏离本意，但不会凭空多查一个错误的位置）。
+const clampLat = (v) => Math.max(-90, Math.min(90, v));
+const clampLon = (v) => Math.max(-180, Math.min(180, v));
+
 /** ECCC 的 bbox：坐标 ± 半径（经度按纬度修正）。 */
 function ecccBboxOf(place) {
   const dLat = Number(place.radiusKm || 0) / KM_PER_DEG;
   const dLon = lonDegreesOf(Number(place.radiusKm || 0), place.lat);
   const f = (n) => Number(n.toFixed(4));
-  return [f(place.lon - dLon), f(place.lat - dLat), f(place.lon + dLon), f(place.lat + dLat)].join(',')
+  return [
+    f(clampLon(place.lon - dLon)), f(clampLat(place.lat - dLat)),
+    f(clampLon(place.lon + dLon)), f(clampLat(place.lat + dLat)),
+  ].join(',')
 }
 
 /** NWS 的采样点：中心 + （半径够大时）四个方位。返回 `[lat, lon]` 数组。 */
@@ -6584,16 +6706,17 @@ function nwsSamplePoints(place) {
   if (!(r >= MIN_SAMPLE_RADIUS_KM)) return pts
   const dLat = r / KM_PER_DEG;
   const dLon = lonDegreesOf(r, place.lat);
-  pts.push([place.lat + dLat, place.lon]);
-  pts.push([place.lat - dLat, place.lon]);
-  pts.push([place.lat, place.lon + dLon]);
-  pts.push([place.lat, place.lon - dLon]);
+  pts.push([clampLat(place.lat + dLat), place.lon]);
+  pts.push([clampLat(place.lat - dLat), place.lon]);
+  pts.push([place.lat, clampLon(place.lon + dLon)]);
+  pts.push([place.lat, clampLon(place.lon - dLon)]);
   return pts
 }
 
 /** 默认取数：Node / 浏览器通用的 fetch，带超时与 Accept。 */
 async function defaultFetchText(url, ctx) {
   const signal = ctx && ctx.signal;
+  const timeoutMs = ctx && typeof ctx.timeoutMs === 'number' ? ctx.timeoutMs : OVERSEAS_TIMEOUT_MS;
   const work = (async () => {
     const res = await fetch(url, { signal, headers: { Accept: 'application/json' } });
     if (!res.ok) {
@@ -6603,8 +6726,9 @@ async function defaultFetchText(url, ctx) {
       err.status = res.status;
       // 400 的响应体自带原因（NWS 是 `Invalid Parameter` + parameterErrors）——**只留给诊断**，
       // 不参与任何判据（按错误文本做分支就是"猜"，DESIGN 4.5 明确反对）。
+      // 截 160 字：与下面 catch 里展示时的切片长度一致（两处不一致会让读码的人以为丢了信息）。
       if (res.status === 400) {
-        try { err.bodyHint = String(await res.text()).slice(0, 200); } catch (e) { /* 读不到就算了 */ }
+        try { err.bodyHint = String(await res.text()).slice(0, 160); } catch (e) { /* 读不到就算了 */ }
       }
       throw err
     }
@@ -6617,7 +6741,7 @@ async function defaultFetchText(url, ctx) {
   return await Promise.race([
     work,
     new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('请求超时（本环境没有 AbortController）')), OVERSEAS_TIMEOUT_MS);
+      setTimeout(() => reject(new Error('请求超时（本环境没有 AbortController）')), timeoutMs);
     }),
   ])
 }
@@ -6649,6 +6773,12 @@ function createOverseasSource(opts = {}) {
   const placesFor = opts.placesFor || (() => []);
   const urlsFor = opts.urlsFor || (() => []);
   const parseOne = opts.parseOne || (() => ({ ok: false, kind: 'schema', detail: '未配置解析器' }));
+  // 单次请求的超时可注入（0.6.1）：好让回归测试能在毫秒级验"超时"这条路径的文案与分类
+  // ——否则它得真的等 10 秒（默认沙箱此前连 AbortController 都没有，这条路径从未被跑过）。
+  const timeoutMs = typeof opts.timeoutMs === 'number' ? opts.timeoutMs : OVERSEAS_TIMEOUT_MS;
+  // 400 冷却期的时长可注入（0.6.1）：好让回归测试真的能走到"TTL 到期后自动重试"那一侧
+  // ——此前只有常量自证（`UNCOVERED_TTL_MS > 0`），把实现改成永久拉黑也测不出来。
+  const uncoveredTtlMs = typeof opts.uncoveredTtlMs === 'number' ? opts.uncoveredTtlMs : UNCOVERED_TTL_MS;
   // 交给主链的出口做成可注入：默认就是 11-pipeline 的 handleAlert，测试注入 spy 之后
   // 就能只验"取数器交出了什么"，而不必把整条通知链（音频 / 通知 / toast）拖进单测。
   const onAlert = opts.onAlert || handleAlert;
@@ -6661,11 +6791,14 @@ function createOverseasSource(opts = {}) {
   let lastStatusKey = '';
   let lastSuccessAt = 0;
   let lastError = '';
+  /** 年龄闸门上一轮是否处于激活状态（用于"只在进入时计数"，见 pollOnce 里的 gated）。 */
+  let gateActive = false;
   /** 整轮全部失败时的退避（0 = 没有退避，用正常间隔）。 */
   let backoffMs = 0;
   const stats = {
     polls: 0, requests: 0, received: 0, applied: 0, errors: 0,
-    ageSkipped: 0, throttledLast: 0, throttledTotal: 0, gated: 0, rejected: 0, lastAt: 0, lastDataAt: 0,
+    ageSkipped: 0, throttledLast: 0, throttledTotal: 0, gated: 0, rejected: 0,
+    truncated: 0, lastAt: 0, lastDataAt: 0,
   };
   // 会话内记住"这些 URL 暂时别查"（键 = URL，值 = 可以再试的时刻）。0.6.0 review A-2：
   // 原来是永久拉黑，一次误判（上游改参数名 / WAF 回 400）就让那个点在本会话里永远查不到；
@@ -6705,9 +6838,15 @@ function createOverseasSource(opts = {}) {
     if (places.length === 0) {
       // 与坐标型源同一条原则（06-matcher 的 noWatch）：**不静默**——"配错了关注点"看起来像
       // "根本没有预警"是这套系统最该避免的误解。这里不产生任何网络请求。
+      //
+      // 两种"0 个关注点"必须分开说（0.6.1 review）：是配置里根本没有点，还是**有**点但都落在
+      // 本源的覆盖盒之外（关岛之类，或纯加拿大用户看美国源）？此前一律说"未设置"，
+      // 而用户明明在设置页的列表里看得见那个点。
+      const anyPlaces = ((cfg.watch || {}).places || []).length > 0;
       reportStatus({
         status: 'open',
-        detail: '未设置' + regionText + '关注点（设置 → 灾害预警 → ③ 其他地区：坐标 + 半径）',
+        detail: (anyPlaces ? '关注点都不在' + regionText + '源的覆盖范围内' : '未设置' + regionText + '关注点') +
+          '（设置 → 灾害预警 → ③ 其他地区：坐标 + 半径）',
       });
       return { applied: 0, noPlaces: true }
     }
@@ -6754,7 +6893,10 @@ function createOverseasSource(opts = {}) {
     // 年龄闸门（DESIGN 4.7.6）：首轮或"距上次成功超过 30 分钟"（页面休眠恢复）时，
     // 只把发布在 6 小时以内的条目当新警报播；更早的仍进历史，但不打扰。
     const gated = (now - lastSuccessAt) > OVERSEAS_GATE_RESET_MS;
-    if (gated) stats.gated += 1;
+    // 只在**进入**闸门的那一刻计数（0.6.1 review）：此前统计的是"闸门处于激活状态的轮数"，
+    // 而源持续不可达时 lastSuccessAt 一直不更新 → 每轮都 +1，诊断里会读成"进入过几百次首轮"。
+    if (gated && !gateActive) stats.gated += 1;
+    gateActive = gated;
 
     stats.polls += 1;
     stats.requests += capped.length;
@@ -6767,18 +6909,32 @@ function createOverseasSource(opts = {}) {
     const seen = new Set();
     for (const item of capped) {
       if (stopped) break
+      // 超时标记（0.6.1 review）：`AbortController.abort()` 造成的错误与"用户停用插件"
+      // 在 fetch 层完全同形（Chrome 的文案甚至是 "The user aborted a request."）。
+      // 只靠 `stopped` 区分不了，于是真实超时会被诊断成"用户主动中止"——正是 A-1 想消灭的
+      // 那条误导信息。这里自己记一笔，好在 catch 里给出正确的文案。
+      let timedOut = false;
       abortCtl = typeof AbortController === 'function' ? new AbortController() : null;
-      const timerId = abortCtl ? setTimeout(() => { try { abortCtl.abort(); } catch (e) {} }, OVERSEAS_TIMEOUT_MS) : null;
+      const timerId = abortCtl
+        ? setTimeout(() => { timedOut = true; try { abortCtl.abort(); } catch (e) {} }, timeoutMs)
+        : null;
       try {
-        const text = await fetchText(item.url, { signal: abortCtl ? abortCtl.signal : undefined });
+        const text = await fetchText(item.url, {
+          signal: abortCtl ? abortCtl.signal : undefined,
+          timeoutMs,
+        });
         if (typeof text !== 'string') throw new Error('取数器没有返回文本')
         if (text.length > OVERSEAS_MAX_BODY_CHARS) {
           throw new Error('响应体过大（' + text.length + ' 字符 > 上限 ' + OVERSEAS_MAX_BODY_CHARS + '）')
         }
-        let json;
+        let json = null;
         try {
           json = JSON.parse(text);
         } catch (err) {
+          // 与下面"缺 features"同一类（0.6.1 review）：HTTP 200 却不是 JSON，最常见的原因是
+          // 拦截页 / 上游改版。此前它按**链路故障**上报，于是同一份证据在同一个函数里得出两个
+          // 相反的六态（蓝点 vs 红点）——而 JMA / NOAA 对"返回 HTML 而不是电文"一律判 schema。
+          noteParseResult(id, failResult('schema', '响应不是合法 JSON（可能是拦截页或上游改版）'));
           throw new Error('响应不是合法 JSON（可能是拦截页或上游改版）')
         }
         const feats = json && Array.isArray(json.features) ? json.features : null;
@@ -6790,6 +6946,14 @@ function createOverseasSource(opts = {}) {
           noteParseResult(id, failResult('schema', '响应缺少 features 数组（结构不符，可能是上游改版或拦截页）'));
           throw new Error('响应缺少 features 数组（结构不符）')
         }
+        // 结构正确但**空数组**（NWS 按点查询的常态）也要过一次契约（0.6.1 review）：
+        // 05g 的约定是"empty 也算结构是好的 → 清蓝点"，而清蓝点的调用此前只出现在非空循环体里
+        // → 一旦因拦截页升级过蓝点，此后每轮都拿到正确空响应的用户仍会看到它挂满 24 小时 TTL。
+        if (feats.length === 0) noteParseResult(id, failResult('empty', '该点当前没有本插件范围内的预警'));
+        // ECCC 的 OGC API 按 limit=200 分页：条目超过它时 features 会被**静默截断**。
+        // 当前全国约 116 条、按关注点的 bbox 更小，但"上游突然变多"是可能的（0.6.1 review）。
+        // 只计数（进诊断与设置页），**不进 detail** —— detail 是状态上报的去重键，不能含单调计数。
+        if (typeof json.numberMatched === 'number' && json.numberMatched > feats.length) stats.truncated += 1;
         okCount += 1;
         stats.received += feats.length;
         for (const feature of feats) {
@@ -6814,7 +6978,11 @@ function createOverseasSource(opts = {}) {
           const issued = Date.parse(alert.issued);
           if (Number.isFinite(issued) && issued > newestDataAt) newestDataAt = issued;
           const stale = gated && Number.isFinite(issued) && (now - issued) > OVERSEAS_FRESH_GATE_MS;
-          if (stale) stats.ageSkipped += 1;
+          // 只统计**本来会被播报**的那些（0.6.1 review）：Watch / Advisory 由档位决定
+          // （`overseasRank < 3`）本来就不播报，把它们算进"过老只记历史"会让设置页那个
+          // 数字失去解释力（用户会以为有那么多条被闸门拦下了播报）。
+          const rank = typeof alert.overseasRank === 'number' ? alert.overseasRank : 0;
+          if (stale && rank >= OVERSEAS_BROADCAST_MIN_RANK) stats.ageSkipped += 1;
           // 过老的条目仍然交给主链，但带 staleOnArrival：主链会走"命中 + 只记历史"的那条分支
           // （与"跨会话重放"同形）。丢掉它会让用户看不到"就在打开页面前刚发布的洪水预警"。
           try {
@@ -6846,7 +7014,7 @@ function createOverseasSource(opts = {}) {
         if (err && err.status === 400) {
           stats.rejected += 1;
           rejectedNow += 1;
-          uncovered.set(item.url, now + UNCOVERED_TTL_MS);
+          uncovered.set(item.url, now + uncoveredTtlMs);
           if (!lastError) lastError = 'HTTP 400（' + String(err.bodyHint || '').slice(0, 160) + '）';
           // 400 也是"上游有响应"，同样算一次成功接触：否则只配了覆盖外坐标的用户
           // `lastSuccessAt` 永远不更新、年龄闸门恒处于"首轮"。
@@ -6855,8 +7023,12 @@ function createOverseasSource(opts = {}) {
         }
         failCount += 1;
         stats.errors += 1;
-        lastError = String((err && err.message) || err);
-        onError(err);
+        // 超时自己标记过 → 给一条能读懂的原因（否则诊断里会写 "The user aborted a request."）。
+        const timedOutNow = timedOut && !(err && err.status);
+        lastError = timedOutNow
+          ? '请求超时（' + Math.round(timeoutMs / 1000) + ' 秒未响应）'
+          : String((err && err.message) || err);
+        onError(timedOutNow ? new Error(lastError) : err);
       } finally {
         if (timerId) clearTimeout(timerId);
         abortCtl = null;
@@ -6901,7 +7073,7 @@ function createOverseasSource(opts = {}) {
       // 文案只说被拒绝 + 多久后重试，响应体前 160 字在诊断里。
       reportStatus({
         status: 'open',
-        detail: rejectedNow + ' 个请求被上游拒绝（HTTP 400，' + Math.round(UNCOVERED_TTL_MS / 60000) + ' 分钟后重试）',
+        detail: rejectedNow + ' 个请求被上游拒绝（HTTP 400，' + Math.round(uncoveredTtlMs / 60000) + ' 分钟后重试）',
       });
     }
     stats.applied += applied;
@@ -6935,7 +7107,10 @@ function createOverseasSource(opts = {}) {
       const allFailed = !!(res && res.requests > 0 && res.failed === res.requests);
       if (allFailed) backoffMs = backoffMs ? Math.min(backoffMs * 2, OVERSEAS_MAX_BACKOFF_MS) : OVERSEAS_MIN_BACKOFF_MS;
       else backoffMs = 0;
-      schedule(backoffMs || intervalMs);
+      // 退避是"**不低于**正常间隔"的下限，不是替代（0.6.1 review）：ECCC 正常 300 秒一轮，
+      // 而退避上限是 60 秒——直接拿退避当间隔会让它在失败时比正常时打得勤 5 倍，
+      // 与"对上游礼貌"（文件头第 3 条纪律）正好相反。
+      schedule(Math.max(backoffMs, intervalMs));
     }, delay);
   }
 
@@ -7080,11 +7255,14 @@ function feedRows() {
  * 海外源（12e，0.6.0）：Client 直连的 REST 轮询。
  *
  * 三个字段是这个形态**独有**的，也是排障时最先要看的：
- *   · `uncovered` —— NWS 对"覆盖范围之外"的坐标回 400（实测多伦多 / 温哥华 / 伦敦），
- *     它不是故障；数字涨说明有人的关注点不在这个源的服务范围内。
- *   · `ageSkipped` —— 被年龄闸门拦下的条数（打开页面时已发布超过 6 小时的那些，
- *     只进历史不响铃）。它解释"为什么我看到预警但没响"。
- *   · `gated` —— 这个源进入过几次"首轮 / 休眠恢复"状态（每次进入都会重新按 6 小时判）。
+ *   · `rejected` —— 被上游用 HTTP 400 拒绝的请求数（实测多伦多 / 温哥华 / 伦敦的坐标都被
+ *     NWS 这样答过）。**它不代表"这个点不在覆盖范围"**（也可能是我们的参数被拒），
+ *     文案与代码都不替上游断言原因。（0.6.1 review：此处此前写作 `uncovered` ——
+ *     那是 12e 内部 Map 的名字，快照里从来没有这个字段。）
+ *   · `ageSkipped` —— 被年龄闸门拦下的、**本来会播报**的条数（打开页面时已发布超过 6 小时
+ *     的那些，只进历史不响铃）。它解释"为什么我看到预警但没响"。
+ *   · `gated` —— 这个源**进入**过几次"首轮 / 休眠恢复"状态（每次进入都会重新按 6 小时判）。
+ *   · `truncated` —— 上游返回的条目数超过每次请求上限、被我们截断的轮数（ECCC 的 limit=200）。
  */
 function overseasRows() {
   const out = {};
@@ -7097,6 +7275,8 @@ function overseasRows() {
       // 也可能是我们的参数被拒；响应体前 160 字在 lastError 里）。
       rejected: num(o.rejected),
       ageSkipped: num(o.ageSkipped),
+      // 上游条目数超过每次请求上限、被我们截断的轮数（ECCC 的 limit=200）
+      truncated: num(o.truncated),
       // 两个 throttle 计数分开：Last 是本轮、Total 是累计（0.6.0 review B-6）
       throttledLast: num(o.throttledLast), throttledTotal: num(o.throttledTotal), gated: num(o.gated),
       lastAt: o.lastAt ? new Date(o.lastAt).toISOString() : null,
@@ -7439,9 +7619,9 @@ function SourceStatusBlock() {
       (Number(host.detailDropped) ? '，Host 放弃详情 ' + host.detailDropped + ' 条' : '') +
       ' · 最近拉取 ' + ago);
   }
-  // 海外源（0.6.0）：按关注点查询外部 REST。显示"查了几轮 / 发了多少请求 / 收到几条"，
-  // 以及两个只有这个形态才有的计数：**过老只记历史**（年龄闸门）与**不在覆盖范围**
-  // （NWS 对覆盖外的坐标回 400——那不是故障，见 12e 的说明）。
+  // 海外源（0.6.0）：按关注点查询外部 REST。显示"查了几轮 / 发了多少请求 / 收到多少响应条目"，
+  // 以及几个只有这个形态才有的计数：**过老只记历史**（年龄闸门）、**被上游拒绝**（HTTP 400，
+  // 不替上游断言"这个点不在覆盖范围"）、**被分页上限截断的轮数**（ECCC 的 limit=200）。
   for (const id of OVERSEAS_STAT_ORDER) {
     const o = overseasStatsOf[id];
     const st = sources[id];
@@ -7450,11 +7630,14 @@ function SourceStatusBlock() {
       continue
     }
     const ago = o.lastAt ? Math.max(0, Math.round((Date.now() - o.lastAt) / 1000)) + ' 秒前' : '—';
+    // 「响应条目」而不是「收到 N 条」（0.6.1 review）：NWS 是按点的 5 个采样点各查一次，
+    // 同一批预警会被重复计入，写成"收到 35 条"会让用户以为收到了 35 条不同预警。
     rows.push((SOURCE_LABELS[id] || id) + '：已查询 ' + (o.polls || 0) + ' 轮 · 请求 ' + (o.requests || 0) +
-      ' 次 · 收到 ' + (o.received || 0) + ' 条' +
+      ' 次 · 响应条目 ' + (o.received || 0) +
       (o.applied ? '，交给主链 ' + o.applied + ' 条' : '') +
       (o.ageSkipped ? '，过老只记历史 ' + o.ageSkipped + ' 条' : '') +
       (o.rejected ? '，被上游拒绝 ' + o.rejected + ' 次' : '') +
+      (o.truncated ? '，上游结果被分页上限截断 ' + o.truncated + ' 轮' : '') +
       (o.throttledLast ? '，本轮超上限跳过 ' + o.throttledLast + ' 个请求' : '') +
       (o.errors ? '，失败 ' + o.errors + ' 次' : '') +
       ' · 最近查询 ' + ago);
@@ -7840,8 +8023,12 @@ function SettingsPanel() {
       '半径 ≥ 25km 时会在中心点之外补查 4 个方位点，所以半径对它是近似（不保证覆盖半径内的所有县）；' +
       '加拿大源把半径换算成一个矩形范围向 ECCC 查询，凡与该范围相交的预警都算命中。' +
       '美国只播报 Flood / Flash Flood / Coastal Flood Warning，Watch、Advisory、Statement 只记入历史；' +
-      '加拿大只接 warning 类的降雨 / 洪水 / 风暴潮（霜冻、雾、大风等既非危险天气、也不在本插件灾种内）。' +
-      '打开页面时若某条预警已发布超过 6 小时，只记入历史、不响铃。' +
+      // 措辞订正（0.6.1 review）：原句把"霜冻 / 雾 / 大风"一律说成"非危险天气"，但 ECCC 的
+      // wind warning 确实是 warning（只有霜冻 / 雾是 advisory）——它被排除是因为**不在本插件的
+      // 灾种范围内**，不是因为它不危险。把两件事混成一句会让用户误判这个源的取舍。
+      '加拿大只接 warning 类的降雨 / 洪水 / 风暴潮：霜冻、雾属于 ECCC 的 advisory（官方定义即' +
+      '「非危险天气」），大风、高温、雷暴等虽是 warning 但不在本插件的灾种范围内。' +
+      '打开页面时若某条预警已发布超过 6 小时，只记入历史、不响铃；页面休眠超过 30 分钟再恢复时同样按这条规则处理。' +
       '数据来源：美国国家气象局（NWS）；加拿大环境与气候变化部（ECCC，Data Source: Environment and Climate Change Canada）。'),
     // 无灾情时也能验证整条链路：用本地构造的电文走完 解析 → 匹配 → 播报 → 历史，
     // 不产生任何外部请求。每次点击轮换一种场景，覆盖级别落点与区域粒度的不同分支。
@@ -8252,6 +8439,12 @@ function SettingsPanel() {
                       h('div', { style: { display: 'flex', gap: 6, marginTop: 2 } },
                         h('span', { style: { color: '#9aa0a6', width: 44 } }, '内容'),
                         h('span', { style: { color: '#e6e6e8', flex: 1, wordBreak: 'break-all' } }, head)),
+                      // 官方正文（0.6.1）：NWS 的 description + instruction、ECCC 的正文 + 署名。
+                      // 此前 alert.detail 在整条链路上**没有任何消费者**——用户看不到洪水预警里
+                      // "该怎么做"那一段，ECCC 许可要求的署名也进不了界面（见 05h 的文件头）。
+                      e.detail ? h('div', { style: { display: 'flex', gap: 6, marginTop: 4 } },
+                        h('span', { style: { color: '#9aa0a6', width: 44, flexShrink: 0 } }, '正文'),
+                        h('span', { style: { color: '#c8ccd4', flex: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, String(e.detail))) : null,
                     ),
               )
             }),
@@ -8640,11 +8833,11 @@ const __test = {
   NMC_KIND_TEXT, NMC_LEVEL_TEXT, NMC_LEVEL_RANK, NMC_BROADCAST_MIN_RANK,
   // 0.6.0：海外气象源（美国 NWS / 加拿大 ECCC）—— 解析层 / 契约 / 事件键 / 白名单
   parseNwsAlert, parseEcccAlert, parseNwsAlertResult, parseEcccAlertResult,
-  ecccKindTextOf, nwsEventKeyOf, ecccEventKeyOf, NWS_EVENT_WHITELIST, NWS_KIND_TEXT,
+  ecccKindTextOf, nwsEventKeyOf, nwsVtecKeyOf, ecccEventKeyOf, NWS_EVENT_WHITELIST, NWS_KIND_TEXT,
   NWS_SEVERITY, NWS_SEV_RANK, ECCC_COLOUR_SEVERITY, ECCC_COLOUR_RANK, ECCC_INCLUDE, ECCC_EXCLUDE,
   OVERSEAS_BROADCAST_MIN_RANK,
   // 0.6.0：取数器与匹配（按关注点查询 / 查询即匹配 / 年龄闸门）
-  createNwsSource, createEcccSource, nwsSamplePoints, ecccBboxOf, placesInBoxes, matchOverseasAlert,
+  createNwsSource, createEcccSource, nwsSamplePoints, ecccBboxOf, placesInBoxes, US_BOXES, CA_BOX, matchOverseasAlert,
   NWS_ALERTS_BASE, ECCC_ALERTS_BASE, NWS_EVENT_QUERY,
   MIN_SAMPLE_RADIUS_KM, MAX_REQUESTS_PER_ROUND, OVERSEAS_FRESH_GATE_MS, OVERSEAS_GATE_RESET_MS,
   UNCOVERED_TTL_MS, OVERSEAS_MIN_BACKOFF_MS, OVERSEAS_MAX_BACKOFF_MS,

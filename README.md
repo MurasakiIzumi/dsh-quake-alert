@@ -141,7 +141,9 @@ last poll; hovering the sidebar status dot shows the same (abnormal sources firs
 - Hypocenter-only reports (551 "hypocenter information" / "distant earthquake") carry no intensity data and cannot be evaluated against thresholds; they are recorded in "Recent alerts" with an explanatory note.
 - System notification permission must be granted once via "Test system notification"; the alert tone requires one user interaction before the browser allows it (autoplay policy).
 - **Coverage**: Japanese earthquakes / EEW / tsunamis come from P2PQuake over a WebSocket, and weather alerts from the JMA's Atom feed (polled by the Host half about once a minute). Outside Japan, coverage comes from EMSC (live push), USGS (global catalog, polled by the Host every 2 minutes) and NOAA (tsunami CAP, polled every 5 minutes). Earthquakes in **mainland China** come from Wolfx relaying CENC (the China Earthquake Networks Center): the Host half holds one persistent connection per source and streams it to the page over SSE. Weather warnings for mainland China come separately from nmc.cn's warning-signal list (polled by the Host half every 120 seconds) and cover the heavy-rain and geological-disaster categories only. US and Canadian weather alerts (0.6.0) are fetched **directly by the browser** from the NWS and ECCC APIs, using the watch points configured under "Other regions". Other regional weather sources (Europe's MeteoAlarm, GDACS) were evaluated and left out — their granularity, hazard set or coordinate support did not qualify (see DESIGN 4.6).
-- **Three boundaries of the overseas weather sources (0.6.0)**: ① the US radius is an **approximation** — NWS judges by county / zone and the radius only adds four samples, so coverage of every county inside the radius is not guaranteed; ② **ECCC does not cover river floods** — river-flood warnings in Canada are issued by provincial agencies (such as the BC River Forecast Centre) with no national API, while ECCC issues weather warnings and coastal storm-surge warnings; "the plugin is installed" must not be read as "somebody is watching Canada's floods"; ③ **neither source can detect an upstream stall** — a per-point / per-box query is legitimately empty, so "no data this round" and "the upstream stopped" look identical; only request failures and schema drift are observable. Note also that the NWS is key-free today but has said its User-Agent string will become an API key — at that point direct browser calls stop working and the Host half would have to be brought back in.- **Global sources are coarser than Japanese ones**: they carry only an epicenter and a magnitude, with nothing down to the municipality; tsunamis are expressed as NOAA sea areas (such as `SCOTIA SEA`) rather than Japan's 津波予報区; and landslides / floods outside Japan have no ingestion channel yet.
+- **Five boundaries of the overseas weather sources (0.6.0; ④⑤ added in 0.6.1)**: ① the US radius is an **approximation** — NWS judges by county / zone and the radius only adds four samples, so coverage of every county inside the radius is not guaranteed; ② **ECCC does not cover river floods** — river-flood warnings in Canada are issued by provincial agencies (such as the BC River Forecast Centre) with no national API, while ECCC issues weather warnings and coastal storm-surge warnings; "the plugin is installed" must not be read as "somebody is watching Canada's floods"; ③ **neither source can detect an upstream stall** — a per-point / per-box query is legitimately empty, so "no data this round" and "the upstream stopped" look identical; only request failures and schema drift are observable. Note also that the NWS is key-free today but has said its User-Agent string will become an API key — at that point direct browser calls stop working and the Host half would have to be brought back in.
+  (added in 0.6.1) ④ **ECCC has no reliable "ended" signal** — its `status_en` does contain `ended` / `continued`, but a freshly issued frost advisory is also `ended`, so the meaning is unverified and ECCC's `cancelled` is **always false**: an expired ECCC warning never produces a follow-up saying it is void (better to say one word too many than to pretend we can handle it). NWS does have a real CAP `Cancel`, and that cancellation path works. ⑤ **ECCC's hazard whitelist is the only part of this design not backed by measurements** — its code table has no official enumeration and there are no rainfall samples in the current season, so the whitelist is built from English-name keywords and needs calibration once real rainfall warnings arrive. Mind the age rule too: alerts already issued more than 6 hours ago when you **open the page** are recorded without ringing, and a page that has been **asleep for over 30 minutes** is treated the same way on wake.
+- **Global sources are coarser than Japanese ones**: they carry only an epicenter and a magnitude, with nothing down to the municipality; tsunamis are expressed as NOAA sea areas (such as `SCOTIA SEA`) rather than Japan's 津波予報区; and landslides / floods outside Japan have no ingestion channel yet.
 - **The same earthquake may be reported by both global sources**: if EMSC's and USGS's origin times fall on opposite sides of a minute boundary, the merge fails. The trade-off is deliberate — better to alert twice than to miss one.
 - **The Chinese sources carry no cancellation or final-report flag (safety-relevant)**: neither CENC stream has a "cancelled" or "final" field, so **if an alert already announced to you is later withdrawn or revised upstream, the plugin cannot send a follow-up saying it is void** — the cancellation path that exists for Japanese EEW / tsunamis does not apply here. That is a gap in the source itself, not something an implementation can paper over. For anything you receive, defer to CENC's own official release.
 - **The mainland weather source has no "cleared" flag either, and orange alerts do not pierce quiet hours**: nmc.cn's warnings are a "currently in force" set — an expired warning simply vanishes from the list, so the plugin never sees a "cleared" action and will not post a follow-up saying a heavy-rain / geological-disaster alert it announced is void. Orange is also mapped faithfully to the official level (orange ≠ red) while quiet hours release red only by default, so an orange warning issued at night leaves a trace in "Recent alerts" and nothing more.
@@ -169,7 +171,7 @@ Why the cut-off sits at 4: levels 1–2 call for "check the hazard map", which a
 ## Development
 
 ```
-client/src/*.js       # client sources: 19 standard ESM modules (explicit import/export; each header states job + deps)
+client/src/*.js       # client sources: 27 standard ESM modules (explicit import/export; each header states job + deps)
 client/client.js      # DSH single-file bundle — GENERATED by rollup, do not edit
 lib/index.js          # Host half: settings namespace (schemastery) + the /areas and /feed read-only routes
 lib/poller.js         # Host half: generic feed poller (entry de-duplication, ring buffer, cursor; single-stage and two-stage sources)
@@ -190,7 +192,7 @@ node scripts/build-client.mjs          # rebuild client/client.js after editing 
 node scripts/build-areas.mjs           # regenerate the river-area table from the JMA public zip (needs network)
 node scripts/check-imports.mjs         # cross-module reference check (missing import / undeclared assignment)
 node scripts/build-client.mjs --check  # fail when the committed bundle is stale
-node tests/sync-test.cjs               # regression tests (1070 assertions)
+node tests/sync-test.cjs               # regression tests (1315 assertions)
 node scripts/check-contracts.mjs       # contract check: pull the live sources through the parsers to catch upstream changes (--offline uses samples/, no network)
 ```
 
@@ -210,14 +212,14 @@ node scripts/check-contracts.mjs       # contract check: pull the live sources t
 
 ## Changelog
 
-Current version **0.6.0** (overseas weather hazards: US NWS flood / flash-flood / coastal-flood
-warnings and Canadian ECCC rainfall / storm-surge warnings. Both are fetched **directly by the
-browser** from the official APIs and queried per watch point under "Other regions" — because only
-per-point / per-box queries are usable, while **pulling everything every round** would mean
-1.2 GB/day and 144 MB/day of **network traffic**.
-This release also went through **two independent adversarial reviews** which found and fixed six
-real defects, including a completely non-functional NWS cancellation path and overseas alerts
-wiping the Japanese "level 3, below level 4" hint. The suite went from 1103 to 1242 assertions.
+Current version **0.6.1** (review and fixes for 0.6.0: the **NWS event key now uses the VTEC
+event-tracking number** — the CAP `references` algorithm shipped in 0.6.0 was disproved by
+measurement, and made the same flood ring again on every update. Also fixed: a
+"~NaN km from the epicenter" line in overseas notifications, the cancellation path watching the
+wrong hazard switch, a permanent silence after an intensity dip, back-off polling *faster* than
+the normal interval, and Puerto Rico / Guam watch points being reported as "not configured" —
+13 items in total, plus end-to-end assertions for the ECCC fetch wiring and the cancellation path).
+The suite went from 1242 to 1315 assertions.
 See [CHANGELOG.md](./CHANGELOG.md) for the details of each release.
 
 ## Data sources

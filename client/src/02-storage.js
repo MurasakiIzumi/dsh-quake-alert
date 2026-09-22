@@ -58,6 +58,15 @@ function saveJSON(key, value) {
 // 历史记录必须是「对象数组」，且每个字段必须是渲染层能直接交给 React 的基本类型：
 // 元素为 null 会抛错；字段是对象/数组则会让 React 抛「Objects are not valid as a React child」。
 const strOr = (v, fallback) => (typeof v === 'string' ? v : (typeof v === 'number' || typeof v === 'boolean' ? String(v) : fallback))
+/**
+ * 历史条目里正文的保留上限（0.6.1）。
+ *
+ * `detail` 是解析层给出的官方正文（NWS 的 description + instruction；ECCC 的正文 + 署名），
+ * 展开条目时给用户看"该怎么做"。必须截断：历史最多 30 条、写进 localStorage，
+ * NWS 的 description + instruction 单条实测可达数 KB，不设上限会让这条 key 轻易撑爆配额
+ *（超配额时 saveJSON 是**静默失败**的，整份历史会停止落盘）。
+ */
+const HISTORY_DETAIL_MAX = 1200
 function normalizeHistoryEntry(e, i) {
   const key = strOr(e.key, '') || strOr(e.id, '')
   return {
@@ -72,6 +81,9 @@ function normalizeHistoryEntry(e, i) {
     severity: strOr(e.severity, ''),
     issued: strOr(e.issued, ''),
     headline: strOr(e.headline, ''),
+    // 官方正文（0.6.1）：NWS 的 description + instruction / ECCC 的正文 + 署名。
+    // 旧条目没有这个字段 → 空串，展示层不渲染那一行。
+    detail: strOr(e.detail, '').slice(0, HISTORY_DETAIL_MAX),
     pref: strOr(e.pref, ''),
     hit: e.hit === true,
     suppressed: e.suppressed === true,

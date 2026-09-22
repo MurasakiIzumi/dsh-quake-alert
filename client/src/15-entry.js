@@ -20,7 +20,7 @@ import { parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, par
 import { noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, resetConnHealth, pruneHealth, noteFreshness, noteStale, loadHealth, publishStatus, republishDataHealth, SCHEMA_ESCALATE_COUNT, SCHEMA_ESCALATE_CONSECUTIVE, SCHEMA_ESCALATE_WINDOW_MS, HEALTH_TTL_MS } from './05g-source-health.js'
 import { parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of } from './05e-cn-parsers.js'
 import { parseNmcAlarm, orgOf, NMC_KIND_TEXT, NMC_LEVEL_TEXT, NMC_LEVEL_RANK, NMC_BROADCAST_MIN_RANK } from './05f-nmc-parsers.js'
-import { parseNwsAlert, parseEcccAlert, ecccKindTextOf, nwsEventKeyOf, ecccEventKeyOf, NWS_EVENT_WHITELIST, NWS_KIND_TEXT, NWS_SEVERITY, NWS_SEV_RANK, ECCC_COLOUR_SEVERITY, ECCC_COLOUR_RANK, ECCC_INCLUDE, ECCC_EXCLUDE, OVERSEAS_BROADCAST_MIN_RANK } from './05h-overseas-parsers.js'
+import { parseNwsAlert, parseEcccAlert, ecccKindTextOf, nwsEventKeyOf, nwsVtecKeyOf, ecccEventKeyOf, NWS_EVENT_WHITELIST, NWS_KIND_TEXT, NWS_SEVERITY, NWS_SEV_RANK, ECCC_COLOUR_SEVERITY, ECCC_COLOUR_RANK, ECCC_INCLUDE, ECCC_EXCLUDE, OVERSEAS_BROADCAST_MIN_RANK } from './05h-overseas-parsers.js'
 import { matchAlert, matchPointAlert, matchCnAreaAlert, matchOverseasAlert, cnPlaceParts, distanceKm, validGeo } from './06-matcher.js'
 import { store, addEvent } from './07-store.js'
 import { unlockAudio, playSound, soundKindOf, audioState } from './08-audio.js'
@@ -30,7 +30,7 @@ import { createWsClient, setActiveClient } from './12-websocket.js'
 import { createFeedClient, feedStatsOf, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL } from './12b-feed-poll.js'
 import { createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY } from './12c-cn-stream.js'
 import { createHealthProbe, PROBE_INTERVAL_MS, staleAfterOf } from './12d-health-probe.js'
-import { createNwsSource, createEcccSource, overseasStatsOf, nwsSamplePoints, ecccBboxOf, placesInBoxes, NWS_ALERTS_BASE, ECCC_ALERTS_BASE, NWS_EVENT_QUERY, MIN_SAMPLE_RADIUS_KM, MAX_REQUESTS_PER_ROUND, OVERSEAS_FRESH_GATE_MS, OVERSEAS_GATE_RESET_MS, UNCOVERED_TTL_MS, OVERSEAS_MIN_BACKOFF_MS, OVERSEAS_MAX_BACKOFF_MS } from './12e-overseas-poll.js'
+import { createNwsSource, createEcccSource, overseasStatsOf, nwsSamplePoints, ecccBboxOf, placesInBoxes, US_BOXES, CA_BOX, NWS_ALERTS_BASE, ECCC_ALERTS_BASE, NWS_EVENT_QUERY, MIN_SAMPLE_RADIUS_KM, MAX_REQUESTS_PER_ROUND, OVERSEAS_FRESH_GATE_MS, OVERSEAS_GATE_RESET_MS, UNCOVERED_TTL_MS, OVERSEAS_MIN_BACKOFF_MS, OVERSEAS_MAX_BACKOFF_MS } from './12e-overseas-poll.js'
 import { SettingsPanel, p2pCodeTextOf, kindColorOf, SOURCE_ORDER, SOURCE_LABELS, SOURCE_CODE_TEXT, statusMetaOf } from './13-ui-settings.js'
 import { StatusIndicator } from './14-ui-status.js'
 import { buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION } from './16-diag.js'
@@ -360,11 +360,11 @@ export const __test = {
   NMC_KIND_TEXT, NMC_LEVEL_TEXT, NMC_LEVEL_RANK, NMC_BROADCAST_MIN_RANK,
   // 0.6.0：海外气象源（美国 NWS / 加拿大 ECCC）—— 解析层 / 契约 / 事件键 / 白名单
   parseNwsAlert, parseEcccAlert, parseNwsAlertResult, parseEcccAlertResult,
-  ecccKindTextOf, nwsEventKeyOf, ecccEventKeyOf, NWS_EVENT_WHITELIST, NWS_KIND_TEXT,
+  ecccKindTextOf, nwsEventKeyOf, nwsVtecKeyOf, ecccEventKeyOf, NWS_EVENT_WHITELIST, NWS_KIND_TEXT,
   NWS_SEVERITY, NWS_SEV_RANK, ECCC_COLOUR_SEVERITY, ECCC_COLOUR_RANK, ECCC_INCLUDE, ECCC_EXCLUDE,
   OVERSEAS_BROADCAST_MIN_RANK,
   // 0.6.0：取数器与匹配（按关注点查询 / 查询即匹配 / 年龄闸门）
-  createNwsSource, createEcccSource, nwsSamplePoints, ecccBboxOf, placesInBoxes, matchOverseasAlert,
+  createNwsSource, createEcccSource, nwsSamplePoints, ecccBboxOf, placesInBoxes, US_BOXES, CA_BOX, matchOverseasAlert,
   NWS_ALERTS_BASE, ECCC_ALERTS_BASE, NWS_EVENT_QUERY,
   MIN_SAMPLE_RADIUS_KM, MAX_REQUESTS_PER_ROUND, OVERSEAS_FRESH_GATE_MS, OVERSEAS_GATE_RESET_MS,
   UNCOVERED_TTL_MS, OVERSEAS_MIN_BACKOFF_MS, OVERSEAS_MAX_BACKOFF_MS,

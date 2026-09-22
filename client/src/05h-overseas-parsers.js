@@ -38,7 +38,13 @@
 //      而 Update / Cancel 会**换一条新的 identifier**（2026-09-22 实测过去 7 天 500 条：
 //      11 个多消息事件组里 **0 组**是"同一 serial 只递增 version"，Cancel 的 identifier
 //      与它引用的原消息连 40 位 hash 都不同）。
-//      → 所以事件键**必须用 CAP 的 `references`**（指向被取代的原消息），见 nwsEventKeyOf。
+//      → 事件键落在 **VTEC 的事件追踪号**上：`<office>.<phenom>.<sig>.<ETN>`。它是 NWS 官方的
+//      事件标识，从 NEW → EXT → CON → CAN 全程不变（只改 ACTION 段），实测 80/80 条洪水类电文
+//      都有标准 7 段 VTEC。**0.6.0 曾改用 CAP 的 `references`，0.6.1 review 证伪并撤回**：
+//      实测的链是逐版串联的（每条只引用上一版），"取 sent 最早的一条"只能回溯一步，
+//      8 条真实链里 7 条每个版本各得一个不同的键 → 同一场洪水随每次 Update 重复响铃。
+//      证据与回归数据：`samples/nws/nws-event-chain.geojson`、`nws-cancel-chain.geojson`。
+//      见 nwsEventKeyOf（VTEC → references → 自身 identifier 三级兜底）。
 //    · ECCC 的 API **没有稳定的 alert id**（只有 `alert_code` + `feature_id`），
 //      → 事件键 = 码 + 区域 + **发布日**：同一天内的更新同键（不重复响），跨天的新过程换键。
 //    消息级 id 仍保留完整信息（含版本 / 发布时刻），供"同一条消息重复到达"去重。
@@ -103,23 +109,51 @@ export const NWS_KIND_TEXT = Object.fromEntries(
 )
 
 /**
- * NWS 的事件键。**必须优先用 CAP 的 `references`**（0.6.0 review 修正）。
+ * NWS 的 **VTEC 事件追踪键**：`<office>.<phenom>.<significance>.<ETN>`。
  *
- * 实测（2026-09-22，过去 7 天的 500 条 Flood / Flash Flood / Coastal Flood 电文）：
- * **11 个多消息事件组里 0 组是"同一 serial 只递增 version"**，而 Cancel 消息的 identifier
- * 与它 `references` 的那条原消息**连 40 位 hash 都不同**（例：Cancel `a27ba9d7…` 引用
- * `d17b28bf…`）。所以"去掉末尾版本段"这条规则**关联不上原警报**：
- * 播报时记下的键是原 Alert 的，Cancel 到达时算出的是另一个键 → `wasRecentlyAlerted` 恒为假
- * → 用户永远收不到"此前播报的警报已作废"（与 nmc 的缺口一模一样，而当时的设计正好相反地
- * 宣称"NWS 有真正的取消语义"）。
+ * VTEC 是 NWS 官方的事件追踪机制，段位是
+ * `/O.<ACTION>.<OFFICE>.<PHENOM>.<SIG>.<ETN>.<BEGIN>-<END>/`
+ * （实测 2026-09-22 的 80 条活跃洪水类电文：**80/80 都有 VTEC，且都是标准 7 段**）。
  *
- * 正确做法就是 CAP 语义本身：Update / Cancel 的 `<references>` 指向**被它取代的消息**。
- * 取其中 `sent` 最早的一条作为事件链的根（并列时按 identifier 字典序，保证确定性），
- * 再去掉末尾的 `.<version>` —— 最后这一步是兜底：万一某条 references 只指向上一版
- * （而不是原始那条），去版本段之后仍与更早的版本同键。
- * 没有 references 的（就是原始 Alert）用自身 identifier。
+ * 关键在于 **ACTION 之外的四段是事件级的、跨版本稳定**：同一次洪水从
+ * `NEW` → `EXT` → `CON` → `CAN` 只改 ACTION 段，`OFFICE / PHENOM / SIG / ETN` 全程不变。
+ * 所以键**必须剔除 ACTION 段**，否则每次 Update 都会换键。
+ *
+ * @param {unknown} vtecList `properties.parameters.VTEC`（字符串数组）
+ * @returns {string} 解析不出来时返回 ''（调用方退到兜底）
  */
-function nwsEventKeyOf(id, references) {
+function nwsVtecKeyOf(vtecList) {
+  if (!Array.isArray(vtecList)) return ''
+  for (const raw of vtecList) {
+    // 不在行首锚定：实测存在一条字符串里带多段 VTEC 的产品，取第一段即可。
+    const m = /\/O\.[A-Z]{3}\.([A-Z0-9]{4})\.([A-Z]{2})\.([A-Z])\.(\d{4})\./.exec(String(raw || ''))
+    if (m) return m[1] + '.' + m[2] + '.' + m[3] + '.' + m[4]
+  }
+  return ''
+}
+
+/**
+ * NWS 的事件键。**首选 VTEC 的事件追踪号**（0.6.1 修正；0.6.0 用的是 references，已证伪）。
+ *
+ * 为什么不能用 CAP 的 `references`（0.6.0 的做法）：CAP 的 `<references>` 指向的是
+ * **被本条取代的那条消息**，而 NWS 实测是**逐版串联**的链——每条只引用紧邻的上一版
+ * （见 `samples/nws/nws-event-chain.geojson`：第 N 版 → 第 N-1 版 → … → 原始 Alert）。
+ * 于是"取 references 里 sent 最早的一条"**只能回溯一步**，算出的键每版都不同：
+ * 实测追 8 条真实事件链（2026-09-22 的活跃 Flood Warning），**7 条链上每个版本各得一个不同的键**
+ * → `isEventRepeat` 永远认为"这是新事件" → 同一场洪水随每次 Update 重复响铃
+ * （每次 Update 都在 24 小时"已播报"记忆里留下新键，`looksReplayed` 也拦不住）。
+ * 它唯一看起来成立的场景是 Cancel：Cancel 引用的正是上一版，于是与"最后一次播报的那一版"
+ * 偶然同键 —— 那是巧合，不是归并（原始 `Alert` 版从未被记住过）。
+ *
+ * 兜底顺序（VTEC 缺失时按序退让，**都不判 schema**，见契约的 tolerant）：
+ *   ① VTEC 追踪号；
+ *   ② references 里 `sent` 最早的一条（去掉末尾 `.<version>`）——保留给没有 VTEC 的产品，
+ *      例如部分非 VTEC 的海事 / 特殊电文；
+ *   ③ 自身 identifier（去掉末尾 `.<version>`）。
+ */
+function nwsEventKeyOf(id, references, vtecList) {
+  const vtec = nwsVtecKeyOf(vtecList)
+  if (vtec) return 'nws:' + vtec
   const refs = Array.isArray(references) ? references : []
   let best = null
   for (const r of refs) {
@@ -173,6 +207,9 @@ function parseNwsAlert(feature, opts) {
   const instruction = String(p.instruction || '').trim()
   const detail = [description, instruction].filter(Boolean).join('\n\n')
   const place = opts && isPlainObject(opts.place) ? opts.place : null
+  // 事件键的来源（见 nwsEventKeyOf）：VTEC 优先，references / 自身 identifier 兜底。
+  const vtecList = isPlainObject(p.parameters) ? own(p.parameters, 'VTEC') : null
+  const vtecKey = nwsVtecKeyOf(vtecList)
   return {
     id: 'nws:' + id,
     code: 'nws_alerts',
@@ -189,7 +226,7 @@ function parseNwsAlert(feature, opts) {
     maxScale: -1,
     level: 0,
     regions: [],
-    eventKey: nwsEventKeyOf(id, p.references),
+    eventKey: nwsEventKeyOf(id, p.references, vtecList),
     strength: (sev && own(NWS_SEV_RANK, sev)) || 0,
     // 海外源特有：这条预警属于哪个关注点（取数时确定），以及供 UI / 诊断用的原始标签。
     originPlace: place,
@@ -204,6 +241,8 @@ function parseNwsAlert(feature, opts) {
       senderName: String(p.senderName || ''),
       ends: String(p.ends || p.expires || ''),
       ugc: isPlainObject(p.geocode) && Array.isArray(p.geocode.UGC) ? p.geocode.UGC : [],
+      // 事件键的来源（供设置页 / 诊断核对"这条属于哪一次事件"），解析不出来时为空串。
+      vtecKey,
     },
     // 播报档位：Warning 类 = 3，Watch / Advisory / Statement = 1（见文件头 ②）。
     overseasRank: rule.rank,
@@ -290,7 +329,7 @@ function parseEcccAlert(feature, opts) {
 }
 
 export {
-  parseNwsAlert, parseEcccAlert, ecccKindTextOf, nwsEventKeyOf, ecccEventKeyOf,
+  parseNwsAlert, parseEcccAlert, ecccKindTextOf, nwsEventKeyOf, nwsVtecKeyOf, ecccEventKeyOf,
   NWS_EVENT_WHITELIST, NWS_SEVERITY, NWS_SEV_RANK,
   ECCC_COLOUR_SEVERITY, ECCC_COLOUR_RANK, ECCC_INCLUDE, ECCC_EXCLUDE,
 }
