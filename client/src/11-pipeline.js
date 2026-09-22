@@ -128,7 +128,10 @@ function updateWeatherHint(alert, cfg) {
   // `regions` 恒为空数组（归属在 cnArea 里），于是这里的 `hit` 恒为 undefined，
   // 每一条大陆预警都会走到下面的"清空提示"分支，把日本电文刚留下的
   // 「L3 正在升级、未达 L4」抹成 null——两家机构、两个地区的两件事，不该互相清。
-  if (alert.locator === 'area') return
+  // 0.6.0 review：**海外气象源（`locator === 'overseas'`）是同一个形态的更严重版本**——
+  // 它的 `regions` 同样恒为空（05h），而它每 2 分钟就可能来一条（NWS 的 Watch/Advisory 也在其中），
+  // 于是侧边栏那条日本 L3 提示会被一条美国预警反复抹掉。两条路径一起排除。
+  if (alert.locator === 'area' || alert.locator === 'overseas') return
   if ((cfg.disasters || {}).weather === false) return
   const w = cfg.watch || {}
   const lvOf = (r) => (typeof r.level === 'number' ? r.level : alert.level)
@@ -309,6 +312,32 @@ function handleAlert(alert, cfg, opts) {
       suppressed: true, suppressedReason: '同一事件在最近 24 小时内已提醒过（等强度，不重复响铃）',
     })
     return { notified: false, reason: 'replayed', detail: '该事件在最近 24 小时内已经提醒过，本次只记历史' }
+  }
+  // 打开页面时才发现的老预警（0.6.0 的年龄闸门，DESIGN 4.7.6）：**仍然命中、仍然进历史**，
+  // 但不响铃、不弹通知——海外气象源是**按关注点查询**的，页面一打开就会把当前生效的预警全拉回来，
+  // 其中可能有几小时前发布、仍在生效的洪水预警（有效期实测中位 12.6 小时）。把那些当"刚刚发生"
+  // 播报是纯粹的打扰；整条丢掉又会让用户看不到"就在打开页面前发布的那一条"。
+  // 与"静默时段"分开成两条 reason：那个是用户自己设的时段，这个是数据本身发布得早。
+  //
+  // **位置有讲究**（0.6.0 review 修正）：必须放在 `isEventRepeat` **之后**。放在它之前会绕过
+  // 事件级记忆的更新——同一条老预警每过一轮消息级去重窗口（10 分钟）就会再进一次历史，
+  // 30 条的历史列表会被同一条老预警占满、真正的提醒被挤出去（正是 11.10 第 4 条那个形态）。
+  // 放在后面时：第一次到达由本分支记历史，而 isEventRepeat 已经把事件写进记忆，
+  // 后续轮次会被判成"同一事件的后续发布"，不再重复进历史。
+  if (options.staleOnArrival) {
+    const hours = typeof options.staleOnArrival === 'number' ? options.staleOnArrival : 0
+    // **同时记进"已提醒过"的 24 小时记忆**（0.6.0 review B-4）：只靠 `isEventRepeat` 的事件窗口
+    // （气象 3 小时）不够——窗口一过，同一条仍在生效的老预警会被判成新事件、在开着的页面里响铃
+    //（洪水有效期中位 12.6 小时 → 一天可能响 3〜4 次，而用户刚被告知"只记历史，不打扰"）。
+    // 记进这条记忆之后，后面的 `looksReplayed` 分支会把它拦住。
+    rememberAlerted(alert)
+    addEvent({
+      id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
+      issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
+      suppressed: true,
+      suppressedReason: '打开页面时该预警已发布约 ' + hours + ' 小时（只记历史，不打扰）',
+    })
+    return { notified: false, reason: 'stale-on-arrival', detail: '发布较早，仅记录' }
   }
   // 静默时段：命中但不响铃、不弹通知，只记历史。红色等级（EEW、大海啸警报）默认可穿透。
   if (!options.skipQuietHours && inQuietHours(cfg) && !(hitSeverity === 'red' && cfg.quietHours.breakForSevere !== false)) {

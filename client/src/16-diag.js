@@ -26,6 +26,7 @@ import { currentCfg, settingsSync } from './03-settings-bridge.js'
 import { sourceHealthOf } from './05g-source-health.js'
 import { store } from './07-store.js'
 import { feedStatsOf } from './12b-feed-poll.js'
+import { overseasStatsOf } from './12e-overseas-poll.js'
 import { cnStreamRegistry } from './12c-cn-stream.js'
 
 /** 快照格式版本（与插件版本无关，见文件头）。 */
@@ -67,6 +68,38 @@ function feedRows() {
       lastAt: f.lastAt ? new Date(f.lastAt).toISOString() : null,
       cursor: num(f.cursor), running: f.running === true,
       host: f.host || null,
+    }
+  }
+  return out
+}
+
+/**
+ * 海外源（12e，0.6.0）：Client 直连的 REST 轮询。
+ *
+ * 三个字段是这个形态**独有**的，也是排障时最先要看的：
+ *   · `uncovered` —— NWS 对"覆盖范围之外"的坐标回 400（实测多伦多 / 温哥华 / 伦敦），
+ *     它不是故障；数字涨说明有人的关注点不在这个源的服务范围内。
+ *   · `ageSkipped` —— 被年龄闸门拦下的条数（打开页面时已发布超过 6 小时的那些，
+ *     只进历史不响铃）。它解释"为什么我看到预警但没响"。
+ *   · `gated` —— 这个源进入过几次"首轮 / 休眠恢复"状态（每次进入都会重新按 6 小时判）。
+ */
+function overseasRows() {
+  const out = {}
+  for (const id of Object.keys(overseasStatsOf)) {
+    const o = overseasStatsOf[id] || {}
+    out[id] = {
+      polls: num(o.polls), requests: num(o.requests), received: num(o.received), applied: num(o.applied),
+      errors: num(o.errors),
+      // `rejected` = 被上游用 HTTP 400 拒绝的请求数（**不代表"这个点不在覆盖范围"**，
+      // 也可能是我们的参数被拒；响应体前 160 字在 lastError 里）。
+      rejected: num(o.rejected),
+      ageSkipped: num(o.ageSkipped),
+      // 两个 throttle 计数分开：Last 是本轮、Total 是累计（0.6.0 review B-6）
+      throttledLast: num(o.throttledLast), throttledTotal: num(o.throttledTotal), gated: num(o.gated),
+      lastAt: o.lastAt ? new Date(o.lastAt).toISOString() : null,
+      lastDataAt: o.lastDataAt ? new Date(o.lastDataAt).toISOString() : null,
+      running: o.running === true,
+      lastError: str(o.lastError),
     }
   }
   return out
@@ -193,6 +226,9 @@ export function buildDiagSnapshot(now) {
     dataHealth: safe(() => sourceHealthOf() || {}, {}, warnings, 'health'),
     feed: safe(feedRows, {}, warnings, 'feed'),
     streams: safe(streamRows, {}, warnings, 'streams'),
+    // 海外源（0.6.0）：Client 直连的 REST 轮询。与 feed / streams 并列而不是塞进任一张表
+    // ——它们的字段语义不同（见 overseasRows 的注释）。
+    overseas: safe(overseasRows, {}, warnings, 'overseas'),
     history: safe(historySummary, {}, warnings, 'history'),
     // 生成过程中被兜住的异常：诊断工具自身的失败也要可见，不能假装一切正常
     warnings,

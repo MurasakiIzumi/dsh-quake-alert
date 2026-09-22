@@ -3,7 +3,162 @@
 本文件记录 dsh-quake-alert 的显著变更，格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 条目只写「改了什么」，改动的理由与实现细节见提交记录与 `DESIGN.md`。
 
-## [Unreleased]
+## [0.6.0] - 2026-09-22
+
+### Added
+
+- **`client/src/05h-overseas-parsers.js`**（0.6.0 第 2 期）：海外气象源的解析层。
+  `nws_alerts`——NWS 的 8 类洪水预警（`Flood Warning` / `Flash Flood Warning` /
+  `Coastal Flood Warning` / 各类 Watch、Advisory、Statement），**精确匹配 `properties.event`**；
+  `eccc_alerts`——ECCC 的 `alert_type='warning'` 且 `alert_name_en` 命中灾种白名单
+  （`/rain|flood|surge|hydrolog|water/`，并排除 frost / fog / wind / heat 等）。
+  两个源共用 `locator: 'overseas'`：**命中在取数时就已发生**（NWS 按点、ECCC 按 bbox），
+  由取数器把关注点记进 `alert.originPlace`，匹配层因此不做距离计算。
+- **`SOURCE_CONTRACTS` 追加 `nws_alerts` / `eccc_alerts`** + 两个 Result 包装
+  （`parseNwsAlertResult` / `parseEcccAlertResult`），四要素齐备（required / tolerant /
+  timezone / staleAfterMs / empty）。两条的 `staleAfterMs` 都是 **null**：按点 / 框查询的响应
+  天然可能是空的，"这一轮没数据"与"上游停更"同形——这条缺口连同理由写进了 `staleReason`。
+- **设置页的源状态区登记两个新源**（`SOURCE_CODE_TEXT` / `SOURCE_LABELS` / `SOURCE_ORDER`
+  与 `p2pCodeTextOf` 的 id 前缀兜底）。这是被一条**既有断言**逼出来的：它要求"每个有校验约定的源
+  都必须出现在源状态行里"——契约一登记，界面就必须覆盖，否则"某个源坏了界面上看不见"。
+- **0.6.0 开工前的海外气象源调研**（结论与全部实测数字见 `DESIGN.md` 4.6）：四个候选源——美国 NWS、
+  加拿大 ECCC、欧洲 MeteoAlarm、GDACS——用真实请求各过了一遍。结论是**只有美国 NWS 三项同时达标**：
+  灾种契合（洪水类实测 74–77 条且 severity 以 Severe 为主，而海事通告占全量三分之二，与本插件无关）、
+  粒度可用（`?point=lat,lon` 把匹配变成一次服务端查询，0.2–5KB，**不需要美国县表**）、
+  形态最省事（开放数据、免 key、**返回 `Access-Control-Allow-Origin: *`，可像 P2PQuake / EMSC 一样
+  Client 直连**——于是"按关注点查询"不必让 Host 去读 Client 配置）。**GDACS 否决**（粒度国家 / 区域级，
+  且台风 / 山火 / 干旱 / 火山不在范围内）；**MeteoAlarm 不入 0.6.0**（免 key 的 feed 无坐标、
+  没有全欧汇总端点、20 国 591 条里 wind 类 449 条而 flood 仅 11 条，按坐标查询的 OGC EDR API
+  实测 401 需授权，且 feed 无 CORS）；**ECCC 的增益有限**（116 条 100% 带 Polygon、许可明确，
+  但当前 114/116 是霜冻——实测确认是生长季霜冻、非极寒，官方定义为"非危险"；且它的**河川洪水预警
+  由省级机构发布**，无国家级 API，ECCC 只发气象预警与风暴潮）。复查同时纠正了上一轮的一处猜测：
+  ECCC 的 `CFW` 是 **storm surge warning**，不是洪水码（美国 SAME 码里 `CFW` 才是 Coastal Flood
+  Warning——两套体系不能互套）；并发现 CAP 归档里法语办公室的 `<event>` 是 `gel` 而 `eventCode`
+  仍是 `frost`（按英文名硬编码会漏掉魁北克），以及该归档**只有当天、历史不可得**。
+- **`scripts/check-overseas-sources.mjs`**：上面每一个数字的复现入口。零依赖、一条命令打印四个源的
+  可达性 / 灾种分布 / 体积 / CORS / 空间粒度，并与 `DESIGN.md` 4.6 的表格逐条对应。
+  与 `check-wolfx-live.mjs` / `check-cn-e2e.mjs` 同一处置：**不进 CI**（依赖外部服务），
+  改海外源相关设计前后手动跑。网络不可达**不算失败**（调研脚本不该因一次抖动变红）。
+- **`scripts/capture-overseas-fixtures.mjs`** + **`samples/nws/`** + **`samples/eccc/`**：真实响应快照
+  （形态与 0.5.2 的 `samples/nmc/` 一致：**裁剪但保持同形**）。NWS 侧保留 8 类洪水预警里的 7 类
+  （`Coastal Flood Warning` 当前无活跃样本）、另存一份 `?point=` 查询样本；ECCC 侧每种 `alert_code`
+  各留一条并**保留 Polygon 几何**（它 100% 带几何，是匹配的输入）。
+- **0.6.0 接入设计定稿**（`DESIGN.md` 4.7）：范围是**美国 NWS 主 + 加拿大 ECCC 补**。关键决策——
+  ① **Client 直连而非 Host 代理**：只有按关注点查询才可用，而 Host 的既有纪律是"不知道 Client 配置"
+  （走 Host 等于放弃按点查询，也就等于放弃这两个源）；实测 NWS 带浏览器 UA 与不带 UA 都返回 200。
+  ② **取数语义两源刻意不同**：NWS 用 `?point=` + 半径 ≥ 25km 时补 4 个方位采样点（近似半径，
+  因为 `?point=` 只按该点所在县 / 区划判定），ECCC 用 `?bbox=`（精确带半径，它 100% 带 Polygon）。
+  ③ **新增 `locator: 'overseas'`**：海外气象的命中在取数时就已发生（记为 `alert.originPlace`），
+  匹配层不做距离计算。④ **白名单**：NWS 精确匹配 8 类洪水事件（排除占全量三分之二的海事通告）；
+  ECCC 必须 `alert_type='warning'` 且命中关键词白名单（**落地时从 `eventCode` 改成 `alert_name_en`**：
+  API 只给三字母 `alert_code` 且它没有官方枚举，见 4.7.5）。⑤ **ECCC 许可的硬约束**：署名 + 警报
+  "不得改变内容或意图"（正文原样保留、severity 忠实映射不拔高）。⑥ **`staleAfterMs` 为 null**：
+  按点 / 框查询天然可能是空响应，判不出上游停更——这条缺口如实写进了契约与文档。
+  实施分六期（4.7.8），第 1 期完成；第 2 期见上。
+
+- **`client/src/12e-overseas-poll.js`**（0.6.0 第 3 期）：海外源的**取数器**——两个源都是
+  **Client 直连的外部 REST**（CORS 实测允许），与 `12b` / `12c` 接口同形（start / stop /
+  pollOnce / pollSerial / stats）。取数语义两源刻意不同：**NWS 用 `?point=` + 半径 ≥ 25km 时
+  补 4 个方位采样点**（`?point=` 只按该点所在县 / 区划判定，不扩张半径——只查中心点会让
+  "半径填 300km"的用户实际只有 1 个县），**ECCC 用 `bbox=` = 坐标 ± 半径**（它 100% 带 Polygon，
+  半径直接参与）。共同的纪律：每轮读一次配置（关注点变化下一轮生效）、串行请求、10 秒超时、
+  512KB 响应体上限、年龄闸门（首轮或距上次成功 30 分钟时，只播报发布在 6 小时内的条目，
+  更早的仍进历史）、排新定时器前先清旧的。
+- **`client/src/06-matcher.js` 的 `matchOverseasAlert`**（第 4 期）：海外气象走
+  **查询即匹配**——命中在取数时就已发生（取数器把关注点记进 `alert.originPlace`），
+  匹配层**不算距离**（一条 NWS 预警是"该点所在县"的，没有"距关注点多少公里"可言）。
+  四条判定：灾种开关、取消、档位（`Warning` 才播，`Watch`/`Advisory`/`Statement` 只记录）、
+  归属是否仍在关注列表里（用户删了点 → 如实说明而不是当成命中）。
+- **`disasters.overseasWeather`**（新开关，默认开）：**一个开关覆盖两个源**——与
+  `cnRainstorm` / `cnGeology` 要分成两个的理由不同，那两个是"同一端点、产出差别极大"，
+  这两个是各自独立的源、各按关注点生效（只配美国坐标就只收到美国预警）。
+  `DEFAULT_CFG` / `normalizeCfg` / Host schema / 设置页四处同步，并补了设置页说明与渲染断言。
+- **`scripts/check-contracts.mjs` 接入两个海外源**（0.6.0 第 5 期）：在线模式拉真实数据
+  （NWS 全量 event 查询实测 80 条、ECCC 全国 bbox 116 条）过解析器，离线模式用新的 fixture。
+  脚本自带的**覆盖性自检**（契约里每个源都必须有取数方式）此前会直接拦下"新增源不进 CI"
+  这种漏法——这类漏法不会有任何症状，直到那个源悄悄坏掉。
+- **设置页与诊断快照接入海外源**：源状态区新增一行（已查询轮数 / 请求 / 收到 / 交给主链 /
+  **过老只记历史** / **不在覆盖范围** / 超上限跳过 / 失败），诊断快照新增 `overseas` 段
+  （`feed` / `streams` 并列）。两张计数表**刻意分开**而不是并进 `feedStatsOf`——那张表的字段是
+  "增量 / 游标 / Host 计数"，语义不同，混在一起就得靠形状判断猜来源（0.5.4 修过的那类问题）。
+- **三语 README / `TROUBLESHOOTING.zh.md` / `samples/README.md` 同步**：功能列表、工作原理
+  （为什么这两个源是 Client 直连而不是走 Host）、已知限制（美国半径是近似、**ECCC 不覆盖河川
+  洪水**、两个源都判不出上游停更、NWS 将来可能改用 API key）、数据来源与 ECCC 的署名要求，
+  以及 fixture 的字段要点与"当前季节没有降雨样本"这个已知缺口。
+
+### Fixed
+
+- **诊断快照此前对新源是"看不见"的**：海外源没有 `/feed` 路由，若不单独出一段，它们出问题
+  （不发请求、状态是绿的、只是永远没有预警）在排障时一个字都看不到。新增一条断言守着
+  `overseas` 段的存在。
+- **NWS 的取消链路整体失效**（本轮最严重的一条）：事件键原本按"去掉 identifier 末尾的版本段"算，
+  而**实测过去 7 天 500 条里，11 个多消息事件组没有一组是"同一 serial 只递增 version"**——
+  Cancel 的 identifier 与它 `references` 的原消息**连 40 位 hash 都不同**。于是播报时记的键与
+  Cancel 算出的键永不相等，`wasRecentlyAlerted` 恒为假，用户**永远收不到"此前播报的警报已作废"**
+  （与 nmc 的缺口一样，而 DESIGN 与 README 原先正好反着宣称"NWS 有真正的取消语义"）。
+  现在事件键取 CAP 的 `references`（指向被取代的消息），取消链路才真正成立。
+- **顶层结构不符被判成"链路不可达"（红点）而不是"数据格式异常"（蓝点）**：上游把响应结构改掉、
+  或中间层塞回一个 `{oops:1}` 时，取数器只抛普通 Error，整轮被归成 `unreachable`——用户按配色语义
+  会去折腾自己的网络，而真正该等的是插件更新。现在这种情况走 `noteParseResult('schema')`，
+  与契约层、`check-contracts.mjs` 的判定一致。
+- **请求上限会吞掉关注点（静默漏报）**：`MAX_REQUESTS_PER_ROUND = 40` 原本是"按关注点顺序平铺后
+  整段截断"，于是 10 个关注点 × 5 个采样点 = 50 时，**排在后面的两个关注点每一轮都被截断、
+  永远查不到**（实测复现：被查到的只有 p0–p7），而用户看不出任何异常。现在先保证每个关注点的
+  第一个查询无条件排上，剩余额度才补方位采样点；采样点本身也**按轮次轮转起点**，不再固定顺序。
+- **年龄闸门排在事件级去重之前，会让同一条老预警反复进历史**：`staleOnArrival` 原本插在
+  `isEventRepeat` **之前**，绕过了事件记忆的更新——页面开着的期间，同一条 10 小时前的预警每过一轮
+  消息级去重窗口（10 分钟）就会再进一次历史；而事件窗口（3 小时）一过，它还会**真的响铃**
+  （洪水有效期中位 12.6 小时）。现在移到 `looksReplayed` 之后，并同时记进"已提醒"记忆。
+- **状态上报的去重键漏掉了 detail，用户会一直看到过期的状态文案**：上报键原本只取 `status`，
+  于是"未设置美国关注点（设置 → ③ 其他地区）"在用户**刚加完关注点**之后仍然挂在设置页上。
+  现在键取 `status + detail`；代价是 detail 里不能再放单调计数，所以「收到 N 条 / 处理 M 条」
+  这类计数移到设置页的海外源计数行；同时 detail 也**不能留空**（空串会让侧边栏悬停回退成
+  `NWS：open` 这种裸状态词），改为非单调的「已按 N 个关注点查询」。
+- **`stop()` 之后取数器仍会写状态、把"用户主动停用"记成一次请求失败**：停用插件会 abort 在途请求，
+  于是 catch 收到 AbortError 并照常累加，最后写出一条 `unreachable｜全部失败：The user aborted a
+  request.`——侧边栏留下红点、诊断里留下假故障，重载时旧 fiber 的这次上报还会把新会话短暂染红。
+  现在照搬 `12b-feed-poll.js` 的既有守卫：中止不算失败、不写状态、不打失败日志。
+- **任何 400 都被判成"这个点不在覆盖范围"并永久拉黑**：400 也可能表示"我们的参数被上游拒绝"
+  （`event` 名改了、中间设备改写、WAF），而原实现不问原因就拉黑整个 URL 且**永不过期**，
+  文案还替上游断言了一个我们无法证实的结论。现在：按 URL 记 **1 小时冷却**（到期自动重试）、
+  文案只说「被上游拒绝（HTTP 400，60 分钟后重试）」，响应体前 160 字留在诊断的 `lastError` 里。
+- **海外预警会清掉侧边栏的「日本气象 L3 未达 L4」提示**：`updateWeatherHint` 只排除了 nmc 的
+  `locator === 'area'`，而海外源的 `regions` 同样恒为空数组——于是**每一条**海外预警（含每 2 分钟
+  可能来一条的 NWS 记录类）都会把日本电文刚留下的提示抹掉。0.5.4 为 nmc 修过同一处，这是新实例。
+- **单条处理异常会连带丢掉整个响应**：整个 `features` 循环与 fetch 共用一个 try，一条 entry 的
+  解析 / 主链异常会被记成"这个请求失败"，还会静默丢掉该响应里剩下的条目（`12b` 的既有纪律正是
+  "单条失败不阻断其余条目"）。现在每条各自兜错。
+- **没有失败退避**：DESIGN 4.7.2 承诺过"失败退避 1s→60s"，实现里没有——上游 5xx / 429 时仍按原节奏
+  继续打。现在整轮全部失败才退避（1s 起、翻倍到 60s 上限），成功即回正常间隔。
+- **诊断里的四处语义失真**：`throttled` 是覆盖式的本轮值（拆成 `throttledLast` / `throttledTotal`）、
+  `lastError` 成功后不清零（一次瞬时 500 会永远挂着）、`stop()` 后不刷新快照（`running` 恒为 true）、
+  `overseasStatsOf` 跨插件代存活（重载后短暂显示上一代计数）。另外 `feedError` 把按点查询的失败
+  写成"增量拉取失败"，会把人引到错误的排查方向。
+- **NWS 对"覆盖范围之外"的坐标返回 `400 Invalid Parameter`**（实测多伦多 / 温哥华 / 伦敦都是），
+  而**矩形包围盒贴不住美加边界**——多伦多（43.65, -79.38）必然落进美国那个盒里。
+  若把 400 当链路故障，这些用户每轮都会看到一条假的"请求失败"（黄点）。
+  现在取数器把 400 单独分类成 `rejected`：**状态保持 open**，按 URL 记 **1 小时冷却**
+  （不是永久拉黑——见上面 review 那一条），文案只说"被上游拒绝（HTTP 400，60 分钟后重试）"。
+  这是 DESIGN 4.5 状态语义的应用（红 = 环境问题、蓝 = 数据问题，而"你关注的地方没有这个源"
+  两者都不是），代价写在 DESIGN 4.7.7 第 3 条：**我们无法从 400 本身区分"覆盖外"与"参数被拒"**。
+
+### Changed
+
+- 回归断言 **1103 → 1242**（第 2 期 +61、第 3 / 4 期 +42、第 5 期 +4、第 6 期 review +31）。
+  新增的集中在"能力真的生效吗"：
+  白名单真的在拦
+  （含 `event: 'constructor'` 的原型链攻击）、门槛真的按 `event` 分档、事件键真的把同一次事件的
+  Update 归并到同一个键（消息 id 仍带版本）、`messageType=Cancel` 真的能判取消、
+  ECCC 的署名真的进了正文且**官方正文未被改写**（许可的硬要求）、`originPlace` 真的透传。
+- 落地时按实测**纠正了 DESIGN 4.7 的两处设计**：① 播报门槛从"按 severity ≥ orange"改为
+  **按 `event` 名分档**——实测 `Flood Watch` 的 severity 也是 `Severe`（与 `Flood Warning` 同级），
+  按 severity 卡会把"警戒"当"警报"播出去；② ECCC 的白名单从"用 `eventCode`"改为
+  **用 `alert_name_en`**——ECCC 的 OGC API 只给三字母 `alert_code`（无官方枚举，4.6.3 那次
+  "把 `CFW` 当洪水码"的误判就是猜码的代价），并没有 CAP 的 `eventCode`。
+
+> 第 1 期**不改动运行时**（调研 / fixture / 脚本）；第 2–4 期改的是 `client/src/`、`lib/index.js`
+> 的 settings schema，以及三处配置默认值。**Host 的取数链路仍然零改动**——两个海外源都是
+> Client 直连。全程没有新增依赖。
 
 ## [0.5.4] - 2026-09-19
 

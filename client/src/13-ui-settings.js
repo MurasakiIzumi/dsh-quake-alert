@@ -22,6 +22,7 @@ import { showToast, showSystemNotification, notificationPermission, requestNotif
 import { handleAlert } from './11-pipeline.js'
 import { activeClient } from './12-websocket.js'
 import { feedStatsOf } from './12b-feed-poll.js'
+import { overseasStatsOf } from './12e-overseas-poll.js'
 import { broadcastHistoryCleared } from './10-dedupe.js'
 import { retrySource } from './05g-source-health.js'
 
@@ -61,6 +62,9 @@ const SOURCE_CODE_TEXT = {
   // 0.5.2：大陆气象预警的发布主体是各级气象台、由中央气象台汇总。标成「JMA 电文」会让
   // 一条云南暴雨预警看起来来自日本气象厅（同 SOURCE_CODE_TEXT 存在的理由）。
   nmc_alarm: '中央气象台',
+  // 0.6.0：海外气象源。机构名不能省——一条多伦多的降雨预警被标成「JMA 电文」是同一类错误，
+  // 而 ECCC 的许可（End-use Licence v2.1.1）本身就要求署名。
+  nws_alerts: 'NWS', eccc_alerts: 'ECCC',
 }
 /**
  * 历史条目「类型」行的来源标注。
@@ -83,6 +87,9 @@ function p2pCodeTextOf(kind, code, id) {
   if (idStr.indexOf('cenc:') === 0) return 'CENC 大陆'
   // 0.5.2：大陆气象源（新的历史条目走 code，这里兜住"更早写入的"这条路径）
   if (idStr.indexOf('nmc:') === 0) return '中央气象台'
+  // 0.6.0：海外气象源同理（`code` 缺失的历史条目靠 id 前缀认出来源）
+  if (idStr.indexOf('nws:') === 0) return 'NWS'
+  if (idStr.indexOf('eccc:') === 0) return 'ECCC'
   const c = own(P2P_KIND_CODE, kind)
   if (c) return 'code ' + c
   // 兜底：气象（kind='weather'）在 0.5.2 之前只有日本这一个来源。现在有了大陆气象源，
@@ -127,17 +134,26 @@ const SOURCE_LABELS = {
   usgs: 'USGS（全球地震目录，Host 轮询）',
   noaa: 'NOAA（海啸 CAP，Host 轮询）',
   nmc_alarm: '中央气象台（大陆暴雨 / 地质灾害预警，Host 轮询）',
+  // 0.6.0：两个海外源都是 **Client 直连的 REST 轮询**（CORS 实测允许），不走 Host。
+  nws_alerts: 'NWS（美国洪水 / 山洪 / 沿海洪水，Client 直连）',
+  eccc_alerts: 'ECCC（加拿大降雨 / 风暴潮预警，Client 直连）',
 }
 /**
  * 源状态区块里的源顺序与分组。**一处维护**：此前同样的列表在三个地方各写一遍
  * （状态行、增量计数行、重试按钮），加一个源要改三处——漏掉任何一处就变成
  * "某个源坏了但界面上看不见"，而"让失败可见"正是这个区块存在的全部理由。
  */
-const SOURCE_ORDER = ['p2pquake', 'emsc', 'cenc_eew', 'cenc_eqlist', 'jma', 'usgs', 'noaa', 'nmc_alarm']
+const SOURCE_ORDER = ['p2pquake', 'emsc', 'cenc_eew', 'cenc_eqlist', 'jma', 'usgs', 'noaa', 'nmc_alarm', 'nws_alerts', 'eccc_alerts']
 /** 走 `/feed` 增量计数的源（feedStatsOf 有快照）。大陆地震源走 SSE，另有自己的计数与链路模式。 */
 const FEED_STAT_ORDER = ['jma', 'usgs', 'noaa', 'nmc_alarm']
 /** 走 SSE 的源（0.5.0）：状态从 cnStreamRegistry 实时读。 */
 const STREAM_ORDER = ['cenc_eew', 'cenc_eqlist']
+/**
+ * 海外源（0.6.0）：Client 直连的 REST 轮询，计数从 `overseasStatsOf` 实时读。
+ * 单独一张表而不是并进 FEED_STAT_ORDER——那边的字段是"增量 / 游标 / Host 计数"，
+ * 语义不同，混在一起就得靠形状判断猜来源。
+ */
+const OVERSEAS_STAT_ORDER = ['nws_alerts', 'eccc_alerts']
 /**
  * 源状态区块（0.4.1）。
  *
@@ -180,6 +196,26 @@ function SourceStatusBlock() {
       (Number(host.errors) ? '，Host 失败 ' + host.errors + ' 次' : '') +
       (Number(host.detailDropped) ? '，Host 放弃详情 ' + host.detailDropped + ' 条' : '') +
       ' · 最近拉取 ' + ago)
+  }
+  // 海外源（0.6.0）：按关注点查询外部 REST。显示"查了几轮 / 发了多少请求 / 收到几条"，
+  // 以及两个只有这个形态才有的计数：**过老只记历史**（年龄闸门）与**不在覆盖范围**
+  // （NWS 对覆盖外的坐标回 400——那不是故障，见 12e 的说明）。
+  for (const id of OVERSEAS_STAT_ORDER) {
+    const o = overseasStatsOf[id]
+    const st = sources[id]
+    if (!o) {
+      if (!st) rows.push((SOURCE_LABELS[id] || id) + '：尚未查询')
+      continue
+    }
+    const ago = o.lastAt ? Math.max(0, Math.round((Date.now() - o.lastAt) / 1000)) + ' 秒前' : '—'
+    rows.push((SOURCE_LABELS[id] || id) + '：已查询 ' + (o.polls || 0) + ' 轮 · 请求 ' + (o.requests || 0) +
+      ' 次 · 收到 ' + (o.received || 0) + ' 条' +
+      (o.applied ? '，交给主链 ' + o.applied + ' 条' : '') +
+      (o.ageSkipped ? '，过老只记历史 ' + o.ageSkipped + ' 条' : '') +
+      (o.rejected ? '，被上游拒绝 ' + o.rejected + ' 次' : '') +
+      (o.throttledLast ? '，本轮超上限跳过 ' + o.throttledLast + ' 个请求' : '') +
+      (o.errors ? '，失败 ' + o.errors + ' 次' : '') +
+      ' · 最近查询 ' + ago)
   }
   // 大陆源（0.5.0）：走 SSE，状态从注册表**实时**读。**链路模式必须显示出来**——
   // 降级到轮询意味着延迟从秒级变成最长 15 秒，用户有权知道自己在哪条路上。
@@ -546,6 +582,25 @@ function SettingsPanel() {
           '当前：' + (store.weatherHint.label || '') +
           ' 有 L' + store.weatherHint.level + ' 气象警报（未达 L4，未播报）')
       : null,
+    // 海外气象灾害（0.6.0）：美国 NWS + 加拿大 ECCC。
+    // **一个开关覆盖两个源**——与上面大陆那两个灾种不同：那一对是"同一个端点、产出差别极大"
+    // （暴雨常年可见、地质灾害全是黄色），而这两个源是各自独立的，各按关注点生效：
+    // 只配美国坐标就只收到美国预警，不需要再加一个开关（DESIGN 4.7.6）。
+    h('div', { style: { fontSize: 12, color: '#9aa0a6', marginTop: 12, marginBottom: 2 } },
+      '海外气象灾害（美国 NWS / 加拿大 ECCC）'),
+    s.row(
+      s.checkbox(cfg.disasters.overseasWeather !== false,
+        (v) => setCfg((c) => ({ ...c, disasters: { ...c.disasters, overseasWeather: v } })),
+        '洪水 / 山洪 / 降雨 / 风暴潮预警'),
+    ),
+    h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4, lineHeight: 1.6 } },
+      '关注点在「③ 其他地区：坐标 + 半径」里配。美国源按 NWS 的县 / 区划判定——' +
+      '半径 ≥ 25km 时会在中心点之外补查 4 个方位点，所以半径对它是近似（不保证覆盖半径内的所有县）；' +
+      '加拿大源把半径换算成一个矩形范围向 ECCC 查询，凡与该范围相交的预警都算命中。' +
+      '美国只播报 Flood / Flash Flood / Coastal Flood Warning，Watch、Advisory、Statement 只记入历史；' +
+      '加拿大只接 warning 类的降雨 / 洪水 / 风暴潮（霜冻、雾、大风等既非危险天气、也不在本插件灾种内）。' +
+      '打开页面时若某条预警已发布超过 6 小时，只记入历史、不响铃。' +
+      '数据来源：美国国家气象局（NWS）；加拿大环境与气候变化部（ECCC，Data Source: Environment and Climate Change Canada）。'),
     // 无灾情时也能验证整条链路：用本地构造的电文走完 解析 → 匹配 → 播报 → 历史，
     // 不产生任何外部请求。每次点击轮换一种场景，覆盖级别落点与区域粒度的不同分支。
     // 区域取关注列表首项，保证一定命中（否则点了没反应会让人以为坏了）。
@@ -690,8 +745,9 @@ function SettingsPanel() {
     s.section('③ 其他地区：坐标 + 半径',
       h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 8 } },
         (cfg.watch.places || []).length === 0
-          ? '未设置时，全球源（EMSC / USGS 地震、NOAA 海啸）的消息不会打扰你。添加你所在或关心的位置即可生效，不需要重启。' +
-            '这里填的坐标与「② 中国大陆」加进来的城市是**同一份列表**。'
+          ? '未设置时，全球源（EMSC / USGS 地震、NOAA 海啸）与海外气象源（美国 NWS、加拿大 ECCC）的消息不会打扰你。' +
+            '添加你所在或关心的位置即可生效，不需要重启。' +
+            '这里填的坐标与「② 中国大陆」加进来的城市是同一份列表。'
           : '已设置 ' + cfg.watch.places.length + ' 个位置：震中落在半径内才提醒。日本的地震 / 海啸不受这里影响，仍按上面的都道府县判定。'),
       ...(cfg.watch.places || []).map((p, i) => h('div', {
         key: 'place-' + i,
@@ -883,9 +939,11 @@ function SettingsPanel() {
     // 免责
     s.section('免责声明', h('div', { style: { color: '#9aa0a6', fontSize: 11, lineHeight: 1.6 } },
       '预警数据由 P2PQuake 转播、日本气象厅公开 XML 电文、EMSC / USGS / NOAA，' +
+      '美国国家气象局（NWS）与加拿大环境与气候变化部（ECCC）的公开接口（浏览器直连），' +
       '以及 Wolfx 转播的中国地震台网（CENC）信息提供，均非官方直接推送；' +
       '紧急地震速报（EEW）与大陆地震预警等内容与配信品质无保证。' +
-      '本插件提醒仅供参考，避险请以当地主管机构（日本气象厅 気象庁 / 中国地震台网 CENC / 美国 USGS・NOAA 等）官方发布为准。' +
+      '本插件提醒仅供参考，避险请以当地主管机构（日本气象厅 気象庁 / 中国地震台网 CENC / ' +
+      '美国 NWS・USGS・NOAA / 加拿大 ECCC 等）官方发布为准。' +
       '插件仅在 DSH 页面开启时工作。')),
 
     // 最近预警（点击条目展开详情；多条时可滚动）

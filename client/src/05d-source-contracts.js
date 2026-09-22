@@ -29,6 +29,7 @@ import { parseJma } from './05b-jma-parser.js'
 import { parseEmsc, parseUsgsFeature, parseNoaaCap } from './05c-global-parsers.js'
 import { parseCencEew, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of } from './05e-cn-parsers.js'
 import { parseNmcAlarm, orgOf, NMC_KIND_TEXT, NMC_LEVEL_TEXT } from './05f-nmc-parsers.js'
+import { parseNwsAlert, parseEcccAlert, NWS_EVENT_WHITELIST, ECCC_INCLUDE, ECCC_EXCLUDE, ECCC_COLOUR_SEVERITY } from './05h-overseas-parsers.js'
 
 // ---------------------------------------------------------------- 返回形态
 /** 解析成功。 */
@@ -254,6 +255,74 @@ export const SOURCE_CONTRACTS = {
       '不断的（实测 238 条覆盖约 24 小时），所以"3 小时没有任何新预警"只可能是上游停更或我们' +
       '拿到缓存。与 JMA 同档；实测 40 分钟窗口里新增 11 条、相邻两次新增的最长间隔只有 10 分钟，' +
       '余量近 20 倍。',
+  },
+  // 海外气象源（0.6.0，DESIGN 4.7）。两条都是 **Client 直连的 REST 轮询**（CORS 实测允许），
+  // 而且都是**按关注点查询**（NWS 按点、ECCC 按 bbox）——这一点决定了它们与其它源的三处不同：
+  //   · locator 是 'overseas'（命中在取数时就已发生，匹配层不算距离）；
+  //   · staleAfterMs 只能是 null（空响应是常态，判不出上游停更）；
+  //   · 时间语义相反（NWS 自带偏移、ECCC 是 UTC `Z`，都不需要补本地时区）。
+  nws_alerts: {
+    label: '美国国家气象局预警（api.weather.gov）',
+    region: 'us',
+    disasters: ['weather'],
+    transport: 'rest',
+    url: 'https://api.weather.gov/alerts/active?point=<lat>,<lon>' +
+      '（半径 ≥ 25km 时另查 4 个方位采样点，见 DESIGN 4.7.2；全量 /alerts/active 1.67MB 不可用）',
+    pollMs: 120 * 1000,
+    timezone: '**响应自带偏移**（`2026-09-22T06:51:00-04:00`，随州与夏令时变化）——不换算，直接 Date.parse。' +
+      '这是本插件第一个"时刻完整"的源：JMA / nmc / Wolfx 给的都是裸本地时间、必须补偏移，NWS 不是。',
+    required: [
+      'properties 是对象（一条 CAP 电文）',
+      'properties.event string 且**精确命中 8 类洪水白名单**（未命中判 empty，见下）',
+      'properties.id string 非空（CAP identifier，去重与事件键的基础）',
+      'properties.sent 可解析的 ISO 时间（带偏移）',
+    ],
+    tolerant: 'severity 缺失或不在 {Extreme,Severe,Moderate,Minor} 内 → 退回 info，**不判 schema**：' +
+      '宁可让一条真实洪水预警少一个颜色，也不要因为上游少给一个枚举值就整源停播（漏报方向）。' +
+      'headline / areaDesc / description / instruction / geocode / ends / senderName 缺失一律不判 schema。' +
+      '`properties.eventCode` 是对象（`{SAME:[…],NationalWeatherService:[…]}`）且实测 `Flood Warning` 的 ' +
+      'SAME 给的是 `FLS`——它只作诊断，**不参与任何判据**。',
+    empty: '`properties.event` 不在白名单——它是**向前兼容的兜底**而不是异常：全量 359 条里海事通告占' +
+      '三分之二（Small Craft Advisory 202 条、Gale Warning 34 条），非本插件灾种（Air Quality / Frost / ' +
+      'Wind / Test Message）也在其中。另外 `features: []`（该点当前没有预警）同样是正常形态。' +
+      '两类都判 empty 而不是 schema，是为了不点亮一个用户处理不了的蓝点。',
+    staleAfterMs: null,
+    staleReason: '**按点查询的响应天然可能是空的**：美国绝大多数坐标绝大多数时候没有洪水预警，' +
+      '"这一轮没数据"与"上游停更"完全同形，据此判 stale 会把正常状态反复报成故障。' +
+      '活性交给连接层（请求是否成功）。代价要如实说：**"服务在但数据不更新"这种停更本插件看不见**，' +
+      '能发现的只有 schema 判据能抓到的结构改版（DESIGN 4.7.7 第 2 条）。',
+  },
+  eccc_alerts: {
+    label: '加拿大环境与气候变化部预警（api.weather.gc.ca）',
+    region: 'ca',
+    disasters: ['weather'],
+    transport: 'rest',
+    url: 'https://api.weather.gc.ca/collections/weather-alerts/items?f=json&bbox=<minLon>,<minLat>,<maxLon>,<maxLat>' +
+      '（bbox = 关注点坐标 ± radiusKm，OGC API 的矩形查询）',
+    pollMs: 300 * 1000,
+    timezone: '**UTC**（`2026-09-22T08:47:21.957Z`）——不需要补偏移，直接 Date.parse。',
+    required: [
+      'properties 是对象',
+      'alert_type === "warning"（advisory 判 empty，见下）',
+      'alert_name_en 命中灾种白名单（未命中判 empty，见下）',
+      'alert_code string 非空（ECCC 的三字母码，只作诊断与事件键）',
+      'publication_datetime 可解析的 ISO 时间',
+      'risk_colour_en ∈ {yellow, orange, red}——**颜色是 ECCC 2025 改版后的核心等级信息**，' +
+      '缺失或越界说明上游结构变了，判 schema 让用户看见',
+    ],
+    tolerant: 'alert_text_en 为空 → detail 只留署名行，**不判 schema**（正文是"该怎么做"的说明，' +
+      '它的缺失不该让一条真实预警消失）。feature_id / province / confidence_en / impact_en / status_en ' +
+      '缺失一律不判 schema——**事件键会在 feature_id 缺失时退回区域名**（见 05h 的 ecccEventKeyOf）。',
+    empty: '两类都判 empty（向前兼容，不点亮蓝点）：① `alert_type !== "warning"`——ECCC 的 advisory 按官方' +
+      '定义是「generally not considered hazardous」，实测当前 116 条里 114 条是 frost advisory；' +
+      '② `alert_name_en` 不在白名单（风 / 高温 / 雷暴 / 雾…）。' +
+      '**注意白名单的证据等级**：ECCC 的码表没有官方枚举，而当前季节没有降雨类样本，' +
+      '白名单是按名称关键词收的（`' + String(ECCC_INCLUDE) + '`，并排除 `' + String(ECCC_EXCLUDE) + '`），' +
+      '**是本设计里唯一未经实测证实的部分**——首批真实降雨预警到达后要回头校准（DESIGN 4.7.5）。',
+    staleAfterMs: null,
+    staleReason: '与 NWS 同因：bbox 查询在"这个范围当前没有本插件范围内的预警"时返回空数组，' +
+      '与"上游停更"同形。另外 ECCC 的 **CAP 归档只有当天、历史不可得**（实测跨 3 天取样全部失败），' +
+      '所以也无法用"上一次见到数据是什么时候"来判停更。',
   },
 }
 
@@ -518,6 +587,66 @@ export function parseNmcAlarmResult(raw) {
   if (t === null) return failResult('schema', '缺少 issued（可解析的 ISO 时间）')
   if (timeIsImpossible(t)) return failResult('value', '发布时间客观不可能：' + String(raw.issued))
   const alert = parseNmcAlarm(raw)
+  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  return okResult(alert)
+}
+
+/**
+ * 美国 NWS 洪水类预警（`nws_alerts`）。
+ *
+ * `opts.place` 是取数器查这条时用的关注点——它让匹配层不必再算距离（DESIGN 4.7.3）。
+ * 判据顺序与其它源一致：先把"不在范围内"与"结构不符"分开，再交给解析器（单一实现）。
+ */
+export function parseNwsAlertResult(raw, opts) {
+  if (!isPlainObject(raw)) return failResult('schema', '顶层不是对象')
+  const p = raw.properties
+  if (!isPlainObject(p)) return failResult('schema', '缺少 properties（对象）')
+  const event = typeof p.event === 'string' ? p.event : ''
+  // 走 own()：`event: 'constructor'` 这类键直查会命中原型链返回函数对象（truthy），
+  // 于是脏数据绕过白名单被放行（与 0.5.4 修的 nmc 查表是同一个坑）。
+  if (!own(NWS_EVENT_WHITELIST, event)) {
+    return failResult('empty', '事件类型不在本插件范围内：' + (event || '(空)'))
+  }
+  const id = String(p.id === undefined || p.id === null ? (raw.id || '') : p.id).trim()
+  if (!id) return failResult('schema', '缺少 properties.id（CAP identifier）')
+  const t = timeMsOf(p.sent)
+  if (t === null) return failResult('schema', '缺少或无法解析 properties.sent（ISO 时间）')
+  if (timeIsImpossible(t)) return failResult('value', '发布时间客观不可能：' + String(p.sent))
+  const alert = parseNwsAlert(raw, opts)
+  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  return okResult(alert)
+}
+
+/**
+ * 加拿大 ECCC 预警（`eccc_alerts`）。
+ *
+ * 两道过滤器都在契约层做（与解析器里的同一份名单），这样"不在范围内"这件事在
+ * **进入解析器之前**就有明确的归类，而不是靠解析器返回 null 再反推是 schema 还是 empty。
+ */
+export function parseEcccAlertResult(raw, opts) {
+  if (!isPlainObject(raw)) return failResult('schema', '顶层不是对象')
+  const p = raw.properties
+  if (!isPlainObject(p)) return failResult('schema', '缺少 properties（对象）')
+  const type = typeof p.alert_type === 'string' ? p.alert_type : ''
+  if (type !== 'warning') {
+    return failResult('empty', 'ECCC 的 ' + (type || '(空类型)') + ' 不在本插件接的范围内（advisory 按官方定义是非危险天气）')
+  }
+  const nameEn = typeof p.alert_name_en === 'string' ? p.alert_name_en.trim() : ''
+  if (!nameEn) return failResult('schema', '缺少 alert_name_en（string）')
+  // 先排除、再包含——与 05h 里的顺序一致（那边是解析器的最后一道）。
+  if (ECCC_EXCLUDE.test(nameEn) || !ECCC_INCLUDE.test(nameEn)) {
+    return failResult('empty', '灾种不在本插件范围内：' + nameEn)
+  }
+  const code = typeof p.alert_code === 'string' ? p.alert_code.trim() : ''
+  if (!code) return failResult('schema', '缺少 alert_code（string）')
+  const t = timeMsOf(p.publication_datetime)
+  if (t === null) return failResult('schema', '缺少或无法解析 publication_datetime')
+  if (timeIsImpossible(t)) return failResult('value', '发布时间客观不可能：' + String(p.publication_datetime))
+  const colour = typeof p.risk_colour_en === 'string' ? p.risk_colour_en.toLowerCase() : ''
+  if (!own(ECCC_COLOUR_SEVERITY, colour)) {
+    return failResult('schema', 'risk_colour_en 缺失或越界：' + String(p.risk_colour_en))
+  }
+  const alert = parseEcccAlert(raw, opts)
   if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
   return okResult(alert)
 }

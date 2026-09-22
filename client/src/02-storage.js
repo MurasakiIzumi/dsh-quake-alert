@@ -155,6 +155,8 @@ function normalizeCfg(input) {
       // 表现是"用户关掉了暴雨提醒，刷新后又自己开了"。
       cnRainstorm: boolOr(d.cnRainstorm, DEFAULT_CFG.disasters.cnRainstorm),
       cnGeology: boolOr(d.cnGeology, DEFAULT_CFG.disasters.cnGeology),
+      // 海外气象灾害（0.6.0）。同上：**必须在这里同步**，否则用户关掉之后刷新又自己开了。
+      overseasWeather: boolOr(d.overseasWeather, DEFAULT_CFG.disasters.overseasWeather),
     },
     thresholds: {
       quakeScale: numOr(t.quakeScale, DEFAULT_CFG.thresholds.quakeScale, 0, 70),

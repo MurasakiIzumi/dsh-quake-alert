@@ -1,0 +1,103 @@
+{
+    "@context": [
+        "https://geojson.org/geojson-ld/geojson-context.jsonld",
+        {
+            "@version": "1.1",
+            "wx": "https://api.weather.gov/ontology#",
+            "@vocab": "https://api.weather.gov/ontology#"
+        }
+    ],
+    "type": "FeatureCollection",
+    "features": [
+        {
+            "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.07e8b75fb57f05a4b356f7591a8dd7bac660e5d3.001.1",
+            "type": "Feature",
+            "geometry": null,
+            "properties": {
+                "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.07e8b75fb57f05a4b356f7591a8dd7bac660e5d3.001.1",
+                "@type": "wx:Alert",
+                "id": "urn:oid:2.49.0.1.840.0.07e8b75fb57f05a4b356f7591a8dd7bac660e5d3.001.1",
+                "areaDesc": "Inland Harris; Inland Brazoria; Inland Galveston; Coastal Harris; Coastal Brazoria; Coastal Galveston; Brazoria Islands; Galveston Island; Bolivar Peninsula",
+                "geocode": {
+                    "SAME": [
+                        "048201",
+                        "048039",
+                        "048167"
+                    ],
+                    "UGC": [
+                        "TXZ213",
+                        "TXZ237",
+                        "TXZ238",
+                        "TXZ313",
+                        "TXZ337",
+                        "TXZ338",
+                        "TXZ437",
+                        "TXZ438",
+                        "TXZ439"
+                    ]
+                },
+                "affectedZones": [
+                    "https://api.weather.gov/zones/forecast/TXZ213",
+                    "https://api.weather.gov/zones/forecast/TXZ237",
+                    "https://api.weather.gov/zones/forecast/TXZ238",
+                    "https://api.weather.gov/zones/forecast/TXZ313",
+                    "https://api.weather.gov/zones/forecast/TXZ337",
+                    "https://api.weather.gov/zones/forecast/TXZ338",
+                    "https://api.weather.gov/zones/forecast/TXZ437",
+                    "https://api.weather.gov/zones/forecast/TXZ438",
+                    "https://api.weather.gov/zones/forecast/TXZ439"
+                ],
+                "references": [],
+                "sent": "2026-09-21T14:57:00-05:00",
+                "effective": "2026-09-21T14:57:00-05:00",
+                "onset": "2026-09-21T14:57:00-05:00",
+                "expires": "2026-09-22T19:00:00-05:00",
+                "ends": null,
+                "status": "Actual",
+                "messageType": "Alert",
+                "category": "Met",
+                "severity": "Unknown",
+                "certainty": "Unknown",
+                "urgency": "Unknown",
+                "event": "Air Quality Alert",
+                "sender": "w-nws.webmaster@noaa.gov",
+                "senderName": "NWS Houston/Galveston TX",
+                "headline": "Air Quality Alert issued September 21 at 2:57PM CDT by NWS Houston/Galveston TX",
+                "description": "AQAHGX\n\nThe Texas Commission on Environmental Quality (TCEQ) has issued an\nOzone Action Day for the Houston, Galveston, and Brazoria area for\nTuesday, September 22, 2026.\n\nAtmospheric conditions are expected to be favorable for producing\nhigh levels of ozone pollution in the Houston, Galveston, and\nsurrounding areas on Tuesday. You can help prevent ozone pollution by\nsharing a ride, walking, riding a bicycle, taking your lunch to work,\navoiding drive through lanes, conserving energy and keeping your vehicle\nproperly tuned.\n\nFor more information on ozone:\nOzone: The Facts www.tceq.texas.gov/airquality/monops/ozonefacts.html\nEPA AirNow: www.airnow.gov/?city=Houston&state=TX&country=USA\nTake Care of Texas:\nwww.takecareoftexas.org/conservation-tips/keep-our-air-clean",
+                "instruction": null,
+                "response": "Monitor",
+                "note": "Non-Weather Emergency Message. Not sent to IPAWS.",
+                "parameters": {
+                    "AWIPSidentifier": [
+                        "AQAHGX"
+                    ],
+                    "WMOidentifier": [
+                        "AEUS74 KHGX 211957"
+                    ],
+                    "NWSheadline": [
+                        "Ozone Action Day"
+                    ],
+                    "BLOCKCHANNEL": [
+                        "EAS",
+                        "NWEM",
+                        "CMAS"
+                    ]
+                },
+                "scope": "Public",
+                "code": "IPAWSv1.0",
+                "language": "en-US",
+                "web": "http://www.weather.gov",
+                "eventCode": {
+                    "SAME": [
+                        "NWS"
+                    ],
+                    "NationalWeatherService": [
+                        "AQA"
+                    ]
+                }
+            }
+        }
+    ],
+    "title": "Current watches, warnings, and advisories for 29.7604 N, 95.3698 W",
+    "updated": "2026-09-22T11:33:16+00:00"
+}

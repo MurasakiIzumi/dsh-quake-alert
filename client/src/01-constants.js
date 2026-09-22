@@ -198,7 +198,7 @@ const DEFAULT_CFG = {
   //   · 坐标点（places）——全球源（EMSC / USGS / NOAA）用，判定方式是「震中距 ≤ radiusKm」
   // 两者互不影响：日本用户不用配 places，全球用户不用配 prefectures。
   watch: { prefectures: [], cities: [], places: [] },
-  disasters: { earthquake: true, tsunami: true, weather: true, cnRainstorm: true, cnGeology: true }, // weather = 日本气象灾害（泥石流 / 洪水 / 大雨 / 高潮…），固定 L4 以上播报；cnRainstorm / cnGeology = 中国大陆气象灾害（0.5.2），固定橙色以上播报
+  disasters: { earthquake: true, tsunami: true, weather: true, cnRainstorm: true, cnGeology: true, overseasWeather: true }, // weather = 日本气象灾害（泥石流 / 洪水 / 大雨 / 高潮…），固定 L4 以上播报；cnRainstorm / cnGeology = 中国大陆气象灾害（0.5.2），固定橙色以上播报；overseasWeather = 海外气象灾害（0.6.0，美国 NWS + 加拿大 ECCC），一个开关覆盖两个"按关注点生效"的源
   // globalMagnitude：全球源（EMSC / USGS）的最低震级。日本源用的是震度（quakeScale），
   // 全球源只有震级——实测 EMSC 会推 M3.8 级别的事件，若沿用"来什么报什么"会明显吵闹。
   // cnReportMagnitude：大陆**速报**（cenc_eqlist）的独立震级门槛。大陆地震预警（cenc_eew）与

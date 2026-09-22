@@ -15,12 +15,13 @@ import { setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, set
 import { parse, parseQuake, parseEew, parseTsunami, prefsOfArea, regionsOfArea, AREA_PREF, sevColor } from './05-parser.js'
 import { parseJma, buildTestTelegram, TEST_SCENARIOS, maxLevelIn as jmaMaxLevelIn, itemsOf as jmaItemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf } from './05b-jma-parser.js'
 import { parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage } from './05c-global-parsers.js'
-import { parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseNmcAlarmResult, failResult, SOURCE_CONTRACTS } from './05d-source-contracts.js'
+import { parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseNmcAlarmResult, parseNwsAlertResult, parseEcccAlertResult, failResult, SOURCE_CONTRACTS } from './05d-source-contracts.js'
 // 0.5.3：健康状态（机制层）与契约（约定层）现在是两个模块，调用方分别 import。
 import { noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, resetConnHealth, pruneHealth, noteFreshness, noteStale, loadHealth, publishStatus, republishDataHealth, SCHEMA_ESCALATE_COUNT, SCHEMA_ESCALATE_CONSECUTIVE, SCHEMA_ESCALATE_WINDOW_MS, HEALTH_TTL_MS } from './05g-source-health.js'
 import { parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of } from './05e-cn-parsers.js'
 import { parseNmcAlarm, orgOf, NMC_KIND_TEXT, NMC_LEVEL_TEXT, NMC_LEVEL_RANK, NMC_BROADCAST_MIN_RANK } from './05f-nmc-parsers.js'
-import { matchAlert, matchPointAlert, matchCnAreaAlert, cnPlaceParts, distanceKm, validGeo } from './06-matcher.js'
+import { parseNwsAlert, parseEcccAlert, ecccKindTextOf, nwsEventKeyOf, ecccEventKeyOf, NWS_EVENT_WHITELIST, NWS_KIND_TEXT, NWS_SEVERITY, NWS_SEV_RANK, ECCC_COLOUR_SEVERITY, ECCC_COLOUR_RANK, ECCC_INCLUDE, ECCC_EXCLUDE, OVERSEAS_BROADCAST_MIN_RANK } from './05h-overseas-parsers.js'
+import { matchAlert, matchPointAlert, matchCnAreaAlert, matchOverseasAlert, cnPlaceParts, distanceKm, validGeo } from './06-matcher.js'
 import { store, addEvent } from './07-store.js'
 import { unlockAudio, playSound, soundKindOf, audioState } from './08-audio.js'
 import { isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, ensureAlertChannel, closeAlertChannel, broadcastHistoryCleared } from './10-dedupe.js'
@@ -29,6 +30,7 @@ import { createWsClient, setActiveClient } from './12-websocket.js'
 import { createFeedClient, feedStatsOf, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL } from './12b-feed-poll.js'
 import { createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY } from './12c-cn-stream.js'
 import { createHealthProbe, PROBE_INTERVAL_MS, staleAfterOf } from './12d-health-probe.js'
+import { createNwsSource, createEcccSource, overseasStatsOf, nwsSamplePoints, ecccBboxOf, placesInBoxes, NWS_ALERTS_BASE, ECCC_ALERTS_BASE, NWS_EVENT_QUERY, MIN_SAMPLE_RADIUS_KM, MAX_REQUESTS_PER_ROUND, OVERSEAS_FRESH_GATE_MS, OVERSEAS_GATE_RESET_MS, UNCOVERED_TTL_MS, OVERSEAS_MIN_BACKOFF_MS, OVERSEAS_MAX_BACKOFF_MS } from './12e-overseas-poll.js'
 import { SettingsPanel, p2pCodeTextOf, kindColorOf, SOURCE_ORDER, SOURCE_LABELS, SOURCE_CODE_TEXT, statusMetaOf } from './13-ui-settings.js'
 import { StatusIndicator } from './14-ui-status.js'
 import { buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION } from './16-diag.js'
@@ -148,7 +150,9 @@ export function apply(ctx) {
    *  这里再过一次是幂等的，但保证了"写 store 的每一处都走同一个合成规则"。 */
   const feedStatus = (sourceId) => (patch) => publishStatus(sourceId, patch)
   const feedError = (name) => (err) => {
-    try { console.warn('[dsh-quake-alert] ' + name + ' 增量拉取失败：' + String((err && err.message) || err)) } catch (e) {}
+    // 措辞用"请求失败"而不是"增量拉取失败"（0.6.0 review C-5）：海外源是按点 / 按框查询，
+    // 没有"增量"这个概念，日志里出现"增量拉取失败"会把人引到错误的排查方向。
+    try { console.warn('[dsh-quake-alert] ' + name + ' 请求失败：' + String((err && err.message) || err)) } catch (e) {}
   }
 
   // 気象庁电文增量（0.3.0）：Host 侧负责轮询与去重，这里只拉本地增量并交给主链。
@@ -282,6 +286,27 @@ export function apply(ctx) {
     return () => { for (const c of [cencEew, cencEqlist]) { try { c.stop() } catch (err) {} } }
   }, 'dsh-quake-alert: cn streams')
 
+  // 海外气象（0.6.0）：美国 NWS 与加拿大 ECCC，**Client 直连的外部 REST**（CORS 实测允许）。
+  // 与其它源的形态差别写在 12e 的文件头：按关注点查询、不判停更、年龄闸门在首轮生效。
+  // 两个源各自只对"落在对应国家包围盒内的关注点"发请求——没配那个国家的用户一个请求都不产生，
+  // 所以不需要额外的开关，灾种开关（overseasWeather）关掉时连请求都不发（12e 的 enabled 判定）。
+  const nwsSource = createNwsSource({
+    onStatus: feedStatus('nws_alerts'),
+    onError: feedError('nws_alerts'),
+  })
+  const ecccSource = createEcccSource({
+    onStatus: feedStatus('eccc_alerts'),
+    onError: feedError('eccc_alerts'),
+  })
+  ctx.effect(() => {
+    // 清掉上一代的计数快照（0.6.0 review C-4）：`overseasStatsOf` 是模块级的，插件重建后
+    // 到首个轮询完成前，设置页与诊断会显示上一代的数字与 `running: true`。
+    for (const k of Object.keys(overseasStatsOf)) delete overseasStatsOf[k]
+    nwsSource.start()
+    ecccSource.start()
+    return () => { for (const s of [nwsSource, ecccSource]) { try { s.stop() } catch (err) {} } }
+  }, 'dsh-quake-alert: overseas pollers')
+
   // 全球地震（0.4.0）：EMSC 的 WebSocket，复用与 P2PQuake 同一套连接管理（退避、建连看门狗、
   // 生命周期归还 fiber）。「久无数据」判据从 0（关闭）改为 3 小时（0.4.1 修正）：
   // 关掉之后就没有任何半开检测了——半开正是"没有 onclose"，而建连看门狗在 onopen 之后
@@ -333,6 +358,17 @@ export const __test = {
   // 0.5.2：大陆气象源（nmc.cn）—— 解析层 / 契约 / 行政区层级匹配
   parseNmcAlarm, orgOf, parseNmcAlarmResult, matchCnAreaAlert, cnPlaceParts, cnAreaOf, normAliases,
   NMC_KIND_TEXT, NMC_LEVEL_TEXT, NMC_LEVEL_RANK, NMC_BROADCAST_MIN_RANK,
+  // 0.6.0：海外气象源（美国 NWS / 加拿大 ECCC）—— 解析层 / 契约 / 事件键 / 白名单
+  parseNwsAlert, parseEcccAlert, parseNwsAlertResult, parseEcccAlertResult,
+  ecccKindTextOf, nwsEventKeyOf, ecccEventKeyOf, NWS_EVENT_WHITELIST, NWS_KIND_TEXT,
+  NWS_SEVERITY, NWS_SEV_RANK, ECCC_COLOUR_SEVERITY, ECCC_COLOUR_RANK, ECCC_INCLUDE, ECCC_EXCLUDE,
+  OVERSEAS_BROADCAST_MIN_RANK,
+  // 0.6.0：取数器与匹配（按关注点查询 / 查询即匹配 / 年龄闸门）
+  createNwsSource, createEcccSource, nwsSamplePoints, ecccBboxOf, placesInBoxes, matchOverseasAlert,
+  NWS_ALERTS_BASE, ECCC_ALERTS_BASE, NWS_EVENT_QUERY,
+  MIN_SAMPLE_RADIUS_KM, MAX_REQUESTS_PER_ROUND, OVERSEAS_FRESH_GATE_MS, OVERSEAS_GATE_RESET_MS,
+  UNCOVERED_TTL_MS, OVERSEAS_MIN_BACKOFF_MS, OVERSEAS_MAX_BACKOFF_MS,
+  overseasStatsOf,
   parse, parseQuake, parseEew, parseTsunami, parseJma, parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage, feedStatsOf, watchlessPoint, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn, jmaItemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf, matchAlert, matchPointAlert, distanceKm, validGeo, normalizePlaces, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, hitSeverityOf, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY, cnProductName, authorityOf, disclaimerOf, SOURCE_ORDER, SOURCE_LABELS, SOURCE_CODE_TEXT, SettingsPanel, statusMetaOf, buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION, inQuietHours, isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, ensureAlertChannel, broadcastHistoryCleared, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, p2pTimeToIso, cnTimeToIso, CN_TIME_RE, CN_REPORT_MAG_OPTIONS, issuedToDate, formatIssuedLocal, audioState, SOURCE_CONTRACTS, parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of, failResult, noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, P2P_TIME_RE, MIGRATED_KEY }
 
 // activeClient 是 12-websocket 的模块级 let：给 12 用的赋值出口（跨模块不能写 imported binding）

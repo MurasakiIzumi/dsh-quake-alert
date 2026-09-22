@@ -1,0 +1,807 @@
+{
+ "@context": [
+  "https://geojson.org/geojson-ld/geojson-context.jsonld",
+  {
+   "@version": "1.1",
+   "wx": "https://api.weather.gov/ontology#",
+   "@vocab": "https://api.weather.gov/ontology#"
+  }
+ ],
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.87b778d0893c19faf245aa08573dea4c831d7d0b.001.1",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.87b778d0893c19faf245aa08573dea4c831d7d0b.001.1",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.87b778d0893c19faf245aa08573dea4c831d7d0b.001.1",
+    "areaDesc": "Monroe Upper Keys; Monroe Middle Keys; Monroe Lower Keys",
+    "geocode": {
+     "SAME": [
+      "012087"
+     ],
+     "UGC": [
+      "FLZ076",
+      "FLZ077",
+      "FLZ078"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/forecast/FLZ076",
+     "https://api.weather.gov/zones/forecast/FLZ077",
+     "https://api.weather.gov/zones/forecast/FLZ078"
+    ],
+    "references": [],
+    "sent": "2026-09-22T07:04:00-04:00",
+    "effective": "2026-09-22T07:04:00-04:00",
+    "onset": "2026-09-22T07:04:00-04:00",
+    "expires": "2026-09-22T15:15:00-04:00",
+    "ends": "2026-09-22T17:00:00-04:00",
+    "status": "Actual",
+    "messageType": "Alert",
+    "category": "Met",
+    "severity": "Minor",
+    "certainty": "Likely",
+    "urgency": "Expected",
+    "event": "Coastal Flood Statement",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Key West FL",
+    "headline": "Coastal Flood Statement issued September 22 at 7:04AM EDT until September 22 at 5:00PM EDT by NWS Key West FL",
+    "description": "* WHAT...Minor saltwater flooding.\n\n* WHERE...Florida Keys.\n\n* WHEN...Through this afternoon.\n\n* IMPACTS...Minor saltwater flooding of low elevation streets\nand lots is likely. Some storm drains will overflow, and some\nseawalls and docks will be overtopped. Boaters can expect less\nclearance under fixed bridges. Motorists should remember that\npersistent puddles around the times of high tide are almost\ncertain to contain a mix of saltwater.",
+    "instruction": "Do not drive through flooded roadways.",
+    "response": "Monitor",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "CFWKEY"
+     ],
+     "WMOidentifier": [
+      "WHUS42 KKEY 221104"
+     ],
+     "NWSheadline": [
+      "COASTAL FLOOD STATEMENT REMAINS IN EFFECT UNTIL 5 PM EDT THIS AFTERNOON"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "VTEC": [
+      "/O.CON.KKEY.CF.S.0006.000000T0000Z-260922T2100Z/"
+     ],
+     "eventEndingTime": [
+      "2026-09-22T17:00:00-04:00"
+     ],
+     "expiredReferences": [
+      "w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.4012d084f3603f4d95839eb82448a24cb3db2984.001.1,2026-09-21T16:28:00-04:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "NWS"
+     ],
+     "NationalWeatherService": [
+      "CFS"
+     ]
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.51147ec31690b5d7617cac97c237c6154f9b8a49.001.1",
+   "type": "Feature",
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -84.5,
+       34.55
+      ],
+      [
+       -84.35,
+       34.76
+      ],
+      [
+       -84.35,
+       34.77
+      ],
+      [
+       -84.15,
+       34.66
+      ],
+      [
+       -84.38,
+       34.44
+      ],
+      [
+       -84.53,
+       34.5
+      ],
+      [
+       -84.5,
+       34.55
+      ]
+     ]
+    ]
+   },
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.51147ec31690b5d7617cac97c237c6154f9b8a49.001.1",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.51147ec31690b5d7617cac97c237c6154f9b8a49.001.1",
+    "areaDesc": "Dawson, GA; Fannin, GA; Gilmer, GA; Pickens, GA",
+    "geocode": {
+     "SAME": [
+      "013085",
+      "013111",
+      "013123",
+      "013227"
+     ],
+     "UGC": [
+      "GAC085",
+      "GAC111",
+      "GAC123",
+      "GAC227"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/county/GAC085",
+     "https://api.weather.gov/zones/county/GAC111",
+     "https://api.weather.gov/zones/county/GAC123",
+     "https://api.weather.gov/zones/county/GAC227"
+    ],
+    "references": [],
+    "sent": "2026-09-22T06:31:00-04:00",
+    "effective": "2026-09-22T06:31:00-04:00",
+    "onset": "2026-09-22T06:31:00-04:00",
+    "expires": "2026-09-22T12:30:00-04:00",
+    "ends": "2026-09-22T12:30:00-04:00",
+    "status": "Actual",
+    "messageType": "Alert",
+    "category": "Met",
+    "severity": "Severe",
+    "certainty": "Likely",
+    "urgency": "Immediate",
+    "event": "Flash Flood Warning",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Peachtree City GA",
+    "headline": "Flash Flood Warning issued September 22 at 6:31AM EDT until September 22 at 12:30PM EDT by NWS Peachtree City GA",
+    "description": "FFWFFC\n\nThe National Weather Service in Peachtree City has issued a\n\n* Flash Flood Warning for...\nNorthwestern Dawson County in north central Georgia...\nSoutheastern Fannin County in north central Georgia...\nSoutheastern Gilmer County in north central Georgia...\nNortheastern Pickens County in north central Georgia...\n\n* Until 1230 PM EDT.\n\n* At 631 AM EDT, Doppler radar indicated thunderstorms producing\nheavy rain across the warned area. Between 1 and 3 inches of rain\nhave fallen. The expected rainfall rate is 1 to 2 inches in 1 hour.\nFlash flooding is ongoing or expected to begin shortly.\n\nHAZARD...Flash flooding caused by thunderstorms.\n\nSOURCE...Radar indicated.\n\nIMPACT...Flash flooding of small creeks and streams, urban areas,\nhighways, streets and underpasses as well as other poor\ndrainage and low-lying areas.\n\n* Some locations that will experience flash flooding include...\nJasper, Talking Rock, Cartecay, Roy, Sequoyah Lake, Lake Tamarack,\nPisgah, Black Gap Shelter, Stover Creek Shelter and Springer\nMountain Shelter.",
+    "instruction": "Turn around, don't drown when encountering flooded roads. Most flood\ndeaths occur in vehicles.",
+    "response": "Avoid",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "FFWFFC"
+     ],
+     "WMOidentifier": [
+      "WGUS52 KFFC 221031"
+     ],
+     "flashFloodDetection": [
+      "RADAR INDICATED"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "EAS-ORG": [
+      "WXR"
+     ],
+     "VTEC": [
+      "/O.NEW.KFFC.FF.W.0076.260922T1031Z-260922T1630Z/"
+     ],
+     "eventEndingTime": [
+      "2026-09-22T12:30:00-04:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "FFW"
+     ],
+     "NationalWeatherService": [
+      "FFW"
+     ]
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.9ebebf5bd501b2db671a3bac51e49d750be36b90.009.1",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.9ebebf5bd501b2db671a3bac51e49d750be36b90.009.1",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.9ebebf5bd501b2db671a3bac51e49d750be36b90.009.1",
+    "areaDesc": "Prince George; Charles City",
+    "geocode": {
+     "SAME": [
+      "051149",
+      "051670",
+      "051730",
+      "051036"
+     ],
+     "UGC": [
+      "VAZ081",
+      "VAZ082"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/forecast/VAZ081",
+     "https://api.weather.gov/zones/forecast/VAZ082"
+    ],
+    "references": [
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.1f0e1cc1d5b5cbc28a87f45808d3895c0472ed36.010.1",
+      "identifier": "urn:oid:2.49.0.1.840.0.1f0e1cc1d5b5cbc28a87f45808d3895c0472ed36.010.1",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-09-22T02:10:00-04:00"
+     },
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.1f0e1cc1d5b5cbc28a87f45808d3895c0472ed36.011.1",
+      "identifier": "urn:oid:2.49.0.1.840.0.1f0e1cc1d5b5cbc28a87f45808d3895c0472ed36.011.1",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-09-22T02:10:00-04:00"
+     },
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.acf0b3f7b1c3ce36fb86ec135d42b63b72debd26.009.1",
+      "identifier": "urn:oid:2.49.0.1.840.0.acf0b3f7b1c3ce36fb86ec135d42b63b72debd26.009.1",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-09-22T06:09:00-04:00"
+     }
+    ],
+    "sent": "2026-09-22T06:28:00-04:00",
+    "effective": "2026-09-22T06:28:00-04:00",
+    "onset": "2026-09-23T06:00:00-04:00",
+    "expires": "2026-09-22T16:00:00-04:00",
+    "ends": "2026-09-25T04:00:00-04:00",
+    "status": "Actual",
+    "messageType": "Update",
+    "category": "Met",
+    "severity": "Moderate",
+    "certainty": "Possible",
+    "urgency": "Future",
+    "event": "Coastal Flood Watch",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Wakefield VA",
+    "headline": "Coastal Flood Watch issued September 22 at 6:28AM EDT until September 25 at 4:00AM EDT by NWS Wakefield VA",
+    "description": "* WHAT...One to two feet of inundation above ground level\npossible in low-lying areas near shorelines and tidal\nwaterways.\n\n* WHERE...Charles City and Prince George (including Hopewell)\nCounties along the James River.\n\n* WHEN...From Wednesday morning through late Thursday night.\n\n* IMPACTS...Numerous roads may be closed. Low lying property\nincluding homes, businesses, and some critical infrastructure\nmay be inundated. Some shoreline erosion may occur.",
+    "instruction": "If travel is required, allow extra time as some roads may be\nclosed. Do not drive around barricades or through water of\nunknown depth. Take the necessary actions to protect flood-prone\nproperty.",
+    "response": "Prepare",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "CFWAKQ"
+     ],
+     "WMOidentifier": [
+      "WHUS41 KAKQ 221028"
+     ],
+     "NWSheadline": [
+      "COASTAL FLOOD WATCH REMAINS IN EFFECT FROM WEDNESDAY MORNING THROUGH LATE THURSDAY NIGHT"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "EAS-ORG": [
+      "WXR"
+     ],
+     "VTEC": [
+      "/O.CON.KAKQ.CF.A.0002.260923T1000Z-260925T0800Z/"
+     ],
+     "eventEndingTime": [
+      "2026-09-25T04:00:00-04:00"
+     ],
+     "expiredReferences": [
+      "w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.ebddb28a7d11dc335522ebb6cd3e94c4b1455431.005.1,2026-09-21T18:00:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.6c5803439c82bb5a0d7151352206ff4f5d09d5b4.002.1,2026-09-21T14:22:00-04:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "CFA"
+     ],
+     "NationalWeatherService": [
+      "CFA"
+     ]
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.9ebebf5bd501b2db671a3bac51e49d750be36b90.002.1",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.9ebebf5bd501b2db671a3bac51e49d750be36b90.002.1",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.9ebebf5bd501b2db671a3bac51e49d750be36b90.002.1",
+    "areaDesc": "Virginia Beach",
+    "geocode": {
+     "SAME": [
+      "051810"
+     ],
+     "UGC": [
+      "VAZ098"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/forecast/VAZ098"
+    ],
+    "references": [
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.1f0e1cc1d5b5cbc28a87f45808d3895c0472ed36.003.1",
+      "identifier": "urn:oid:2.49.0.1.840.0.1f0e1cc1d5b5cbc28a87f45808d3895c0472ed36.003.1",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-09-22T02:10:00-04:00"
+     },
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.acf0b3f7b1c3ce36fb86ec135d42b63b72debd26.002.1",
+      "identifier": "urn:oid:2.49.0.1.840.0.acf0b3f7b1c3ce36fb86ec135d42b63b72debd26.002.1",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-09-22T06:09:00-04:00"
+     }
+    ],
+    "sent": "2026-09-22T06:28:00-04:00",
+    "effective": "2026-09-22T06:28:00-04:00",
+    "onset": "2026-09-22T16:00:00-04:00",
+    "expires": "2026-09-22T16:00:00-04:00",
+    "ends": "2026-09-23T14:00:00-04:00",
+    "status": "Actual",
+    "messageType": "Update",
+    "category": "Met",
+    "severity": "Minor",
+    "certainty": "Likely",
+    "urgency": "Expected",
+    "event": "Coastal Flood Advisory",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Wakefield VA",
+    "headline": "Coastal Flood Advisory issued September 22 at 6:28AM EDT until September 23 at 2:00PM EDT by NWS Wakefield VA",
+    "description": "* WHAT...For the Beach Hazards Statement, a high risk of rip\ncurrents is expected. For the Coastal Flood Advisory, up to\none foot of inundation above ground level expected in low-\nlying areas near shorelines and tidal waterways. For the High\nSurf Advisory, large breaking waves of 8 to 12 feet expected\nin the surf zone. For the Coastal Flood Watch, two to three\nfeet of inundation above ground level possible in low-lying\nareas near shorelines and tidal waterways.\n\n* WHERE...Virginia Beach.\n\n* WHEN...For the Beach Hazards Statement, from 8 AM EDT this\nmorning through Wednesday evening. For the Coastal Flood\nAdvisory, from 4 PM this afternoon to 2 PM EDT Wednesday. For\nthe High Surf Advisory, from 7 AM Wednesday to 6 PM EDT\nThursday. For the Coastal Flood Watch, from Wednesday\nafternoon through late Thursday night.\n\n* IMPACTS...Numerous roads may be closed. Low lying property\nincluding homes, businesses, and some critical infrastructure\nmay be inundated. Some shoreline erosion may occur. Dangerous\nswimming and surfing conditions and localized beach erosion.",
+    "instruction": "If travel is required, allow extra time as some roads may be\nclosed. Do not drive around barricades or through water of\nunknown depth. Take the necessary actions to protect flood-prone\nproperty.\n\nInexperienced swimmers should remain out of the water due to\ndangerous surf conditions.\n\nRemain out of the water to avoid hazardous swimming conditions.",
+    "response": "Monitor",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "CFWAKQ"
+     ],
+     "WMOidentifier": [
+      "WHUS41 KAKQ 221028"
+     ],
+     "NWSheadline": [
+      "BEACH HAZARDS STATEMENT REMAINS IN EFFECT THROUGH WEDNESDAY EVENING... ...COASTAL FLOOD ADVISORY REMAINS IN EFFECT FROM 4 PM THIS AFTERNOON TO 2 PM EDT WEDNESDAY... ...HIGH SURF ADVISORY REMAINS IN EFFECT FROM 7 AM WEDNESDAY TO 6 PM EDT THURSDAY... ...COASTAL FLOOD WATCH REMAINS IN EFFECT FROM WEDNESDAY AFTERNOON THROUGH LATE THURSDAY NIGHT"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "VTEC": [
+      "/O.CON.KAKQ.CF.Y.0006.260922T2000Z-260923T1800Z/"
+     ],
+     "eventEndingTime": [
+      "2026-09-23T14:00:00-04:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "NWS"
+     ],
+     "NationalWeatherService": [
+      "CFY"
+     ]
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.20ec95d55e1efc1d3605a69ee1c409d5cf1ef610.001.1",
+   "type": "Feature",
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -83.39,
+       35.63
+      ],
+      [
+       -83.35,
+       35.64
+      ],
+      [
+       -83.32,
+       35.66
+      ],
+      [
+       -83.31,
+       35.65
+      ],
+      [
+       -83.31,
+       35.66
+      ],
+      [
+       -83.29,
+       35.66
+      ],
+      [
+       -83.27,
+       35.48
+      ],
+      [
+       -83.34,
+       35.33
+      ],
+      [
+       -83.4,
+       35.33
+      ],
+      [
+       -83.47,
+       35.37
+      ],
+      [
+       -83.4,
+       35.55
+      ],
+      [
+       -83.39,
+       35.63
+      ]
+     ]
+    ]
+   },
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.20ec95d55e1efc1d3605a69ee1c409d5cf1ef610.001.1",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.20ec95d55e1efc1d3605a69ee1c409d5cf1ef610.001.1",
+    "areaDesc": "Jackson, NC; Swain, NC",
+    "geocode": {
+     "SAME": [
+      "037099",
+      "037173"
+     ],
+     "UGC": [
+      "NCC099",
+      "NCC173"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/county/NCC099",
+     "https://api.weather.gov/zones/county/NCC173"
+    ],
+    "references": [],
+    "sent": "2026-09-22T06:28:00-04:00",
+    "effective": "2026-09-22T06:28:00-04:00",
+    "onset": "2026-09-22T06:28:00-04:00",
+    "expires": "2026-09-22T09:30:00-04:00",
+    "ends": "2026-09-22T09:30:00-04:00",
+    "status": "Actual",
+    "messageType": "Alert",
+    "category": "Met",
+    "severity": "Minor",
+    "certainty": "Likely",
+    "urgency": "Expected",
+    "event": "Flood Advisory",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Greenville-Spartanburg SC",
+    "headline": "Flood Advisory issued September 22 at 6:28AM EDT until September 22 at 9:30AM EDT by NWS Greenville-Spartanburg SC",
+    "description": "* WHAT...Flooding caused by excessive rainfall is expected.\n\n* WHERE...Northwestern Jackson County in western North Carolina...\nEastern Swain County in western North Carolina...\n\n* WHEN...Until 930 AM EDT.\n\n* IMPACTS...Minor flooding in low-lying and poor drainage areas.\nWater over roadways.\n\n* ADDITIONAL DETAILS...\n- At 628 AM EDT, Doppler radar indicated heavy rain due to\nthunderstorms. Minor flooding is ongoing or expected to begin\nshortly in the advisory area. Between 1 and 2 inches of rain have\nfallen.\n- Some locations that will experience flooding include...\nBryson City, Cherokee, Smoky Mountains-Oconaluftee, Smoky\nMountains-Deep Creek, Smoky Mountains-Newfound Gap, B.R.\nParkway-Smoky Mountains To Balsam Gap, Smoky Mountains-Balsam\nMountain, Whittier and Alarka.\n- http://www.weather.gov/safety/flood",
+    "instruction": "Only when it is safe to do so, please report flooding or landslides\nthreatening roads or property to the National Weather Service\nGreenville-Spartanburg by calling 1...800...2 6 7...8 1 0 1, by\nposting on our Facebook page, or by posting on X using hashtag\nNWSGSP. Your message should describe the specific location, address,\nor intersection where impacts occurred and the depth of flooding\nobserved.\n\nBe especially cautious at night when it is harder to recognize the\ndangers of flooding.",
+    "response": "Avoid",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "FLSGSP"
+     ],
+     "WMOidentifier": [
+      "WGUS82 KGSP 221028"
+     ],
+     "NWSheadline": [
+      "FLOOD ADVISORY IN EFFECT UNTIL 930 AM EDT THIS MORNING"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "VTEC": [
+      "/O.NEW.KGSP.FA.Y.0111.260922T1028Z-260922T1330Z/"
+     ],
+     "eventEndingTime": [
+      "2026-09-22T09:30:00-04:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "NWS"
+     ],
+     "NationalWeatherService": [
+      "FAY"
+     ]
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.5a1541b9193001ff5dbb02ca227dc1af3eb9256b.002.1",
+   "type": "Feature",
+   "geometry": null,
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.5a1541b9193001ff5dbb02ca227dc1af3eb9256b.002.1",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.5a1541b9193001ff5dbb02ca227dc1af3eb9256b.002.1",
+    "areaDesc": "Upper Gila River Valley; Southern Gila Foothills/Mimbres Valley; Southwest Desert/Lower Gila River Valley; Lowlands of the Bootheel; Uplands of the Bootheel; Southwest Desert/Mimbres Basin; Eastern Black Range Foothills; Sierra County Lakes; Northern Dona Ana County; Southern Dona Ana County/Mesilla Valley; West Slopes Sacramento Mountains Below 7500 Feet; Sacramento Mountains Above 7500 Feet; East Slopes Sacramento Mountains Below 7500 Feet; Otero Mesa; Central Grant County/Silver City Area; Southern Gila Region Highlands/Black Range; West Central Tularosa Basin/White Sands; East Central Tularosa Basin/Alamogordo; Southeast Tularosa Basin; Western El Paso County; Eastern/Central El Paso County; Northern Hudspeth Highlands/Hueco Mountains; Rio Grande Valley of Eastern El Paso/Western Hudspeth Counties",
+    "geocode": {
+     "SAME": [
+      "035017",
+      "035023",
+      "035029",
+      "035051",
+      "035013",
+      "035035",
+      "048141",
+      "048229"
+     ],
+     "UGC": [
+      "NMZ401",
+      "NMZ403",
+      "NMZ404",
+      "NMZ405",
+      "NMZ406",
+      "NMZ407",
+      "NMZ408",
+      "NMZ409",
+      "NMZ410",
+      "NMZ411",
+      "NMZ414",
+      "NMZ415",
+      "NMZ416",
+      "NMZ417",
+      "NMZ425",
+      "NMZ426",
+      "NMZ427",
+      "NMZ428",
+      "NMZ429",
+      "TXZ418",
+      "TXZ419",
+      "TXZ420",
+      "TXZ423"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/forecast/NMZ401",
+     "https://api.weather.gov/zones/forecast/NMZ403",
+     "https://api.weather.gov/zones/forecast/NMZ404",
+     "https://api.weather.gov/zones/forecast/NMZ405",
+     "https://api.weather.gov/zones/forecast/NMZ406",
+     "https://api.weather.gov/zones/forecast/NMZ407",
+     "https://api.weather.gov/zones/forecast/NMZ408",
+     "https://api.weather.gov/zones/forecast/NMZ409",
+     "https://api.weather.gov/zones/forecast/NMZ410",
+     "https://api.weather.gov/zones/forecast/NMZ411",
+     "https://api.weather.gov/zones/forecast/NMZ414",
+     "https://api.weather.gov/zones/forecast/NMZ415",
+     "https://api.weather.gov/zones/forecast/NMZ416",
+     "https://api.weather.gov/zones/forecast/NMZ417",
+     "https://api.weather.gov/zones/forecast/NMZ425",
+     "https://api.weather.gov/zones/forecast/NMZ426",
+     "https://api.weather.gov/zones/forecast/NMZ427",
+     "https://api.weather.gov/zones/forecast/NMZ428",
+     "https://api.weather.gov/zones/forecast/NMZ429",
+     "https://api.weather.gov/zones/forecast/TXZ418",
+     "https://api.weather.gov/zones/forecast/TXZ419",
+     "https://api.weather.gov/zones/forecast/TXZ420",
+     "https://api.weather.gov/zones/forecast/TXZ423"
+    ],
+    "references": [
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.edeb8a3896765abd79d0240e68192d0f76464e69.002.1",
+      "identifier": "urn:oid:2.49.0.1.840.0.edeb8a3896765abd79d0240e68192d0f76464e69.002.1",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-09-21T18:07:00-06:00"
+     }
+    ],
+    "sent": "2026-09-22T03:43:00-06:00",
+    "effective": "2026-09-22T03:43:00-06:00",
+    "onset": "2026-09-22T12:00:00-06:00",
+    "expires": "2026-09-22T12:00:00-06:00",
+    "ends": "2026-09-23T19:00:00-06:00",
+    "status": "Actual",
+    "messageType": "Update",
+    "category": "Met",
+    "severity": "Severe",
+    "certainty": "Possible",
+    "urgency": "Future",
+    "event": "Flood Watch",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS El Paso Tx/Santa Teresa NM",
+    "headline": "Flood Watch issued September 22 at 3:43AM MDT until September 23 at 7:00PM MDT by NWS El Paso Tx/Santa Teresa NM",
+    "description": "* WHAT...Flooding caused by excessive rainfall continues to be\npossible.\n\n* WHERE...Portions of New Mexico, including the following areas,\nCentral Grant County/Silver City Area, East Central Tularosa\nBasin/Alamogordo, East Slopes Sacramento Mountains Below 7500 Feet,\nEastern Black Range Foothills, Lowlands of the Bootheel, Northern\nDona Ana County, Otero Mesa, Sacramento Mountains Above 7500 Feet,\nSierra County Lakes, Southeast Tularosa Basin, Southern Dona Ana\nCounty/Mesilla Valley, Southern Gila Foothills/Mimbres Valley,\nSouthern Gila Region Highlands/Black Range, Southwest Desert/Lower\nGila River Valley, Southwest Desert/Mimbres Basin, Uplands of the\nBootheel, Upper Gila River Valley, West Central Tularosa\nBasin/White Sands and West Slopes Sacramento Mountains Below 7500\nFeet and southwest Texas, including the following areas,\nEastern/Central El Paso County, Northern Hudspeth Highlands/Hueco\nMountains, Rio Grande Valley of Eastern El Paso/Western Hudspeth\nCounties and Western El Paso County.\n\n* WHEN...From noon MDT today through Wednesday evening.\n\n* IMPACTS...Excessive runoff may result in flooding of arroyos,\nrivers, streams, and other low-lying and flood-prone locations.\nFlooding may occur in poor drainage and urban areas. Low-water\ncrossings may be flooded, resulting in road closures.\n\n* ADDITIONAL DETAILS...\n- An early season back door cool front will interact with a late\nseason plume of deep tropical moisture, bringing several rounds\nof thunderstorms with torrential downpours to the region Tuesday\nafternoon through Wednesday evening. Repeated thunderstorms may\ntend to focus in one or two areas, resulting in higher end\nprecipitation totals. The most critical period with the heaviest\nrain potential will likely be Tuesday night into Wednesday\nmorning.\n- http://www.weather.gov/safety/flood",
+    "instruction": "You should monitor later forecasts and be alert for possible Flood\nWarnings. Those living in areas prone to flooding should be prepared\nto take action should flooding develop.",
+    "response": "Prepare",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "FFAEPZ"
+     ],
+     "WMOidentifier": [
+      "WGUS64 KEPZ 220943"
+     ],
+     "NWSheadline": [
+      "FLOOD WATCH REMAINS IN EFFECT FROM NOON MDT TODAY THROUGH WEDNESDAY EVENING"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "EAS-ORG": [
+      "WXR"
+     ],
+     "VTEC": [
+      "/O.CON.KEPZ.FA.A.0013.260922T1800Z-260924T0100Z/"
+     ],
+     "eventEndingTime": [
+      "2026-09-23T19:00:00-06:00"
+     ],
+     "expiredReferences": [
+      "w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.ec890a65357c664d2e02985743e29d39b95308f3.002.1,2026-09-21T11:52:00-06:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.ec890a65357c664d2e02985743e29d39b95308f3.001.1,2026-09-21T11:52:00-06:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.e3530ab6e1bf472bce3bf4fb4183e06b889379aa.002.1,2026-09-21T14:04:00-06:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.611c0fc9ca6484f952a2fdb208df69cba885d389.001.1,2026-09-20T23:18:00-06:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "FFA"
+     ],
+     "NationalWeatherService": [
+      "FAA"
+     ]
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.b0eb22816eb396a57c9c1246e4282f8cee0fd690.001.1",
+   "type": "Feature",
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -82.6,
+       39.61
+      ],
+      [
+       -82.49,
+       39.6
+      ],
+      [
+       -82.35,
+       39.53
+      ],
+      [
+       -82.28,
+       39.47
+      ],
+      [
+       -82.28,
+       39.43
+      ],
+      [
+       -82.6,
+       39.61
+      ]
+     ]
+    ]
+   },
+   "properties": {
+    "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.b0eb22816eb396a57c9c1246e4282f8cee0fd690.001.1",
+    "@type": "wx:Alert",
+    "id": "urn:oid:2.49.0.1.840.0.b0eb22816eb396a57c9c1246e4282f8cee0fd690.001.1",
+    "areaDesc": "Hocking, OH",
+    "geocode": {
+     "SAME": [
+      "039073"
+     ],
+     "UGC": [
+      "OHC073"
+     ]
+    },
+    "affectedZones": [
+     "https://api.weather.gov/zones/county/OHC073"
+    ],
+    "references": [
+     {
+      "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.f5841cf41191af1c77dc3244c1e72e199c6619b2.002.1",
+      "identifier": "urn:oid:2.49.0.1.840.0.f5841cf41191af1c77dc3244c1e72e199c6619b2.002.1",
+      "sender": "w-nws.webmaster@noaa.gov",
+      "sent": "2026-09-21T21:51:00-04:00"
+     }
+    ],
+    "sent": "2026-09-22T05:21:00-04:00",
+    "effective": "2026-09-22T05:21:00-04:00",
+    "onset": "2026-09-22T05:21:00-04:00",
+    "expires": "2026-09-22T14:00:00-04:00",
+    "ends": "2026-09-22T14:00:00-04:00",
+    "status": "Actual",
+    "messageType": "Update",
+    "category": "Met",
+    "severity": "Severe",
+    "certainty": "Observed",
+    "urgency": "Immediate",
+    "event": "Flood Warning",
+    "sender": "w-nws.webmaster@noaa.gov",
+    "senderName": "NWS Wilmington OH",
+    "headline": "Flood Warning issued September 22 at 5:21AM EDT until September 22 at 2:00PM EDT by NWS Wilmington OH",
+    "description": "...The Flood Warning is extended for the following rivers...\n\nHocking River at Enterprise.\n\n* WHAT...Minor flooding is occurring and minor flooding is forecast.\n\n* WHERE...Hocking River at Enterprise.\n\n* WHEN...Until this afternoon.\n\n* IMPACTS...At 12.5 feet, Flooding extends well into the floodplain\nalong the river.  Flood waters extend to near the skirting of a\ncouple of homes along the river in Rockbridge and closes Voris\nRoad, Roley Road and Dupler Road.\n\n* ADDITIONAL DETAILS...\n- At 5:00 AM EDT Tuesday the stage was 12.6 feet.\n- Forecast...The river is expected to fall below flood stage this\nmorning and continue falling, remaining below flood stage.\n- Flood stage is 12.0 feet.",
+    "instruction": "Turn around, don't drown when encountering flooded roads. Most flood\ndeaths occur in vehicles.\n\nAdditional information is available at www.weather.gov/iln.",
+    "response": "Avoid",
+    "note": null,
+    "parameters": {
+     "AWIPSidentifier": [
+      "FLSILN"
+     ],
+     "WMOidentifier": [
+      "WGUS81 KILN 220921"
+     ],
+     "NWSheadline": [
+      "FLOOD WARNING NOW IN EFFECT UNTIL THIS AFTERNOON"
+     ],
+     "BLOCKCHANNEL": [
+      "EAS",
+      "NWEM",
+      "CMAS"
+     ],
+     "EAS-ORG": [
+      "WXR"
+     ],
+     "VTEC": [
+      "/O.EXT.KILN.FL.W.0067.000000T0000Z-260922T1800Z/"
+     ],
+     "eventEndingTime": [
+      "2026-09-22T14:00:00-04:00"
+     ],
+     "expiredReferences": [
+      "w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.cc6ed4d102f3c264f333ebff70f8561186456eb8.001.1,2026-09-21T15:55:00-04:00 w-nws.webmaster@noaa.gov,urn:oid:2.49.0.1.840.0.8d0539945fe9abe228680416a402135fd0d480e9.001.1,2026-09-21T08:57:00-04:00"
+     ]
+    },
+    "scope": "Public",
+    "code": "IPAWSv1.0",
+    "language": "en-US",
+    "web": "http://www.weather.gov",
+    "eventCode": {
+     "SAME": [
+      "FLS"
+     ],
+     "NationalWeatherService": [
+      "FLW"
+     ]
+    }
+   }
+  }
+ ],
+ "title": "Current watches, warnings, and advisories",
+ "updated": "2026-09-22T11:33:16+00:00"
+}

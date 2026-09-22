@@ -4002,6 +4002,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       for (const k of ['at', 'page', 'aggregate', 'config', 'sources', 'dataHealth', 'feed', 'streams', 'history', 'warnings']) {
         assert(k in snap, '快照含 ' + k + ' 段')
       }
+      // 0.6.0：海外源是 Client 直连的 REST，没有 /feed 路由可查——它们的计数单独一段。
+      // 没有这一段，海外源出问题时诊断快照里**一个字都看不到**（而"看不到"正是这类
+      // 源最容易出的故障形态：不发请求、状态是绿的，只是永远没有预警）。
+      assert('overseas' in snap, '快照含 overseas 段（海外源的查询 / 未覆盖 / 年龄闸门计数）')
       let json = ''
       try { json = JSON.stringify(snap) } catch (err) { json = '' }
       assert(json.length > 50, '快照可 JSON 化（活对象/循环引用会在这里炸）')
@@ -4285,6 +4289,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '大陆气象灾害的两个开关渲染出来了')
       assert(has('橙色及以上') && has('没有「解除」标志'),
         '设置页如实说明"橙色才播报"与"没有解除标志"（DESIGN 10.2 要求 UI 不得假装能处理）')
+      // 0.6.0：海外气象源的开关与说明。与 0.5.0 / 0.5.2 同一条纪律——新加的 UI 必须有渲染断言，
+      // 否则一个拼错的 h(...) 会白屏而没有任何断言会失败。
+      assert(has('海外气象灾害') && has('洪水 / 山洪 / 降雨 / 风暴潮预警'),
+        '海外气象的开关渲染出来了')
+      assert(has('Data Source: Environment and Climate Change Canada'),
+        '设置页带上了 ECCC 的署名（End-use Licence v2.1.1 要求署名）')
+      assert(has('打开页面时若某条预警已发布超过 6 小时'),
+        '设置页如实说明了年龄闸门（用户知道为什么打开页面时老预警不响）')
       T2.resetCityTable()
     }
   } catch (e) {
@@ -4952,6 +4964,714 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     }
   } catch (e) {
     assert(false, '0.5.4 检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
+  }
+
+  // ==========================================================================
+  // 0.6.0 第 2 期：海外气象源（美国 NWS / 加拿大 ECCC）的解析层与契约
+  // 全部用 samples/nws/ 与 samples/eccc/ 的真实 fixture，不联网。
+  // 这一批断言问的是"能力真的生效吗"（11.9 F）：白名单真的在拦、门槛真的按 event 分档、
+  // 事件键真的把同一次事件的 Update 归并到一起、许可要求的署名真的进了正文。
+  // ==========================================================================
+  try {
+    const T6 = loadClientEx().exports.__test
+    const nwsSample = JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'nws', 'nws-flood-alerts.geojson'), 'utf8'))
+    const ecccSample = JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'eccc', 'eccc-alerts.geojson'), 'utf8'))
+    const usPlace = { name: '休斯敦', lat: 29.7604, lon: -95.3698, radiusKm: 100 }
+    const caPlace = { name: '多伦多', lat: 43.6532, lon: -79.3832, radiusKm: 150 }
+    const jpPlace = { name: '东京', lat: 35.6812, lon: 139.7671, radiusKm: 100 }
+    // 取数器与匹配层只读配置，不写；复制一份避免污染 currentCfg 返回的对象。
+    const mkCfg = (places, overseas) => {
+      const c = JSON.parse(JSON.stringify(T6.currentCfg()))
+      c.watch.places = places
+      c.disasters.overseasWeather = overseas !== false
+      return c
+    }
+    const nwsByEvent = (ev) => nwsSample.features.filter((f) => f.properties.event === ev)[0]
+
+    console.log('== 0.6.0 NWS：白名单 / 门槛 / 事件键 ==')
+
+    // ---- 1. 白名单：8 类事件一个都不能少，且都能从真实 fixture 走通 ----
+    {
+      const white = T6.NWS_EVENT_WHITELIST
+      const want = ['Flood Warning', 'Flash Flood Warning', 'Coastal Flood Warning', 'Flood Watch',
+        'Flood Advisory', 'Coastal Flood Watch', 'Coastal Flood Advisory', 'Coastal Flood Statement']
+      assert(want.every((e) => Object.prototype.hasOwnProperty.call(white, e)),
+        '8 类洪水事件都在白名单里（契约里声明了几类，这里就必须有几类）')
+      let okCount = 0
+      for (const f of nwsSample.features) {
+        const r = T6.parseNwsAlertResult(f, { place: usPlace })
+        if (r.ok) okCount += 1
+        else assert(false, '真实 fixture 里的 ' + f.properties.event + ' 解析失败：' + r.kind + ' ' + r.detail)
+      }
+      assert(okCount === nwsSample.features.length, 'fixture 里的每一条都解析成功（' + okCount + ' 条）')
+    }
+
+    // ---- 2. 门槛按 event 分档，**不按 severity**——这条有实测证据 ----
+    {
+      const fw = T6.parseNwsAlertResult(nwsByEvent('Flood Warning'), { place: usPlace }).alert
+      const ffw = T6.parseNwsAlertResult(nwsByEvent('Flash Flood Warning'), { place: usPlace }).alert
+      const watch = T6.parseNwsAlertResult(nwsByEvent('Flood Watch'), { place: usPlace }).alert
+      const adv = T6.parseNwsAlertResult(nwsByEvent('Flood Advisory'), { place: usPlace }).alert
+      assert(fw.overseasRank >= T6.OVERSEAS_BROADCAST_MIN_RANK, 'Flood Warning 达到播报线（Warning 类）')
+      assert(ffw.overseasRank >= T6.OVERSEAS_BROADCAST_MIN_RANK, 'Flash Flood Warning 达到播报线')
+      assert(watch.overseasRank < T6.OVERSEAS_BROADCAST_MIN_RANK, 'Flood Watch 不到播报线（只进历史）')
+      assert(adv.overseasRank < T6.OVERSEAS_BROADCAST_MIN_RANK, 'Flood Advisory 不到播报线')
+      // 关键证据：Flood Watch 的 severity 实测是 Severe（与 Flood Warning 同级），
+      // 所以"按 severity ≥ orange 播报"会把警戒当警报播出去。门槛必须看 event 名。
+      assert(watch.severity === 'orange' && watch.overseasRank < T6.OVERSEAS_BROADCAST_MIN_RANK,
+        'Flood Watch 的 severity 是 orange 但档位不到线——这正是"门槛不能按 severity"的实测证据')
+    }
+
+    // ---- 3. severity 忠实映射，不拔高 ----
+    {
+      assert(T6.NWS_SEVERITY.Extreme === 'red' && T6.NWS_SEVERITY.Severe === 'orange' &&
+        T6.NWS_SEVERITY.Moderate === 'yellow' && T6.NWS_SEVERITY.Minor === 'info',
+        'NWS 的四个 severity 各自映射到本项目配色，不做"恒 red"那种拔高')
+      const fw = T6.parseNwsAlertResult(nwsByEvent('Flood Warning'), { place: usPlace }).alert
+      assert(fw.severity === 'orange', 'Flood Warning（Severe）→ orange，未被拔高成 red')
+    }
+
+    // ---- 4. 时间：NWS 自带偏移，**不做换算**（与 JMA / nmc / Wolfx 相反的形态）----
+    {
+      const f = nwsByEvent('Flood Warning')
+      const a = T6.parseNwsAlertResult(f, { place: usPlace }).alert
+      assert(a.issued === f.properties.sent, 'issued 原样保留响应里的带偏移时刻：' + a.issued)
+      assert(/[+-]\d{2}:\d{2}$/.test(a.issued), '确实是带偏移的 ISO（不是补出来的本地时间）')
+    }
+
+    // ---- 5. 事件键：按 CAP 的 references 归并事件链（0.6.0 review 修正的核心） ----
+    {
+      const f = nwsByEvent('Flood Warning')
+      const base = T6.parseNwsAlertResult(f, { place: usPlace }).alert
+      // 该 fixture 是 msgType=Update 且带 references → 事件键取**被取代的那条**，不是它自己
+      assert(base.eventKey === T6.nwsEventKeyOf(f.properties.id, f.properties.references),
+        '事件键由 identifier + references 推出')
+      assert(base.eventKey === 'nws:' + f.properties.references[0].identifier.replace(/\.[0-9]+$/, ''),
+        'Update 的事件键取 references 指向的原消息：' + base.eventKey)
+      assert(base.eventKey !== 'nws:' + f.properties.id.replace(/\.[0-9]+$/, ''),
+        '——而且它与自身 identifier 算出的键**不同**（"取消永远匹配不上"那个缺陷正来自这里）')
+      // 没有 references 的原始 Alert 用自身 identifier
+      const raw = nwsByEvent('Flash Flood Warning')
+      const rawAlert = T6.parseNwsAlertResult(raw, { place: usPlace }).alert
+      assert(rawAlert.eventKey === 'nws:' + raw.properties.id.replace(/\.[0-9]+$/, ''),
+        '原始 Alert（无 references）用自身 identifier')
+    }
+
+    // ---- 5b. 取消链路端到端（review A1 的守卫） ----
+    {
+      const alert = T6.parseNwsAlertResult(nwsByEvent('Flood Warning'), { place: usPlace }).alert
+      T6.rememberAlerted(alert) // 模拟"这条已经播报过"
+      assert(T6.wasRecentlyAlerted(alert) === true, '（前置）播报后 24 小时内记得它')
+      const c = JSON.parse(JSON.stringify(nwsByEvent('Flood Warning')))
+      c.properties.id = c.properties.id.replace(/(\.[0-9]+)$/, '.2') // Cancel 会换新 identifier
+      c.properties.messageType = 'Cancel'
+      const cancelAlert = T6.parseNwsAlertResult(c, { place: usPlace }).alert
+      assert(cancelAlert.cancelled === true, '（前置）messageType=Cancel → cancelled')
+      assert(cancelAlert.id !== alert.id, '（前置）Cancel 的消息 id 与原来不同（CAP 要求 identifier 唯一）')
+      assert(cancelAlert.eventKey === alert.eventKey,
+        'Cancel 的事件键与当初播报的那条**相同**——否则用户永远收不到"此前警报已作废"')
+      assert(T6.wasRecentlyAlerted(cancelAlert) === true, '于是取消链路能命中记忆，会补一条作废提醒')
+    }
+
+    // ---- 6. 取消语义：NWS 有真正的 Cancel（比 nmc 强）----
+    {
+      const c = JSON.parse(JSON.stringify(nwsByEvent('Flood Warning')))
+      c.properties.messageType = 'Cancel'
+      assert(T6.parseNwsAlertResult(c, { place: usPlace }).alert.cancelled === true, 'messageType=Cancel → cancelled')
+      assert(T6.parseNwsAlertResult(nwsByEvent('Flood Warning'), { place: usPlace }).alert.cancelled === false,
+        '其余 messageType（Alert / Update）不算取消')
+    }
+
+    // ---- 7. 判据的分类：不在范围内是 empty，结构不符才是 schema ----
+    {
+      const craft = (patch) => {
+        const f = JSON.parse(JSON.stringify(nwsByEvent('Flood Warning')))
+        Object.assign(f.properties, patch)
+        return T6.parseNwsAlertResult(f, { place: usPlace })
+      }
+      assert(craft({ event: 'Small Craft Advisory' }).kind === 'empty',
+        '海事通告（占全量三分之二）判 empty，不是故障')
+      assert(craft({ event: 'constructor' }).kind === 'empty',
+        'event=constructor 判 empty——直查白名单会命中原型链返回函数对象（0.5.4 修过的同一个坑）')
+      assert(craft({ sent: undefined }).kind === 'schema', '缺 sent → schema')
+      // properties.id 缺了会退回 GeoJSON 外层的 feature.id（实测外层是完整 URL）——那是有意的
+      // 兜底（宁可多认一种 id 形态，也不丢一条真实预警），所以"缺 identifier"要两层都清才成立。
+      {
+        const noId = JSON.parse(JSON.stringify(nwsByEvent('Flood Warning')))
+        noId.properties.id = undefined
+        assert(T6.parseNwsAlertResult(noId, { place: usPlace }).ok === true,
+          '只有 properties.id 缺失时退回外层 feature.id（兜底，不判 schema）')
+        delete noId.id
+        assert(T6.parseNwsAlertResult(noId, { place: usPlace }).kind === 'schema', '两层都没有 identifier → schema')
+      }
+      assert(T6.parseNwsAlertResult('nope', {}).kind === 'schema', '顶层不是对象 → schema')
+    }
+
+    // ---- 8. 正文原样保留（instruction 是"该怎么做"，截断它才是危险）----
+    {
+      const f = nwsByEvent('Flash Flood Warning')
+      const a = T6.parseNwsAlertResult(f, { place: usPlace }).alert
+      assert(a.detail.indexOf(String(f.properties.description).slice(0, 40)) === 0, 'detail 以官方 description 开头')
+      assert(a.detail.indexOf('Turn around, don\'t drown') >= 0, 'instruction 也在 detail 里')
+      assert(a.kindLabel.indexOf('美国') === 0 && a.kindLabel.indexOf('NWS') > 0,
+        'kindLabel 带国别与发布机构：' + a.kindLabel)
+    }
+
+    // ---- 9. originPlace 透传（匹配层据此命中，不再算距离）----
+    {
+      const a = T6.parseNwsAlertResult(nwsByEvent('Flood Warning'), { place: usPlace }).alert
+      assert(a.locator === 'overseas', 'locator 是 overseas（不是 point——命中在取数时就已发生）')
+      assert(a.originPlace && a.originPlace.name === '休斯敦', 'originPlace 记录了这条是哪个关注点查回来的')
+      const noPlace = T6.parseNwsAlertResult(nwsByEvent('Flood Warning')).alert
+      assert(noPlace.originPlace === null, '取数器没给 place 时是 null，而不是 undefined/{}')
+    }
+
+    console.log('== 0.6.0 ECCC：两道过滤器 / 署名 / 事件键 ==')
+
+    // ---- 10. 两道过滤器：advisory 与不在白名单的灾种都判 empty ----
+    {
+      const kinds = {}
+      for (const f of ecccSample.features) {
+        const r = T6.parseEcccAlertResult(f, { place: caPlace })
+        kinds[f.properties.alert_code] = r.ok ? 'ok' : r.kind
+      }
+      assert(kinds.FTA === 'empty', 'frost advisory（advisory）判 empty：官方定义就是"非危险天气"')
+      assert(kinds.WDW === 'empty', 'wind warning 判 empty：不在本插件的灾种范围内')
+      assert(kinds.CFW === 'ok', 'storm surge warning 解析成功（加拿大当前唯一命中的一类）')
+    }
+
+    // ---- 11. 白名单按名称关键词，**按码猜是错的**（4.6.3 踩过 CFW 那个坑）----
+    {
+      // 构造一条降雨预警：**码本身用任意值**（白名单不看码，只看名称），
+      // 因为 ECCC 的三字母码表没有官方枚举，而当前季节没有降雨样本。
+      const f = JSON.parse(JSON.stringify(ecccSample.features[2]))
+      f.properties.alert_code = 'ZZZ'
+      f.properties.alert_name_en = 'rainfall warning'
+      const r = T6.parseEcccAlertResult(f, { place: caPlace })
+      assert(r.ok, '降雨预警（当前季节无真实样本）能通过白名单——即便码是任意值')
+      assert(r.alert.headline.indexOf('降雨预警') === 0, '按名称关键词给出中文标签：' + r.alert.headline)
+      assert(r.alert.ecccCode === 'ZZZ', '码只作诊断与事件键，不参与白名单判据')
+      // 反向：同一权限下"风"必须被排除，即便它也是 warning
+      f.properties.alert_name_en = 'wind warning'
+      assert(T6.parseEcccAlertResult(f, { place: caPlace }).kind === 'empty', 'wind warning 仍被排除')
+    }
+
+    // ---- 12. 许可要求的署名真的进了正文（ECCC 独有，硬约束）----
+    {
+      const a = T6.parseEcccAlertResult(ecccSample.features[2], { place: caPlace }).alert
+      assert(a.detail.indexOf('Data Source: Environment and Climate Change Canada') > 0,
+        'detail 带署名（End-use Licence v2.1.1 要求）')
+      const rawText = ecccSample.features[2].properties.alert_text_en
+      assert(a.detail.indexOf(String(rawText).slice(0, 40)) === 0, '官方正文原样保留、未被改写（同一条许可要求）')
+    }
+
+    // ---- 13. 事件键按"码 + 区域 + 发布日"；消息 id 含时刻 ----
+    {
+      const f = ecccSample.features[2]
+      const a = T6.parseEcccAlertResult(f, { place: caPlace }).alert
+      assert(a.eventKey === 'eccc:CFW:' + f.properties.feature_id + ':' + f.properties.publication_datetime.slice(0, 10),
+        '事件键 = 码 + 区域 + 发布日：' + a.eventKey)
+      const later = JSON.parse(JSON.stringify(f))
+      later.properties.publication_datetime = f.properties.publication_datetime.replace('T10:50', 'T14:20')
+      const b = T6.parseEcccAlertResult(later, { place: caPlace }).alert
+      assert(b.eventKey === a.eventKey, '同一天内的再次发布同键 → 不会重复响铃')
+      assert(b.id !== a.id, '消息 id 含时刻 → "同一条消息重复到达"仍能去重')
+    }
+
+    // ---- 14. 判据分类 ----
+    {
+      const craft = (patch) => {
+        const f = JSON.parse(JSON.stringify(ecccSample.features[2]))
+        Object.assign(f.properties, patch)
+        return T6.parseEcccAlertResult(f, { place: caPlace })
+      }
+      assert(craft({ risk_colour_en: 'purple' }).kind === 'schema', '颜色越界 → schema（颜色是 ECCC 的等级本体）')
+      assert(craft({ risk_colour_en: undefined }).kind === 'schema', '缺颜色 → schema')
+      assert(craft({ publication_datetime: '昨天' }).kind === 'schema', '发布时间不可解析 → schema')
+      assert(craft({ alert_name_en: '' }).kind === 'schema', '缺英文名 → schema')
+      assert(craft({ alert_type: 'advisory' }).kind === 'empty', 'advisory → empty')
+    }
+
+    // ---- 15. 契约：两条都登记，且关键字段与设计一致 ----
+    {
+      const C = T6.SOURCE_CONTRACTS
+      assert(C.nws_alerts && C.eccc_alerts, '两条海外源的契约都已登记')
+      assert(Object.keys(C).length === 10, '契约总数 10（原有 8 + 海外 2）：' + Object.keys(C).length)
+      for (const id of ['nws_alerts', 'eccc_alerts']) {
+        const c = C[id]
+        assert(Array.isArray(c.required) && c.required.length > 0, id + ' 的 required 非空')
+        assert(typeof c.tolerant === 'string' && c.tolerant.length > 20, id + ' 的 tolerant 写明了不判 schema 的范围')
+        assert(typeof c.empty === 'string' && c.empty.length > 20, id + ' 的 empty 写明了什么形态算正常无数据')
+        assert(c.staleAfterMs === null && typeof c.staleReason === 'string' && c.staleReason.length > 20,
+          id + ' 的 staleAfterMs 是 null，且 staleReason 写清了为什么判不了停更')
+        assert(c.transport === 'rest' && typeof c.pollMs === 'number', id + ' 是 REST 轮询且声明了周期')
+      }
+      assert(C.nws_alerts.region === 'us' && C.eccc_alerts.region === 'ca', '两条各自标了国别')
+      assert(/自带偏移/.test(C.nws_alerts.timezone) && /UTC/.test(C.eccc_alerts.timezone),
+        '时区一栏如实写了两源的相反形态（NWS 自带偏移 / ECCC 是 UTC）')
+    }
+
+    console.log('== 0.6.0 取数器：按关注点查询 ==')
+
+    // ---- 16. 几何：采样点与 bbox ----
+    {
+      assert(T6.nwsSamplePoints({ lat: 29.7604, lon: -95.3698, radiusKm: 10 }).length === 1,
+        '半径 < 25km 只查中心点（NWS 的县通常比它大，采样点会落进同一个县）')
+      const pts = T6.nwsSamplePoints({ lat: 29.7604, lon: -95.3698, radiusKm: 100 })
+      assert(pts.length === 5, '半径 ≥ 25km 时补 4 个方位采样点')
+      assert(pts[0][0] === 29.7604 && pts[0][1] === -95.3698, '第一个是中心点')
+      assert(pts.some((p) => p[0] > 29.76) && pts.some((p) => p[0] < 29.76) &&
+        pts.some((p) => p[1] > -95.37) && pts.some((p) => p[1] < -95.37), '四个方位都覆盖到')
+      const bbox = T6.ecccBboxOf({ lat: 45, lon: -75, radiusKm: 111 })
+      const b = bbox.split(',').map(Number)
+      assert(b.length === 4 && b[0] < -75 && b[2] > -75 && b[1] < 45 && b[3] > 45,
+        'ECCC 的 bbox 由坐标与半径算出：' + bbox)
+      assert((b[2] - b[0]) > (b[3] - b[1]),
+        '经度跨度大于纬度跨度（45° 处 cos≈0.71，同样的公里数对应更多经度）')
+      const hi = T6.ecccBboxOf({ lat: 70, lon: 0, radiusKm: 111 }).split(',').map(Number)
+      assert((hi[2] - hi[0]) > (b[2] - b[0]), '纬度越高，同样的半径对应越宽的经度')
+    }
+
+    // ---- 17. 覆盖范围：只对"那个国家"的关注点发请求 ----
+    {
+      const US = { minLat: 24, maxLat: 50, minLon: -125, maxLon: -66 }
+      const CA = { minLat: 41, maxLat: 84, minLon: -141, maxLon: -52 }
+      const cfgAll = mkCfg([usPlace, caPlace, jpPlace])
+      const inUs = T6.placesInBoxes(cfgAll, [US]).map((p) => p.name).join(',')
+      assert(inUs === '休斯敦,多伦多',
+        '美国盒选中两个北美点——多伦多也在盒内（美加边界不是矩形），由第 19 条的 400 兜底处理：' + inUs)
+      assert(T6.placesInBoxes(cfgAll, [CA]).map((p) => p.name).join(',') === '多伦多', '加拿大盒只选中多伦多')
+      assert(T6.placesInBoxes(cfgAll, [US, CA]).length === 2, '东京不在任何一个盒里 → 一个请求都不发')
+    }
+
+    // ---- 18. 取数器主链：查询 → 契约 → 交出 Alert（用真实 fixture，不联网） ----
+    {
+      const cfg = mkCfg([usPlace])
+      const urls = []
+      const handed = []
+      let status = null
+      const src = T6.createNwsSource({
+        getCfg: () => cfg,
+        onStatus: (p) => { status = p },
+        onAlert: (a, c, o) => handed.push({ id: a.id, stale: !!(o && o.staleOnArrival) }),
+        fetchText: async (url) => {
+          urls.push(url)
+          return JSON.stringify({ type: 'FeatureCollection', features: nwsSample.features })
+        },
+      })
+      const r = await src.pollOnce()
+      assert(urls.length === 5, '1 个关注点 + 100km 半径 = 5 个请求（中心 + 4 方位）')
+      assert(urls[0].indexOf('point=29.7604,-95.3698') > 0, '第一个请求是中心点：' + urls[0].slice(0, 100))
+      assert(urls[0].indexOf('event=') > 0 && urls[0].indexOf('Flood') > 0,
+        'URL 带 event 白名单参数（服务端过滤，省掉占全量三分之二的海事通告）')
+      assert(r.applied === 7 && handed.length === 7,
+        'fixture 的 7 条各交出一次：5 个采样点返回同一批，靠 alert.id 在一轮内去重')
+      assert(src.stats().received === 35, '收到计数按每份响应累计（7 × 5）：' + src.stats().received)
+      assert(handed.every((h) => h.stale === false), '刚发布的条目不进门闸（fixture 都是当天的）')
+      // detail **只放语义信息**（0.6.0 review 修正）：正常情况下它为空——计数由设置页的
+      // OVERSEAS_STAT_ORDER 从 stats 直接读，这样 detail 变化才等于"语义变化"，
+      // 上报去重键才敢把它算进去（否则每轮都会被判成变化、页面反复重渲）。
+      assert(status && status.status === 'open' && /已按 1 个关注点查询/.test(status.detail || ''),
+        '正常一轮的状态是 open，detail 是非单调的语义摘要（review B-1：留空会让悬停显示裸状态词 open）：' + JSON.stringify(status))
+    }
+
+    // ---- 19. 400 = "不在覆盖范围"，不是故障（实测多伦多 / 温哥华 / 伦敦都会被 NWS 这样答） ----
+    {
+      const cfg = mkCfg([caPlace])
+      let calls = 0
+      let status = null
+      const src = T6.createNwsSource({
+        getCfg: () => cfg,
+        onStatus: (p) => { status = p },
+        onAlert: () => {},
+        fetchText: async () => {
+          calls += 1
+          const e = new Error('HTTP 400')
+          e.status = 400
+          throw e
+        },
+      })
+      await src.pollOnce()
+      assert(calls === 5, '第一轮按采样点各查一次（还不知道会被拒）')
+      assert(src.stats().rejected === 5 && src.stats().errors === 0,
+        '400 记成 rejected 而不是 errors（它是参数问题，不是链路故障）：' + JSON.stringify({ rejected: src.stats().rejected, errors: src.stats().errors }))
+      assert(status && status.status === 'open',
+        '状态是 open 而不是 unreachable——把它显示成红色会让多伦多用户以为插件坏了：' + JSON.stringify(status))
+      await src.pollOnce()
+      assert(calls === 5, '冷却期内不再查这些 URL（TTL 到期后会自动重试一次）')
+    }
+
+    // ---- 20. 门闸、开关、关注点与失败分类 ----
+    {
+      // 年龄闸门：首轮把"发布已 10 小时"的条目标记为 staleOnArrival
+      const cfg = mkCfg([usPlace])
+      const old = JSON.parse(JSON.stringify(nwsSample.features))
+      const oldStamp = new Date(Date.now() - 10 * 3600 * 1000).toISOString()
+      for (const f of old) { f.properties.sent = oldStamp; f.properties.id = f.properties.id + '.old' }
+      const seen = []
+      const mk = () => T6.createNwsSource({
+        getCfg: () => cfg,
+        onStatus: () => {},
+        onAlert: (a, c, o) => seen.push(!!(o && o.staleOnArrival)),
+        fetchText: async () => JSON.stringify({ type: 'FeatureCollection', features: old }),
+      })
+      const src1 = mk()
+      await src1.pollOnce()
+      assert(seen.length === 7 && seen.every(Boolean),
+        '首轮：发布 10 小时的条目全部带 staleOnArrival（只进历史，不响铃）')
+      const seen2 = []
+      const src2 = T6.createNwsSource({
+        getCfg: () => cfg,
+        onStatus: () => {},
+        onAlert: (a, c, o) => seen2.push(!!(o && o.staleOnArrival)),
+        fetchText: async () => JSON.stringify({ type: 'FeatureCollection', features: old }),
+      })
+      await src2.pollOnce() // 第一轮：建立"刚刚成功过"
+      seen2.length = 0
+      await src2.pollOnce() // 第二轮：距上次成功很近 → 不再按首轮处理
+      assert(seen2.length === 7 && seen2.every((v) => v === false),
+        '距上次成功 30 分钟以内：同样的老数据不再进门闸（它是"刚查到的"，不是"刚打开的"）')
+
+      // 开关关闭 → 一个请求都不发
+      let callsOff = 0
+      const offSrc = T6.createNwsSource({
+        getCfg: () => mkCfg([usPlace], false),
+        onStatus: () => {},
+        onAlert: () => {},
+        fetchText: async () => { callsOff += 1; return '{}' },
+      })
+      const offRes = await offSrc.pollOnce()
+      assert(callsOff === 0 && offRes.disabled === true, '灾种开关关闭时不产生任何请求')
+
+      // 没有这一国的关注点 → 也不发请求，但状态要说清怎么配（不静默）
+      let callsNone = 0
+      let stNone = null
+      const noneSrc = T6.createNwsSource({
+        getCfg: () => mkCfg([jpPlace]),
+        onStatus: (p) => { stNone = p },
+        onAlert: () => {},
+        fetchText: async () => { callsNone += 1; return '{}' },
+      })
+      const noneRes = await noneSrc.pollOnce()
+      assert(callsNone === 0 && noneRes.noPlaces === true, '只有日本关注点时，美国源一个请求都不发')
+      assert(stNone && /未设置/.test(stNone.detail) && /其他地区/.test(stNone.detail),
+        '状态里说明去哪里配关注点：' + (stNone && stNone.detail))
+
+      // 失败分类：非 JSON / 缺 features / 响应过大 / HTTP 500
+      const mkBad = (body, err) => T6.createNwsSource({
+        getCfg: () => cfg,
+        onStatus: () => {},
+        onAlert: () => {},
+        fetchText: async () => {
+          if (err) { const e = new Error(err.message || 'boom'); e.status = err.status; throw e }
+          return body
+        },
+      })
+      const r1 = await mkBad('<html>拦截页</html>').pollOnce()
+      assert(r1.failed === 5, '被拦截成 HTML → 每个请求都算失败（不是静默跳过）')
+      const r2 = await mkBad('{"oops":1}').pollOnce()
+      assert(r2.failed === 5, '缺 features 数组 → 失败（上游改版要看得见）')
+      // 0.6.0 review A2：顶层结构不符 = **契约漂移**，要按 DESIGN 4.5 的配色语义点亮蓝点
+      // （schema-error：用户处理不了、等插件更新），而不是红点（让用户去折腾自己的网络）。
+      // 清掉前面几条"坏响应"留下的健康记录，避免它们把这里的状态预先染成 schema-error。
+      T6.resetSourceHealth()
+      let stSchema = null
+      const badStruct = T6.createNwsSource({
+        getCfg: () => cfg,
+        onStatus: (p) => { stSchema = p },
+        onAlert: () => {},
+        fetchText: async () => '{"oops":1}',
+      })
+      await badStruct.pollOnce()
+      await badStruct.pollOnce()
+      assert(stSchema && stSchema.status === 'schema-error',
+        '顶层结构不符 → schema-error（蓝点），而不是 unreachable（红点）：' + JSON.stringify(stSchema))
+      const r3 = await mkBad('x'.repeat(600 * 1024)).pollOnce()
+      assert(r3.failed === 5, '响应体超过上限 → 失败（在 JSON 解析之前就拦下，不会把几百 KB 塞进解析器）')
+      // 5xx 同样是"环境问题"那一类（它是真的连不上），所以要先把上面的 schema 记录清掉
+      T6.resetSourceHealth()
+      let st500 = null
+      const s500 = T6.createNwsSource({
+        getCfg: () => cfg,
+        onStatus: (p) => { st500 = p },
+        onAlert: () => {},
+        fetchText: async () => { const e = new Error('HTTP 500'); e.status = 500; throw e },
+      })
+      await s500.pollOnce()
+      assert(st500 && st500.status === 'unreachable', '全部 5xx → unreachable（红色：环境问题）')
+    }
+
+    console.log('== 0.6.0 review：修掉的三条各配一条守卫 ==')
+
+    // ---- 23. 请求上限不能吞掉关注点（review A1） ----
+    {
+      const many = Array.from({ length: 10 }, (_, i) => ({ name: 'p' + i, lat: 30 + i * 0.2, lon: -95, radiusKm: 100 }))
+      const urls = []
+      const src = T6.createNwsSource({
+        getCfg: () => mkCfg(many),
+        onStatus: () => {},
+        onAlert: () => {},
+        fetchText: async (url) => { urls.push(decodeURIComponent(url)); return '{"type":"FeatureCollection","features":[]}' },
+      })
+      await src.pollOnce()
+      const lats = new Set(urls.map((u) => { const m = /point=([\d.-]+),/.exec(u); return m ? Number(m[1]) : null }).filter(Boolean))
+      const missed = many.filter((p) => ![...lats].some((v) => Math.abs(v - p.lat) < 0.001))
+      assert(missed.length === 0,
+        '10 个关注点（50 个请求 > 上限 ' + T6.MAX_REQUESTS_PER_ROUND + '）时每个点仍被查一次——' +
+        '上限只截采样点，绝不吞掉关注点；漏掉的是：' + missed.map((p) => p.name).join(','))
+      assert(urls.length === T6.MAX_REQUESTS_PER_ROUND, '请求数仍守在上限内：' + urls.length)
+      assert(src.stats().throttledLast === 10, '被截断的采样点如实计数（本轮 10 个）：' + src.stats().throttledLast)
+      assert(src.stats().throttledTotal === 10, '累计值也记（诊断里看趋势）：' + src.stats().throttledTotal)
+    }
+
+    // ---- 24. 年龄闸门必须更新事件记忆（review A2） ----
+    {
+      const cfg = mkCfg([usPlace])
+      const f = JSON.parse(JSON.stringify(nwsByEvent('Flood Warning')))
+      f.properties.sent = new Date(Date.now() - 10 * 3600 * 1000).toISOString()
+      f.properties.id = 'urn:oid:2.49.0.1.840.0.guard.001.1'
+      // 清掉 references：否则事件键会指回 fixture 里那条原消息，而它在第 5b 条用例里已被
+      // rememberAlerted 记过 —— 这条就会先被 looksReplayed 拦下（那说明机制是好的，但测不到本用例）
+      delete f.properties.references
+      const alert = T6.parseNwsAlertResult(f, { place: usPlace }).alert
+      const r = T6.handleAlert(alert, cfg, { staleOnArrival: 10 })
+      assert(r.reason === 'stale-on-arrival', '老预警走的是"只记历史"分支：' + r.reason)
+      // isEventRepeat **自己会写记忆**，所以只能调用一次来验证 handleAlert 有没有写
+      assert(T6.isEventRepeat(alert, 10) === true,
+        '该分支排在 isEventRepeat 之后 → 事件记忆已写入，后续轮次会判成"后续发布"而不是再进一次历史')
+    }
+
+    // ---- 25. 状态去重键必须包含 detail（review A3） ----
+    {
+      // 前面的"坏响应"测试会往健康层里留下 schema 记录，而状态是经 effectiveStatusOf 合成的
+      // ——不清掉的话这里拿到的是蓝点而不是本用例要验的 open（测试间的模块级状态污染）。
+      T6.resetSourceHealth()
+      const seen = []
+      let places = []
+      const src = T6.createNwsSource({
+        getCfg: () => mkCfg(places),
+        onStatus: (p) => {
+          seen.push(p.status + '|' + (p.detail || ''))
+          // 模拟 15-entry 的 feedStatus → publishStatus 写 store（12e 自己不写）
+          T6.store.push({ sources: Object.assign({}, T6.store.sources, { nws_alerts: Object.assign({ label: p.label }, p) }) })
+        },
+        onAlert: () => {},
+        fetchText: async () => '{"type":"FeatureCollection","features":[]}',
+      })
+      await src.pollOnce()
+      places = [usPlace]
+      await src.pollOnce()
+      await src.pollOnce()
+      assert(seen.length === 2, '状态推送 2 次（"未设置" → 空），第 3 次相同则不再推：' + JSON.stringify(seen))
+      assert(/未设置/.test(seen[0]), '第一次说明去哪里配关注点：' + seen[0])
+      assert(seen[1] === 'open|已按 1 个关注点查询',
+        '第二次 detail 变成"已按 N 个关注点查询"——不会把"未设置"的旧文案一直挂在设置页上：' + seen[1])
+    }
+
+    // ---- 26. 400 只跳过那一个请求，不吞掉整个关注点（review B1） ----
+    {
+      T6.resetSourceHealth()
+      const urls = []
+      const hitPoint = 'point=29.7604,-95.3698'
+      const src = T6.createNwsSource({
+        getCfg: () => mkCfg([usPlace]),
+        onStatus: () => {},
+        onAlert: () => {},
+        fetchText: async (url) => {
+          urls.push(url)
+          if (url.indexOf(hitPoint) > 0) { const e = new Error('HTTP 400'); e.status = 400; throw e }
+          return '{"type":"FeatureCollection","features":[]}'
+        },
+      })
+      await src.pollOnce()
+      assert(src.stats().rejected === 1, '只有中心点被上游拒绝：' + src.stats().rejected)
+      assert(urls.length === 5, '当轮其余 4 个方位点仍然照查：' + urls.length)
+      await src.pollOnce()
+      assert(urls.length === 9, '第二轮只跳过那 1 个 URL，仍查 4 个方位点（修复前整点被跳、第二轮 0 个请求）')
+    }
+
+    // ---- 27. 只有覆盖外坐标时，年龄闸门不该永远停在"首轮"（review B2） ----
+    {
+      T6.resetSourceHealth()
+      const src = T6.createNwsSource({
+        getCfg: () => mkCfg([caPlace]),
+        onStatus: () => {},
+        onAlert: () => {},
+        fetchText: async () => { const e = new Error('HTTP 400'); e.status = 400; throw e },
+      })
+      await src.pollOnce()
+      assert(src.stats().gated === 1, '第一轮算"首轮"')
+      // 第二轮：这些 URL 已被记住，不再发请求 —— 门闸计数也不该再涨
+      await src.pollOnce()
+      assert(src.stats().gated === 1, '第二轮不再被当成首轮（400 也是"上游有响应"，修复前恒为首轮）')
+    }
+
+    // ---- 28. 外层 URL id 也要能归并版本（review B3） ----
+    {
+      const base = nwsByEvent('Flood Warning')
+      const outer = {
+        id: 'https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.abc.001.1',
+        type: 'Feature',
+        geometry: base.geometry,
+        properties: Object.assign({}, base.properties),
+      }
+      delete outer.properties.id
+      delete outer.properties.references
+      const a = T6.parseNwsAlertResult(outer, { place: usPlace }).alert
+      assert(a.id === 'nws:urn:oid:2.49.0.1.840.0.abc.001.1',
+        '外层 URL id 会抽出 urn:oid 段（否则事件键带 URL 前缀，版本归并与取消匹配都失效）：' + a.id)
+      assert(a.eventKey === 'nws:urn:oid:2.49.0.1.840.0.abc.001',
+        '事件键随之正确（同一链的 .2 版会算出同一个键）：' + a.eventKey)
+    }
+
+    // ---- 29. stop() 之后不再写状态、中止不算失败（review A-1） ----
+    {
+      T6.resetSourceHealth()
+      const reports = []
+      const src = T6.createNwsSource({
+        getCfg: () => mkCfg([usPlace]),
+        onStatus: (p) => reports.push(p.status + '|' + (p.detail || '')),
+        onAlert: () => {},
+        fetchText: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 30)) // 挂住，让 stop() 发生在途中
+          const e = new Error('The user aborted a request.')
+          e.name = 'AbortError'
+          throw e
+        },
+      })
+      const pending = src.pollOnce()
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      src.stop()
+      await pending
+      assert(reports.length === 0,
+        '停用之后不再上报任何状态（修复前会写一条 unreachable 红点，重载时还会把新会话短暂染红）：' + JSON.stringify(reports))
+      assert(src.stats().errors === 0, '主动中止不算失败：' + src.stats().errors)
+    }
+
+    // ---- 30. 400 的冷却带 TTL、文案不替上游断言原因（review A-2） ----
+    {
+      assert(typeof T6.UNCOVERED_TTL_MS === 'number' && T6.UNCOVERED_TTL_MS > 0,
+        '冷却期是有限值（不是永久拉黑）：' + T6.UNCOVERED_TTL_MS + 'ms')
+      T6.resetSourceHealth()
+      let status = null
+      const src = T6.createNwsSource({
+        getCfg: () => mkCfg([usPlace]),
+        onStatus: (p) => { status = p },
+        onAlert: () => {},
+        fetchText: async () => { const e = new Error('HTTP 400'); e.status = 400; e.bodyHint = '{"title":"Invalid Parameter"}'; throw e },
+      })
+      await src.pollOnce()
+      assert(status && !/不在\s*NWS\s*的覆盖范围/.test(status.detail || ''),
+        '文案只说"被上游拒绝（HTTP 400）"，不断言"这个点不在覆盖范围"（我们无法证实那是唯一原因）：' + JSON.stringify(status))
+      assert(/HTTP 400/.test(status.detail || ''), '但仍然写明是 400 与多久后重试：' + status.detail)
+    }
+
+    // ---- 31. 海外预警不清掉日本气象 L3 提示（review A-3，0.5.4 修过 nmc 的同一处） ----
+    {
+      const cfg = mkCfg([usPlace])
+      T6.store.push({ weatherHint: { level: 3, label: 'テスト県', at: Date.now() } })
+      const alert = T6.parseNwsAlertResult(nwsByEvent('Flood Warning'), { place: usPlace }).alert
+      T6.handleAlert(alert, cfg)
+      assert(T6.store.weatherHint && T6.store.weatherHint.level === 3,
+        '海外预警（regions 恒空）不再抹掉日本电文留下的「L3 未达 L4」提示：' + JSON.stringify(T6.store.weatherHint))
+      T6.store.push({ weatherHint: null })
+    }
+
+    // ---- 32. 采样点按轮次轮转，尾部关注点也能轮到（review B-2） ----
+    {
+      const many = Array.from({ length: 10 }, (_, i) => ({ name: 'p' + i, lat: 30 + i * 0.2, lon: -95, radiusKm: 100 }))
+      const urls = []
+      const src = T6.createNwsSource({
+        getCfg: () => mkCfg(many),
+        onStatus: () => {},
+        onAlert: () => {},
+        fetchText: async (url) => { urls.push(decodeURIComponent(url)); return '{"type":"FeatureCollection","features":[]}' },
+      })
+      const countPerPlace = (from, to) => {
+        const m = {}
+        for (let i = from; i < to && i < urls.length; i += 1) {
+          const mm = /point=([\d.-]+),/.exec(urls[i])
+          if (!mm) continue
+          const lat = Number(mm[1])
+          const idx = many.findIndex((p) => Math.abs(p.lat - lat) < 0.001)
+          if (idx >= 0) m['p' + idx] = (m['p' + idx] || 0) + 1
+        }
+        return m
+      }
+      await src.pollOnce()
+      await src.pollOnce()
+      const ptsOf = (from, to) => urls.slice(from, to)
+        .map((u) => { const m = /point=([\d.,-]+)/.exec(u); return m ? m[1] : '' })
+        .filter(Boolean)
+      const first = ptsOf(0, 40)
+      const second = ptsOf(40, 80)
+      // 每轮的前 10 个请求是各关注点的**中心点**（无条件优先），差异应出现在采样点部分
+      assert(first.slice(0, 10).join(' ') === second.slice(0, 10).join(' '),
+        '两轮的中心点集合相同（每个关注点每轮必被查一次）')
+      assert(first[10] !== second[10],
+        '第一个采样点在两轮里属于不同的关注点（' + first[10] + ' → ' + second[10] + '）' +
+        '——这就是轮转：固定顺序会让同一批关注点永远拿满采样、尾部永远只有中心点')
+      assert(first.length === 40 && second.length === 40, '两轮都守在上限 40 内：' + first.length + '/' + second.length)
+    }
+
+    // ---- 33. 整轮失败会退避（review B-5：DESIGN 4.7.2 承诺过，此前实现里没有） ----
+    {
+      let calls = 0
+      const src = T6.createNwsSource({
+        getCfg: () => mkCfg([usPlace]),
+        intervalMs: 5, // 正常间隔压到 5ms：有退避时不会按这个节奏继续打
+        firstDelayMs: 1,
+        onStatus: () => {},
+        onAlert: () => {},
+        fetchText: async () => { calls += 1; const e = new Error('HTTP 500'); e.status = 500; throw e },
+      })
+      src.start()
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      src.stop()
+      // 无退避时：每 5ms 一轮 × 5 个请求 = 上百次；有退避（1 秒起）时 150ms 内只有第一轮
+      assert(calls <= 20, '全部失败后进入退避，150ms 内只跑了 ' + calls + ' 个请求（无退避会是上百次）')
+      assert(T6.OVERSEAS_MIN_BACKOFF_MS === 1000 && T6.OVERSEAS_MAX_BACKOFF_MS === 60000,
+        '退避是 1s → 60s 上限（与 DESIGN 4.7.2 一致）')
+    }
+
+    console.log('== 0.6.0 匹配：查询即匹配 ==')
+    // ---- 21. matchOverseasAlert 的四条判定 ----
+    {
+      const alert = T6.parseNwsAlertResult(nwsByEvent('Flood Warning'), { place: usPlace }).alert
+      const cfg = mkCfg([usPlace])
+      const m = T6.matchOverseasAlert(alert, cfg)
+      assert(m.hit === true, '命中所属关注点（不算距离——命中在取数时就已发生）')
+      assert(m.place && m.place.name === '休斯敦', '返回命中的关注点，供 UI 显示')
+      assert(/命中关注点/.test(m.reason), '理由写清了命中哪个点：' + m.reason)
+      const noWatch = T6.matchOverseasAlert(alert, mkCfg([]))
+      assert(noWatch.hit === false && noWatch.noWatch === true, '没有海外关注点 → noWatch（不静默）')
+      assert(T6.matchOverseasAlert(alert, mkCfg([usPlace], false)).hit === false, '灾种开关关闭 → 不提醒')
+      const watch = T6.parseNwsAlertResult(nwsByEvent('Flood Watch'), { place: usPlace }).alert
+      const wm = T6.matchOverseasAlert(watch, cfg)
+      assert(wm.hit === false && /未达播报档位/.test(wm.reason),
+        'Watch 档位不到线 → 不打扰，但理由说清了（并仍进历史）')
+      const gone = T6.parseNwsAlertResult(nwsByEvent('Flood Warning'),
+        { place: { name: '已删掉的点', lat: 1, lon: 1, radiusKm: 100 } }).alert
+      assert(T6.matchOverseasAlert(gone, cfg).hit === false, '来源关注点已被删除 → 不命中')
+      const orphan = JSON.parse(JSON.stringify(alert))
+      orphan.originPlace = null
+      assert(T6.matchOverseasAlert(orphan, cfg).hit === false, '没有来源关注点 → 不猜，判不命中')
+    }
+
+    // ---- 22. 开关四处同步（Client 默认值 / normalizeCfg / Host schema / 设置页） ----
+    {
+      assert(T6.DEFAULT_CFG.disasters.overseasWeather === true, 'Client 默认值是开')
+      const norm = T6.normalizeCfg({ disasters: { overseasWeather: false } })
+      assert(norm.disasters.overseasWeather === false, 'normalizeCfg 认这个字段（漏掉会被静默丢弃）')
+      const norm2 = T6.normalizeCfg({ disasters: { overseasWeather: 'yes please' } })
+      assert(norm2.disasters.overseasWeather === true, '类型不对时退回默认值')
+      const hostMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
+      const hostParsed = hostMod.QuakeAlertSettingsSchema({ disasters: { overseasWeather: false } })
+      assert(hostParsed.disasters.overseasWeather === false,
+        'Host schema 认这个开关（四处同步里的第三处；默认值一致由前面那条 JSON 全等断言守着）')
+    }
+  } catch (e) {
+    assert(false, '0.6.0 第 2 期检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
   }
 
   console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败')

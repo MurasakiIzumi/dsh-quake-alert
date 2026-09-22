@@ -11,6 +11,7 @@
 import { TSUNAMI_RANK } from './01-constants.js'
 import { own } from './02-storage.js'
 import { lookupAddrCity, normKana } from './04-city-table.js'
+import { OVERSEAS_BROADCAST_MIN_RANK } from './05h-overseas-parsers.js'
 
 // ---------- 匹配引擎 ----------
 // 关注地区匹配：县级始终生效（watch.prefectures 为空 = 全日本）；市级只在数据本身有
@@ -244,6 +245,52 @@ function matchCnAreaAlert(alert, cfg) {
   return { hit: false, reason: what + ' · 归属未识别（' + (area.org || '机构名未知') + '）' }
 }
 
+/**
+ * 海外气象源（0.6.0）的命中判定：**查询即匹配**（DESIGN 4.7.3）。
+ *
+ * 与 matchPointAlert 的根本差别：那边的语义是"震中距 ≤ 半径"，坐标在**电文里**；
+ * 这边的语义是"这条预警属于用户关注的哪个点"，归属在**取数时就确定了**
+ * （取数器按关注点查 NWS 的 `?point=` / ECCC 的 `?bbox=`），所以这里不算距离——
+ * 算也没有意义：NWS 返回的是"该点所在县 / 区划"的预警，一个县没有"距关注点多少公里"。
+ *
+ * 剩下的三个判定都是"用户看不见的漏报"防线：
+ *   ① 关注点被删了（用户改配置后取数器要下一轮才生效）→ 如实说明，不当成命中；
+ *   ② 档位不够（NWS 的 Watch / Advisory / Statement）→ 只记历史，不打扰；
+ *   ③ 取数器没记归属（理论上不该发生）→ 不猜，明确说"无法判定"。
+ */
+function matchOverseasAlert(alert, cfg) {
+  const d = cfg.disasters || {}
+  if (d.overseasWeather === false) return { hit: false, reason: '海外气象提醒已关闭' }
+  if (alert.cancelled) return { hit: false, reason: '取消消息不提醒' }
+  const places = (cfg.watch && cfg.watch.places) || []
+  if (places.length === 0) {
+    return {
+      hit: false,
+      noWatch: true,
+      reason: '未设置海外关注点（设置 → 灾害预警 → ③ 其他地区：坐标 + 半径）',
+    }
+  }
+  const origin = alert.originPlace
+  if (!origin) return { hit: false, reason: '这条海外预警未携带来源关注点，无法判定' }
+  // 关注点还在不在：按"名字 + 坐标"比对（用户只改半径时仍是同一个点，命中判定不变）。
+  const still = places.some((p) => p && p.name === origin.name && p.lat === origin.lat && p.lon === origin.lon)
+  if (!still) {
+    return { hit: false, reason: '来源关注点「' + (origin.name || '未命名') + '」已不在关注列表里' }
+  }
+  const rank = typeof alert.overseasRank === 'number' ? alert.overseasRank : 0
+  if (rank < OVERSEAS_BROADCAST_MIN_RANK) {
+    return {
+      hit: false,
+      reason: (alert.headline || '海外气象预警') + '（未达播报档位，仅记录）',
+    }
+  }
+  return {
+    hit: true,
+    reason: '命中关注点「' + (origin.name || '未命名') + '」· ' + (alert.headline || ''),
+    place: origin,
+  }
+}
+
 function matchAlert(alert, cfg) {
   const w = cfg.watch || {}
   const t = cfg.thresholds || {}
@@ -282,6 +329,9 @@ function matchAlert(alert, cfg) {
       : { hit: false, reason: missReason(alert, w, '关注地区未命中或等级低于阈值') }
   }
   if (alert.kind === 'weather') {
+    // 海外气象源（0.6.0）走**查询即匹配**：取数器是按关注点查的（NWS 按点、ECCC 按 bbox），
+    // "这条属于哪个关注点"在取数时就已经确定，所以这里不做距离计算，只做归属与档位判定。
+    if (alert.locator === 'overseas') return matchOverseasAlert(alert, cfg)
     // 大陆气象源（0.5.2）走**行政区层级**匹配，与日本电文那套（都道府县 + 市町村名）是两套
     // 规则：那边的粒度是市町村、兜底是"区域级条目放行"；这边的粒度是地级市、兜底是"省级放行"，
     // 而且多一道**等级门槛**（DESIGN 8.4：橙色及以上才播报）。
@@ -317,4 +367,4 @@ function matchAlert(alert, cfg) {
 }
 
 
-export { regionInWatch, regionInWeatherWatch, missReason, matchAlert, matchPointAlert, matchCnAreaAlert, cnPlaceParts, distanceKm, validGeo, EARTH_RADIUS_KM }
+export { regionInWatch, regionInWeatherWatch, missReason, matchAlert, matchPointAlert, matchCnAreaAlert, matchOverseasAlert, cnPlaceParts, distanceKm, validGeo, EARTH_RADIUS_KM }

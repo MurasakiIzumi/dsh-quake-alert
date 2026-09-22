@@ -112,3 +112,43 @@ Body Notice 与 Warning 的结构与原文一致）。它锁定两个真实缺�
 - `alertid` 形如 `53072441600000_20260919030245`，**前 6 位是行政区划代码**（530724 = 云南省丽江市宁蒗彝族自治县）。本版本不用它（用户的关注点表来自 GeoNames，两边没有共同主键），但它的存在说明"层级"在这条链路上是可靠的：实测 238 条里 0 条解析不出省份。
 - 列表是**当前生效集合**、不是事件流：实测覆盖约 24 小时，**没有"解除"电文**，预警过期即从列表消失。
 - 列表随预警发布 / 过期而变，所以 fixture 的 diff 天然是噪音，别当成"回归失败"。要固定的是**字段形态**，那由 `tests/sync-test.cjs` 的断言来钉。
+
+## 海外气象源样本（0.6.0）
+
+`samples/nws/` 与 `samples/eccc/` 两个子目录，2026-09-22 实测抓取（非构造），
+采集脚本 `node scripts/capture-overseas-fixtures.mjs`：
+
+| 文件 | 来源 | 说明 |
+|---|---|---|
+| `nws/nws-flood-alerts.geojson` | `https://api.weather.gov/alerts/active?event=<8 类洪水>` | **裁剪版**：74 条里每个 event 类型各留 1 条（7 类）。结构与真实响应**同形**（`{type:'FeatureCollection', features:[…]}`），properties 与 geometry 都**完整保留**——正文（`description` / `instruction`）是解析目标，裁掉就测不到 |
+| `nws/nws-point-alerts.geojson` | 同日 `?point=29.7604,-95.3698` | 运行时真正用的形态（按点查询）。5KB 一条，正好说明"为什么用 point 而不是全量"（全量 1.67MB） |
+| `eccc/eccc-alerts.geojson` | `https://api.weather.gc.ca/collections/weather-alerts/items?f=json&limit=200` | **裁剪版**：每种 `alert_code` 各留 1 条（当前季节只有 FTA / WDW / CFW），**保留 Polygon**——它 100% 带几何，是匹配的输入 |
+
+解析要点（实现见 `client/src/05h-overseas-parsers.js` 与 `12e-overseas-poll.js`）：
+
+- **NWS 的白名单按 `properties.event` 精确匹配**（8 类洪水预警）。**不能按 severity 分档**：
+  实测 `Flood Watch` 的 severity 也是 `Severe`（与 `Flood Warning` 同级），
+  而 `Coastal Flood Watch` 是 `Moderate`——severity 区分不了"警告"与"警戒"。
+  另外 `properties.eventCode` 是**对象**（`{SAME:['FLW'],NationalWeatherService:['FLW']}`），
+  且实测 `Flood Warning` 的 SAME 给的是 `FLS`，所以它只作诊断、不参与任何判据。
+- **NWS 的时间自带偏移**（`2026-09-22T06:51:00-04:00`，随州与夏令时变化）——直接 `Date.parse`，
+  **不要补本地时区**。这是本插件第一个"时刻完整"的源（JMA / nmc / Wolfx 给的都是裸本地时间）。
+- **NWS 的事件键去掉 identifier 末尾的版本段**：实测 identifier 形如
+  `urn:oid:2.49.0.1.840.0.<40hex>.<serial>.<version>`，同一次事件的 Update 递增 version，
+  用 `references` 指回被取代的那几版。去掉 `.<version>` 之后，同一事件的 Alert 与 Update 同键
+  （靠 `strength` 判升级），不同 serial 仍是不同事件。
+- **ECCC 只接 `alert_type === 'warning'`**：`advisory` 按 ECCC 自己的定义是
+  「generally not considered hazardous」（霜冻、雾、高温都在里面）。实测当前 116 条里 114 条是
+  frost advisory——不排除它，这个源就是噪声源。
+- **ECCC 的白名单按 `alert_name_en` 关键词**（`/rain|flood|surge|hydrolog|water/`，并排除
+  frost / fog / wind / heat…）。**不要按三字母 `alert_code` 猜**：它没有官方枚举，
+  而 0.6.0 的调研阶段正是靠猜码把 `CFW` 当成了洪水（实际是 **storm surge warning**）。
+  另外 **CAP XML 归档**里法语办公室的 `<event>` 是 `gel`——但 OGC API 通道给的是固定英文
+  `alert_name_en` 与双语字段，不存在这个问题（我们走的就是后者）。
+- **ECCC 的许可要求署名且不得改写**：End-use Licence v2.1.1 要求
+  `Data Source: Environment and Climate Change Canada`，且警报内容与意图不得改变——
+  所以 `alert_text_en` 原样进 `detail`，署名作为末行，severity 忠实映射（不拔高）。
+- **当前季节没有降雨类样本**：ECCC 的降雨预警长什么样，这份 fixture **回答不了**
+  （DESIGN 4.6.3 已登记这个缺口）。等它真实出现时用采集脚本重抓，并把 `alert_code` 补进白名单。
+- fixture 随季节与生效集合变化，diff 天然是噪音；要固定的是**字段形态**，
+  那由 `tests/sync-test.cjs` 的 0.6.0 断言来钉。

@@ -181,8 +181,18 @@ function nmcRows(json) {
   return rows
 }
 
-// ---------------------------------------------------------------- 八个源的取数
+// ---------------------------------------------------------------- 十个源的取数
 // 每个源给出两件事：离线从哪个 fixture 取、在线从哪里取；两者都返回**解析器的入参数组**。
+
+/**
+ * NWS 的 event 白名单（与 client/src/05h-overseas-parsers.js 的 NWS_EVENT_WHITELIST 同源）。
+ * **这里就地写一份**：本脚本刻意不 import client / lib 的任何东西（文件头第 1 条）——
+ * 契约检查必须独立于实现，否则实现与契约一起漂移时两边会同时"通过"。
+ */
+const NWS_EVENT_FILTER = [
+  'Flood Warning', 'Flash Flood Warning', 'Coastal Flood Warning',
+  'Flood Watch', 'Flood Advisory', 'Coastal Flood Watch', 'Coastal Flood Advisory', 'Coastal Flood Statement',
+].join(',')
 // 返回数组 = 逐条检查（nmc 的列表天然是多条）；返回空数组 = 上游这一次没有可检查的数据。
 
 const SOURCES = [
@@ -290,6 +300,42 @@ const SOURCES = [
     online: async () => {
       const json = JSON.parse(await getText('https://www.nmc.cn/rest/findAlarm?pageNo=1&pageSize=500'))
       return nmcRows(json).map((r) => ({ label: r.alertid, args: [r] }))
+    },
+  },
+  // 海外气象源（0.6.0）。两者都是**Client 直连的 REST**（CORS 实测允许），运行时按关注点查
+  // （NWS `?point=`、ECCC `bbox=`）。契约检查关心的是"上游结构还能不能认"，所以在线取数
+  // 用**更宽**的查询：point 查询当前没有预警是常态，那样这个源会长期显示 empty 而什么都没验到。
+  {
+    id: 'nws_alerts',
+    parser: 'parseNwsAlertResult',
+    offline: () => readJson('nws/nws-flood-alerts.geojson').features
+      .map((f) => ({ label: String(f.properties && f.properties.event), args: [f] })),
+    online: async () => {
+      const json = JSON.parse(await getText(
+        'https://api.weather.gov/alerts/active?event=' + encodeURIComponent(NWS_EVENT_FILTER)))
+      if (!json || !Array.isArray(json.features)) throw new Error('缺少 features 数组（结构变了）')
+      return json.features.map((f) => ({ label: String(f.properties && f.properties.event), args: [f] }))
+    },
+  },
+  {
+    id: 'eccc_alerts',
+    parser: 'parseEcccAlertResult',
+    offline: () => {
+      // 只喂**白名单内**的那一条：--offline 的规则是"样本必须解析出 Alert"（样本是刻意挑的
+      // 有效数据），而这份 fixture 里 frost advisory 与 wind warning 两条本来就该判 empty
+      // ——它们正是"两道过滤器在工作"的证据，但那属于回归测试的职责，不是契约检查的。
+      const f = readJson('eccc/eccc-alerts.geojson').features
+        .find((x) => x.properties && x.properties.alert_name_en === 'storm surge warning')
+      return f ? [{ label: 'samples/eccc/ → storm surge warning', args: [f] }] : []
+    },
+    online: async () => {
+      // ECCC 的 API 没有灾种过滤参数（白名单在 Client 侧做），所以在线拉全国范围再看能认多少。
+      // **当前季节绝大多数是 frost advisory（判 empty 是正常的）**——这条源的在线检查因此
+      // 天然偏弱：只有当风暴潮 / 降雨类真实出现时才算强验证（DESIGN 4.6.3 已登记这个缺口）。
+      const json = JSON.parse(await getText(
+        'https://api.weather.gc.ca/collections/weather-alerts/items?f=json&limit=200&bbox=-141,41,-52,84'))
+      if (!json || !Array.isArray(json.features)) throw new Error('缺少 features 数组（结构变了）')
+      return json.features.map((f) => ({ label: String(f.properties && f.properties.alert_code), args: [f] }))
     },
   },
 ]
