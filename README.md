@@ -1,4 +1,4 @@
-# dsh-quake-alert · QuakeAlert
+﻿# dsh-quake-alert · QuakeAlert
 
 **English** · [中文](./README.zh.md) · [日本語](./README.ja.md)
 
@@ -15,12 +15,12 @@
 - **Mainland China earthquakes (0.5.0)**: CENC's **earthquake early warning** (seconds, relayed by Wolfx) and **earthquake reports** (minute-level confirmation and backfill). The Chinese sources carry no regional intensity, so matching is by epicenter plus radius: just pick your city in the settings — no coordinates needed. The report threshold is a separate knob (M4.5 by default) so M2.5 tremors do not flood you.
 - **Mainland China weather hazards (0.5.2)**: **heavy-rain** and **geological-disaster** warning signals aggregated by the China Meteorological Administration's National Meteorological Center (issued by weather offices at every level, down to the county). Only **orange and above** is announced; yellow and blue go to the history only. Matching is by administrative area — the province / prefecture-level city you picked — so no radius is involved. An expired warning simply disappears from the list: **the source carries no "cleared" flag**, so "no cancellation received" does not mean "the alert is still in force".
 - **Radius in semantic steps**: local only (~30 km) / city and surroundings (~100 km, the default for new watch points) / wider area (~300 km), or type an exact number of kilometres.
-- **Overseas weather alerts (0.6.0)**: flood / flash-flood / coastal-flood warnings from the US **NWS**, and rainfall / flood / storm-surge warnings from Canada's **ECCC**. Both are fetched **directly by the browser** from the official APIs (no Host relay) using the coordinates you set under "Other regions": the NWS source judges by the county / zone the point falls in (with a radius ≥ 25 km it also samples four compass points, so the radius is an **approximation**), while the ECCC source converts your radius into a bounding box and asks ECCC for every warning overlapping it. Only **Warning**-class NWS events are announced (Flood / Flash Flood / Coastal Flood Warning); Watch, Advisory and Statement go to history only. ECCC contributes **warning**-class rainfall / flood / storm-surge alerts only — frost, fog and wind are neither "hazardous weather" by ECCC's own definition nor part of this plugin's scope. A warning published more than 6 hours before you open the page is recorded in history without ringing.
+- **Overseas weather alerts (0.6.0)**: flood / flash-flood / coastal-flood warnings from the US **NWS**, and rainfall / flood / storm-surge warnings from Canada's **ECCC**. Both are fetched **directly by the browser** from the official APIs (no Host relay) using the coordinates you set under "Other regions": the NWS source judges by the county / zone the point falls in (with a radius ≥ 25 km it also samples four compass points, so the radius is an **approximation**), while the ECCC source converts your radius into a bounding box and asks ECCC for every warning overlapping it. Only **Warning**-class NWS events are announced (Flood / Flash Flood / Coastal Flood Warning); Watch, Advisory and Statement go to history only. ECCC contributes **warning**-class rainfall / flood / storm-surge alerts only — frost and fog are advisories (ECCC's own definition of "generally not considered hazardous"), while wind, heat and thunderstorms *are* warnings but fall outside this plugin's hazard scope. A warning published more than 6 hours before you open the page is recorded in history without ringing.
 - **Global earthquakes and tsunamis (0.4.0)**: EMSC's live WebSocket push plus USGS's global earthquake catalog (polled by the Host half) cover earthquakes worldwide; NOAA's tsunami CAP messages cover the Pacific and other basins. When the same earthquake arrives from both global sources, it is merged by origin time plus epicenter so you are alerted only once.
 - **Global watch points**: express the places you care about as a coordinate plus a radius (up to 20, and "Use my location" fills the coordinates in from browser geolocation). An alert fires when the epicenter falls inside the radius and the magnitude reaches the global threshold (M4.5 by default, adjustable). Japanese earthquakes and tsunamis are unaffected by this and are still judged by prefecture; with no watch point configured, global and Chinese messages neither alert you nor enter the history.
 - **Alert thresholds**: configured separately for earthquake intensity (observed), EEW intensity (predicted), and tsunami grade (advisory / warning / major warning).
 - **Notifications**: synthesized alert tones (Web Audio; earthquake / EEW / tsunami / weather / cancellation each have their own tone) with adjustable volume; in-page toast when the page is visible, system notification when it is in the background. Earthquake and EEW headlines carry the intensity (observed or predicted), so the alert itself tells you how strong it is.
-- **Cancellation notices**: if an EEW you were alerted about is cancelled, or a tsunami forecast you were alerted about is cleared, a short follow-up (descending tone) tells you the earlier alert is void. A cancellation for an event you were never alerted about stays silent (history only). US NWS flood alerts carry a real `Cancel` semantic too (linked back to the original alert through CAP's `references`), so they get the same "no longer valid" reminder; the two mainland-China feeds have no such field (see the known limitations below).
+- **Cancellation notices**: if an EEW you were alerted about is cancelled, or a tsunami forecast you were alerted about is cleared, a short follow-up (descending tone) tells you the earlier alert is void. A cancellation for an event you were never alerted about stays silent (history only). US NWS flood alerts carry a real `Cancel` semantic too — the event key is NWS's own VTEC tracking number `<office>.<phenom>.<sig>.<ETN>`, and a cancellation only changes its ACTION segment to `CAN`, so it is matched to the warning it withdraws and gets the same "no longer valid" reminder. ECCC's `status_en` has no verified meaning (a freshly issued frost advisory is also `ended`), so it is never treated as a cancellation; the two mainland-China feeds have no such field either (see the known limitations below).
 - **Quiet hours**: silence non-critical alerts during a daily window (local browser time; a start later than the end crosses midnight). Red-level alerts — EEW, tsunami warnings (Warning and above), intensity 6-lower-or-above earthquakes, and level-4+ weather alerts — still break through unless you turn that off. Suppressed alerts stay in the history.
 - **Weather alerts, level 4 and above**: the JMA states an explicit warning level on every weather telegram. Only level 4+ — the "evacuation instruction" grade — is announced; levels 1–3 are still fetched, parsed and listed in the history, and a level-3 hit merely adds one line to the sidebar tooltip. See [Warning levels](#warning-levels-japan).
 - **Connection indicator**: a status dot at the sidebar foot — green connected, amber connecting/reconnecting/degraded, mid-grey data stale, blue data-format error (wait for a plugin update), red stopped or unreachable, hollow grey disabled by you — with per-source details on hover. Settings → Source status additionally lists increments, failures, gaps, last poll and upstream staleness (0.4.1).
@@ -192,7 +192,7 @@ node scripts/build-client.mjs          # rebuild client/client.js after editing 
 node scripts/build-areas.mjs           # regenerate the river-area table from the JMA public zip (needs network)
 node scripts/check-imports.mjs         # cross-module reference check (missing import / undeclared assignment)
 node scripts/build-client.mjs --check  # fail when the committed bundle is stale
-node tests/sync-test.cjs               # regression tests (1315 assertions)
+node tests/sync-test.cjs               # regression tests (1346 assertions)
 node scripts/check-contracts.mjs       # contract check: pull the live sources through the parsers to catch upstream changes (--offline uses samples/, no network)
 ```
 
@@ -212,14 +212,14 @@ node scripts/check-contracts.mjs       # contract check: pull the live sources t
 
 ## Changelog
 
-Current version **0.6.1** (review and fixes for 0.6.0: the **NWS event key now uses the VTEC
-event-tracking number** — the CAP `references` algorithm shipped in 0.6.0 was disproved by
-measurement, and made the same flood ring again on every update. Also fixed: a
-"~NaN km from the epicenter" line in overseas notifications, the cancellation path watching the
-wrong hazard switch, a permanent silence after an intensity dip, back-off polling *faster* than
-the normal interval, and Puerto Rico / Guam watch points being reported as "not configured" —
-13 items in total, plus end-to-end assertions for the ECCC fetch wiring and the cancellation path).
-The suite went from 1242 to 1315 assertions.
+Current version **0.6.2** (second review round on 0.6.0/0.6.1: **mainland-China weather alerts no
+longer notify with "~NaN km from the epicenter" and Japanese shelter wording** — 0.6.1 had fixed
+only the overseas branch; and the "a valid empty response proves the structure is fine" rule added
+in 0.6.1 was clearing the whole round's failure counters, so a *partial* upstream change could
+never raise the blue dot — it is now a round-level verdict. The failure back-off was dead code at
+the real polling intervals and is now added on top of them. Two stale mechanism descriptions in the
+three READMEs and two missing links in `TROUBLESHOOTING.zh.md` are corrected as well).
+The suite went from 1315 to 1346 assertions.
 See [CHANGELOG.md](./CHANGELOG.md) for the details of each release.
 
 ## Data sources

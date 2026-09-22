@@ -221,10 +221,12 @@ export function createOverseasSource(opts = {}) {
   const parseOne = opts.parseOne || (() => ({ ok: false, kind: 'schema', detail: '未配置解析器' }))
   // 单次请求的超时可注入（0.6.1）：好让回归测试能在毫秒级验"超时"这条路径的文案与分类
   // ——否则它得真的等 10 秒（默认沙箱此前连 AbortController 都没有，这条路径从未被跑过）。
-  const timeoutMs = typeof opts.timeoutMs === 'number' ? opts.timeoutMs : OVERSEAS_TIMEOUT_MS
+  // 用 Number.isFinite 而不是 typeof：`NaN` 也是 number，而 `setTimeout(fn, NaN)` 会**立即**触发
+  //（0.6.2 review）。
+  const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : OVERSEAS_TIMEOUT_MS
   // 400 冷却期的时长可注入（0.6.1）：好让回归测试真的能走到"TTL 到期后自动重试"那一侧
   // ——此前只有常量自证（`UNCOVERED_TTL_MS > 0`），把实现改成永久拉黑也测不出来。
-  const uncoveredTtlMs = typeof opts.uncoveredTtlMs === 'number' ? opts.uncoveredTtlMs : UNCOVERED_TTL_MS
+  const uncoveredTtlMs = Number.isFinite(opts.uncoveredTtlMs) ? opts.uncoveredTtlMs : UNCOVERED_TTL_MS
   // 交给主链的出口做成可注入：默认就是 11-pipeline 的 handleAlert，测试注入 spy 之后
   // 就能只验"取数器交出了什么"，而不必把整条通知链（音频 / 通知 / toast）拖进单测。
   const onAlert = opts.onAlert || handleAlert
@@ -351,6 +353,8 @@ export function createOverseasSource(opts = {}) {
     let applied = 0
     let rejectedNow = 0
     let newestDataAt = 0
+    /** 本轮有多少个响应被 ECCC 的分页上限截断（轮末汇总成 stats.truncated，见下）。 */
+    let truncatedNow = 0
     // 同一条预警可能被多个采样点查到（中心点与方位点落进同一个县）→ 一轮内只处理一次。
     const seen = new Set()
     for (const item of capped) {
@@ -392,14 +396,12 @@ export function createOverseasSource(opts = {}) {
           noteParseResult(id, failResult('schema', '响应缺少 features 数组（结构不符，可能是上游改版或拦截页）'))
           throw new Error('响应缺少 features 数组（结构不符）')
         }
-        // 结构正确但**空数组**（NWS 按点查询的常态）也要过一次契约（0.6.1 review）：
-        // 05g 的约定是"empty 也算结构是好的 → 清蓝点"，而清蓝点的调用此前只出现在非空循环体里
-        // → 一旦因拦截页升级过蓝点，此后每轮都拿到正确空响应的用户仍会看到它挂满 24 小时 TTL。
-        if (feats.length === 0) noteParseResult(id, failResult('empty', '该点当前没有本插件范围内的预警'))
-        // ECCC 的 OGC API 按 limit=200 分页：条目超过它时 features 会被**静默截断**。
-        // 当前全国约 116 条、按关注点的 bbox 更小，但"上游突然变多"是可能的（0.6.1 review）。
-        // 只计数（进诊断与设置页），**不进 detail** —— detail 是状态上报的去重键，不能含单调计数。
-        if (typeof json.numberMatched === 'number' && json.numberMatched > feats.length) stats.truncated += 1
+        // 结构正确但**空数组**（NWS 按点查询的常态）交给**轮末**统一判定（0.6.2 修正，见下）。
+        // 0.6.1 曾在这里逐响应上报 `empty`，而 05g 的 empty 会 `clearData`（清蓝点 + 归零连续
+        // 失败计数）——同一轮里只要有一条 URL 返回空数组，其它 URL 的同类 schema 失败就被清零：
+        // 实测（每轮 1 个拦截页 + 4 个空响应 × 6 轮）schema 计数涨到 6 而 consecutiveFail 恒为 0，
+        // **蓝点永不点亮**。局部改版 / 局部拦截于是变成静默漏报（DESIGN 3.2 最反对的形态）。
+        if (typeof json.numberMatched === 'number' && json.numberMatched > feats.length) truncatedNow += 1
         okCount += 1
         stats.received += feats.length
         for (const feature of feats) {
@@ -486,6 +488,17 @@ export function createOverseasSource(opts = {}) {
       // 但诊断快照与排障要看得到它。
       noteFreshness(id, newestDataAt)
     }
+    // 轮末的两条**轮级**判定（0.6.2 修正）。
+    // ① 分页截断：按**轮**计数（此前按响应累加——加拿大用户有 N 个关注点时一轮会 +N，
+    //    与 UI / 诊断里"多少轮被截断"的说法不符）。
+    if (truncatedNow) stats.truncated += 1
+    // ② 结构正常的空结果：**只有整轮一条失败都没有**时，才把这一轮判成"结构没问题"。
+    //    这正是 05g 的 empty 语义（empty 也算结构是好的 → 清蓝点），但它必须以**轮**为单位：
+    //    逐响应上报会让局部失败（5 个采样点里 1 个被拦截）永远升不了级，见上面的说明。
+    //    `applied === 0` 时才需要它——有成功解析的条目时 `noteSourceSuccess` 已经清过蓝点。
+    if (okCount > 0 && failCount === 0 && applied === 0) {
+      noteParseResult(id, failResult('empty', '本轮响应结构正常，但没有本插件范围内的条目'))
+    }
     // 停用之后不再写状态（0.6.0 review A-1）：否则"用户主动关掉插件"会在侧边栏留下红点，
     // 诊断里也会多一条 "The user aborted a request."
     if (stopped) return { applied, aborted: true }
@@ -548,15 +561,15 @@ export function createOverseasSource(opts = {}) {
       timer = null
       let res = null
       try { res = await pollSerial() } catch (err) { onError(err) }
-      // 失败退避（0.6.0 review B-5）：DESIGN 4.7.2 承诺过"失败退避 1s→60s"，此前实现里没有——
-      // 上游 5xx / 429 时仍按原节奏继续打。整轮全部失败才退避，成功即回到正常间隔。
+      // 失败退避（0.6.0 review B-5；语义在 0.6.2 修正）：整轮全部失败才退避，成功即回正常间隔。
+      // **必须加在正常间隔之上**：退避上限是 60 秒，而两个源的真实间隔是 120 / 300 秒——
+      // 0.6.1 写成 `max(退避, 正常间隔)` 之后，在真实间隔下它恒等于正常间隔，退避阶梯成了
+      // 死代码（0.6.0 承诺的"1s→60s 退避"实际不存在；两条退避用例注入的都是毫秒级间隔，
+      // 永远发现不了）。现在失败时是 `正常间隔 + 退避`，对上游礼貌的方向不变、强度回来了。
       const allFailed = !!(res && res.requests > 0 && res.failed === res.requests)
       if (allFailed) backoffMs = backoffMs ? Math.min(backoffMs * 2, OVERSEAS_MAX_BACKOFF_MS) : OVERSEAS_MIN_BACKOFF_MS
       else backoffMs = 0
-      // 退避是"**不低于**正常间隔"的下限，不是替代（0.6.1 review）：ECCC 正常 300 秒一轮，
-      // 而退避上限是 60 秒——直接拿退避当间隔会让它在失败时比正常时打得勤 5 倍，
-      // 与"对上游礼貌"（文件头第 3 条纪律）正好相反。
-      schedule(Math.max(backoffMs, intervalMs))
+      schedule(intervalMs + backoffMs)
     }, delay)
   }
 
@@ -568,6 +581,10 @@ export function createOverseasSource(opts = {}) {
       stopped = false
       running = true
       backoffMs = 0
+      // 闸门标志也要复位（0.6.2 review）：它记的是"上一轮闸门是否激活"。若在闸门激活期间
+      // stop()（或测试里 resetGate()）之后重新开始，闸门重新为真而标志仍是 true →
+      // "进入过几次闸门"少计一次，正是本模块要修的那类"数字不可解释"。
+      gateActive = false
       schedule(firstDelayMs)
     },
     stop() {
@@ -585,7 +602,7 @@ export function createOverseasSource(opts = {}) {
       return Object.assign({}, stats, { running, lastError })
     },
     /** 测试与诊断用：把"上次成功"归零，模拟页面刚打开。 */
-    resetGate() { lastSuccessAt = 0 },
+    resetGate() { lastSuccessAt = 0; gateActive = false },
   }
 }
 
@@ -628,4 +645,4 @@ function urlOfLocal(base, params) {
   return base + '?' + qs
 }
 
-export { placesInBoxes, US_BOXES, CA_BOX }
+export { placesInBoxes, US_BOXES, CA_BOX, defaultFetchText }

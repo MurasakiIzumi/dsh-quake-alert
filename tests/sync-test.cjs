@@ -43,7 +43,10 @@ function loadClientEx(seedStorage, opts) {
     // 0.6.1：AbortController 是浏览器标准全局，而 12e 的请求超时正是靠它实现的
     // （abort 之后 fetch 抛 AbortError）。沙箱此前没有它 → `abortCtl` 恒为 null →
     // "10 秒超时"那条路径在 1242 条用例里从未被跑过，连它的错误文案都没人看见。
-    AbortController: o.AbortController || AbortController,
+    // 0.6.2：写成 `'AbortController' in o ? …` 而不是 `o.AbortController || …`——
+    // 后者无法表达"注入 undefined"（`undefined || AbortController` 仍是真实实现），
+    // 于是 12e 里"没有 AbortController 时用 Promise.race 兜超时"那条分支**不可测**。
+    AbortController: ('AbortController' in o) ? o.AbortController : AbortController,
   }
   // client.js 的 handleRaw 用裸 `document` 判断页面可见性（浏览器里就是 window.document），
   // 注入 document 的用例需要把它同时挂到沙箱全局，否则永远走「后台」分支。
@@ -60,7 +63,9 @@ function loadClientEx(seedStorage, opts) {
   }
   vm.createContext(sandbox)
   vm.runInContext(CLIENT_CODE, sandbox, { filename: 'client.js' })
-  return { exports: sandbox.__exports, storage: memStore }
+  // sandbox 也交出去（0.6.2）：要在加载**之后**注入 `fetch` 才能测到 12e 的 defaultFetchText
+  // ——26 处取数器用例全都注入 fetchText，那条默认路径在测试里原本永远不执行。
+  return { exports: sandbox.__exports, storage: memStore, sandbox }
 }
 function loadClient(seedStorage) { return loadClientEx(seedStorage).exports }
 
@@ -4998,6 +5003,28 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       return c
     }
     const nwsByEvent = (ev) => nwsSample.features.filter((f) => f.properties.event === ev)[0]
+    /**
+     * 一条**与季节无关**的 ECCC 样本 shell（0.6.2）：取任意真实 feature 并把 alert_type 强制成
+     * `warning` + 保证有合法颜色。此前多处写死 `alert_code === 'CFW'`（风暴潮）或按下标取
+     * `features[2]`——fixture 随季节重抓时会变成 undefined，`JSON.parse(JSON.stringify(undefined))`
+     * 直接抛 SyntaxError，整段套件失败且失败原因不可归因（samples/README 与 TROUBLESHOOTING
+     * 都写明"分布随季节变化"）。
+     */
+    const ecccWarnShell = () => {
+      // 优先挑一条**真实就通过白名单**的样本（例如风暴潮）；本季都没有时（fixture 随季节变）
+      // 退到任意样本并补一个白名单内的名字，保证用例仍然测的是"取数 / 正文 / 统计"这几条链路。
+      const usable = (x) => x && x.properties
+      const listed = ecccSample.features.filter(usable)
+        .filter((x) => T6.parseEcccAlertResult(x, { place: caPlace }).ok)[0]
+      const f = JSON.parse(JSON.stringify(listed || ecccSample.features.filter(usable)[0]))
+      f.properties.alert_type = 'warning'
+      if (!f.properties.risk_colour_en) f.properties.risk_colour_en = 'orange'
+      const name = String(f.properties.alert_name_en || '')
+      if (!/rain|flood|surge|hydrolog|water/i.test(name) || /frost|fog|freez|wind|heat|snow|ice/i.test(name)) {
+        f.properties.alert_name_en = 'rainfall warning'
+      }
+      return f
+    }
 
     console.log('== 0.6.0 NWS：白名单 / 门槛 / 事件键 ==')
 
@@ -5302,6 +5329,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '经度跨度大于纬度跨度（45° 处 cos≈0.71，同样的公里数对应更多经度）')
       const hi = T6.ecccBboxOf({ lat: 70, lon: 0, radiusKm: 111 }).split(',').map(Number)
       assert((hi[2] - hi[0]) > (b[2] - b[0]), '纬度越高，同样的半径对应越宽的经度')
+      // 0.6.2：坐标夹取（此前只有实现、没有断言——改回旧写法 CI 仍全绿）
+      const pole = T6.nwsSamplePoints({ lat: 60, lon: -179.5, radiusKm: 2000 })
+      assert(pole.every((p) => p[0] >= -90 && p[0] <= 90 && p[1] >= -180 && p[1] <= 180),
+        '大半径 + 高纬度时方位点被夹到合法范围（否则我们自造的非法参数会被上游回 400）：' + JSON.stringify(pole))
+      const box = T6.ecccBboxOf({ lat: 70, lon: -178, radiusKm: 2000 }).split(',').map(Number)
+      assert(box.every((v, i) => (i % 2 === 0 ? v >= -180 && v <= 180 : v >= -90 && v <= 90)),
+        'ECCC 的 bbox 同样被夹住：' + box.join(','))
+      assert(box[0] <= box[2] && box[1] <= box[3], '夹取不会把矩形翻过来：' + box.join(','))
     }
 
     // ---- 17. 覆盖范围：只对"那个国家"的关注点发请求 ----
@@ -5788,7 +5823,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const urls = []
       const handed = []
       let status = null
-      const cfwFixture = ecccSample.features.filter((f) => f.properties.alert_code === 'CFW')[0]
+      // shell 与断言都**不绑定季节**（0.6.2）：此前写死风暴潮（CFW），非风暴季重抓 fixture 时
+      // 它会变成 undefined，`JSON.parse(JSON.stringify(undefined))` 直接抛 SyntaxError。
+      const cfwFixture = ecccWarnShell()
       const src = T6.createEcccSource({
         getCfg: () => mkCfg([caPlace, usPlace]),
         onStatus: (p) => { status = p },
@@ -5843,22 +5880,33 @@ console.log('== 机器级持久化：Host settings 桥 ==')
 
     // ---- 43. ECCC 的排除名单是"先排除再包含"，且 areaKey 有兜底 ----
     {
+      // **不依赖具体季节的样本**（0.6.2 修正）：shell 取任意一条真实 feature，并把 alert_type
+      // 强制成 'warning' —— 此前写死 `alert_code === 'CFW'`（风暴潮），非风暴季重抓 fixture 时
+      // 它会变成 undefined，`JSON.parse(JSON.stringify(undefined))` 直接抛 SyntaxError。
+      const shell = ecccSample.features.filter((x) => x && x.properties)[0]
+      assert(shell, '（前置）ECCC fixture 里至少有一条可用作 shell 的样本')
       const mk = (nameEn) => {
-        const f = JSON.parse(JSON.stringify(ecccSample.features.filter((x) => x.properties.alert_code === 'CFW')[0]))
+        const f = JSON.parse(JSON.stringify(shell))
+        f.properties.alert_type = 'warning'
         f.properties.alert_name_en = nameEn
+        if (typeof f.properties.risk_colour_en !== 'string') f.properties.risk_colour_en = 'orange'
         return T6.parseEcccAlertResult(f, { place: caPlace })
       }
-      const excluded = ['frost advisory', 'fog advisory', 'freezing rain warning', 'snowfall warning',
-        'blizzard warning', 'ice storm warning', 'wind warning', 'gale warning', 'heat warning',
-        'cold weather warning', 'severe thunderstorm warning', 'tornado warning', 'hurricane warning',
-        'tropical storm warning', 'air quality statement', 'humidex advisory', 'visibility advisory']
-      const leaked = excluded.filter((n) => mk(n).kind !== 'empty')
-      assert(leaked.length === 0, '排除名单里的每一类都判 empty（漏进来的：' + leaked.join(', ') + '）')
+      // 负向词从**实现的正则**派生（0.6.2）：手抄 17 个词里，此前有 16 个无论删掉哪条排除规则
+      // 都仍然判 empty（它们本来就不含 INCLUDE 里的任何词）——那是恒真断言，不是守卫。
+      const sources = String(T6.ECCC_EXCLUDE).replace(/\\b/g, '').replace(/[()]/g, '').split('|')
+      const negative = sources.map((s) => 'rain ' + s + ' warning')
+      const leaked = negative.filter((n) => mk(n).kind !== 'empty')
+      assert(leaked.length === 0,
+        '把 EXCLUDE 的每个词都塞进一条"本来会命中 INCLUDE"的预警里（rain + 该词）→ 全部判 empty。' +
+        '漏进来的：' + leaked.join(', '))
       assert(mk('rainfall warning').ok, '包含名单里的降雨预警放行（当前季节无真实样本，按名称收）')
-      assert(mk('freezing rain warning').kind === 'empty',
-        '"freezing rain" 既含 rain 又含 freez → 判 empty —— 这钉住的是"**先排除、再包含**"的顺序')
+      assert(mk('wind and rain warning').kind === 'empty',
+        '"wind and rain" 既含 rain（会被 INCLUDE 命中）又含 wind → 必须判 empty：' +
+        '这钉住的是"**先排除、再包含**"的顺序（删掉 ECCC_EXCLUDE 里的 wind 这条会红）')
+      assert(mk('freezing rain warning').kind === 'empty', '"freezing rain" 同理（freez 先排除）')
       // areaKey 兜底：feature_id 缺失 → 退回区域名（契约 tolerant 里写明了这件事）
-      const noFid = JSON.parse(JSON.stringify(ecccSample.features.filter((x) => x.properties.alert_code === 'CFW')[0]))
+      const noFid = ecccWarnShell()
       delete noFid.properties.feature_id
       const a = T6.parseEcccAlertResult(noFid, { place: caPlace }).alert
       assert(a.eventKey === 'eccc:' + noFid.properties.alert_code + ':' + noFid.properties.feature_name_en +
@@ -5868,10 +5916,20 @@ console.log('== 机器级持久化：Host settings 桥 ==')
 
     // ---- 44. 真实抓到的"非白名单响应"判 empty（否定方向用真实样本，不只靠合成 patch） ----
     {
-      const pt = nwsPointSample.features && nwsPointSample.features[0]
+      const pt = (nwsPointSample.features || []).filter((f) => f && f.properties)[0]
       assert(pt, '（前置）nws-point-alerts.geojson 里有样本')
       const r = T6.parseNwsAlertResult(pt, { place: usPlace })
-      assert(r.kind === 'empty', '真实抓到的 ' + pt.properties.event + '（?point= 返回的非白名单事件）判 empty：' + r.kind)
+      // **按白名单成员关系判**，而不是假定这一条必是非白名单（0.6.2 修正）：这份 fixture 由
+      // 采集脚本每次重抓时无条件覆盖，若恰好在有洪水预警的时刻抓取，它会变成白名单内的事件
+      // ——那时这条断言会红，而失败信息却指向"白名单"。改成跟着 `NWS_EVENT_WHITELIST` 走：
+      // 非白名单 → empty（真实的否定方向证据）；白名单内 → 解析成功（同一条 fixture 仍有效）。
+      const isListed = Object.prototype.hasOwnProperty.call(T6.NWS_EVENT_WHITELIST, pt.properties.event)
+      if (isListed) {
+        assert(r.ok === true, '（本轮抓到的恰是白名单事件 ' + pt.properties.event + '）解析成功：' + r.kind)
+      } else {
+        assert(r.kind === 'empty',
+          '真实抓到的 ' + pt.properties.event + '（?point= 返回的非白名单事件）判 empty：' + r.kind)
+      }
       const lower = JSON.parse(JSON.stringify(nwsByEvent('Flood Warning')))
       lower.properties.event = 'flood warning'
       assert(T6.parseNwsAlertResult(lower, { place: usPlace }).kind === 'empty',
@@ -5893,8 +5951,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const persisted = T6.loadHistory().filter((e) => e.id === nwsAlert.id)[0]
       assert(persisted && persisted.detail && persisted.detail.indexOf('Turn around') >= 0,
         '落盘后仍然带着正文（刷新页面还能看到）')
-      const ecccAlert = T6.parseEcccAlertResult(
-        ecccSample.features.filter((f) => f.properties.alert_code === 'CFW')[0], { place: caPlace }).alert
+      const ecccAlert = T6.parseEcccAlertResult(ecccWarnShell(), { place: caPlace }).alert
       T6.handleAlert(ecccAlert, mkCfg([caPlace]), { skipQuietHours: true })
       const evEccc = T6.store.events[0]
       assert(evEccc.id === ecccAlert.id, '（前置）刚写入的是这条')
@@ -5912,7 +5969,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(T6.store.events[0].detail.length === 1200, '超长正文被截到 1200 字符：' + T6.store.events[0].detail.length)
     }
 
-    // ---- 46. 海外命中不拼"距震中 NaN km"，也不给日本口径的避难提示 ----
+    // ---- 46. 命中文案按"有没有真实距离"分岔（海外 + 大陆都要覆盖） ----
     {
       // 在一个**独立沙箱**里跑真正的通知拼装（页内 toast 会把 title / body 写进 textContent）
       const texts = []
@@ -5940,12 +5997,39 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const joined = texts.join(' / ')
       assert(joined.indexOf('NaN') === -1, '通知文案里没有 NaN：' + joined)
       assert(joined.indexOf('距震中') === -1, '也不再把一条洪水预警说成"距震中"：' + joined)
-      assert(joined.indexOf('NaN') === -1 && joined.indexOf('该点所在地的官方预警') > 0,
-        '命中行按海外源分岔：' + joined)
+      assert(joined.indexOf('该点所在地的官方预警') > 0, '命中行按"没有真实距离"分岔：' + joined)
       assert(joined.indexOf('当地官方发布的避难与撤离指引') > 0 && joined.indexOf('市町村') === -1,
         '行动提示不再套日本口径（"请确认所在市町村的避难信息"）：' + joined)
       assert(joined.indexOf('美国国家气象局（NWS）') > 0,
         '免责声明点名了正确的机构（AUTHORITY_BY_SOURCE 里登记了 nws_alerts）：' + joined)
+
+      // **大陆气象（locator 'area'）也走同一支**（0.6.2）：0.6.1 只给 overseas 分了岔，
+      // 于是每条命中的大陆暴雨 / 地质灾害预警仍然带着「距震中约 NaN km」与日本避难口径上线。
+      texts.length = 0
+      const nmcRaw = {
+        alertid: '53072441600000_20260919030245',
+        title: '云南省丽江市宁蒗彝族自治县气象台发布暴雨橙色预警',
+        issued: '2026-09-19 03:02:45', kind: 'rainstorm', level: 'orange', detail: '正文',
+      }
+      const nmcAlert = T46.parseNmcAlarmResult(nmcRaw)
+      assert(nmcAlert.ok, '（前置）大陆气象预警解析成功')
+      assert(nmcAlert.alert.locator === 'area', '（前置）大陆气象源的 locator 是 area')
+      const cfgNmc = JSON.parse(JSON.stringify(T46.currentCfg()))
+      cfgNmc.watch.places = [{ name: '云南省·丽江市', lat: 26.87, lon: 100.23, radiusKm: 100 }]
+      cfgNmc.disasters.cnRainstorm = true
+      const rNmc = T46.handleAlert(nmcAlert.alert, cfgNmc, { skipQuietHours: true })
+      assert(rNmc.notified === true, '（前置）大陆预警真的播报了：' + JSON.stringify(rNmc))
+      const nmcText = texts.join(' / ')
+      assert(nmcText.indexOf('NaN') === -1, '大陆预警的通知里也没有 NaN：' + nmcText)
+      assert(nmcText.indexOf('距震中') === -1, '也不把一场暴雨说成"震中"：' + nmcText)
+      assert(nmcText.indexOf('按该点所在地的官方预警判定') > 0, '命中行同样是"没有距离"那一支：' + nmcText)
+      assert(nmcText.indexOf('请关注当地气象台发布的防御指引') > 0 && nmcText.indexOf('市町村') === -1,
+        '行动提示用大陆口径（不是日本的市町村避难信息）：' + nmcText)
+      assert(nmcText.indexOf('中央气象台（中国气象局）') > 0, '免责声明点名中央气象台：' + nmcText)
+      // 三支行动提示都在，且互不相同（防止将来把某支写死回日本口径）
+      assert(T46.weatherActionHintOf({ locator: 'overseas' }) !== T46.weatherActionHintOf({ locator: 'area' }) &&
+        T46.weatherActionHintOf({ locator: 'area' }) !== T46.weatherActionHintOf({ locator: undefined }),
+        '三种来源各自的行动提示互不相同')
     }
 
     // ---- 47. 取消链路的开关按来源分岔（日本气象关掉不影像海外源） ----
@@ -6020,8 +6104,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       T6.resetSourceHealth()
       let lastErr = ''
       const src = T6.createNwsSource({
-        getCfg: () => mkCfg([usPlace]),
-        timeoutMs: 30,
+        // 半径 < 25km → 只有中心点一个请求，于是可以把超时设成 1.5 秒而只花 1.5 秒
+        //（0.6.2：此前用 30ms，文案里的秒数是 "0 秒"，单位写错也抓不住）
+        getCfg: () => mkCfg([Object.assign({}, usPlace, { radiusKm: 10 })]),
+        timeoutMs: 1500,
         onStatus: () => {},
         onError: (e) => { lastErr = String((e && e.message) || e) },
         onAlert: () => {},
@@ -6037,10 +6123,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         }),
       })
       const r = await src.pollOnce()
-      assert(r.failed === 5 && src.stats().errors === 5, '超时算失败：' + JSON.stringify({ failed: r.failed }))
-      assert(/超时/.test(lastErr), '错误文案说明是超时：' + lastErr)
+      assert(r.failed === 1 && src.stats().errors === 1, '超时算失败：' + JSON.stringify({ failed: r.failed }))
       assert(lastErr.indexOf('user aborted') === -1,
-        '不再把超时写成 "The user aborted a request."（那是 A-1 想消灭的误导信息）')
+        '不再把超时写成 "The user aborted a request."（那是 A-1 想消灭的误导信息）：' + lastErr)
+      assert(/请求超时（2 秒未响应）/.test(lastErr),
+        '文案里的秒数按 timeoutMs 换算（1500ms → 2 秒；单位或换算写错会红）：' + lastErr)
       assert(/超时/.test(src.stats().lastError || ''), '快照里的 lastError 同样是超时：' + src.stats().lastError)
     }
 
@@ -6079,6 +6166,143 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         'HTTP 200 + HTML（拦截页 / 上游改版）判 schema 蓝点，与"缺 features"同一口径：' + JSON.stringify(st))
       const h2 = T6.sourceHealthOf('nws_alerts')
       assert(h2 && h2.data && h2.data.kind === 'schema', '健康记录里是 schema：' + JSON.stringify(h2 && h2.data && h2.data.kind))
+    }
+
+    console.log('== 0.6.2 review：第二轮 ==')
+
+    // ---- 52. 空响应**不能**把整轮的失败清零（0.6.1 引入的静默面） ----
+    {
+      T6.resetSourceHealth()
+      const cfg = mkCfg([usPlace]) // 100km → 5 个采样点
+      let n = 0
+      const mixed = T6.createNwsSource({
+        getCfg: () => cfg,
+        onStatus: () => {},
+        onAlert: () => {},
+        // 每轮：第 1 个采样点被拦截（schema），其余 4 个是结构正确的空响应
+        fetchText: async () => {
+          n += 1
+          return (n % 5 === 1) ? '<html>拦截页</html>' : '{"type":"FeatureCollection","features":[]}'
+        },
+      })
+      for (let i = 0; i < 6; i += 1) await mixed.pollOnce()
+      const h = T6.sourceHealthOf('nws_alerts')
+      assert(h.consecutiveFail >= 5, '同一轮里的空响应不会把连续失败计数清零：' + h.consecutiveFail)
+      assert(h.data && h.data.escalated === true,
+        '局部失败（5 条里 1 条被拦截）× 6 轮 → 蓝点照样升级（0.6.1 的逐响应 empty 会让它永不升级）：' +
+        JSON.stringify(h.data))
+      // 反向：整轮都干净的空响应仍然要能清掉蓝点（0.6.1 的初衷不能丢）
+      T6.resetSourceHealth()
+      const bad = T6.createNwsSource({ getCfg: () => cfg, onStatus: () => {}, onAlert: () => {}, fetchText: async () => '{"oops":1}' })
+      await bad.pollOnce()
+      assert(T6.sourceHealthOf('nws_alerts').data.escalated === true, '（前置）先制造一个蓝点')
+      const clean = T6.createNwsSource({
+        getCfg: () => cfg, onStatus: () => {}, onAlert: () => {},
+        fetchText: async () => '{"type":"FeatureCollection","features":[]}',
+      })
+      await clean.pollOnce()
+      assert(!T6.sourceHealthOf('nws_alerts').data,
+        '整轮都是结构正确的空响应 → 仍然清掉蓝点（本轮一条失败都没有，结构就是好的）')
+    }
+
+    // ---- 53. `truncated` 的单位是**轮**，不是响应 ----
+    {
+      const body = (matched) => JSON.stringify({ type: 'FeatureCollection', numberMatched: matched, features: [ecccWarnShell()] })
+      const one = T6.createEcccSource({
+        getCfg: () => mkCfg([caPlace]), onStatus: () => {}, onAlert: () => {}, fetchText: async () => body(250),
+      })
+      await one.pollOnce()
+      assert(one.stats().truncated === 1, '单关注点：一轮被截断 → truncated = 1：' + one.stats().truncated)
+      const two = T6.createEcccSource({
+        getCfg: () => mkCfg([caPlace, { name: '温哥华', lat: 49.2827, lon: -123.1207, radiusKm: 150 }]),
+        onStatus: () => {}, onAlert: () => {}, fetchText: async () => body(250),
+      })
+      await two.pollOnce()
+      assert(two.stats().requests === 2, '（前置）两个关注点 = 2 个请求：' + two.stats().requests)
+      assert(two.stats().truncated === 1,
+        '两个关注点、同一轮各被截断 → 仍记 1（0.6.1 按响应累加会记 2，与"多少轮被截断"的说法不符）：' +
+        two.stats().truncated)
+      const none = T6.createEcccSource({
+        getCfg: () => mkCfg([caPlace]), onStatus: () => {}, onAlert: () => {},
+        fetchText: async () => JSON.stringify({ type: 'FeatureCollection', numberMatched: 1, features: [ecccWarnShell()] }),
+      })
+      await none.pollOnce()
+      assert(none.stats().truncated === 0, '没被截断就不计数（numberMatched 是按 bbox 过滤后的数量，实测如此）')
+    }
+
+    // ---- 54. 退避必须**加在正常间隔之上**（否则在真实间隔下是死代码） ----
+    {
+      let calls = 0
+      const src = T6.createEcccSource({
+        getCfg: () => mkCfg([caPlace]),
+        intervalMs: 1200, // > OVERSEAS_MIN_BACKOFF_MS(1000)，于是两种写法可区分
+        firstDelayMs: 1,
+        onStatus: () => {}, onAlert: () => {},
+        fetchText: async () => { calls += 1; const e = new Error('HTTP 500'); e.status = 500; throw e },
+      })
+      src.start()
+      await new Promise((resolve) => setTimeout(resolve, 1600))
+      src.stop()
+      assert(calls === 1,
+        '全失败后的下一轮在 interval + 退避（1200+1000=2200ms）之后，1.6 秒内只有首轮；' +
+        '若写回 `max(退避, 间隔)` 则第二轮落在 1200ms → 这里会是 2：' + calls)
+    }
+
+    // ---- 55. 闸门计数在 restart / resetGate 之后不能少计 ----
+    {
+      T6.resetSourceHealth()
+      let calls = 0
+      const src = T6.createNwsSource({
+        getCfg: () => mkCfg([usPlace]),
+        onStatus: () => {}, onAlert: () => {},
+        fetchText: async () => { calls += 1; const e = new Error('HTTP 500'); e.status = 500; throw e },
+      })
+      await src.pollOnce()
+      assert(src.stats().gated === 1, '（前置）首轮进入闸门：' + src.stats().gated)
+      src.resetGate() // 模拟"页面刚打开"：闸门会再次为真，标志也必须跟着复位
+      await src.pollOnce()
+      assert(src.stats().gated === 2,
+        'resetGate() 之后再次进入闸门要计数（0.6.1 的 gateActive 不复位 → 少计一次）：' + src.stats().gated)
+      // 同一段闸门内连续两轮不该重复计数
+      await src.pollOnce()
+      assert(src.stats().gated === 2, '闸门内继续跑不再计数（不会变成"待在闸门里的轮数"）：' + src.stats().gated)
+      assert(calls === 15, '（前置）3 轮 × 5 个采样点：' + calls)
+    }
+
+    // ---- 56. 大陆气象的官方正文也进历史（Host 侧 nmcPayload → Client → 主链） ----
+    {
+      const raw = {
+        alertid: '53072441600000_20260919030245',
+        title: '云南省丽江市宁蒗彝族自治县气象台发布暴雨橙色预警',
+        issued: '2026-09-19 03:02:45', kind: 'rainstorm', level: 'orange',
+        detail: '拜城县气象台发布暴雨橙色预警信号：预计未来 3 小时降水量将达 50 毫米以上。',
+      }
+      const r = T6.parseNmcAlarmResult(raw)
+      assert(r.ok && r.alert.detail === raw.detail, '（前置）大陆气象的正文原样进了 alert.detail')
+      const cfg = JSON.parse(JSON.stringify(T6.currentCfg()))
+      cfg.watch.places = [{ name: '云南省·丽江市', lat: 26.87, lon: 100.23, radiusKm: 100 }]
+      cfg.disasters.cnRainstorm = true
+      T6.handleAlert(r.alert, cfg, { skipQuietHours: true })
+      const ev = T6.store.events.filter((e) => e.id === r.alert.id)[0]
+      assert(ev && ev.detail && ev.detail.indexOf('暴雨橙色预警信号') > 0,
+        '大陆预警的正文现在也能在历史条目里展开看到：' + String(ev && ev.detail).slice(0, 40))
+    }
+
+    // ---- 57. defaultFetchText（无 fetchText 注入时的真实默认路径） ----
+    {
+      const s = loadClientEx()
+      // 永不 settle 的 fetch：只能靠 Promise.race 兜住超时
+      s.sandbox.fetch = () => new Promise(() => {})
+      const msg = await s.exports.__test.defaultFetchText('https://example.invalid/slow', { timeoutMs: 30 })
+        .then(() => '(resolved)', (e) => String((e && e.message) || e))
+      assert(/超时/.test(msg) && /没有 AbortController/.test(msg),
+        '无 signal 时用 Promise.race 兜住超时（这条分支此前在测试里不可达）：' + msg)
+      // 400 的 bodyHint 截断长度（0.6.1 把它从 200 改成 160，同样没有任何用例能执行到）
+      s.sandbox.fetch = async () => ({ ok: false, status: 400, text: async () => 'x'.repeat(400) })
+      let err = null
+      try { await s.exports.__test.defaultFetchText('https://example.invalid/bad', { timeoutMs: 30 }) } catch (e) { err = e }
+      assert(err && err.status === 400 && err.bodyHint && err.bodyHint.length === 160,
+        '400 的 bodyHint 截到 160 字（与 catch 里展示时的切片长度一致）：' + (err && err.bodyHint && err.bodyHint.length))
     }
   } catch (e) {
     assert(false, '0.6.0 第 2 期检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))

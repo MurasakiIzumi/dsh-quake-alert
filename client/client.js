@@ -4962,6 +4962,21 @@ function disclaimerOf(alert) {
 }
 
 /**
+ * 气象预警的**行动提示**：三家机构的处置口径不同，不能互相套用（0.6.2）。
+ *
+ * · 日本气象电文 → 市町村级的避难信息（日本の避難情報）
+ * · 大陆气象预警 → 各级气象台发布的防御指引（没有"市町村"这个行政层级）
+ * · 海外气象（NWS / ECCC）→ 当地官方发布的避难与撤离指引
+ * 认定不出来源时退回**中性**表述，而不是默认套日本的制度（同 disclaimerOf 的取向）。
+ */
+function weatherActionHintOf(alert) {
+  if (!alert) return '请关注当地官方发布的指引'
+  if (alert.locator === 'overseas') return '请关注当地官方发布的避难与撤离指引'
+  if (alert.locator === 'area') return '请关注当地气象台发布的防御指引'
+  return '请确认所在市町村的避难信息'
+}
+
+/**
  * 系统通知 / 页内 toast 的标题。抽成纯函数是为了能直接断言文案——
  * 旧写法把「地震情报 · 」与「各地震度」分开拼，非「各地」分支会留下一个悬空的分隔符。
  */
@@ -5261,22 +5276,22 @@ function handleAlert(alert, cfg, opts) {
   // 全球源没有行政区，命中依据是「距某个关注点多少公里」——把距离说出来，
   // 用户才能判断这条提醒是否可信（半径是自己设的）。
   //
-  // 0.6.1 review：海外气象源（`locator === 'overseas'`）**也**带 `m.place`，但它没有
-  // distanceKm（命中在取数时就已确定，见 06-matcher 的 matchOverseasAlert），
-  // 于是这里会拼出「距震中约 NaN km」，还把一条洪水预警说成"震中"——用户可见的错误文案。
-  // 它必须单独分岔：说清判定依据是"该点所在地的官方预警"，而不是距离。
-  else if (m.place && alert.locator === 'overseas') {
-    bodyLines.push('命中关注点：' + m.place.name + '（该点所在地的官方预警）');
-  } else if (m.place) bodyLines.push('命中关注点：' + m.place.name + '（距震中约 ' + Math.round(m.distanceKm) + ' km）');
-  if (alert.kind === 'tsunami') bodyLines.push('请立即远离海岸与河口');
-  // 提醒动作同样分岔（0.6.1 review）：日本气象电文对应的是市町村级的避难信息，
-  // 而美国 / 加拿大的洪水预警由当地应急部门（county / 省）发布——对海外用户说
-  // 「确认所在市町村的避难信息」既找不到对应入口，也把日本制度套到了别国。
-  if (alert.kind === 'weather') {
-    bodyLines.push(alert.locator === 'overseas'
-      ? '请关注当地官方发布的避难与撤离指引'
-      : '请确认所在市町村的避难信息');
+  // **判据是"有没有真实距离"，不是"是哪个源"**（0.6.1 写了前者的一半，0.6.2 补全）：
+  // 只有坐标型源（`locator === 'point'`，见 matchPointAlert）会给出 `distanceKm`；
+  // 海外气象（查询即匹配）与大陆气象（行政区层级）都只给关注点，于是它们落到下面那一支时
+  // `Math.round(undefined)` 会拼出「距震中约 NaN km」，还把一场暴雨 / 洪水说成"震中"。
+  // 0.6.1 只给 `locator === 'overseas'` 分了岔，**大陆源仍然带着这个错误文案上线**——
+  // 现在按距离是否存在分岔，任何"没有距离的行政/查询型命中"都走同一支。
+  else if (m.place && typeof m.distanceKm === 'number' && Number.isFinite(m.distanceKm)) {
+    bodyLines.push('命中关注点：' + m.place.name + '（距震中约 ' + Math.round(m.distanceKm) + ' km）');
+  } else if (m.place) {
+    bodyLines.push('命中关注点：' + m.place.name + '（按该点所在地的官方预警判定）');
   }
+  if (alert.kind === 'tsunami') bodyLines.push('请立即远离海岸与河口');
+  // 行动提示按**机构**分岔（0.6.1 加海外那一支，0.6.2 补大陆那一支）：日本气象电文对应的是
+  // 市町村级的避难信息，中国大陆的预警由各级气象台发布、处置口径不同，而美加的洪水预警由
+  // 当地应急部门（county / 省）发布——把日本制度套到别处既找不到对应入口，也会误导行动。
+  if (alert.kind === 'weather') bodyLines.push(weatherActionHintOf(alert));
   bodyLines.push(disclaimerOf(alert));
   pushEvent({
     id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
@@ -6775,10 +6790,12 @@ function createOverseasSource(opts = {}) {
   const parseOne = opts.parseOne || (() => ({ ok: false, kind: 'schema', detail: '未配置解析器' }));
   // 单次请求的超时可注入（0.6.1）：好让回归测试能在毫秒级验"超时"这条路径的文案与分类
   // ——否则它得真的等 10 秒（默认沙箱此前连 AbortController 都没有，这条路径从未被跑过）。
-  const timeoutMs = typeof opts.timeoutMs === 'number' ? opts.timeoutMs : OVERSEAS_TIMEOUT_MS;
+  // 用 Number.isFinite 而不是 typeof：`NaN` 也是 number，而 `setTimeout(fn, NaN)` 会**立即**触发
+  //（0.6.2 review）。
+  const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : OVERSEAS_TIMEOUT_MS;
   // 400 冷却期的时长可注入（0.6.1）：好让回归测试真的能走到"TTL 到期后自动重试"那一侧
   // ——此前只有常量自证（`UNCOVERED_TTL_MS > 0`），把实现改成永久拉黑也测不出来。
-  const uncoveredTtlMs = typeof opts.uncoveredTtlMs === 'number' ? opts.uncoveredTtlMs : UNCOVERED_TTL_MS;
+  const uncoveredTtlMs = Number.isFinite(opts.uncoveredTtlMs) ? opts.uncoveredTtlMs : UNCOVERED_TTL_MS;
   // 交给主链的出口做成可注入：默认就是 11-pipeline 的 handleAlert，测试注入 spy 之后
   // 就能只验"取数器交出了什么"，而不必把整条通知链（音频 / 通知 / toast）拖进单测。
   const onAlert = opts.onAlert || handleAlert;
@@ -6905,6 +6922,8 @@ function createOverseasSource(opts = {}) {
     let applied = 0;
     let rejectedNow = 0;
     let newestDataAt = 0;
+    /** 本轮有多少个响应被 ECCC 的分页上限截断（轮末汇总成 stats.truncated，见下）。 */
+    let truncatedNow = 0;
     // 同一条预警可能被多个采样点查到（中心点与方位点落进同一个县）→ 一轮内只处理一次。
     const seen = new Set();
     for (const item of capped) {
@@ -6946,14 +6965,12 @@ function createOverseasSource(opts = {}) {
           noteParseResult(id, failResult('schema', '响应缺少 features 数组（结构不符，可能是上游改版或拦截页）'));
           throw new Error('响应缺少 features 数组（结构不符）')
         }
-        // 结构正确但**空数组**（NWS 按点查询的常态）也要过一次契约（0.6.1 review）：
-        // 05g 的约定是"empty 也算结构是好的 → 清蓝点"，而清蓝点的调用此前只出现在非空循环体里
-        // → 一旦因拦截页升级过蓝点，此后每轮都拿到正确空响应的用户仍会看到它挂满 24 小时 TTL。
-        if (feats.length === 0) noteParseResult(id, failResult('empty', '该点当前没有本插件范围内的预警'));
-        // ECCC 的 OGC API 按 limit=200 分页：条目超过它时 features 会被**静默截断**。
-        // 当前全国约 116 条、按关注点的 bbox 更小，但"上游突然变多"是可能的（0.6.1 review）。
-        // 只计数（进诊断与设置页），**不进 detail** —— detail 是状态上报的去重键，不能含单调计数。
-        if (typeof json.numberMatched === 'number' && json.numberMatched > feats.length) stats.truncated += 1;
+        // 结构正确但**空数组**（NWS 按点查询的常态）交给**轮末**统一判定（0.6.2 修正，见下）。
+        // 0.6.1 曾在这里逐响应上报 `empty`，而 05g 的 empty 会 `clearData`（清蓝点 + 归零连续
+        // 失败计数）——同一轮里只要有一条 URL 返回空数组，其它 URL 的同类 schema 失败就被清零：
+        // 实测（每轮 1 个拦截页 + 4 个空响应 × 6 轮）schema 计数涨到 6 而 consecutiveFail 恒为 0，
+        // **蓝点永不点亮**。局部改版 / 局部拦截于是变成静默漏报（DESIGN 3.2 最反对的形态）。
+        if (typeof json.numberMatched === 'number' && json.numberMatched > feats.length) truncatedNow += 1;
         okCount += 1;
         stats.received += feats.length;
         for (const feature of feats) {
@@ -7040,6 +7057,17 @@ function createOverseasSource(opts = {}) {
       // 但诊断快照与排障要看得到它。
       noteFreshness(id, newestDataAt);
     }
+    // 轮末的两条**轮级**判定（0.6.2 修正）。
+    // ① 分页截断：按**轮**计数（此前按响应累加——加拿大用户有 N 个关注点时一轮会 +N，
+    //    与 UI / 诊断里"多少轮被截断"的说法不符）。
+    if (truncatedNow) stats.truncated += 1;
+    // ② 结构正常的空结果：**只有整轮一条失败都没有**时，才把这一轮判成"结构没问题"。
+    //    这正是 05g 的 empty 语义（empty 也算结构是好的 → 清蓝点），但它必须以**轮**为单位：
+    //    逐响应上报会让局部失败（5 个采样点里 1 个被拦截）永远升不了级，见上面的说明。
+    //    `applied === 0` 时才需要它——有成功解析的条目时 `noteSourceSuccess` 已经清过蓝点。
+    if (okCount > 0 && failCount === 0 && applied === 0) {
+      noteParseResult(id, failResult('empty', '本轮响应结构正常，但没有本插件范围内的条目'));
+    }
     // 停用之后不再写状态（0.6.0 review A-1）：否则"用户主动关掉插件"会在侧边栏留下红点，
     // 诊断里也会多一条 "The user aborted a request."
     if (stopped) return { applied, aborted: true }
@@ -7102,15 +7130,15 @@ function createOverseasSource(opts = {}) {
       timer = null;
       let res = null;
       try { res = await pollSerial(); } catch (err) { onError(err); }
-      // 失败退避（0.6.0 review B-5）：DESIGN 4.7.2 承诺过"失败退避 1s→60s"，此前实现里没有——
-      // 上游 5xx / 429 时仍按原节奏继续打。整轮全部失败才退避，成功即回到正常间隔。
+      // 失败退避（0.6.0 review B-5；语义在 0.6.2 修正）：整轮全部失败才退避，成功即回正常间隔。
+      // **必须加在正常间隔之上**：退避上限是 60 秒，而两个源的真实间隔是 120 / 300 秒——
+      // 0.6.1 写成 `max(退避, 正常间隔)` 之后，在真实间隔下它恒等于正常间隔，退避阶梯成了
+      // 死代码（0.6.0 承诺的"1s→60s 退避"实际不存在；两条退避用例注入的都是毫秒级间隔，
+      // 永远发现不了）。现在失败时是 `正常间隔 + 退避`，对上游礼貌的方向不变、强度回来了。
       const allFailed = !!(res && res.requests > 0 && res.failed === res.requests);
       if (allFailed) backoffMs = backoffMs ? Math.min(backoffMs * 2, OVERSEAS_MAX_BACKOFF_MS) : OVERSEAS_MIN_BACKOFF_MS;
       else backoffMs = 0;
-      // 退避是"**不低于**正常间隔"的下限，不是替代（0.6.1 review）：ECCC 正常 300 秒一轮，
-      // 而退避上限是 60 秒——直接拿退避当间隔会让它在失败时比正常时打得勤 5 倍，
-      // 与"对上游礼貌"（文件头第 3 条纪律）正好相反。
-      schedule(Math.max(backoffMs, intervalMs));
+      schedule(intervalMs + backoffMs);
     }, delay);
   }
 
@@ -7122,6 +7150,10 @@ function createOverseasSource(opts = {}) {
       stopped = false;
       running = true;
       backoffMs = 0;
+      // 闸门标志也要复位（0.6.2 review）：它记的是"上一轮闸门是否激活"。若在闸门激活期间
+      // stop()（或测试里 resetGate()）之后重新开始，闸门重新为真而标志仍是 true →
+      // "进入过几次闸门"少计一次，正是本模块要修的那类"数字不可解释"。
+      gateActive = false;
       schedule(firstDelayMs);
     },
     stop() {
@@ -7139,7 +7171,7 @@ function createOverseasSource(opts = {}) {
       return Object.assign({}, stats, { running, lastError })
     },
     /** 测试与诊断用：把"上次成功"归零，模拟页面刚打开。 */
-    resetGate() { lastSuccessAt = 0; },
+    resetGate() { lastSuccessAt = 0; gateActive = false; },
   }
 }
 
@@ -8837,12 +8869,12 @@ const __test = {
   NWS_SEVERITY, NWS_SEV_RANK, ECCC_COLOUR_SEVERITY, ECCC_COLOUR_RANK, ECCC_INCLUDE, ECCC_EXCLUDE,
   OVERSEAS_BROADCAST_MIN_RANK,
   // 0.6.0：取数器与匹配（按关注点查询 / 查询即匹配 / 年龄闸门）
-  createNwsSource, createEcccSource, nwsSamplePoints, ecccBboxOf, placesInBoxes, US_BOXES, CA_BOX, matchOverseasAlert,
+  createNwsSource, createEcccSource, nwsSamplePoints, ecccBboxOf, placesInBoxes, US_BOXES, CA_BOX, defaultFetchText, matchOverseasAlert,
   NWS_ALERTS_BASE, ECCC_ALERTS_BASE, NWS_EVENT_QUERY,
   MIN_SAMPLE_RADIUS_KM, MAX_REQUESTS_PER_ROUND, OVERSEAS_FRESH_GATE_MS, OVERSEAS_GATE_RESET_MS,
   UNCOVERED_TTL_MS, OVERSEAS_MIN_BACKOFF_MS, OVERSEAS_MAX_BACKOFF_MS,
   overseasStatsOf,
-  parse, parseQuake, parseEew, parseTsunami, parseJma, parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage, feedStatsOf, watchlessPoint, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn: maxLevelIn, jmaItemsOf: itemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf, matchAlert, matchPointAlert, distanceKm, validGeo, normalizePlaces, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, hitSeverityOf, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY, cnProductName, authorityOf, disclaimerOf, SOURCE_ORDER, SOURCE_LABELS, SOURCE_CODE_TEXT, SettingsPanel, statusMetaOf, buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION, inQuietHours, isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, ensureAlertChannel, broadcastHistoryCleared, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, p2pTimeToIso, cnTimeToIso, CN_TIME_RE, CN_REPORT_MAG_OPTIONS, issuedToDate, formatIssuedLocal, audioState, SOURCE_CONTRACTS, parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of, failResult, noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, P2P_TIME_RE, MIGRATED_KEY };
+  parse, parseQuake, parseEew, parseTsunami, parseJma, parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage, feedStatsOf, watchlessPoint, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn: maxLevelIn, jmaItemsOf: itemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf, matchAlert, matchPointAlert, distanceKm, validGeo, normalizePlaces, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, hitSeverityOf, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY, cnProductName, authorityOf, disclaimerOf, weatherActionHintOf, SOURCE_ORDER, SOURCE_LABELS, SOURCE_CODE_TEXT, SettingsPanel, statusMetaOf, buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION, inQuietHours, isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, ensureAlertChannel, broadcastHistoryCleared, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, p2pTimeToIso, cnTimeToIso, CN_TIME_RE, CN_REPORT_MAG_OPTIONS, issuedToDate, formatIssuedLocal, audioState, SOURCE_CONTRACTS, parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of, failResult, noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, P2P_TIME_RE, MIGRATED_KEY };
 
 // activeClient 是 12-websocket 的模块级 let：给 12 用的赋值出口（跨模块不能写 imported binding）
 // 由 12-websocket 提供 setter；这里仅保留引用以便阅读

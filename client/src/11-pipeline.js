@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 // dsh-quake-alert · client/src/11-pipeline.js
 //
 // 作用：主链——收到一条原始消息后的完整处理顺序。
@@ -87,6 +87,21 @@ function authorityOf(alert) {
 function disclaimerOf(alert) {
   const a = authorityOf(alert)
   return a ? '—— 仅供参考，请以' + a + '官方发布为准' : '—— 仅供参考，请以官方发布为准'
+}
+
+/**
+ * 气象预警的**行动提示**：三家机构的处置口径不同，不能互相套用（0.6.2）。
+ *
+ * · 日本气象电文 → 市町村级的避难信息（日本の避難情報）
+ * · 大陆气象预警 → 各级气象台发布的防御指引（没有"市町村"这个行政层级）
+ * · 海外气象（NWS / ECCC）→ 当地官方发布的避难与撤离指引
+ * 认定不出来源时退回**中性**表述，而不是默认套日本的制度（同 disclaimerOf 的取向）。
+ */
+function weatherActionHintOf(alert) {
+  if (!alert) return '请关注当地官方发布的指引'
+  if (alert.locator === 'overseas') return '请关注当地官方发布的避难与撤离指引'
+  if (alert.locator === 'area') return '请关注当地气象台发布的防御指引'
+  return '请确认所在市町村的避难信息'
 }
 
 /**
@@ -389,22 +404,22 @@ function handleAlert(alert, cfg, opts) {
   // 全球源没有行政区，命中依据是「距某个关注点多少公里」——把距离说出来，
   // 用户才能判断这条提醒是否可信（半径是自己设的）。
   //
-  // 0.6.1 review：海外气象源（`locator === 'overseas'`）**也**带 `m.place`，但它没有
-  // distanceKm（命中在取数时就已确定，见 06-matcher 的 matchOverseasAlert），
-  // 于是这里会拼出「距震中约 NaN km」，还把一条洪水预警说成"震中"——用户可见的错误文案。
-  // 它必须单独分岔：说清判定依据是"该点所在地的官方预警"，而不是距离。
-  else if (m.place && alert.locator === 'overseas') {
-    bodyLines.push('命中关注点：' + m.place.name + '（该点所在地的官方预警）')
-  } else if (m.place) bodyLines.push('命中关注点：' + m.place.name + '（距震中约 ' + Math.round(m.distanceKm) + ' km）')
-  if (alert.kind === 'tsunami') bodyLines.push('请立即远离海岸与河口')
-  // 提醒动作同样分岔（0.6.1 review）：日本气象电文对应的是市町村级的避难信息，
-  // 而美国 / 加拿大的洪水预警由当地应急部门（county / 省）发布——对海外用户说
-  // 「确认所在市町村的避难信息」既找不到对应入口，也把日本制度套到了别国。
-  if (alert.kind === 'weather') {
-    bodyLines.push(alert.locator === 'overseas'
-      ? '请关注当地官方发布的避难与撤离指引'
-      : '请确认所在市町村的避难信息')
+  // **判据是"有没有真实距离"，不是"是哪个源"**（0.6.1 写了前者的一半，0.6.2 补全）：
+  // 只有坐标型源（`locator === 'point'`，见 matchPointAlert）会给出 `distanceKm`；
+  // 海外气象（查询即匹配）与大陆气象（行政区层级）都只给关注点，于是它们落到下面那一支时
+  // `Math.round(undefined)` 会拼出「距震中约 NaN km」，还把一场暴雨 / 洪水说成"震中"。
+  // 0.6.1 只给 `locator === 'overseas'` 分了岔，**大陆源仍然带着这个错误文案上线**——
+  // 现在按距离是否存在分岔，任何"没有距离的行政/查询型命中"都走同一支。
+  else if (m.place && typeof m.distanceKm === 'number' && Number.isFinite(m.distanceKm)) {
+    bodyLines.push('命中关注点：' + m.place.name + '（距震中约 ' + Math.round(m.distanceKm) + ' km）')
+  } else if (m.place) {
+    bodyLines.push('命中关注点：' + m.place.name + '（按该点所在地的官方预警判定）')
   }
+  if (alert.kind === 'tsunami') bodyLines.push('请立即远离海岸与河口')
+  // 行动提示按**机构**分岔（0.6.1 加海外那一支，0.6.2 补大陆那一支）：日本气象电文对应的是
+  // 市町村级的避难信息，中国大陆的预警由各级气象台发布、处置口径不同，而美加的洪水预警由
+  // 当地应急部门（county / 省）发布——把日本制度套到别处既找不到对应入口，也会误导行动。
+  if (alert.kind === 'weather') bodyLines.push(weatherActionHintOf(alert))
   bodyLines.push(disclaimerOf(alert))
   pushEvent({
     id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
@@ -427,4 +442,4 @@ function handleAlert(alert, cfg, opts) {
 }
 
 
-export { handleCancelled, handleRaw, handleAlert, updateWeatherHint, alertTitleOf, watchlessPoint, hitSeverityOf, cnProductName, authorityOf, disclaimerOf }
+export { handleCancelled, handleRaw, handleAlert, updateWeatherHint, alertTitleOf, watchlessPoint, hitSeverityOf, cnProductName, authorityOf, disclaimerOf, weatherActionHintOf }

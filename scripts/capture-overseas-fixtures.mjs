@@ -20,7 +20,7 @@
 // 活跃集里只有霜冻 / 风 / 风暴潮，**没有降雨类** —— 也就是说「ECCC 的降雨预警长什么样」
 // 这份 fixture 回答不了，只能等它真实出现（DESIGN 4.6.3 / 4.7 已如实登记这个缺口）。
 
-import { writeFileSync, mkdirSync } from 'node:fs'
+import { writeFileSync, readFileSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -39,6 +39,41 @@ const NWS_EVENTS = [
   'Coastal Flood Warning', 'Coastal Flood Watch', 'Coastal Flood Advisory', 'Coastal Flood Statement',
 ]
 
+/**
+ * 白名单自检（0.6.2）：上面那份名单是**手抄的第二份**（`client/src` 的 ESM 依赖 `react`，
+ * Node 下 import 不进来）。往 05h 的白名单里加一类洪水产品却忘了同步这里时，抓取本身不会报错——
+ * 它只是永远抓不回那一类的样本，于是新类型**没有任何回归断点**。这里用读源码文本的方式比对。
+ */
+function assertWhitelistInSync() {
+  const src = readFileSync(join(ROOT, 'client', 'src', '05h-overseas-parsers.js'), 'utf8')
+  const inSource = [...src.matchAll(/^\s*'([^']+)':\s*\{\s*kind:/gm)].map((m) => m[1]).sort()
+  const mine = [...NWS_EVENTS].sort()
+  if (inSource.length === 0) {
+    console.log('  ✗ 白名单自检：没能从 client/src/05h 里解析出白名单（正则与实现脱节了？）')
+    process.exitCode = 1
+    return false
+  }
+  if (inSource.join('|') !== mine.join('|')) {
+    console.log('  ✗ 抓取名单与 client/src/05h 的白名单不一致：')
+    console.log('     client/src/05h =', inSource.join(' / '))
+    console.log('     本脚本         =', mine.join(' / '))
+    process.exitCode = 1
+    return false
+  }
+  console.log('  白名单自检：' + mine.length + ' 类与 client/src/05h 一致')
+  return true
+}
+
+/** 从一条 properties 里取 VTEC 的事件追踪号（与 05h 的 nwsVtecKeyOf 同一规则，用于**校验**）。 */
+function vtecOf(props) {
+  const list = (props && props.parameters && props.parameters.VTEC) || []
+  for (const raw of (Array.isArray(list) ? list : [])) {
+    const m = /\/O\.[A-Z]{3}\.([A-Z0-9]{4})\.([A-Z]{2})\.([A-Z])\.(\d{4})\./.exec(String(raw || ''))
+    if (m) return m[1] + '.' + m[2] + '.' + m[3] + '.' + m[4]
+  }
+  return ''
+}
+
 function write(rel, text) {
   const p = join(ROOT, rel)
   mkdirSync(dirname(p), { recursive: true })
@@ -56,6 +91,7 @@ async function get(url) {
 // ---------------------------------------------------------------------------
 async function captureNws() {
   console.log('=== NWS ===')
+  if (!assertWhitelistInSync()) return
   const q = '?event=' + NWS_EVENTS.map((e) => encodeURIComponent(e)).join(',')
   const r = await get('https://api.weather.gov/alerts/active' + q)
   if (r.status !== 200) { console.log('  列表：HTTP ' + r.status + '（跳过）'); return }
@@ -73,7 +109,14 @@ async function captureNws() {
     seen.add(ev)
     kept.push(f)
   }
-  const sample = { ...j, features: kept }
+  // numberMatched / numberReturned 要跟着**裁剪后**的条数走（0.6.2）：它们原本留的是全量数字，
+  // 于是 fixture 与"裁剪但保持与真实响应同形"的自我声明冲突——any 拿它当响应体的用例都会
+  // 恒判"被分页截断"（假警报）。
+  const sample = Object.assign({}, j, {
+    features: kept,
+    numberMatched: kept.length,
+    numberReturned: kept.length,
+  })
   write('samples/nws/nws-flood-alerts.geojson', JSON.stringify(sample, null, 1))
   console.log('  裁剪后保留类型：' + kept.map((f) => f.properties.event).join(' / '))
 
@@ -95,11 +138,23 @@ async function captureNws() {
  */
 async function captureNwsEventChains(activeJson) {
   const feats = (activeJson && activeJson.features) || []
-  const upd = feats.find((f) => /Warning$/.test(f.properties.event) &&
+  const upd = feats.find((f) => f && f.properties && /Warning$/.test(f.properties.event) &&
     f.properties.messageType === 'Update' && (f.properties.references || []).length > 0)
-  if (upd) {
+  if (!upd) {
+    console.log('  事件链：当前活跃集里没有带 references 的 Warning 类，跳过（下次再抓）')
+  } else {
     const prev = await getAlertJson(upd.properties.references[0].identifier)
-    if (prev) {
+    if (!prev) {
+      // 静默跳过一次抓取看起来和成功一样（0.6.2）：明说，且**不写盘**——半成品 fixture 比没有更糟。
+      console.log('  事件链：被引用的上一版拉取失败，跳过（不写盘）')
+    } else if (!vtecOf(prev.properties) || vtecOf(prev.properties) !== vtecOf(upd.properties)) {
+      // 写盘**之前**验证（0.6.2）：note 里断言"两版 VTEC 追踪号相同"，而上游若改了事件标识的
+      // 语义，这里必须当场失败，而不是把一条自相矛盾的"证据"提交进仓库（回归用例会红，
+      // 但 fixture 已经被覆盖了）。
+      console.log('  ✗ 事件链的两版 VTEC 追踪号不同（prev=' + (vtecOf(prev.properties) || '(无)') +
+        ' upd=' + (vtecOf(upd.properties) || '(无)') + '）——不写盘，请复核事件键的来源')
+      process.exitCode = 1
+    } else {
       write('samples/nws/nws-event-chain.geojson', JSON.stringify({
         type: 'FeatureCollection',
         note: '真实的 NWS 事件链：同一次洪水预警的两个连续版本（都是 Update）。两版的 VTEC 追踪号' +
@@ -107,11 +162,9 @@ async function captureNwsEventChains(activeJson) {
           '事件键必须落在 VTEC 上（用 references 只能回溯一步，见 05h 的 nwsEventKeyOf）。',
         features: [prev, upd],
       }, null, 2) + '\n')
-      console.log('  事件链：' + upd.properties.event + ' · ' +
-        JSON.stringify((upd.properties.parameters || {}).VTEC || null))
+      console.log('  事件链：' + upd.properties.event + ' · ' + vtecOf(upd.properties) +
+        '（两版同键，已校验）')
     }
-  } else {
-    console.log('  事件链：当前活跃集里没有带 references 的 Warning 类，跳过（下次再抓）')
   }
 
   const r = await get('https://api.weather.gov/alerts?message_type=cancel&event=' +
@@ -160,7 +213,11 @@ async function captureEccc() {
     const c = f.properties && f.properties.alert_code
     if (!byCode[c]) byCode[c] = f
   }
-  const sample = { ...j, features: Object.values(byCode) }
+  const sample = Object.assign({}, j, {
+    features: Object.values(byCode),
+    numberMatched: Object.keys(byCode).length,
+    numberReturned: Object.keys(byCode).length,
+  })
   write('samples/eccc/eccc-alerts.geojson', JSON.stringify(sample, null, 1))
   console.log('  裁剪后保留类型：' + Object.keys(byCode).map((c) => c + '→' + byCode[c].properties.alert_name_en).join(' / '))
   console.log('  ⚠ 当前季节没有降雨类：ECCC 的 rainfall 预警形态**未被本 fixture 覆盖**（DESIGN 4.6.3 已登记）')
