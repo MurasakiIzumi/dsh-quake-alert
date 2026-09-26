@@ -3,6 +3,62 @@
 本文件记录 dsh-quake-alert 的显著变更，格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 条目只写「改了什么」，改动的理由与实现细节见提交记录与 `DESIGN.md`。
 
+## [0.7.0] - 2026-09-26
+
+**适配 DSH 0.1.7-rc.2**。0.1.7 换掉了两代 settings API，而本插件的机器级持久化正好建在它们之上：
+宿主侧 `ctx.settings.register()` 已不存在，客户端侧 `ctx.settingsScope` 被整个移除（在 0.1.7 的
+client 包里零命中）。0.6.2 在这套宿主上的实际表现是**配置静默退回浏览器 localStorage**——插件仍
+可用，但跨浏览器 / 跨机器的配置全部失效，而日志还把它错写成「settings.yaml 类型不符」。本版把两侧
+都迁到 0.1.7 的契约上，**同时保留 0.1.6 的旧路径**（按宿主实际提供的方法分派），两代宿主都能跑。
+
+### Fixed
+
+- **机器级持久化在新宿主上失效**：0.1.7 的 settings 表单**从插件导出的 `Config` schema 派生**
+  （可编辑字段须标 `.volatile()`），命名空间就是插件在 profile 里的条目 id——本插件仍是
+  `quake-alert`，两侧寻址名都不用改。Host 侧改为：导出 `Config`、给**全部 24 个可编辑叶子**标
+  volatile、自带配置页面的插件改调 `settings.configure({ auto: false }, ctx.fiber)`；
+  `register` 路径保留为 0.1.6 回退。已用 `dsh --dump-config-schema` 复验：loader 认到了该 schema，
+  每个字段都带 `x-cordis: { volatile: true }`。
+- **日志把「API 不存在」误报成「settings.yaml 类型不符」**：两代 API 都不在时，现在如实说明
+  「宿主版本与插件不匹配」，不再让人去查配置文件。
+- **客户端绑定点**：`ctx.settingsScope.bind({ namespace })`（0.1.7 已移除）改为
+  `ctx.configForms.get('quake-alert')`（`ConfigForm`），旧服务作为回退。两者的快照与写入面同形
+  （`getSnapshot` / `subscribe` / `mutate`；快照字段 `status / value / user / writable / mode`
+  一一对应；写入用的 `{op:'set'|'unset', path, value}` 就是 settings 自己的 `SettingsPathOp`），
+  所以 `03-settings-bridge` 的逻辑未改，只更新了它认的"形状"说明。
+- **`dsh.client.inject` 里的包名失效**：`@deepseek-ai/dsh-client-runtime` 在 0.1.7 已不存在
+  （组合会拒绝缺失的 supplier，那会让整个 client bundle 装载失败），换成 0.1.7 实际存在、且我们
+  真正依赖的 `@deepseek-ai/dsh-client-ui-renderer`（`slots` 服务的提供者）与
+  `@deepseek-ai/dsh-api-remotes`。
+
+### Changed
+
+- **依赖**：`@deepseek-ai/schemastery` `^3.18.2` → `~3.18.4`。`.volatile()` 是 3.18.4 才有的方法，
+  而 0.1.7 的 settings 表单**只编辑 volatile 字段**——旧版本上这些字段在宿主表单里根本看不见。
+- **`settings.section` / `sidebar.footer.action` 两个 slot 与 `ctx.webServer.register()` 无需改动**
+  （0.1.7 契约未变：handler 仍拥有完整响应生命周期，SSE 仍在压缩白名单外）。
+- **session format v4（`source.kind` 不得为 `"plugin"`）与本插件无关**：本插件不写会话事件
+  （全库无 `session` 调用点），该变更只命中另外三个第三方插件。
+
+### Added
+
+- **回归 +17 条**（1346 → **1363**），每一条都在问"这个适配真的生效了吗"：
+  `Config` 导出存在且与 `QuakeAlertSettingsSchema` 是同一对象；**每个可编辑叶子都带 volatile**
+  （期望条数从 `DEFAULT_CFG` 递归算出——将来加字段忘了标会红）；`applySettingsService` 的四种宿主
+  形态（只有 configure / 只有 register / 两者都有时优先新 API / 两者都没有）以及 register 抛错时的
+  兜底；client 侧 `configForms` 与 `settingsScope` 两条入口都在；`ConfigForm` 形状被当成机器级配置源、
+  写回的 ops 是 `SettingsPathOp` 形状。
+
+### 复验
+
+- `node tests/sync-test.cjs` → **1363 通过 / 0 失败**；`client/client.js` 由 rollup 重新构建。
+- `dsh --profile web --dump-config`：条目仍是 `- id: quake-alert, name: dsh-quake-alert`。
+- `dsh --profile web --dump-config-schema`：本插件字段全部带 `x-cordis.volatile: true`。
+- 运行中的实例（改前的 Host 代码）：`/dsh-quake-alert/areas` 200 / `/feed?stats=1` 200（`errors: 0`）/
+  `/stream` 200 + `text/event-stream`、未被压缩、首帧 `event: sync`。
+- **仍需重启 `dsh web` 复核**：Host 半边改动要重启才生效。重启后应确认设置页显示机器级存储
+  （而非 localStorage 回退），且改一项配置不会重载 Host 半边（volatile-only 更新）。
+
 ## [0.6.2] - 2026-09-22
 
 0.6.1 的第二轮 review（三路只读审查 + 实机复验）。**两处是真的用户可见缺陷**：一处是 0.6.1 的

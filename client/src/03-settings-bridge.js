@@ -14,12 +14,18 @@ import { DEFAULT_CFG } from './01-constants.js'
 import { isPlainObject, normalizeCfg, loadCfg, saveCfg, freshCfg, loadJSON, saveJSON } from './02-storage.js'
 import { store } from './07-store.js'
 
-// ---------- 机器级持久化（0.2.0）：Host settings 为主，localStorage 为回退与镜像 ----------
-// Host 半边注册了同名 namespace（lib/index.js 的 QuakeAlertSettingsSchema）。Client 经
-// `ctx.settingsScope.bind({ namespace })` 读写它：scope 快照是**同步**可读的，所以内部读取
-// （WebSocket 重连、handleRaw）仍然同步；写入先更新内存与 localStorage 镜像，再异步推给
-// Host。没有 settings 服务、页面非 loopback、或 Host 只做进程内存储时，整条链路自动退化为
-// M1 的 localStorage 行为。
+// ---------- 机器级持久化（0.2.0）：Host 存储为主，localStorage 为回退与镜像 ----------
+// 本模块只认一个**形状**（两代宿主都提供它），不关心它来自哪个服务：
+//   · DSH 0.1.6 及以前：`ctx.settingsScope.bind({ namespace })` 返回的 scope
+//   · DSH 0.1.7 起：`ctx.configForms.get('quake-alert')` 返回的 ConfigForm
+//     （`settingsScope` 已被移除；表单由 Host 侧导出的 Config schema 派生）
+// 用到的成员两边同名同义：`getSnapshot()` / `subscribe(fn)` / `mutate(ops)`，快照字段
+// `status / value / user / writable / mode` 也一一对应；`mutate` 接收的
+// `{op:'set'|'unset', path, value}` 就是 settings 服务自己的 SettingsPathOp。
+// 分派在 client/src/15-entry.js（哪个服务出现就用哪个）。
+// scope 快照是**同步**可读的，所以内部读取（WebSocket 重连、handleRaw）仍然同步；写入先更新
+// 内存与 localStorage 镜像，再异步推给 Host。没有对应服务、页面非 loopback、或 Host 只做进程内
+// 存储时，整条链路自动退化为 M1 的 localStorage 行为。
 const SETTINGS_NS = 'quake-alert'
 /** 「本地配置已迁移到 Host」的落盘标记：迁移只能发生一次，见 bindSettingsScope。 */
 const MIGRATED_KEY = 'dsh.quakeAlert.hostMigrated'

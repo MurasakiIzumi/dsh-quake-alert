@@ -1,4 +1,4 @@
-﻿# dsh-quake-alert · QuakeAlert
+# dsh-quake-alert · QuakeAlert
 
 **English** · [中文](./README.zh.md) · [日本語](./README.ja.md)
 
@@ -24,7 +24,7 @@
 - **Quiet hours**: silence non-critical alerts during a daily window (local browser time; a start later than the end crosses midnight). Red-level alerts — EEW, tsunami warnings (Warning and above), intensity 6-lower-or-above earthquakes, and level-4+ weather alerts — still break through unless you turn that off. Suppressed alerts stay in the history.
 - **Weather alerts, level 4 and above**: the JMA states an explicit warning level on every weather telegram. Only level 4+ — the "evacuation instruction" grade — is announced; levels 1–3 are still fetched, parsed and listed in the history, and a level-3 hit merely adds one line to the sidebar tooltip. See [Warning levels](#warning-levels-japan).
 - **Connection indicator**: a status dot at the sidebar foot — green connected, amber connecting/reconnecting/degraded, mid-grey data stale, blue data-format error (wait for a plugin update), red stopped or unreachable, hollow grey disabled by you — with per-source details on hover. Settings → Source status additionally lists increments, failures, gaps, last poll and upstream staleness (0.4.1).
-- **Machine-level persistence**: configuration is stored in DSH's `settings.yaml` through the Host settings service, so it survives across browsers and machines. A browser `localStorage` copy stays as a mirror, and as the fallback when the settings service is unavailable; existing local settings migrate to the Host once, on first run.
+- **Machine-level persistence**: configuration goes to DSH's machine-level storage (the Host settings `settings.yaml` up to DSH 0.1.6; the plugin entry's profile configuration from 0.1.7 on), so it survives across browsers and machines. A browser `localStorage` copy stays as a mirror, and as the fallback when that storage is unavailable; existing local settings migrate once, on first run.
 - **Municipality-level watch**: narrow earthquake reports down to individual cities / wards / towns / villages, chosen from a searchable per-prefecture list (1,917 entries). Observed-intensity point names are resolved to their municipality first, so the many official spellings all match (大阪北区茶屋町 → 大阪市北区, 福島伊達市 → 伊達市, 渡島北斗市 → 北斗市). Only observed-intensity points carry that granularity; EEW and tsunami stay prefecture-level, and a point that cannot be resolved is treated as a match rather than dropped.
 - **Data source switch**: production (live) or sandbox (replays 2023 history, roughly one message every 30 seconds, for testing).
 - **Smart de-duplication**: multiple releases for the same earthquake (intensity prompt → detailed intensity report, or successive EEW updates) notify you only once, and again only when the intensity is upgraded. With several DSH pages open, only one tab plays the alert.
@@ -50,7 +50,7 @@ NOAA CAP ────────────┘   (Global: tsunamis)           
                       recent alert history (persisted in localStorage)
 ```
 
-- All realtime logic runs in the browser (the Client half): the WebSocket connections, parsing, matching, notifications and the history list. The Host half registers the `quake-alert` settings namespace (machine-level `settings.yaml`), serves the read-only municipality and river-forecast-area tables at `/dsh-quake-alert/areas`, and polls the feed for each of the three polled sources.
+- All realtime logic runs in the browser (the Client half): the WebSocket connections, parsing, matching, notifications and the history list. The Host half wires the `quake-alert` configuration into the host's settings service (from 0.1.7 the form is derived from the exported `Config` schema; up to 0.1.6 the plugin registered the namespace itself), serves the read-only municipality and river-forecast-area tables at `/dsh-quake-alert/areas`, and polls the feed for each of the three polled sources.
 - **Two realtime links, both Client-direct**: P2PQuake (Japan, sub-second) and EMSC (global). Global earthquake traffic is far sparser than Japan's — an M4+ event arrives roughly every 30 minutes on average — so the EMSC connection **deliberately uses a long three-hour "no data" threshold** instead of a tight one: M4+ events are sparse enough that a short window would keep tearing down a perfectly healthy connection. Real disconnects are still caught by `onclose` and the connect watchdog.
 - **Three polled sources, one external requester (the Host half)**: the JMA Atom feed (landslides / floods / heavy rain / storm surges, about once a minute), the USGS GeoJSON catalog (global earthquakes, every 2 minutes) and the NOAA event list plus CAP messages (tsunamis, every 5 minutes). The Host remembers which entries it has already fetched and exposes the increment on a local read-only route, `/dsh-quake-alert/feed?source=jma|usgs|noaa&since=N`; the Client polls that route every 15 s and hands each message to the very same `handleAlert` used by P2PQuake messages. Keeping the only external requester on the Host means several DSH tabs or windows never multiply the requests — the JMA explicitly asks consumers not to re-download a file it has already served, and blocks IPs that do. The Client persists a cursor per source, so a refresh resumes where it left off instead of replaying the buffer; a first run (no cursor yet) uses `?since=tail` to align to the current position without replaying anything.
 - **Two overseas sources, fetched directly by the Client (0.6.0)**: the US NWS and Canada's ECCC are queried straight from the browser rather than through the Host half. The reason is that they are **only usable as per-watch-point queries** (NWS `?point=lat,lon`, ECCC `bbox=`), while pulling everything would mean 1.2 GB/day and 144 MB/day respectively; the Host's standing rule is that it does not know the Client's configuration, so it has no watch points — going through the Host would force full pulls and effectively mean dropping both sources. Both APIs return `Access-Control-Allow-Origin: *` (measured), so the browser can call them directly. The two are deliberately not unified: NWS `?point=` returns the warnings for the county / zone containing the point and does not expand to a radius, so radii ≥ 25 km add four compass samples (an approximation); ECCC's `bbox` takes the radius directly. Requests are serial, with a 10 s timeout and a 512 KB body cap; **no watch point in that country means no request at all**.
@@ -212,14 +212,15 @@ node scripts/check-contracts.mjs       # contract check: pull the live sources t
 
 ## Changelog
 
-Current version **0.6.2** (second review round on 0.6.0/0.6.1: **mainland-China weather alerts no
-longer notify with "~NaN km from the epicenter" and Japanese shelter wording** — 0.6.1 had fixed
-only the overseas branch; and the "a valid empty response proves the structure is fine" rule added
-in 0.6.1 was clearing the whole round's failure counters, so a *partial* upstream change could
-never raise the blue dot — it is now a round-level verdict. The failure back-off was dead code at
-the real polling intervals and is now added on top of them. Two stale mechanism descriptions in the
-three READMEs and two missing links in `TROUBLESHOOTING.zh.md` are corrected as well).
-The suite went from 1315 to 1346 assertions.
+Current version **0.7.0** (**DSH 0.1.7-rc.2 support**: that release replaced the settings API on both
+halves — the Host-side `ctx.settings.register()` is gone and the client-side `ctx.settingsScope` was
+removed entirely, while this plugin's machine-level persistence was built on both. The observable
+effect was that configuration silently fell back to browser `localStorage`. Both halves now use the
+new contract — the Host exports a `Config` schema with `volatile()` editable fields and calls
+`settings.configure` for its own settings page, the client uses `ctx.configForms` — while the 0.1.6
+paths are kept, so either host works. The `dsh.client.inject` entry `dsh-client-runtime`, which no
+longer exists in 0.1.7, was replaced by the existing `dsh-client-ui-renderer` / `dsh-api-remotes`).
+The suite went from 1346 to 1363 assertions.
 See [CHANGELOG.md](./CHANGELOG.md) for the details of each release.
 
 ## Data sources

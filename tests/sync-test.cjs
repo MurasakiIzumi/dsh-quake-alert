@@ -70,6 +70,21 @@ function loadClientEx(seedStorage, opts) {
 function loadClient(seedStorage) { return loadClientEx(seedStorage).exports }
 
 const T = loadClient().__test
+
+// ---- 0.7.0：volatile 字段是**响应式引用** ----
+// DSH 0.1.7 的 settings 契约要求可编辑字段标 `.volatile()`，而 schemastery 会把标了的字段
+// 解析成带 `.get()` 的引用（官方插件的读法就是 `config.fontSize.get()`），JSON 序列化后是 `{}`。
+// 所以凡是**直接调用 Host schema** 取配置值的断言，都要先 unwrap 再比较。
+const unwrapRefs = (v) => {
+  if (Array.isArray(v)) return v.map(unwrapRefs)
+  if (v && typeof v === 'object') {
+    if (typeof v.get === 'function') return unwrapRefs(v.get())
+    const out = {}
+    for (const k of Object.keys(v)) out[k] = unwrapRefs(v[k])
+    return out
+  }
+  return v
+}
 if (!T) { console.error('FAIL: __test 未导出'); process.exit(1) }
 const { EEW_AREA_EXPECT, TSUNAMI_AREA_EXPECT } = require('./area-tables.cjs')
 
@@ -909,7 +924,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
   console.log('== Host settings schema 与 Client 默认值一致 ==')
   try {
     const mod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
-    const hostDefault = mod.QuakeAlertSettingsSchema({})
+    const hostDefault = unwrapRefs(mod.QuakeAlertSettingsSchema({}))
     const clientDefault = T.cfgToSection(T.DEFAULT_CFG)
     assert(JSON.stringify(hostDefault) === JSON.stringify(clientDefault), 'Host schema 默认值与 Client DEFAULT_CFG 完全一致')
     assert(mod.SETTINGS_NAMESPACE === T.SETTINGS_NS, '两侧 namespace 名称一致（' + mod.SETTINGS_NAMESPACE + '）')
@@ -919,10 +934,89 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     let rejectedSource = false
     try { mod.QuakeAlertSettingsSchema({ source: 'bogus' }) } catch (e) { rejectedSource = true }
     assert(rejectedSource, 'Host schema 拒绝非法数据源')
-    const withCities = mod.QuakeAlertSettingsSchema({ watch: { cities: ['白河市'] } })
+    const withCities = unwrapRefs(mod.QuakeAlertSettingsSchema({ watch: { cities: ['白河市'] } }))
     assert(withCities.watch.cities.join() === '白河市', 'Host schema 接受市区町村列表')
   } catch (e) {
     assert(false, 'Host schema 加载失败：' + e.message)
+  }
+
+  console.log('== 0.7.0：DSH 0.1.7-rc.2 适配（Config / volatile / settings 两代 API / client 入口） ==')
+  try {
+    const mod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
+
+    // ① 0.1.7 的 settings 表单**从插件导出的 `Config` schema 派生**，命名空间就是 profile
+    //    条目 id（cordis.patch.yml 的 `- id: quake-alert`），所以 Client 侧寻址名不用改。
+    assert(mod.Config === mod.QuakeAlertSettingsSchema, '导出 Config（0.1.7 宿主按这个名字取 schema）')
+    assert(mod.SETTINGS_NAMESPACE === 'quake-alert', '命名空间仍是 profile 条目 id（quake-alert）')
+
+    // ② 每个可编辑字段都要标 volatile。漏标一个不会报错，后果是"改这一项会重启 Host 半边"
+    //    （重建四个轮询器 + 断开 Wolfx 常连）——用户只会觉得"改个阈值卡了一下"。
+    //    期望条数从 Client 的 DEFAULT_CFG 递归数出来：加字段忘了标时这条会红。
+    const countLeaves = (node) => Object.keys(node).reduce((n, k) => {
+      const v = node[k]
+      return n + ((v && typeof v === 'object' && !Array.isArray(v)) ? countLeaves(v) : 1)
+    }, 0)
+    const expectedVolatile = countLeaves(T.cfgToSection(T.DEFAULT_CFG))
+    const volatileCount = (JSON.stringify(mod.Config.toJSON()).match(/"volatile":true/g) || []).length
+    assert(volatileCount === expectedVolatile,
+      '配置 schema 的每个叶子都标了 volatile（' + volatileCount + '/' + expectedVolatile + '）')
+
+    // ③ settings 两代 API 的分派（0.7.0 的核心适配）
+    const mk = (settings) => ({ settings, effect(fn) { fn(); return () => {} } })
+    const seen = { configure: [], register: [] }
+    const newer = mk({ configure: (presentation, owner) => { seen.configure.push([presentation, owner]) } })
+    assert(mod.applySettingsService(newer, { fiber: 'FIBER' }) === 'configure', '只有 configure 的宿主（0.1.7）：走新 API')
+    assert(seen.configure.length === 1 && seen.configure[0][0] && seen.configure[0][0].auto === false,
+      'configure 收到 { auto: false }——本插件自带配置页面，宿主不再生成自动表单页')
+    assert(seen.configure[0][1] === 'FIBER', 'configure 的第二参数是插件自己的 fiber（策略归属该条目）')
+    const older = mk({ register: (ns, schema) => { seen.register.push([ns, schema]) } })
+    assert(mod.applySettingsService(older, { effect() {} }) === 'register', '只有 register 的宿主（0.1.6）：仍走老 API')
+    assert(seen.register.length === 1 && seen.register[0][0] === 'quake-alert' && seen.register[0][1] === mod.Config,
+      'register 收到 (namespace, schema)，且 schema 与 Config 是同一个对象')
+    const both = mk({
+      configure: () => { both.configured = true },
+      register: () => { both.registered = true },
+    })
+    assert(mod.applySettingsService(both, { effect() {} }) === 'configure' && both.configured === true && !both.registered,
+      '两代 API 同时存在时优先新 API（有 configure 的宿主上不会走回老路）')
+    assert(mod.applySettingsService(mk({}), { effect() {} }) === 'none',
+      '两代 API 都没有：不抛错，如实返回 none（配置退回 localStorage）')
+    const broken = mk({ register: () => { throw new Error('quake-alert 段类型不符') } })
+    assert(mod.applySettingsService(broken, { effect() {} }) === 'register-failed',
+      'register 抛错被兜住（0.1.6 的容错仍然生效，插件照常可用）')
+  } catch (e) {
+    assert(false, 'Host 侧 0.7.0 适配验证失败：' + e.message)
+  }
+
+  try {
+    // ④ Client 侧：0.1.7 的入口是 ConfigForm（`ctx.configForms.get(entryId)`），它的
+    //    快照 / 写入面与 0.1.6 的 settingsScope 同形 —— 03-settings-bridge 因此不必改。
+    const src = fs.readFileSync(path.join(ROOT, 'client', 'src', '15-entry.js'), 'utf8')
+    assert(src.indexOf("ctx.inject(['configForms']") !== -1, 'client 侧用 ctx.configForms 作为 0.1.7 入口')
+    assert(src.indexOf("ctx.inject(['settingsScope']") !== -1, 'settingsScope 回退路径保留（可退回 0.1.6）')
+    const t = loadClientEx({}).exports.__test
+    const written = []
+    const form = {
+      getSnapshot: () => ({
+        status: 'ready', mode: 'host', writable: true, revision: 7,
+        value: { source: 'sandbox' }, user: { source: 'sandbox' },
+      }),
+      subscribe: () => () => {},
+      mutate: (ops) => { written.push(ops); return Promise.resolve(true) },
+    }
+    const unbind = t.bindSettingsScope(form)
+    assert(t.settingsState().sync === 'host', 'ConfigForm 形状被当成机器级配置源（sync=host）')
+    assert(t.currentCfg().source === 'sandbox', 'ConfigForm 的 value 被读成当前配置')
+    const base = t.currentCfg()
+    t.applyCfg(Object.assign({}, base, { thresholds: Object.assign({}, base.thresholds, { quakeScale: 55 }) }))
+    const ops = written.length ? written[0] : null
+    assert(Array.isArray(ops) && ops.length > 0 &&
+      ops.every((o) => (o.op === 'set' || o.op === 'unset') && Array.isArray(o.path)),
+      '写回归宿主的 ops 是 settings 服务的 SettingsPathOp 形状（0.1.7 的 mutate 直接吃它）')
+    assert(typeof unbind === 'function', 'bindSettingsScope 返回解除函数（供 ctx.effect 释放订阅）')
+    unbind()
+  } catch (e) {
+    assert(false, 'Client 侧 0.7.0 适配验证失败：' + e.message)
   }
 
   console.log('== 真实市区町村表与 Host /areas 路由 ==')
@@ -5808,10 +5902,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const norm2 = T6.normalizeCfg({ disasters: { overseasWeather: 'yes please' } })
       assert(norm2.disasters.overseasWeather === true, '类型不对时退回默认值')
       const hostMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
-      const hostParsed = hostMod.QuakeAlertSettingsSchema({ disasters: { overseasWeather: false } })
+      const hostParsed = unwrapRefs(hostMod.QuakeAlertSettingsSchema({ disasters: { overseasWeather: false } }))
       assert(hostParsed.disasters.overseasWeather === false,
         'Host schema 认这个开关（四处同步里的第三处；默认值一致由前面那条 JSON 全等断言守着）')
-      const hostDefaults = hostMod.QuakeAlertSettingsSchema({})
+      const hostDefaults = unwrapRefs(hostMod.QuakeAlertSettingsSchema({}))
       assert(hostDefaults.disasters.overseasWeather === T6.DEFAULT_CFG.disasters.overseasWeather,
         'Host schema 的**默认值**与 Client 的 DEFAULT_CFG 一致（0.6.1：此前只是注释里说"有断言守着"）')
     }

@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 // dsh-quake-alert · client/src/15-entry.js
 //
 // 作用：插件入口——apply 与单测钩子。
@@ -81,19 +81,44 @@ export function apply(ctx) {
     return () => { try { probe.stop() } catch (err) { /* 已停 */ } }
   }, 'dsh-quake-alert: health probe')
 
-  // 机器级持久化：settings 服务可用时，配置交给 DSH 的 settings.yaml（Host 侧同名 namespace）。
-  // 服务缺席（或页面非 loopback）时保持 localStorage 路径，插件照常工作。
+  // 机器级持久化：settings 服务可用时，配置交给 DSH 的机器级存储（0.1.7 起是 profile patch，
+  // 0.1.6 及以前是 settings.yaml）。服务缺席（或页面非 loopback）时保持 localStorage 路径。
+  //
+  // 0.7.0 适配：两代宿主的**读写入口是两个不同的服务**，而 03-settings-bridge 只认"快照 + 写入"
+  // 这个形状（两者的 getSnapshot/subscribe/mutate 面几乎同形），所以分派放在这里：
+  //   · 0.1.6 及以前：`ctx.settingsScope.bind({ namespace })` → scope
+  //   · 0.1.7 起：`ctx.configForms.get(entryId)` → ConfigForm（`settingsScope` 已被移除）
+  // 两者都 `ctx.inject` 等待，但各自只在服务真的出现时执行，因此同一份代码在两代宿主上都能绑上；
+  // 先到者胜（bound 守卫），都缺席就退回 localStorage。
   if (typeof ctx.inject === 'function') {
-    ctx.inject(['settingsScope'], (settingsCtx) => {
+    let bound = false
+    const bindHostSettings = (resolveScope, label) => {
+      if (bound) return
       let unbind = null
       try {
-        unbind = bindSettingsScope(settingsCtx.settingsScope.bind({ namespace: SETTINGS_NS }))
+        const scope = resolveScope()
+        if (!scope) return
+        unbind = bindSettingsScope(scope)
+        bound = true
       } catch (err) { /* bind 失败 → 继续用 localStorage */ }
       // 订阅必须随 fiber 释放（0.4.1）：否则同一页面内停用 → 启用 N 次会累积 N 个订阅，
       // 此后 Host 的每一次配置变更都会触发 N 次写盘与 N 次重渲。
-      if (typeof unbind === 'function' && typeof ctx.effect === 'function') {
-        ctx.effect(() => () => { try { unbind() } catch (err) { /* 忽略 */ } }, 'dsh-quake-alert: settings unbind')
+      if (bound && typeof unbind === 'function' && typeof ctx.effect === 'function') {
+        ctx.effect(() => () => { try { unbind() } catch (err) { /* 忽略 */ } }, 'dsh-quake-alert: ' + label + ' unbind')
       }
+    }
+    // 0.1.7：命名空间就是本插件在 profile 里的条目 id（与 cordis.patch.yml 的 `- id:` 一致），
+    // 与 Host 侧导出的 Config schema 同名——SETTINGS_NS 不需要改。
+    ctx.inject(['configForms'], (settingsCtx) => {
+      const forms = settingsCtx.configForms
+      if (!forms || typeof forms.get !== 'function') return
+      bindHostSettings(() => forms.get(SETTINGS_NS), 'configForms')
+    })
+    // 0.1.6 回退路径（0.1.7 下这个服务永远不出现，回调不会执行）。
+    ctx.inject(['settingsScope'], (settingsCtx) => {
+      const scope = settingsCtx.settingsScope
+      if (!scope || typeof scope.bind !== 'function') return
+      bindHostSettings(() => scope.bind({ namespace: SETTINGS_NS }), 'settingsScope')
     })
   }
 

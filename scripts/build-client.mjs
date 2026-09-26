@@ -40,7 +40,8 @@ var module = { exports: {} }; var exports = module.exports;
  * 按「关注都道府县 / 市区町村 + 震度 / 海啸等级阈值」匹配命中后提醒：
  *   - 页面可见 → 页内 toast；页面后台 → 系统通知；命中时播放合成提示音
  *   - 设置页：设置 → 灾害预警（关注地区 / 阈值 / 音量 / 静默时段 / 测试）
- *   - 配置：Host settings（settings.yaml）为主，localStorage 为镜像与回退
+ *   - 配置：Host 机器级存储（DSH 0.1.7 起为 profile patch，0.1.6 及以前为 settings.yaml）
+ *     为主，localStorage 为镜像与回退
  *   - 免责：数据由 P2PQuake 转播，EEW 等仅供参考，请以气象厅官方发布为准
  *
  * DSH 客户端 bundle 必须是单文件（扁平模块图：一个 bundle = 一个模块节点）。
