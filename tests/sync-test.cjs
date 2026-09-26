@@ -4073,7 +4073,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       // 对照组：日本 EEW（556）的文案一个字都不能变——改文案的范围只限大陆源
       const jpEew = t8.parse(JSON.parse(fs.readFileSync(
         path.join(ROOT, 'samples', 'eew-ibaraki-m6.7-20260823.json'), 'utf8')))
-      assert(jpEew && jpEew.kind === 'eew' && t8.alertTitleOf(jpEew) === '⚠ 紧急地震速报（警报）',
+      assert(jpEew && jpEew.kind === 'eew' && t8.alertTitleOf(jpEew) === '⚠ 紧急地震速报',
         '日本 EEW 的文案保持不变（只把大陆源换成「地震预警」）')
       assert(t8.disclaimerOf(jpEew).indexOf('気象庁') !== -1, '日本 EEW 的免责声明仍指向気象庁')
       assert(t8.authorityOf(eewAlert) === '中国地震台网（CENC）', '大陆源的"官方"是中国地震台网')
@@ -4372,19 +4372,19 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       '缺 radiusKm 的旧条目仍按 300 兜底 —— 把用户配好的半径从 300 改成 100 会让提醒变窄（漏报方向）')
     assert(t.normalizePlaces([{ name: 'x', lat: 1, lon: 2, radiusKm: 100 }])[0].radiusKm === 100,
       '显式配的 100 被保留')
-    // ⑥ 设置页**真的渲染一次**（0.8.0：三个分支各渲染一次——统合 UI 的本质就是"一次只展开
-    //    一个分支"，只渲染默认分支的话，中国与其他国家那两条路径从没被任何断言走过）
+    // ⑥ 设置页**真的渲染**（0.8.0：三个地区分支各渲染一次；0.8.1：五个选项卡各渲染一次——
+    //    选项卡的本质就是"一次只渲染一页"，只渲染默认页等于另外四页从没被任何断言走过）
     {
-      /** 渲染一次设置页，返回它里面所有文本节点。seedStorage 决定落在哪个国家分支上。 */
-      const renderTexts = (seed) => {
+      /** 渲染设置页的一页，返回它里面所有文本节点。seedStorage 决定地区页落在哪个分支上。 */
+      const renderTexts = (seed, tab) => {
         const react = mkTestReact()
         const { exports: ex } = loadClientEx(seed || {}, { react })
         ex.__test.setCnAreas(CN_AREAS)
         react.__reset()
-        return textsOfTree(ex.__test.SettingsPanel())
+        return textsOfTree(ex.__test.SettingsPanel({ initialTab: tab }))
       }
-      const safeRender = (seed, label) => {
-        try { return renderTexts(seed) } catch (e) {
+      const safeRender = (seed, tab, label) => {
+        try { return renderTexts(seed, tab) } catch (e) {
           assert(false, label + '渲染失败：' + e.message)
           return []
         }
@@ -4398,28 +4398,83 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       })
       const mkHas = (texts) => (s) => texts.some((t) => t.indexOf(s) !== -1)
 
-      // —— 日本分支（未配置任何关注点时的默认落点）——
-      const jpTexts = safeRender({}, '设置页（日本分支）')
+      // —— 地区页：日本分支（未配置任何关注点时的默认落点）——
+      const jpTexts = safeRender({}, 'region', '设置页（地区 / 日本分支）')
       const jpHas = mkHas(jpTexts)
-      assert(jpHas('关注地区'), '渲染结果里有「关注地区」（0.8.0：三个平铺区块收成一个入口）')
-      assert(jpHas('添加关注地区：先选国家 / 地区'), '第一级是唯一的「国家 / 地区」选择器')
+      assert(jpHas('地区') && jpHas('灾害') && jpHas('通知') && jpHas('履历') && jpHas('其他'),
+        '选项卡栏渲染出五页（0.8.1：设置页不再是一列到底）')
+      assert(jpHas('关注地区'), '渲染结果里有「关注地区」')
+      assert(jpHas('关注地区') && jpHas('其他国家 / 地区'),
+        '第一级是唯一的「国家 / 地区」选择器（分支按钮直接是区块第一行，没有再套一层说明）')
       assert(jpHas('日本') && jpHas('中国大陆') && jpHas('其他国家 / 地区'),
         '三个分支标签都在（用户一眼看到可以关注哪些地区）')
-      assert(jpHas('已关注的地区（'),
+      assert(jpHas('已关注（'),
         '已关注地区的**统一列表**在同一个区块里（"统合 UI，不统合模型"的落点）')
       assert(jpHas('北海道') && jpHas('冲绳'), '默认落在日本分支：47 个都道府县按钮渲染出来了')
-      assert(jpHas('先选择都道府县，再可选地细化到市区町村'), '市区町村细化器也在日本分支里')
-      assert(jpHas('灾害类型与阈值'), '开关与阈值合并成一张表（0.8.0）')
-      assert(jpHas('地震') && jpHas('海啸') && jpHas('气象灾害 · 日本'),
-        '按灾种分组的分组标题都在（一行一个灾种）')
-      assert(jpHas('固定：警戒レベル4 以上'),
-        '固定门槛写成只读文字（做成置灰下拉会让人以为能调）')
-      assert(jpHas('诊断') && jpHas('生成诊断快照'), '诊断区块也在（同一页）')
+      assert(jpHas('先选都道府县'), '市区町村细化器也在日本分支里')
+      assert(!jpHas('生成诊断快照') && !jpHas('预警记录'),
+        '地区页**不含**其他页的区块——选项卡的意义就在这里（不用滚到底）')
 
-      // —— 中国大陆分支：由配置里的 origin=cn 推断（inferRegionTab）——
+      // —— 灾害页 ——
+      const disTexts = safeRender({}, 'disaster', '设置页（灾害页）')
+      const disHas = mkHas(disTexts)
+      assert(disHas('灾害类型与阈值'), '开关与阈值合并成一张表（0.8.0）')
+      assert(disHas('地震') && disHas('海啸') && disHas('气象 · 日本'),
+        '按灾种分组的分组标题都在（一行一个灾种）')
+      assert(disHas('警戒4级以上'),
+        '固定门槛写成只读文字（做成置灰下拉会让人以为能调）')
+      assert(disHas('暴雨预警') && disHas('地质灾害预警') && disHas('橙色以上') && disHas('没有取消或最终报标志'),
+        '大陆气象的开关与门槛说明都在（DESIGN 10.2 要求 UI 不得假装能处理）')
+      assert(disHas('洪水 / 山洪 / 降雨 / 风暴潮') &&
+        disHas('Data Source: Environment and Climate Change Canada') &&
+        disHas('打开页面时，如果某条预警已经发布超过 6 小时'),
+        '海外气象的开关行、ECCC 署名（许可要求）与年龄闸门说明都在')
+
+      // —— 通知页 ——
+      const ntTexts = safeRender({}, 'notify', '设置页（通知页）')
+      const ntHas = mkHas(ntTexts)
+      assert(ntHas('通知与声音') && ntHas('静默时段'), '通知页含「通知与声音」与「静默时段」两块')
+      assert(ntHas('试听地震音') && ntHas('测试系统通知'), '试听与测试按钮在通知页')
+      assert(ntHas('跨夜时段写成 23:00–07:00'), '静默时段的说明也在（压缩成一行）')
+
+      // —— 履历页 ——
+      const hiTexts = safeRender({}, 'history', '设置页（履历页）')
+      const hiHas = mkHas(hiTexts)
+      assert(hiHas('预警记录') && hiHas('清空记录'), '履历页有记录列表与清空按钮')
+      assert(!hiHas('关注地区'), '履历页不含地区配置（这就是分页要解决的问题）')
+
+      // —— 其他页 ——
+      const msTexts = safeRender({}, 'misc', '设置页（其他页）')
+      const msHas = mkHas(msTexts)
+      assert(msHas('数据源') && msHas('大陆源链路') && msHas('测试与诊断') && msHas('免责声明'),
+        '其他页含数据源、链路、诊断与免责')
+      assert(msHas('语言 / Language') && msHas('简体中文') && msHas('目前只有简体中文'),
+        '语言选项在「其他」页，并如实说明本地化排在 0.9.0（不做成假控件）')
+      assert(msHas('生成诊断快照') && msHas('正式（实时推送）'), '诊断快照与数据源开关都在')
+
+      // —— 常驻状态条：在选项卡**之外**，所以每一页都看得到，且只报"通不通 + 几条" ——
+      const stripHas = (texts) => texts.some((t) => t.indexOf('未启动') !== -1)
+      assert(stripHas(jpTexts) && stripHas(disTexts) && stripHas(ntTexts) && stripHas(hiTexts) && stripHas(msTexts),
+        '状态条在五页里都可见（0.8.1：不必切页就知道通不通）')
+      assert(jpHas('详情在「其他」里') && !msHas('详情在「其他」里'),
+        '状态条指路「其他」，但已经在那一页时就不再啰嗦')
+      assert(!jpHas('已连接 EMSC') && !jpHas('（全球地震实时推送）'),
+        '状态条不再复述逐源细节——那是「其他」页「源状态」的活')
+      {
+        // 有推送时报条数（并且与选项卡无关：这里特意渲染「履历」页）
+        const react = mkTestReact()
+        const { exports: ex } = loadClientEx({}, { react })
+        ex.__test.store.push({ received: 7 })
+        react.__reset()
+        const t = textsOfTree(ex.__test.SettingsPanel({ initialTab: 'history' }))
+        assert(t.some((x) => x.indexOf('已收到 7 条推送') !== -1),
+          '状态条在有推送时显示条数（在「履历」页也看得到）')
+      }
+
+      // —— 地区页的中国大陆分支：由配置里的 origin=cn 推断（inferRegionTab）——
       const cnTexts = safeRender(seedCfg({
         places: [{ name: '四川省·成都市', lat: 30.66, lon: 104.07, radiusKm: 100, origin: 'cn' }],
-      }), '设置页（中国大陆分支）')
+      }), 'region', '设置页（地区 / 中国大陆分支）')
       const cnHas = mkHas(cnTexts)
       assert(cnHas('四川省') && cnHas('西藏自治区'),
         '中国分支的省份选项渲染出来了（只渲染默认分支的话这条路径从没被走过）')
@@ -4428,27 +4483,17 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(cnHas('仅本地（约 30 km）') && cnHas('本市及周边（约 100 km，默认）'),
         '三档半径语义预设出现在渲染结果里')
       assert(cnHas('四川省·成都市'), '统一列表里列出了这个关注点（跨分支汇总）')
-      assert(cnHas('没有取消 / 最终报标志'),
+      assert(cnHas('没有取消或最终报标志'),
         '设置页如实说明大陆源无取消机制（DESIGN 10.2 要求 UI 不得假装能处理）')
 
-      // —— 其他国家 / 地区分支 ——
+      // —— 地区页的其他国家 / 地区分支 ——
       const glTexts = safeRender(seedCfg({
         places: [{ name: '东京', lat: 35.68, lon: 139.77, radiusKm: 100, origin: 'global' }],
-      }), '设置页（其他国家分支）')
+      }), 'region', '设置页（地区 / 其他国家分支）')
       const glHas = mkHas(glTexts)
       assert(glHas('添加关注点') && glHas('用当前位置'), '其他国家分支给出手填坐标的入口')
       assert(glHas('东京'), '统一列表里列出了这个关注点')
-
-      // —— 0.5.2 / 0.6.0 的安全相关文案（与分支无关，摘一处渲染结果钉住即可）——
-      const anyHas = (s) => jpTexts.concat(cnTexts, glTexts).some((t) => t.indexOf(s) !== -1)
-      assert(anyHas('暴雨预警') && anyHas('地质灾害预警'), '大陆气象灾害的两个开关渲染出来了')
-      assert(anyHas('橙色及以上') && anyHas('没有「解除」标志'),
-        '设置页如实说明"橙色才播报"与"没有解除标志"（DESIGN 10.2 要求 UI 不得假装能处理）')
-      assert(anyHas('洪水 / 山洪 / 降雨 / 风暴潮'), '海外气象的开关行渲染出来了')
-      assert(anyHas('Data Source: Environment and Climate Change Canada'),
-        '设置页带上了 ECCC 的署名（End-use Licence v2.1.1 要求署名）')
-      assert(anyHas('打开页面时若某条预警已发布超过 6 小时'),
-        '设置页如实说明了年龄闸门（用户知道为什么打开页面时老预警不响）')
+      assert(glHas('也可以直接填坐标'), '手填坐标这条出口始终在（未收录国家 / 地区只能走它）')
     }
   } catch (e) {
     assert(false, '0.5.0 设置页级联检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
@@ -6140,7 +6185,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(joined.indexOf('NaN') === -1, '通知文案里没有 NaN：' + joined)
       assert(joined.indexOf('距震中') === -1, '也不再把一条洪水预警说成"距震中"：' + joined)
       assert(joined.indexOf('该点所在地的官方预警') > 0, '命中行按"没有真实距离"分岔：' + joined)
-      assert(joined.indexOf('当地官方发布的避难与撤离指引') > 0 && joined.indexOf('市町村') === -1,
+      assert(joined.indexOf('当地官方发布的避难指引') > 0 && joined.indexOf('市町村') === -1,
         '行动提示不再套日本口径（"请确认所在市町村的避难信息"）：' + joined)
       assert(joined.indexOf('美国国家气象局（NWS）') > 0,
         '免责声明点名了正确的机构（AUTHORITY_BY_SOURCE 里登记了 nws_alerts）：' + joined)
@@ -6165,7 +6210,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(nmcText.indexOf('NaN') === -1, '大陆预警的通知里也没有 NaN：' + nmcText)
       assert(nmcText.indexOf('距震中') === -1, '也不把一场暴雨说成"震中"：' + nmcText)
       assert(nmcText.indexOf('按该点所在地的官方预警判定') > 0, '命中行同样是"没有距离"那一支：' + nmcText)
-      assert(nmcText.indexOf('请关注当地气象台发布的防御指引') > 0 && nmcText.indexOf('市町村') === -1,
+      assert(nmcText.indexOf('请关注当地气象台发布的指引') > 0 && nmcText.indexOf('市町村') === -1,
         '行动提示用大陆口径（不是日本的市町村避难信息）：' + nmcText)
       assert(nmcText.indexOf('中央气象台（中国气象局）') > 0, '免责声明点名中央气象台：' + nmcText)
       // 三支行动提示都在，且互不相同（防止将来把某支写死回日本口径）
@@ -6609,6 +6654,28 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(rejected, 'Host schema 拒绝白名单外的 origin')
     }
 
+    // ⑨ 界面语言（0.8.1 先立选项与字段，本地化本身在 0.9.0）
+    //    现在只有简体中文，但这条链路（常量 → DEFAULT_CFG → normalizeCfg → Host schema → UI）
+    //    现在就通——否则 0.9.0 加语言包时得回头改配置契约，而改契约要迁移用户配置。
+    {
+      const t9 = loadClient().__test
+      assert(t9.DEFAULT_CFG.language === 'zh-CN', '默认界面语言是简体中文')
+      assert(t9.LANGUAGE_OPTIONS.length === 1 && t9.LANGUAGE_OPTIONS[0].v === 'zh-CN',
+        '选项现在只有简体中文一项（0.9.0 加 日本語 / English）')
+      assert(t9.normalizeCfg({ language: 'ja' }).language === 'zh-CN',
+        '白名单外的语言码回默认值——手改配置写一个还没有语言包的代码不该被放行（否则界面会进入半本地化状态）')
+      assert(t9.normalizeCfg({ language: 'zh-CN' }).language === 'zh-CN', '白名单内的原样保留')
+      const mod9 = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
+      const parsed9 = unwrapRefs(mod9.QuakeAlertSettingsSchema({ language: 'zh-CN' }))
+      assert(parsed9.language === 'zh-CN', 'Host schema 认这个字段（未声明的键会被归一掉）')
+      let rejectedLang = false
+      try { mod9.QuakeAlertSettingsSchema({ language: 'ja' }) } catch (e) { rejectedLang = true }
+      assert(rejectedLang, 'Host schema 拒绝还没有语言包的代码')
+      const snap9 = loadClient().__test.buildDiagSnapshot()
+      assert(snap9.config.language === 'zh-CN',
+        '诊断快照里带界面语言（0.9.0 排查"界面没跟着切"时第一个要核的字段）')
+    }
+
     // ⑧ 全球主要城市表（DESIGN 9.4）：数据结构、按国家分包下发、客户端缓存与 UI 入口
     {
       const world = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'world-cities.js')).href)
@@ -6717,7 +6784,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const { exports: ex } = loadClientEx(seed, { react })
       ex.__test.setWorldCountries([{ code: 'US', name: '美国', count: 620 }, { code: 'FR', name: '法国', count: 40 }])
       react.__reset()
-      const texts = textsOfTree(ex.__test.SettingsPanel())
+      const texts = textsOfTree(ex.__test.SettingsPanel({ initialTab: 'region' }))
       const has = (s) => texts.some((t) => t.indexOf(s) !== -1)
       assert(has('国家 / 地区') && has('美国（620 个城市）') && has('法国（40 个城市）'),
         '其他国家分支渲染出国家选择器与各国城市数（0.8.0 的新入口）')

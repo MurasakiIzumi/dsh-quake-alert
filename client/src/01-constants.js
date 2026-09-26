@@ -186,6 +186,14 @@ function formatIssuedLocal(raw) {
   } catch (err) { return d.toISOString() }
 }
 
+// ---------- 界面语言（0.8.1 先立选项与配置字段，本地化本身在 0.9.0） ----------
+// 值用 BCP 47 的写法（zh-CN / ja / en），与三语 README 对齐。**现在只有简体中文**：
+// 先把契约（常量 → DEFAULT_CFG → normalizeCfg → Host schema → UI）立起来，
+// 0.9.0 加语言包时只需往这个数组里加项、再写文案表，不用再动配置层。
+const LANGUAGE_OPTIONS = [
+  { v: 'zh-CN', label: '简体中文' },
+]
+
 const DEFAULT_CFG = {
   version: 1,
   source: 'prod', // prod | sandbox（沙箱回放 2023 年历史，约30秒/条，测试用）
@@ -211,7 +219,11 @@ const DEFAULT_CFG = {
   dedupe: { windowMinutes: 10 },
   // 静默时段（0.2.0）：按浏览器本地时间判定；跨午夜用 start > end 表示（如 23:00–07:00）
   quietHours: { enabled: false, start: '23:00', end: '07:00', breakForSevere: true },
+  // 界面语言（0.8.1 先立字段，本地化在 0.9.0）。**放在末尾是有意的**：Host schema 的字段顺序
+  // 也要跟着一致——那条"Host 默认值与 Client DEFAULT_CFG 完全一致"的断言是 JSON.stringify
+  // 全量比较，顺序不同就会红。
+  language: 'zh-CN',
 }
 
 
-export { React, h, useState, useEffect, useRef, WS_URL, SANDBOX_URL, EMSC_WS_URL, STORAGE_KEY, HISTORY_KEY, HEALTH_KEY, HISTORY_MAX, MAX_WATCH_CITIES, MAX_WATCH_PLACES, RECONNECT_BASE, RECONNECT_MAX, SCALE_TEXT, SCALE_OPTIONS, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, CN_REPORT_MAG_OPTIONS, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, PREFECTURES, PREF_SET, PREF_SHORT, PREF_BY_CODE, prefOfCode, prefCodeOf, normalizePref, P2P_TZ_OFFSET, P2P_TIME_RE, p2pTimeToIso, CN_TZ_OFFSET, CN_TIME_RE, cnTimeToIso, issuedToDate, formatIssuedLocal, DEFAULT_CFG }
+export { React, h, useState, useEffect, useRef, WS_URL, SANDBOX_URL, EMSC_WS_URL, STORAGE_KEY, HISTORY_KEY, HEALTH_KEY, HISTORY_MAX, MAX_WATCH_CITIES, MAX_WATCH_PLACES, RECONNECT_BASE, RECONNECT_MAX, SCALE_TEXT, SCALE_OPTIONS, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, CN_REPORT_MAG_OPTIONS, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, LANGUAGE_OPTIONS, PREFECTURES, PREF_SET, PREF_SHORT, PREF_BY_CODE, prefOfCode, prefCodeOf, normalizePref, P2P_TZ_OFFSET, P2P_TIME_RE, p2pTimeToIso, CN_TZ_OFFSET, CN_TIME_RE, cnTimeToIso, issuedToDate, formatIssuedLocal, DEFAULT_CFG }

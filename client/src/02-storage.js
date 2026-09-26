@@ -8,7 +8,7 @@
 // 依赖：01-constants。
 // ============================================================================
 
-import { PREF_SET, PREFECTURES, TSUNAMI_OPTIONS, DEFAULT_CFG, STORAGE_KEY, HISTORY_KEY, HISTORY_MAX, MAX_WATCH_PLACES } from './01-constants.js'
+import { PREF_SET, PREFECTURES, TSUNAMI_OPTIONS, LANGUAGE_OPTIONS, DEFAULT_CFG, STORAGE_KEY, HISTORY_KEY, HISTORY_MAX, MAX_WATCH_PLACES } from './01-constants.js'
 
 // ---------- 存储（localStorage） ----------
 // 读入的数据可能被旧版本、其它脚本或用户手工改坏。所有读入都做类型校验，
@@ -216,6 +216,9 @@ function normalizeCfg(input) {
       end: timeOr(qh.end, DEFAULT_CFG.quietHours.end),
       breakForSevere: boolOr(qh.breakForSevere, DEFAULT_CFG.quietHours.breakForSevere),
     },
+    // 界面语言（0.8.1）：白名单校验，认不出的一律回默认（不是"原样放行"——手改配置写进
+    // 一个没有语言包的代码，会让界面在 0.9.0 之后进入一个谁也说不清的半本地化状态）。
+    language: LANGUAGE_OPTIONS.some((o) => o.v === stored.language) ? stored.language : DEFAULT_CFG.language,
   }
 }
 function loadCfg() {

@@ -249,6 +249,9 @@ export function buildDiagSnapshot(now) {
         breakForSevere: cfgQuiet.breakForSevere !== false,
       },
       cnTransport: str(cfg.cnTransport) || 'auto', // 'auto'（默认，SSE 可自动降级）| 'poll'（用户强制轮询）
+      // 界面语言（0.8.1 先立字段）。现在只有 zh-CN；0.9.0 落地本地化后，
+      // "界面没跟着切"这类问题第一个要核的就是这一项（它总由 normalizeCfg 保证有值）。
+      language: str(cfg.language),
       watch: safe(() => watchSummary(cfg), {}, warnings, 'watch'),
     }), {}, warnings, 'config'),
     sources: safe(sourceRows, {}, warnings, 'sources'),

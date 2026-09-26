@@ -86,7 +86,7 @@ function authorityOf(alert) {
 /** 「仅供参考」那一行。机构已知时点名，未知时用中性表述（不硬编码日本气象厅）。 */
 function disclaimerOf(alert) {
   const a = authorityOf(alert)
-  return a ? '—— 仅供参考，请以' + a + '官方发布为准' : '—— 仅供参考，请以官方发布为准'
+  return a ? '仅供参考，请以' + a + '的官方发布为准' : '仅供参考，请以官方发布为准'
 }
 
 /**
@@ -99,8 +99,8 @@ function disclaimerOf(alert) {
  */
 function weatherActionHintOf(alert) {
   if (!alert) return '请关注当地官方发布的指引'
-  if (alert.locator === 'overseas') return '请关注当地官方发布的避难与撤离指引'
-  if (alert.locator === 'area') return '请关注当地气象台发布的防御指引'
+  if (alert.locator === 'overseas') return '请关注当地官方发布的避难指引'
+  if (alert.locator === 'area') return '请关注当地气象台发布的指引'
   return '请确认所在市町村的避难信息'
 }
 
@@ -111,7 +111,7 @@ function weatherActionHintOf(alert) {
 function alertTitleOf(alert) {
   if (!alert) return '灾害预警'
   // kindLabel 本身已区分「地震速报·震度速报」「地震情报·各地震度」等，不需要再拼后缀
-  if (alert.kind === 'eew') return '⚠ ' + (cnProductName(alert) || '紧急地震速报（警报）')
+  if (alert.kind === 'eew') return '⚠ ' + (cnProductName(alert) || '紧急地震速报')
   if (alert.kind === 'quake') return '🌐 ' + alert.kindLabel
   if (alert.kind === 'tsunami') return '🌊 ' + alert.kindLabel
   if (alert.kind === 'weather') return '🌧 ' + alert.kindLabel
@@ -416,7 +416,7 @@ function handleAlert(alert, cfg, opts) {
   const prefZh = (PREFECTURES.find((p) => p.jp === hitPref) || {}).zh || hitPref
   const title = alertTitleOf(alert)
   const bodyLines = [alert.headline]
-  if (hitPref) bodyLines.push('命中关注地区：' + prefZh + (prefZh !== hitPref ? '（' + hitPref + '）' : ''))
+  if (hitPref) bodyLines.push('命中地区：' + prefZh + (prefZh !== hitPref ? '（' + hitPref + '）' : ''))
   // 全球源没有行政区，命中依据是「距某个关注点多少公里」——把距离说出来，
   // 用户才能判断这条提醒是否可信（半径是自己设的）。
   //
@@ -427,9 +427,9 @@ function handleAlert(alert, cfg, opts) {
   // 0.6.1 只给 `locator === 'overseas'` 分了岔，**大陆源仍然带着这个错误文案上线**——
   // 现在按距离是否存在分岔，任何"没有距离的行政/查询型命中"都走同一支。
   else if (m.place && typeof m.distanceKm === 'number' && Number.isFinite(m.distanceKm)) {
-    bodyLines.push('命中关注点：' + m.place.name + '（距震中约 ' + Math.round(m.distanceKm) + ' km）')
+    bodyLines.push('命中位置：' + m.place.name + '（距震中约 ' + Math.round(m.distanceKm) + ' km）')
   } else if (m.place) {
-    bodyLines.push('命中关注点：' + m.place.name + '（按该点所在地的官方预警判定）')
+    bodyLines.push('命中位置：' + m.place.name + '（按该点所在地的官方预警判定）')
   }
   if (alert.kind === 'tsunami') bodyLines.push('请立即远离海岸与河口')
   // 行动提示按**机构**分岔（0.6.1 加海外那一支，0.6.2 补大陆那一支）：日本气象电文对应的是
