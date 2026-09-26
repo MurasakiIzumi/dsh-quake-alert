@@ -5,7 +5,7 @@
 //       ——与 P2PQuake 的 551/552/556、気象庁的电文汇到同一个 handleAlert。
 // 内容：EventSource 生命周期、断线补齐（Last-Event-ID）、游标持久化、
 //       **降级到轮询**（EventSource 不可用 / 连不上 / 连上但不推流）。
-// 依赖：02-storage（游标落盘）、03-settings-bridge（currentCfg）、05d（解析契约与健康状态）、
+// 依赖：00-i18n（状态说明的文案）、02-storage（游标落盘）、03-settings-bridge（currentCfg）、05d（解析契约与健康状态）、
 //       11-pipeline（handleAlert）、12b-feed-poll（降级用的轮询客户端）。
 //
 // 为什么用 SSE 而不是复用 12b 的轮询：EEW 的价值在秒级。轮询是 15 秒一轮，
@@ -20,6 +20,7 @@
 //   手动开关（用户强制选轮询）与只读诊断快照是 0.5.0 的后续增量。
 // ============================================================================
 
+import { t } from './00-i18n.js'
 import { loadJSON, saveJSON } from './02-storage.js'
 import { currentCfg } from './03-settings-bridge.js'
 import { failResult } from './05d-source-contracts.js'
@@ -193,8 +194,8 @@ export function createCnStream(opts = {}) {
     const p = patch || {}
     reportStatus({
       status: fallbackManual ? 'disabled' : 'degraded',
-      detail: (fallbackManual ? '已按设置选择轮询' : 'SSE 推送不可用 → 已降级为轮询') +
-        '（延迟最长 15 秒）' + (p.detail ? ' · ' + String(p.detail) : ''),
+      detail: (fallbackManual ? t('source.cnPollManual') : t('source.cnFallback')) +
+        t('source.cnPollDelay') + (p.detail ? ' · ' + String(p.detail) : ''),
     }, 'fallback:' + String(p.status || ''))
   }
 
@@ -251,8 +252,8 @@ export function createCnStream(opts = {}) {
     // status，若按 status 去重，这条"已降级"会被自己的上一条吃掉——而降级是不能被静默的。
     reportStatus({
       status: fallbackManual ? 'disabled' : 'degraded',
-      detail: (fallbackManual ? '已按设置选择轮询' : 'SSE 推送不可用（' + reason + '）→ 已降级为轮询') +
-        '（延迟从秒级变为最长 15 秒）',
+      detail: (fallbackManual ? t('source.cnPollManual') : t('source.cnFallbackReason', { reason })) +
+        t('source.cnFallbackDelay'),
     }, 'fallback')
   }
 
@@ -305,7 +306,7 @@ export function createCnStream(opts = {}) {
           else if (!fallbackManual) {
             fallbackManual = true
             stats.fallbackManual = true
-            reportStatus({ status: 'disabled', detail: '已按设置选择轮询（延迟最长 15 秒）' }, 'fallback:manual')
+            reportStatus({ status: 'disabled', detail: t('source.cnPollManual') + t('source.cnPollDelay') }, 'fallback:manual')
           }
         } else if (inFallback && fallbackManual) {
           // 用户改回「自动」：手动选的轮询要能撤销。自动降级的不升回——那条链路已经证明过不通。

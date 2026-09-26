@@ -66,6 +66,19 @@ const CORE = {
     'status.sourceDisabled': '{name}：已关闭',
     'status.sourceDetail': '{name}：{detail}',
 
+    // 取数层写给用户的**状态说明**（进 store.sources[id].detail：设置页的源状态区块、侧边栏
+    // 悬停提示、诊断快照）。它们不是源侧文本，而是我们自己写的降级 / 关闭 / 覆盖范围说明。
+    'source.cnPollManual': '已按设置选择轮询',
+    'source.cnFallback': 'SSE 推送不可用 → 已降级为轮询',
+    'source.cnFallbackReason': 'SSE 推送不可用（{reason}）→ 已降级为轮询',
+    'source.cnPollDelay': '（延迟最长 15 秒）',
+    'source.cnFallbackDelay': '（延迟从秒级变为最长 15 秒）',
+    'source.overseasDisabled': '海外气象提醒已关闭',
+    'source.overseasNoneInCoverage': '关注点都不在{region}源的覆盖范围内',
+    'source.overseasNoPlaces': '未设置{region}关注点',
+    'source.settingsHint': '（设置 → 灾害预警 → 关注地区 → 其他国家 / 地区）',
+    'source.noAbortController': '请求超时（本环境没有 AbortController）',
+
     // 状态圆点的提示后缀（气象警报的静默提示，只在该源未达播报门槛时出现）。
     'status.weatherHint': ' · 气象警报 L{level}',
     'status.weatherHintLabel': '（{label}）',
@@ -112,6 +125,17 @@ const CORE = {
     'status.emscConnected': 'EMSC に接続しました（全球地震のリアルタイム配信）',
     'status.sourceDisabled': '{name}：停止中',
     'status.sourceDetail': '{name}：{detail}',
+
+    'source.cnPollManual': '設定によりポーリングを選択',
+    'source.cnFallback': 'SSE 配信が使えないためポーリングに降格',
+    'source.cnFallbackReason': 'SSE 配信が使えないため（{reason}）ポーリングに降格',
+    'source.cnPollDelay': '（遅延は最大 15 秒）',
+    'source.cnFallbackDelay': '（遅延は秒単位から最大 15 秒に）',
+    'source.overseasDisabled': '海外の気象警報はオフです',
+    'source.overseasNoneInCoverage': '登録地点が{region}のソースの対象範囲にありません',
+    'source.overseasNoPlaces': '{region}の登録地点がありません',
+    'source.settingsHint': '（設定 → 災害警報 → 監視地域 → その他の国 / 地域）',
+    'source.noAbortController': 'リクエストがタイムアウト（この環境に AbortController がありません）',
 
     'status.weatherHint': ' · 気象警報 L{level}',
     'status.weatherHintLabel': '（{label}）',
@@ -160,6 +184,17 @@ const CORE = {
     'status.emscConnected': 'Connected to EMSC (global earthquake push)',
     'status.sourceDisabled': '{name}: disabled',
     'status.sourceDetail': '{name}: {detail}',
+
+    'source.cnPollManual': 'Polling chosen in settings',
+    'source.cnFallback': 'SSE unavailable — fell back to polling',
+    'source.cnFallbackReason': 'SSE unavailable ({reason}) — fell back to polling',
+    'source.cnPollDelay': ' (up to 15 s delay)',
+    'source.cnFallbackDelay': ' (delay goes from seconds to up to 15 s)',
+    'source.overseasDisabled': 'Overseas weather alerts are off',
+    'source.overseasNoneInCoverage': 'No watch location is inside the {region} source coverage',
+    'source.overseasNoPlaces': 'No {region} watch locations configured',
+    'source.settingsHint': ' (Settings → Disaster alerts → Watch regions → Other countries / regions)',
+    'source.noAbortController': 'Request timed out (no AbortController in this environment)',
 
     'status.weatherHint': ' · Weather alert L{level}',
     'status.weatherHintLabel': ' ({label})',

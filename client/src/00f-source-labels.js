@@ -50,16 +50,18 @@ const STATUS_TEXT_KEYS = {
 
 /** 源 id → 当前语言下的显示名。认不出的 id 原样返回（宁可显示 id，也不要显示空白）。 */
 function sourceLabelOf(id) {
-  const key = SOURCE_LABEL_KEYS[String(id === undefined || id === null ? '' : id)]
-  return key ? t(key) : String(id === undefined || id === null ? '' : id)
+  const raw = String(id === undefined || id === null ? '' : id)
+  // hasOwnProperty：`SOURCE_LABEL_KEYS['constructor']` 会命中原型链拿到一个函数（同 00-i18n 的 t）
+  const key = Object.prototype.hasOwnProperty.call(SOURCE_LABEL_KEYS, raw) ? SOURCE_LABEL_KEYS[raw] : ''
+  return key ? t(key) : raw
 }
 
 /** 状态码 → 当前语言下的文字。`retries` 只被 reconnecting 用到（"重连中（第 N 次）"）。 */
 function statusTextOf(status, retries) {
   const code = String(status === undefined || status === null ? '' : status)
-  const key = STATUS_TEXT_KEYS[code]
+  const key = Object.prototype.hasOwnProperty.call(STATUS_TEXT_KEYS, code) ? STATUS_TEXT_KEYS[code] : ''
   if (!key) return t('settings.status.raw', { status: code })
-  if (code === 'reconnecting') return t(key, { n: retries })
+  if (code === 'reconnecting') return t(key, { n: typeof retries === 'number' && Number.isFinite(retries) ? retries : 0 })
   return t(key)
 }
 

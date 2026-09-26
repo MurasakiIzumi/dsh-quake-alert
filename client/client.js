@@ -88,6 +88,19 @@ const CORE = {
     'status.sourceDisabled': '{name}：已关闭',
     'status.sourceDetail': '{name}：{detail}',
 
+    // 取数层写给用户的**状态说明**（进 store.sources[id].detail：设置页的源状态区块、侧边栏
+    // 悬停提示、诊断快照）。它们不是源侧文本，而是我们自己写的降级 / 关闭 / 覆盖范围说明。
+    'source.cnPollManual': '已按设置选择轮询',
+    'source.cnFallback': 'SSE 推送不可用 → 已降级为轮询',
+    'source.cnFallbackReason': 'SSE 推送不可用（{reason}）→ 已降级为轮询',
+    'source.cnPollDelay': '（延迟最长 15 秒）',
+    'source.cnFallbackDelay': '（延迟从秒级变为最长 15 秒）',
+    'source.overseasDisabled': '海外气象提醒已关闭',
+    'source.overseasNoneInCoverage': '关注点都不在{region}源的覆盖范围内',
+    'source.overseasNoPlaces': '未设置{region}关注点',
+    'source.settingsHint': '（设置 → 灾害预警 → 关注地区 → 其他国家 / 地区）',
+    'source.noAbortController': '请求超时（本环境没有 AbortController）',
+
     // 状态圆点的提示后缀（气象警报的静默提示，只在该源未达播报门槛时出现）。
     'status.weatherHint': ' · 气象警报 L{level}',
     'status.weatherHintLabel': '（{label}）',
@@ -134,6 +147,17 @@ const CORE = {
     'status.emscConnected': 'EMSC に接続しました（全球地震のリアルタイム配信）',
     'status.sourceDisabled': '{name}：停止中',
     'status.sourceDetail': '{name}：{detail}',
+
+    'source.cnPollManual': '設定によりポーリングを選択',
+    'source.cnFallback': 'SSE 配信が使えないためポーリングに降格',
+    'source.cnFallbackReason': 'SSE 配信が使えないため（{reason}）ポーリングに降格',
+    'source.cnPollDelay': '（遅延は最大 15 秒）',
+    'source.cnFallbackDelay': '（遅延は秒単位から最大 15 秒に）',
+    'source.overseasDisabled': '海外の気象警報はオフです',
+    'source.overseasNoneInCoverage': '登録地点が{region}のソースの対象範囲にありません',
+    'source.overseasNoPlaces': '{region}の登録地点がありません',
+    'source.settingsHint': '（設定 → 災害警報 → 監視地域 → その他の国 / 地域）',
+    'source.noAbortController': 'リクエストがタイムアウト（この環境に AbortController がありません）',
 
     'status.weatherHint': ' · 気象警報 L{level}',
     'status.weatherHintLabel': '（{label}）',
@@ -183,6 +207,17 @@ const CORE = {
     'status.sourceDisabled': '{name}: disabled',
     'status.sourceDetail': '{name}: {detail}',
 
+    'source.cnPollManual': 'Polling chosen in settings',
+    'source.cnFallback': 'SSE unavailable — fell back to polling',
+    'source.cnFallbackReason': 'SSE unavailable ({reason}) — fell back to polling',
+    'source.cnPollDelay': ' (up to 15 s delay)',
+    'source.cnFallbackDelay': ' (delay goes from seconds to up to 15 s)',
+    'source.overseasDisabled': 'Overseas weather alerts are off',
+    'source.overseasNoneInCoverage': 'No watch location is inside the {region} source coverage',
+    'source.overseasNoPlaces': 'No {region} watch locations configured',
+    'source.settingsHint': ' (Settings → Disaster alerts → Watch regions → Other countries / regions)',
+    'source.noAbortController': 'Request timed out (no AbortController in this environment)',
+
     'status.weatherHint': ' · Weather alert L{level}',
     'status.weatherHintLabel': ' ({label})',
   },
@@ -202,15 +237,22 @@ const CORE = {
 //
 // 范围（DESIGN 11.10）：只放**我们生成的文本**。设置页里这些一律不进表、原样透传：
 //   · 源侧标签：`SOURCE_CODE_TEXT` / `p2pCodeTextOf` 的来源标注（'JMA 电文' / '中央气象台' …）、
-//     `P2P_KIND_CODE`、`store.detail` / `store.sources[id].label`、`store.weatherHint.label`、地名
-//     （`prefZhOf` / `place.name` / `c.name` / `c.admin`）、`alert.detail`（正文）、`e.headline`、
-//     `e.label`（解析层的 kindLabel）、`e.suppressedReason` 与测试结果里的 `res.detail`；
+//     `P2P_KIND_CODE`、`store.sources[id].label`、`store.weatherHint.label`、地名
+//     （`place.name` / `c.name` / `c.admin`）、`alert.detail`（正文）、`e.headline`、
+//     `e.label`（解析层的 kindLabel）、测试结果里的 `res.detail`；
+//   · **曾经列在这里、0.9.1 起已经进表的两项**——留在这里是为了下一轮 review 不再把它们当漏翻：
+//     `store.detail`（源状态摘要：源名与状态文字现在都走 `t()`，见 07-store）、
+//     都道府县名（现在走 `prefLabelOf`：日文原名 / 中文名 / 罗马字三分支，见 01-constants）；
 //   · 语义标签里的专有名词原文：'気象庁'、'東京都'、'Data Source: Environment and Climate Change Canada'；
-//   · 源文本里的固定枚举（'Flood / Flash Flood / Coastal Flood Warning' / 'Watch' / 'Advisory' /
+//   · 源文本里的固定枚举（'Flood / Flood Warning' / 'Watch' / 'Advisory' /
 //     'Statement' / 'warning' / 'advisory'）——它们描述的是上游规则，不是我们的说法；
 //   · 单位与标识：'km'、'%'、'EEW'、'CENC'、'NOAA'、'NWS'、'ECCC'、'SSE'、'Web Audio'、
 //     'settings.yaml'、'localStorage'、'TROUBLESHOOTING.zh.md'、'dsh web'、'QuakeAlert'、'AI'；
 //   · 间隔符与破折号：' · '、' / '、'—'、'…'、'（'、'）'、'%' 这些不是文案。
+//
+// **归属待定（别当成漏翻）**：`e.suppressedReason`——它是管道层（11-pipeline）拼的"为什么没播报"，
+// 进履历条目的「说明」字段（日常可见），但既不在 11.10 的"要翻"清单里，也不属于"解析层 reason
+// 不翻"那一类。0.9.1 未做，登记在 CHANGELOG 的「有意不做」里。
 // ============================================================================
 
 const SETTINGS = {
@@ -343,7 +385,9 @@ const SETTINGS = {
     'settings.cities.overLimit': '…共 {n} 个，请输入关键词',
 
     // ---------- 已关注地区列表 ----------
-    'settings.watch.prefMeta': '{zh}（{jp}）',
+    // 只是**后缀**（原名），显示名由调用方按语言拼（`prefLabelOf`）——0.9.0 这里一度写成完整
+    // 形式 `'{zh}（{jp}）'`，而调用方前面已经拼过一次名字，界面上就成了「东京东京（東京都）」。
+    'settings.watch.prefMeta': '（{jp}）',
     'settings.watch.prefOrFull': ' · 全境',
     'settings.watch.prefDetail': ' · 已细化 {n} 个市区町村',
     'settings.watch.remove': '移除',
@@ -505,6 +549,26 @@ const SETTINGS = {
     'settings.diag.outcomeUnknown': '未知原因',
     'settings.diag.sentWeather': '已发送：{label}（{pref} / 警戒レベル{level}，{note}）',
     'settings.diag.scenarios': '每次点击换一个场景：{list}。',
+    // 测试场景的**显示名与说明**。场景数据本身（TEST_SCENARIOS / TEST_GEO_SCENARIOS）留在
+    // 05b / 05c 里保持纯数据，key 用它们的稳定标识（`sc.key`），所以那两个文件不必 import t()。
+    'settings.diag.scenario.landslide': '泥石流警戒情报',
+    'settings.diag.scenarioNote.landslide': '市町村级 / 电文本身即 L4',
+    'settings.diag.scenario.flood': '指定河川洪水予報（氾濫危険情報）',
+    'settings.diag.scenarioNote.flood': '级别写在主文里',
+    'settings.diag.scenario.heavyrain': '大雨危険警報',
+    'settings.diag.scenarioNote.heavyrain': '级别写在 Kind 名称里',
+    'settings.diag.scenario.stormsurge': '高潮危険警報',
+    'settings.diag.scenarioNote.stormsurge': '级别写在 Kind 名称里',
+    'settings.diag.scenario.landslide-l3': '泥石流警報（警戒レベル3）',
+    'settings.diag.scenarioNote.landslide-l3': '未达 L4：不播报',
+    'settings.diag.scenario.emsc': 'EMSC 地震（震中就在关注点）',
+    'settings.diag.scenarioNote.emsc': 'M6.2',
+    'settings.diag.scenario.usgs': 'USGS 地震（约 80km 外）',
+    'settings.diag.scenarioNote.usgs': 'M5.6 · 近处，小半径也可能不命中',
+    'settings.diag.scenario.noaa': 'NOAA 海啸注意报',
+    'settings.diag.scenarioNote.noaa': 'Tsunami Advisory',
+    'settings.diag.scenario.emsc-far': 'EMSC 远地地震（约 550km 外）',
+    'settings.diag.scenarioNote.emsc-far': 'M7.0 · 用于演示半径：半径 < 550km 时不命中',
     'settings.diag.sendGlobal': '发送测试全球警报',
     'settings.diag.needPlace': '请先在「地区」里添加一个位置，测试消息需要一个震中',
     'settings.diag.sentGlobal': '已发送：{label}（{note}）',
@@ -661,7 +725,7 @@ const SETTINGS = {
     'settings.cities.searchLabel': '{pref} の市区町村を検索',
     'settings.cities.overLimit': '…全 {n} 件です。キーワードを入力してください',
 
-    'settings.watch.prefMeta': '{zh}（{jp}）',
+    'settings.watch.prefMeta': '（{jp}）',
     'settings.watch.prefOrFull': ' · 全域',
     'settings.watch.prefDetail': ' · 市区町村 {n} 件',
     'settings.watch.remove': '削除',
@@ -746,7 +810,7 @@ const SETTINGS = {
     'settings.disaster.tradeoffCnTitle': '中国大陸の気象',
     'settings.disaster.tradeoffCn1': '大雨と地質災害の 2 種類のみです。雷電・強風・高温などは扱いません（毎日数十件になり画面が埋まるため）。',
     'settings.disaster.tradeoffCn2': '橙色以上でのみ通知します。黄色と青色は「履歴」に残るだけで、音も通知も出しません（おやすみ時間でも橙色は通さず、赤色のみ通します）。',
-    'settings.disaster.tradeoffCn3': '照合は行政区単位です。中国大陸の分支で選んだ省・市だけが登録地点となり、手入力の座標は関与しません。発表機関名が省級までの場合（海南省の直轄県など）は全省で通し、通知が多い側に倒します。',
+    'settings.disaster.tradeoffCn3': '照合は行政区単位です。中国大陸の区分で選んだ省・市だけが登録地点となり、手入力の座標は関与しません。発表機関名が省級までの場合（海南省の直轄県など）は全省で通し、通知が多い側に倒します。',
     'settings.disaster.tradeoffCn4': 'このデータには取消・最終報のフラグがありません：警報は期限が来ると一覧から消えるため、取消が届かないことは警報が有効という意味ではありません。',
     'settings.disaster.tradeoffOverseasTitle': '海外の気象',
     'settings.disaster.tradeoffOverseas1': '登録地点は「地域」ページの「その他の国・地域」で設定します。米国は郡と区画で判定し、半径 25km 以上のときは中心点の周囲も追加で照会するため、半径は近似でしかなく範囲内のすべての郡を網羅する保証はありません。カナダは半径を矩形範囲に換算して照会し、交差する警報をすべて命中とします。',
@@ -815,6 +879,24 @@ const SETTINGS = {
     'settings.diag.outcomeUnknown': '不明な理由',
     'settings.diag.sentWeather': '送信しました：{label}（{pref} / 警戒レベル{level}、{note}）',
     'settings.diag.scenarios': 'クリックごとに場面が変わります：{list}。',
+    'settings.diag.scenario.landslide': '土砂災害警戒情報',
+    'settings.diag.scenarioNote.landslide': '市町村単位 / 電文自体が L4',
+    'settings.diag.scenario.flood': '指定河川洪水予報（氾濫危険情報）',
+    'settings.diag.scenarioNote.flood': 'レベルは本文に記載',
+    'settings.diag.scenario.heavyrain': '大雨危険警報',
+    'settings.diag.scenarioNote.heavyrain': 'レベルは Kind 名に記載',
+    'settings.diag.scenario.stormsurge': '高潮危険警報',
+    'settings.diag.scenarioNote.stormsurge': 'レベルは Kind 名に記載',
+    'settings.diag.scenario.landslide-l3': '土砂災害警報（警戒レベル3）',
+    'settings.diag.scenarioNote.landslide-l3': 'L4 未満：通知しません',
+    'settings.diag.scenario.emsc': 'EMSC の地震（震源が登録地点そのもの）',
+    'settings.diag.scenarioNote.emsc': 'M6.2',
+    'settings.diag.scenario.usgs': 'USGS の地震（約 80km 離れている）',
+    'settings.diag.scenarioNote.usgs': 'M5.6 · 近いため、半径が小さいと命中しないことも',
+    'settings.diag.scenario.noaa': 'NOAA 津波注意報',
+    'settings.diag.scenarioNote.noaa': 'Tsunami Advisory',
+    'settings.diag.scenario.emsc-far': 'EMSC の遠地地震（約 550km 離れている）',
+    'settings.diag.scenarioNote.emsc-far': 'M7.0 · 半径のデモ用：半径 < 550km では命中しません',
     'settings.diag.sendGlobal': 'テストの世界警報を送信',
     'settings.diag.needPlace': '先に「地域」で地点を追加してください。テストメッセージには震源が必要です',
     'settings.diag.sentGlobal': '送信しました：{label}（{note}）',
@@ -969,7 +1051,7 @@ const SETTINGS = {
     'settings.cities.searchLabel': 'Search municipalities in {pref}',
     'settings.cities.overLimit': '…{n} in total, type a keyword',
 
-    'settings.watch.prefMeta': '{zh} ({jp})',
+    'settings.watch.prefMeta': ' ({jp})',
     'settings.watch.prefOrFull': ' · whole prefecture',
     'settings.watch.prefDetail': ' · {n} municipalities',
     'settings.watch.remove': 'Remove',
@@ -1070,7 +1152,7 @@ const SETTINGS = {
     'settings.perm.unsupported': 'This browser does not support system notifications',
     'settings.strip.received': 'Received {n} pushes',
     'settings.strip.more': 'Details are under "More"',
-    'settings.section.language': 'Language / 言語',
+    'settings.section.language': 'Language',
     'settings.language.label': 'Interface language',
     'settings.section.source': 'Data source',
     'settings.source.prod': 'Production (live push)',
@@ -1123,6 +1205,24 @@ const SETTINGS = {
     'settings.diag.outcomeUnknown': 'unknown reason',
     'settings.diag.sentWeather': 'Sent: {label} ({pref} / warning level {level}, {note})',
     'settings.diag.scenarios': 'Each click moves to the next scenario: {list}.',
+    'settings.diag.scenario.landslide': 'Landslide warning information',
+    'settings.diag.scenarioNote.landslide': 'municipality level / the telegram itself is L4',
+    'settings.diag.scenario.flood': 'Designated river flood forecast (flooding risk)',
+    'settings.diag.scenarioNote.flood': 'the level is written in the body',
+    'settings.diag.scenario.heavyrain': 'Heavy rain critical warning',
+    'settings.diag.scenarioNote.heavyrain': 'the level is in the Kind name',
+    'settings.diag.scenario.stormsurge': 'Storm surge critical warning',
+    'settings.diag.scenarioNote.stormsurge': 'the level is in the Kind name',
+    'settings.diag.scenario.landslide-l3': 'Landslide warning (level 3)',
+    'settings.diag.scenarioNote.landslide-l3': 'below L4 — not announced',
+    'settings.diag.scenario.emsc': 'EMSC earthquake (epicentre right at the watch point)',
+    'settings.diag.scenarioNote.emsc': 'M6.2',
+    'settings.diag.scenario.usgs': 'USGS earthquake (~80 km away)',
+    'settings.diag.scenarioNote.usgs': 'M5.6 · nearby, so a small radius may still miss it',
+    'settings.diag.scenario.noaa': 'NOAA tsunami advisory',
+    'settings.diag.scenarioNote.noaa': 'Tsunami Advisory',
+    'settings.diag.scenario.emsc-far': 'EMSC distant earthquake (~550 km away)',
+    'settings.diag.scenarioNote.emsc-far': 'M7.0 · demonstrates the radius: not matched when radius < 550 km',
     'settings.diag.sendGlobal': 'Send test global alert',
     'settings.diag.needPlace': 'Add a location under Regions first — a test message needs an epicentre',
     'settings.diag.sentGlobal': 'Sent: {label} ({note})',
@@ -1197,6 +1297,8 @@ const CONFIG_IO = {
     'settings.configIo.errNewer': '文件来自更新版本的插件（格式版本 {v}），当前版本读不了。',
     'settings.configIo.errRead': '读取文件失败。',
     'settings.configIo.errNoFile': '没有选择文件。',
+    'settings.configIo.errBackupFailed': '当前环境无法保存备份（浏览器存储可能已满或被禁用）。为避免无法撤销，导入已取消。',
+    'settings.configIo.errUnexpected': '导入过程中出错了：{detail}',
   },
 
   ja: {
@@ -1219,6 +1321,8 @@ const CONFIG_IO = {
     'settings.configIo.errNewer': 'より新しいバージョンのプラグインが出力したファイルです（形式バージョン {v}）。現在のバージョンでは読み込めません。',
     'settings.configIo.errRead': 'ファイルの読み込みに失敗しました。',
     'settings.configIo.errNoFile': 'ファイルが選択されていません。',
+    'settings.configIo.errBackupFailed': 'この環境ではバックアップを保存できません（ブラウザの保存領域が満杯か、無効になっています）。元に戻せなくなるため、インポートを中止しました。',
+    'settings.configIo.errUnexpected': 'インポート中にエラーが発生しました：{detail}',
   },
 
   en: {
@@ -1241,6 +1345,8 @@ const CONFIG_IO = {
     'settings.configIo.errNewer': 'This file comes from a newer plugin version (format version {v}); this version cannot read it.',
     'settings.configIo.errRead': 'Could not read the file.',
     'settings.configIo.errNoFile': 'No file selected.',
+    'settings.configIo.errBackupFailed': 'Could not save a backup (browser storage may be full or disabled). The import was cancelled so it always stays undoable.',
+    'settings.configIo.errUnexpected': 'Something went wrong during the import: {detail}',
   },
 };
 
@@ -1386,6 +1492,14 @@ const PARTS = [CORE, SETTINGS, CONFIG_IO, UNITS];
  * 任一条不满足就抛错——bundle 装载即失败，比一条悄悄失效的断言更早、更明确。
  */
 function mergeParts(parts) {
+  // 每个语言还得有**显示名**（语言下拉的 label）。漏了的话 `LANGUAGE_OPTIONS` 会产出
+  // `{ v: 'ko', label: undefined }`——"加一种语言漏一步"的沉默失败，装载期就把它拦住
+  // （加语言 = LANGS 加一项 + LANGUAGE_LABELS 加一项 + 每份面补一栏，三者缺一不可）。
+  for (const lang of LANGS) {
+    if (typeof LANGUAGE_LABELS[lang] !== 'string' || !LANGUAGE_LABELS[lang]) {
+      throw new Error('i18n 语言缺显示名（LANGUAGE_LABELS）：' + lang)
+    }
+  }
   const tables = {};
   for (const lang of LANGS) tables[lang] = {};
   for (const part of parts) {
@@ -1444,10 +1558,17 @@ function getLanguage() { return currentLang }
 
 /** 取词。params 用于替换 `{name}`；缺 key 时回显 key 本身（见文件头）。 */
 function t(key, params) {
+  const k = String(key);
   const table = TABLES[currentLang] || TABLES[DEFAULT_LANGUAGE];
-  let s = table[key];
-  if (s === undefined) s = TABLES[DEFAULT_LANGUAGE][key];
-  if (s === undefined) return String(key)
+  // 用 `hasOwnProperty` 而不是直接 `table[k]`：key 恰好是 `constructor` / `toString` / `valueOf`
+  // 这类名字时，后者会命中原型链拿到一个函数——"缺 key 回显 key"的承诺不成立，而且带参数时
+  // 会在 `.replace` 上抛 TypeError。项目在 02-storage 的 `own()` 里立过同一条约定。
+  let s = Object.prototype.hasOwnProperty.call(table, k) ? table[k] : undefined;
+  if (s === undefined) {
+    const def = TABLES[DEFAULT_LANGUAGE];
+    s = Object.prototype.hasOwnProperty.call(def, k) ? def[k] : undefined;
+  }
+  if (s === undefined) return k
   if (params) {
     s = s.replace(/\{(\w+)\}/g, (m, name) => (
       Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : m
@@ -2107,16 +2228,18 @@ const STATUS_TEXT_KEYS = {
 
 /** 源 id → 当前语言下的显示名。认不出的 id 原样返回（宁可显示 id，也不要显示空白）。 */
 function sourceLabelOf(id) {
-  const key = SOURCE_LABEL_KEYS[String(id === undefined || id === null ? '' : id)];
-  return key ? t(key) : String(id === undefined || id === null ? '' : id)
+  const raw = String(id === undefined || id === null ? '' : id);
+  // hasOwnProperty：`SOURCE_LABEL_KEYS['constructor']` 会命中原型链拿到一个函数（同 00-i18n 的 t）
+  const key = Object.prototype.hasOwnProperty.call(SOURCE_LABEL_KEYS, raw) ? SOURCE_LABEL_KEYS[raw] : '';
+  return key ? t(key) : raw
 }
 
 /** 状态码 → 当前语言下的文字。`retries` 只被 reconnecting 用到（"重连中（第 N 次）"）。 */
 function statusTextOf(status, retries) {
   const code = String(status === undefined || status === null ? '' : status);
-  const key = STATUS_TEXT_KEYS[code];
+  const key = Object.prototype.hasOwnProperty.call(STATUS_TEXT_KEYS, code) ? STATUS_TEXT_KEYS[code] : '';
   if (!key) return t('settings.status.raw', { status: code })
-  if (code === 'reconnecting') return t(key, { n: retries })
+  if (code === 'reconnecting') return t(key, { n: typeof retries === 'number' && Number.isFinite(retries) ? retries : 0 })
   return t(key)
 }
 
@@ -2267,12 +2390,32 @@ function currentCfg() {
 // 跨模块不能直接给本模块私有的 runtimeCfg 赋值：拆分前它同处一个作用域，拆分后就成了
 // 自由变量，打包进 'use strict' 的 bundle 会抛 ReferenceError（0.2.1 拆分时漏改过一处），
 // 所以这里给出显式入口。
+/**
+ * 语言变化后，**由语言派生出来的文本**要重算，并让订阅者重渲染。
+ *
+ * `store.detail` 是 `recomputeStatus` 拼好的一个字符串（源名 + 状态文字），而切语言只改 i18n 的
+ * 当前值——不重算的话，侧边栏悬停提示、状态点的读屏标签、诊断快照里的状态摘要会一直停在旧语言，
+ * 直到下一次源状态汇报（ws 事件 / 15 秒的 feed / 30 秒的探针）；而状态点本身只订阅 store，
+ * 收不到通知就不会重渲染。两件事一起做才完整（0.9.0 review 的 A-1 / A-2）。
+ */
+function syncDerivedTextAfterLanguageChange() {
+  try {
+    store.recomputeStatus();
+    store.push({});
+  } catch (err) {
+    // store 不可用（单测里很常见）时忽略：语言本身已经生效，这里只是让派生文本跟上。
+  }
+}
 function reloadFromLocal() {
+  const prevLang = getLanguage();
   runtimeCfg = loadCfg();
+  // 别的标签页可能只改了关注点、也可能改了语言——只在语言真的变了时才做重算与通知。
+  if (getLanguage() !== prevLang) syncDerivedTextAfterLanguageChange();
   return runtimeCfg
 }
 // 写入入口：内存立即生效 → localStorage 镜像 → Host（可用时异步持久化）
 function applyCfg(cfg) {
+  const prevLang = getLanguage();
   // 写入路径也归一（0.4.1）：此前只有读取路径（loadCfg / sectionToCfg）归一，于是
   // 「坐标相同的关注点自动合并」「name 截断到 30 字」这类不变量在内存与 localStorage 里
   // 都不成立——同一次会话里重复添加同一个点会真的存两份，直到下次加载才被悄悄合并。
@@ -2281,6 +2424,7 @@ function applyCfg(cfg) {
   // setCfgState(next) 触发重渲染的——语言若不在此刻落到 i18n 的当前值，界面会等到
   // 下一次配置加载才切换（表现为"改了语言当场没反应"）。
   setLanguage(runtimeCfg.language);
+  if (getLanguage() !== prevLang) syncDerivedTextAfterLanguageChange();
   pushCfgToHost(runtimeCfg);
   return runtimeCfg
 }
@@ -7902,7 +8046,7 @@ function createFeedClient(opts = {}) {
 //       ——与 P2PQuake 的 551/552/556、気象庁的电文汇到同一个 handleAlert。
 // 内容：EventSource 生命周期、断线补齐（Last-Event-ID）、游标持久化、
 //       **降级到轮询**（EventSource 不可用 / 连不上 / 连上但不推流）。
-// 依赖：02-storage（游标落盘）、03-settings-bridge（currentCfg）、05d（解析契约与健康状态）、
+// 依赖：00-i18n（状态说明的文案）、02-storage（游标落盘）、03-settings-bridge（currentCfg）、05d（解析契约与健康状态）、
 //       11-pipeline（handleAlert）、12b-feed-poll（降级用的轮询客户端）。
 //
 // 为什么用 SSE 而不是复用 12b 的轮询：EEW 的价值在秒级。轮询是 15 秒一轮，
@@ -8083,8 +8227,8 @@ function createCnStream(opts = {}) {
     const p = patch || {};
     reportStatus({
       status: fallbackManual ? 'disabled' : 'degraded',
-      detail: (fallbackManual ? '已按设置选择轮询' : 'SSE 推送不可用 → 已降级为轮询') +
-        '（延迟最长 15 秒）' + (p.detail ? ' · ' + String(p.detail) : ''),
+      detail: (fallbackManual ? t('source.cnPollManual') : t('source.cnFallback')) +
+        t('source.cnPollDelay') + (p.detail ? ' · ' + String(p.detail) : ''),
     }, 'fallback:' + String(p.status || ''));
   }
 
@@ -8141,8 +8285,8 @@ function createCnStream(opts = {}) {
     // status，若按 status 去重，这条"已降级"会被自己的上一条吃掉——而降级是不能被静默的。
     reportStatus({
       status: fallbackManual ? 'disabled' : 'degraded',
-      detail: (fallbackManual ? '已按设置选择轮询' : 'SSE 推送不可用（' + reason + '）→ 已降级为轮询') +
-        '（延迟从秒级变为最长 15 秒）',
+      detail: (fallbackManual ? t('source.cnPollManual') : t('source.cnFallbackReason', { reason })) +
+        t('source.cnFallbackDelay'),
     }, 'fallback');
   }
 
@@ -8195,7 +8339,7 @@ function createCnStream(opts = {}) {
           else if (!fallbackManual) {
             fallbackManual = true;
             stats.fallbackManual = true;
-            reportStatus({ status: 'disabled', detail: '已按设置选择轮询（延迟最长 15 秒）' }, 'fallback:manual');
+            reportStatus({ status: 'disabled', detail: t('source.cnPollManual') + t('source.cnPollDelay') }, 'fallback:manual');
           }
         } else if (inFallback && fallbackManual) {
           // 用户改回「自动」：手动选的轮询要能撤销。自动降级的不升回——那条链路已经证明过不通。
@@ -8742,7 +8886,7 @@ async function defaultFetchText(url, ctx) {
   return await Promise.race([
     work,
     new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('请求超时（本环境没有 AbortController）')), timeoutMs);
+      setTimeout(() => reject(new Error(t('source.noAbortController'))), timeoutMs);
     }),
   ])
 }
@@ -8834,7 +8978,7 @@ function createOverseasSource(opts = {}) {
     const cfg = getCfg();
     stats.lastAt = Date.now();
     if (!enabled(cfg)) {
-      reportStatus({ status: 'disabled', detail: '海外气象提醒已关闭' });
+      reportStatus({ status: 'disabled', detail: t('source.overseasDisabled') });
       return { applied: 0, disabled: true }
     }
     const places = placesFor(cfg);
@@ -8848,8 +8992,10 @@ function createOverseasSource(opts = {}) {
       const anyPlaces = ((cfg.watch || {}).places || []).length > 0;
       reportStatus({
         status: 'open',
-        detail: (anyPlaces ? '关注点都不在' + regionText + '源的覆盖范围内' : '未设置' + regionText + '关注点') +
-          '（设置 → 灾害预警 → 关注地区 → 其他国家 / 地区）',
+        detail: (anyPlaces
+          ? t('source.overseasNoneInCoverage', { region: regionText })
+          : t('source.overseasNoPlaces', { region: regionText })) +
+          t('source.settingsHint'),
       });
       return { applied: 0, noPlaces: true }
     }
@@ -9556,7 +9702,10 @@ function buildConfigExport(cfg, now) {
  *   `format`（其它应用的 JSON）/ `version`（版本号缺失或非法）/ `newer`（版本高于本版能读的）
  */
 function parseConfigImport(text) {
-  const raw = String(text === undefined || text === null ? '' : text);
+  // 去掉 BOM：JSON 规范不允许它，但记事本、PowerShell 的 `Out-File -Encoding utf8` 之类都会加上，
+  // 而 `JSON.parse` 会因此在第一个字符上抛——对用户表现为"我导出后一个字没改，它却说不是有效的
+  // JSON"。只差这一个 replace。
+  const raw = String(text === undefined || text === null ? '' : text).replace(/^\uFEFF/, '');
   if (!raw.trim()) return { ok: false, error: 'shape' }
   let parsed;
   try {
@@ -9570,14 +9719,32 @@ function parseConfigImport(text) {
   if (typeof v !== 'number' || !Number.isFinite(v) || v < 1) return { ok: false, error: 'version' }
   if (v > CONFIG_FORMAT_VERSION) return { ok: false, error: 'newer', detail: String(v) }
   if (!isPlainObject(parsed.config)) return { ok: false, error: 'shape' }
-  return { ok: true, cfg: normalizeCfg(parsed.config), formatVersion: v }
+  // 归一必须与"返回错误码"同一口径：畸形配置（例如某个字段是 `{toString: null, valueOf: null}`
+  // 这种**转不成字符串**的对象）会在归一里抛。让它抛出去的话，UI 那条 `.then` 链上没人接得住
+  // ——用户点「导入」之后界面毫无反应，而这是最难归因的一类失败（11.8 教训 4）。
+  let cfg;
+  try {
+    cfg = normalizeCfg(parsed.config);
+  } catch (err) {
+    return { ok: false, error: 'shape', detail: String((err && err.message) || err) }
+  }
+  return { ok: true, cfg, formatVersion: v }
 }
 
-/** 把当前配置备份到 localStorage（覆盖上一次备份）。返回备份时间。 */
+/**
+ * 把当前配置备份到 localStorage（覆盖上一次备份）。
+ *
+ * **返回备份时间；写不进去时返回空字符串**——返回值不是"操作成功"的同义词。`saveJSON` 是
+ * 静默失败的（`try { setItem } catch {}`），而这份备份是"导入还能回滚"的**全部依据**：写不进去
+ * 却照样返回时间戳，界面就会显示「撤销上次导入」，用户点下去才发现没有备份，而那时他原来的
+ * 配置已经被替换掉了。所以写后**回读校验**，确认它真的落了盘。
+ */
 function backupCurrentConfig(now) {
   const at = now instanceof Date ? now : new Date();
-  saveJSON(CONFIG_BACKUP_KEY, { at: at.toISOString(), config: normalizeCfg(currentCfg()) });
-  return at.toISOString()
+  const payload = { at: at.toISOString(), config: normalizeCfg(currentCfg()) };
+  saveJSON(CONFIG_BACKUP_KEY, payload);
+  const back = loadConfigBackup();
+  return back && back.at === payload.at ? payload.at : ''
 }
 
 /** 读回备份。没有备份、或备份结构不可用时返回 null（不抛错：界面只需知道"能不能撤销"）。 */
@@ -9595,6 +9762,9 @@ function importConfig(text, now) {
   const parsed = parseConfigImport(text);
   if (!parsed.ok) return parsed
   const backupAt = backupCurrentConfig(now);
+  // 备份不成功就**不导入**：定稿承诺的是"导入后随时能撤销"，而做不到这一点时，"整体替换成
+  // 另一份配置"是不可逆的破坏性操作。宁可这次导入失败并如实说明，也不要在没有退路的情况下替换。
+  if (!backupAt) return { ok: false, error: 'backup-failed' }
   const next = applyCfg(parsed.cfg);
   return { ok: true, cfg: next, backupAt }
 }
@@ -10311,7 +10481,9 @@ function SettingsPanel(props) {
   //   · 其他国家 → 坐标 + 半径（同坐标型；9.4 的城市表接入后这里多一条城市列表）
   // 硬把日本改成坐标匹配会让"震中 150km 外、本地却到震度 5 弱"的地震漏掉——那是把日本这一路
   // **降级**（9.3 明确否决）。所以数据模型一个字段都不动，只统合用户看到的路径。
-  const prefZhOf = (jp) => (PREFECTURES.find((p) => p.jp === jp) || {}).zh || jp;
+  // 县名的**显示名**统一走 01-constants 的 `prefLabelOf`（按当前语言给日文原名 / 中文名 / 罗马字）。
+  // 0.9.0 曾在这里自己写一份 `prefZhOf`（恒取中文名），于是英文 / 日文界面下"地区"页显示的是
+  // 中文县名——同一个能力两份实现，而**没有断言覆盖的那一份**正在界面上生效（11.8 教训 1、4）。
   /** 按来源分支筛关注点（`origin` 见 02-storage 的 placeOriginOf）。 */
   const placesOfOrigin = (origin) => (cfg.watch.places || [])
     .filter((p) => (origin === 'cn' ? (p && p.origin === 'cn') : (p && p.origin !== 'cn')));
@@ -10345,9 +10517,12 @@ function SettingsPanel(props) {
     const places = w.places || [];
     const jpRows = (w.prefectures || []).map((pref) => {
       const cities = (w.cities || []).filter((c) => citiesOfPref(pref).indexOf(c) !== -1);
+      // 显示名随语言：日文界面「東京都」、中文界面「东京」、英文界面「Tokyo」。
+      // 原名只在"显示名与它不同"时括注——同一种语言里不会出现「東京都（東京都）」。
+      const label = prefLabelOf(pref);
       return h('div', { key: 'wl-jp-' + pref, style: { display: 'flex', alignItems: 'center', gap: 8, margin: '3px 0', fontSize: 12 } },
         h('span', { style: { flex: 1 } },
-          '🇯🇵 ' + prefZhOf(pref) + (prefZhOf(pref) !== pref ? t('settings.watch.prefMeta', { zh: prefZhOf(pref), jp: pref }) : '') +
+          '🇯🇵 ' + label + (label !== pref ? t('settings.watch.prefMeta', { jp: pref }) : '') +
           t('settings.watch.prefOrFull') +
           (cities.length ? t('settings.watch.prefDetail', { n: cities.length }) : '')),
         s.btn(t('settings.watch.remove'), () => togglePref(pref)))
@@ -10397,7 +10572,7 @@ function SettingsPanel(props) {
             background: on ? 'rgba(59,130,246,0.18)' : 'transparent',
             color: on ? '#93c5fd' : '#9aa0a6',
           },
-        }, p.zh)
+        }, prefLabelOf(p.jp))
       }),
     ),
     cityPicker(),
@@ -10858,10 +11033,10 @@ function SettingsPanel(props) {
       const outcome = res && res.notified
         ? t('settings.diag.outcomeSent')
         : t('settings.diag.outcomeNotSent', { reason: (res && res.detail) || t('settings.diag.outcomeUnknown') });
-      setWeatherTestMsg(t('settings.diag.sentWeather', { label: sc.label, pref, level: alert.level, note: sc.note }) + outcome);
+      setWeatherTestMsg(t('settings.diag.sentWeather', { label: t('settings.diag.scenario.' + sc.key), pref, level: alert.level, note: t('settings.diag.scenarioNote.' + sc.key) }) + outcome);
     })),
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4 } },
-      t('settings.diag.scenarios', { list: TEST_SCENARIOS.map((x) => x.label).join(' / ') })),
+      t('settings.diag.scenarios', { list: TEST_SCENARIOS.map((x) => t('settings.diag.scenario.' + x.key)).join(' / ') })),
     weatherTestMsg
       ? h('div', { role: 'status', style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, weatherTestMsg)
       : null,
@@ -10882,10 +11057,10 @@ function SettingsPanel(props) {
       const outcome = res && res.notified
         ? t('settings.diag.outcomeSent')
         : t('settings.diag.outcomeNotSent', { reason: (res && res.detail) || t('settings.diag.outcomeUnknown') });
-      setGeTestMsg(t('settings.diag.sentGlobal', { label: sc.label, note: sc.note }) + outcome);
+      setGeTestMsg(t('settings.diag.sentGlobal', { label: t('settings.diag.scenario.' + sc.key), note: t('settings.diag.scenarioNote.' + sc.key) }) + outcome);
     })),
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4 } },
-      t('settings.diag.globalScenarios', { list: TEST_GEO_SCENARIOS.map((x) => x.label).join(' / ') })),
+      t('settings.diag.globalScenarios', { list: TEST_GEO_SCENARIOS.map((x) => t('settings.diag.scenario.' + x.key)).join(' / ') })),
     geTestMsg ? h('div', { role: 'status', style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, geTestMsg) : null,
     // 源状态：逐源的连接 / 增量 / 失败计数。放在这里而不是某个地区区块下面——它回答的是
     // "哪条链路在动"，与关注了哪个国家无关。
@@ -10932,6 +11107,7 @@ function SettingsPanel(props) {
       newer: 'settings.configIo.errNewer',
       read: 'settings.configIo.errRead',
       'no-file': 'settings.configIo.errNoFile',
+      'backup-failed': 'settings.configIo.errBackupFailed',
     };
     return t(own(map, res && res.error) || 'settings.configIo.errShape', { v: String((res && res.detail) || '') })
   };
@@ -10957,6 +11133,11 @@ function SettingsPanel(props) {
       setCfgState(currentCfg());
       setCfgIoBackupAt(res.backupAt);
       setCfgIoMsg(t('settings.configIo.imported'));
+    }).catch((err) => {
+      // 兜底：解析层的异常已经在 17-config-io 里转成错误码，但读文件（`file.text()` /
+      // FileReader）以及将来新增的任何一步仍可能抛。少了这个 catch，用户看到的是
+      // "点了没有任何反应"——那是最难归因的失败形态。
+      setCfgIoMsg(t('settings.configIo.errUnexpected', { detail: String((err && err.message) || err) }));
     });
   };
   const onUndoCfg = () => {
@@ -11515,7 +11696,7 @@ const __test = {
   MIN_SAMPLE_RADIUS_KM, MAX_REQUESTS_PER_ROUND, OVERSEAS_FRESH_GATE_MS, OVERSEAS_GATE_RESET_MS,
   UNCOVERED_TTL_MS, OVERSEAS_MIN_BACKOFF_MS, OVERSEAS_MAX_BACKOFF_MS,
   overseasStatsOf,
-  parse, parseQuake, parseEew, parseTsunami, parseJma, parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage, feedStatsOf, watchlessPoint, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn: maxLevelIn, jmaItemsOf: itemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf, matchAlert, matchPointAlert, distanceKm, validGeo, normalizePlaces, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, hitSeverityOf, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY, cnProductName, authorityOf, disclaimerOf, weatherActionHintOf, SOURCE_ORDER, sourceLabelOf, SOURCE_CODE_TEXT, SettingsPanel, statusMetaOf, buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION, inQuietHours, placeOriginOf, PLACE_ORIGINS, geoOfHypo, sourceIdOf, crossSourceCopyOf, noteAuthoritySuppressed, authorityStatsOf, SOURCE_RANK, SOURCE_ZH, SOURCE_AGENCY, agencyOf, CROSS_SOURCE_KINDS, rankOfSource, sourceZhOf, isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, ensureAlertChannel, broadcastHistoryCleared, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, STORAGE_KEY, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, setWorldCountries, worldCountriesOf, countryPackOf, loadCountryCities, resetWorldCities, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, p2pTimeToIso, cnTimeToIso, CN_TIME_RE, CN_REPORT_MAG_OPTIONS, LANGUAGE_OPTIONS, issuedToDate, formatIssuedLocal, audioState, SOURCE_CONTRACTS, parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of, failResult, noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, P2P_TIME_RE, MIGRATED_KEY };
+  parse, parseQuake, parseEew, parseTsunami, parseJma, parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage, feedStatsOf, watchlessPoint, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn: maxLevelIn, jmaItemsOf: itemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf, matchAlert, matchPointAlert, distanceKm, validGeo, normalizePlaces, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, hitSeverityOf, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY, cnProductName, authorityOf, disclaimerOf, weatherActionHintOf, SOURCE_ORDER, sourceLabelOf, SOURCE_CODE_TEXT, SettingsPanel, statusMetaOf, buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION, inQuietHours, placeOriginOf, PLACE_ORIGINS, geoOfHypo, sourceIdOf, crossSourceCopyOf, noteAuthoritySuppressed, authorityStatsOf, SOURCE_RANK, SOURCE_ZH, SOURCE_AGENCY, agencyOf, CROSS_SOURCE_KINDS, rankOfSource, sourceZhOf, isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, ensureAlertChannel, broadcastHistoryCleared, createWsClient, store, HISTORY_MAX, PREFECTURES, prefLabelOf, PREF_EN, SCALE_OPTIONS, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, DEFAULT_CFG, STORAGE_KEY, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, setWorldCountries, worldCountriesOf, countryPackOf, loadCountryCities, resetWorldCities, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, p2pTimeToIso, cnTimeToIso, CN_TIME_RE, CN_REPORT_MAG_OPTIONS, LANGUAGE_OPTIONS, issuedToDate, formatIssuedLocal, audioState, SOURCE_CONTRACTS, parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of, failResult, noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, P2P_TIME_RE, MIGRATED_KEY };
 
 // activeClient 是 12-websocket 的模块级 let：给 12 用的赋值出口（跨模块不能写 imported binding）
 // 由 12-websocket 提供 setter；这里仅保留引用以便阅读

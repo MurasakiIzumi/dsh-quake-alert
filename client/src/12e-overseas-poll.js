@@ -29,6 +29,7 @@
 // 因为按点 / 框查询天然可能是空响应。活性只由"请求是否成功"表达。
 // ============================================================================
 
+import { t } from './00-i18n.js'
 import { currentCfg } from './03-settings-bridge.js'
 import { parseNwsAlertResult, parseEcccAlertResult, failResult } from './05d-source-contracts.js'
 import { noteParseResult, noteSourceSuccess, noteFreshness, effectiveStatusOf } from './05g-source-health.js'
@@ -187,7 +188,7 @@ async function defaultFetchText(url, ctx) {
   return await Promise.race([
     work,
     new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('请求超时（本环境没有 AbortController）')), timeoutMs)
+      setTimeout(() => reject(new Error(t('source.noAbortController'))), timeoutMs)
     }),
   ])
 }
@@ -279,7 +280,7 @@ export function createOverseasSource(opts = {}) {
     const cfg = getCfg()
     stats.lastAt = Date.now()
     if (!enabled(cfg)) {
-      reportStatus({ status: 'disabled', detail: '海外气象提醒已关闭' })
+      reportStatus({ status: 'disabled', detail: t('source.overseasDisabled') })
       return { applied: 0, disabled: true }
     }
     const places = placesFor(cfg)
@@ -293,8 +294,10 @@ export function createOverseasSource(opts = {}) {
       const anyPlaces = ((cfg.watch || {}).places || []).length > 0
       reportStatus({
         status: 'open',
-        detail: (anyPlaces ? '关注点都不在' + regionText + '源的覆盖范围内' : '未设置' + regionText + '关注点') +
-          '（设置 → 灾害预警 → 关注地区 → 其他国家 / 地区）',
+        detail: (anyPlaces
+          ? t('source.overseasNoneInCoverage', { region: regionText })
+          : t('source.overseasNoPlaces', { region: regionText })) +
+          t('source.settingsHint'),
       })
       return { applied: 0, noPlaces: true }
     }

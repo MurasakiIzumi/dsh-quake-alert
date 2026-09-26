@@ -57,7 +57,10 @@ function buildConfigExport(cfg, now) {
  *   `format`（其它应用的 JSON）/ `version`（版本号缺失或非法）/ `newer`（版本高于本版能读的）
  */
 function parseConfigImport(text) {
-  const raw = String(text === undefined || text === null ? '' : text)
+  // 去掉 BOM：JSON 规范不允许它，但记事本、PowerShell 的 `Out-File -Encoding utf8` 之类都会加上，
+  // 而 `JSON.parse` 会因此在第一个字符上抛——对用户表现为"我导出后一个字没改，它却说不是有效的
+  // JSON"。只差这一个 replace。
+  const raw = String(text === undefined || text === null ? '' : text).replace(/^\uFEFF/, '')
   if (!raw.trim()) return { ok: false, error: 'shape' }
   let parsed
   try {
@@ -71,14 +74,32 @@ function parseConfigImport(text) {
   if (typeof v !== 'number' || !Number.isFinite(v) || v < 1) return { ok: false, error: 'version' }
   if (v > CONFIG_FORMAT_VERSION) return { ok: false, error: 'newer', detail: String(v) }
   if (!isPlainObject(parsed.config)) return { ok: false, error: 'shape' }
-  return { ok: true, cfg: normalizeCfg(parsed.config), formatVersion: v }
+  // 归一必须与"返回错误码"同一口径：畸形配置（例如某个字段是 `{toString: null, valueOf: null}`
+  // 这种**转不成字符串**的对象）会在归一里抛。让它抛出去的话，UI 那条 `.then` 链上没人接得住
+  // ——用户点「导入」之后界面毫无反应，而这是最难归因的一类失败（11.8 教训 4）。
+  let cfg
+  try {
+    cfg = normalizeCfg(parsed.config)
+  } catch (err) {
+    return { ok: false, error: 'shape', detail: String((err && err.message) || err) }
+  }
+  return { ok: true, cfg, formatVersion: v }
 }
 
-/** 把当前配置备份到 localStorage（覆盖上一次备份）。返回备份时间。 */
+/**
+ * 把当前配置备份到 localStorage（覆盖上一次备份）。
+ *
+ * **返回备份时间；写不进去时返回空字符串**——返回值不是"操作成功"的同义词。`saveJSON` 是
+ * 静默失败的（`try { setItem } catch {}`），而这份备份是"导入还能回滚"的**全部依据**：写不进去
+ * 却照样返回时间戳，界面就会显示「撤销上次导入」，用户点下去才发现没有备份，而那时他原来的
+ * 配置已经被替换掉了。所以写后**回读校验**，确认它真的落了盘。
+ */
 function backupCurrentConfig(now) {
   const at = now instanceof Date ? now : new Date()
-  saveJSON(CONFIG_BACKUP_KEY, { at: at.toISOString(), config: normalizeCfg(currentCfg()) })
-  return at.toISOString()
+  const payload = { at: at.toISOString(), config: normalizeCfg(currentCfg()) }
+  saveJSON(CONFIG_BACKUP_KEY, payload)
+  const back = loadConfigBackup()
+  return back && back.at === payload.at ? payload.at : ''
 }
 
 /** 读回备份。没有备份、或备份结构不可用时返回 null（不抛错：界面只需知道"能不能撤销"）。 */
@@ -102,6 +123,9 @@ function importConfig(text, now) {
   const parsed = parseConfigImport(text)
   if (!parsed.ok) return parsed
   const backupAt = backupCurrentConfig(now)
+  // 备份不成功就**不导入**：定稿承诺的是"导入后随时能撤销"，而做不到这一点时，"整体替换成
+  // 另一份配置"是不可逆的破坏性操作。宁可这次导入失败并如实说明，也不要在没有退路的情况下替换。
+  if (!backupAt) return { ok: false, error: 'backup-failed' }
   const next = applyCfg(parsed.cfg)
   return { ok: true, cfg: next, backupAt }
 }

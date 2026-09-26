@@ -12,7 +12,7 @@
 
 import { DEFAULT_CFG } from './01-constants.js'
 import { isPlainObject, normalizeCfg, loadCfg, saveCfg, freshCfg, loadJSON, saveJSON } from './02-storage.js'
-import { setLanguage } from './00-i18n.js'
+import { setLanguage, getLanguage } from './00-i18n.js'
 import { store } from './07-store.js'
 
 // ---------- 机器级持久化（0.2.0）：Host 存储为主，localStorage 为回退与镜像 ----------
@@ -52,12 +52,32 @@ function currentCfg() {
 // 跨模块不能直接给本模块私有的 runtimeCfg 赋值：拆分前它同处一个作用域，拆分后就成了
 // 自由变量，打包进 'use strict' 的 bundle 会抛 ReferenceError（0.2.1 拆分时漏改过一处），
 // 所以这里给出显式入口。
+/**
+ * 语言变化后，**由语言派生出来的文本**要重算，并让订阅者重渲染。
+ *
+ * `store.detail` 是 `recomputeStatus` 拼好的一个字符串（源名 + 状态文字），而切语言只改 i18n 的
+ * 当前值——不重算的话，侧边栏悬停提示、状态点的读屏标签、诊断快照里的状态摘要会一直停在旧语言，
+ * 直到下一次源状态汇报（ws 事件 / 15 秒的 feed / 30 秒的探针）；而状态点本身只订阅 store，
+ * 收不到通知就不会重渲染。两件事一起做才完整（0.9.0 review 的 A-1 / A-2）。
+ */
+function syncDerivedTextAfterLanguageChange() {
+  try {
+    store.recomputeStatus()
+    store.push({})
+  } catch (err) {
+    // store 不可用（单测里很常见）时忽略：语言本身已经生效，这里只是让派生文本跟上。
+  }
+}
 function reloadFromLocal() {
+  const prevLang = getLanguage()
   runtimeCfg = loadCfg()
+  // 别的标签页可能只改了关注点、也可能改了语言——只在语言真的变了时才做重算与通知。
+  if (getLanguage() !== prevLang) syncDerivedTextAfterLanguageChange()
   return runtimeCfg
 }
 // 写入入口：内存立即生效 → localStorage 镜像 → Host（可用时异步持久化）
 function applyCfg(cfg) {
+  const prevLang = getLanguage()
   // 写入路径也归一（0.4.1）：此前只有读取路径（loadCfg / sectionToCfg）归一，于是
   // 「坐标相同的关注点自动合并」「name 截断到 30 字」这类不变量在内存与 localStorage 里
   // 都不成立——同一次会话里重复添加同一个点会真的存两份，直到下次加载才被悄悄合并。
@@ -66,6 +86,7 @@ function applyCfg(cfg) {
   // setCfgState(next) 触发重渲染的——语言若不在此刻落到 i18n 的当前值，界面会等到
   // 下一次配置加载才切换（表现为"改了语言当场没反应"）。
   setLanguage(runtimeCfg.language)
+  if (getLanguage() !== prevLang) syncDerivedTextAfterLanguageChange()
   pushCfgToHost(runtimeCfg)
   return runtimeCfg
 }

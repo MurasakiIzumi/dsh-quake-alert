@@ -12,7 +12,7 @@
 //       kindLabel / res.detail）一律原样透传——DESIGN 11.10 的范围约定。
 // ============================================================================
 
-import { h, useState, useEffect, useRef, PREFECTURES, SCALE_OPTIONS, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, CN_REPORT_MAG_OPTIONS, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, HISTORY_MAX, HISTORY_KEY, MAX_WATCH_CITIES, MAX_WATCH_PLACES, LANGUAGE_OPTIONS, formatIssuedLocal } from './01-constants.js'
+import { h, useState, useEffect, useRef, PREFECTURES, prefLabelOf, SCALE_OPTIONS, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, CN_REPORT_MAG_OPTIONS, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, HISTORY_MAX, HISTORY_KEY, MAX_WATCH_CITIES, MAX_WATCH_PLACES, LANGUAGE_OPTIONS, formatIssuedLocal } from './01-constants.js'
 import { t } from './00-i18n.js'
 import { sourceLabelOf } from './00f-source-labels.js'
 import { saveJSON, own } from './02-storage.js'
@@ -681,7 +681,9 @@ function SettingsPanel(props) {
   //   · 其他国家 → 坐标 + 半径（同坐标型；9.4 的城市表接入后这里多一条城市列表）
   // 硬把日本改成坐标匹配会让"震中 150km 外、本地却到震度 5 弱"的地震漏掉——那是把日本这一路
   // **降级**（9.3 明确否决）。所以数据模型一个字段都不动，只统合用户看到的路径。
-  const prefZhOf = (jp) => (PREFECTURES.find((p) => p.jp === jp) || {}).zh || jp
+  // 县名的**显示名**统一走 01-constants 的 `prefLabelOf`（按当前语言给日文原名 / 中文名 / 罗马字）。
+  // 0.9.0 曾在这里自己写一份 `prefZhOf`（恒取中文名），于是英文 / 日文界面下"地区"页显示的是
+  // 中文县名——同一个能力两份实现，而**没有断言覆盖的那一份**正在界面上生效（11.8 教训 1、4）。
   /** 按来源分支筛关注点（`origin` 见 02-storage 的 placeOriginOf）。 */
   const placesOfOrigin = (origin) => (cfg.watch.places || [])
     .filter((p) => (origin === 'cn' ? (p && p.origin === 'cn') : (p && p.origin !== 'cn')))
@@ -715,9 +717,12 @@ function SettingsPanel(props) {
     const places = w.places || []
     const jpRows = (w.prefectures || []).map((pref) => {
       const cities = (w.cities || []).filter((c) => citiesOfPref(pref).indexOf(c) !== -1)
+      // 显示名随语言：日文界面「東京都」、中文界面「东京」、英文界面「Tokyo」。
+      // 原名只在"显示名与它不同"时括注——同一种语言里不会出现「東京都（東京都）」。
+      const label = prefLabelOf(pref)
       return h('div', { key: 'wl-jp-' + pref, style: { display: 'flex', alignItems: 'center', gap: 8, margin: '3px 0', fontSize: 12 } },
         h('span', { style: { flex: 1 } },
-          '🇯🇵 ' + prefZhOf(pref) + (prefZhOf(pref) !== pref ? t('settings.watch.prefMeta', { zh: prefZhOf(pref), jp: pref }) : '') +
+          '🇯🇵 ' + label + (label !== pref ? t('settings.watch.prefMeta', { jp: pref }) : '') +
           t('settings.watch.prefOrFull') +
           (cities.length ? t('settings.watch.prefDetail', { n: cities.length }) : '')),
         s.btn(t('settings.watch.remove'), () => togglePref(pref)))
@@ -767,7 +772,7 @@ function SettingsPanel(props) {
             background: on ? 'rgba(59,130,246,0.18)' : 'transparent',
             color: on ? '#93c5fd' : '#9aa0a6',
           },
-        }, p.zh)
+        }, prefLabelOf(p.jp))
       }),
     ),
     cityPicker(),
@@ -1228,10 +1233,10 @@ function SettingsPanel(props) {
       const outcome = res && res.notified
         ? t('settings.diag.outcomeSent')
         : t('settings.diag.outcomeNotSent', { reason: (res && res.detail) || t('settings.diag.outcomeUnknown') })
-      setWeatherTestMsg(t('settings.diag.sentWeather', { label: sc.label, pref, level: alert.level, note: sc.note }) + outcome)
+      setWeatherTestMsg(t('settings.diag.sentWeather', { label: t('settings.diag.scenario.' + sc.key), pref, level: alert.level, note: t('settings.diag.scenarioNote.' + sc.key) }) + outcome)
     })),
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4 } },
-      t('settings.diag.scenarios', { list: TEST_SCENARIOS.map((x) => x.label).join(' / ') })),
+      t('settings.diag.scenarios', { list: TEST_SCENARIOS.map((x) => t('settings.diag.scenario.' + x.key)).join(' / ') })),
     weatherTestMsg
       ? h('div', { role: 'status', style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, weatherTestMsg)
       : null,
@@ -1252,10 +1257,10 @@ function SettingsPanel(props) {
       const outcome = res && res.notified
         ? t('settings.diag.outcomeSent')
         : t('settings.diag.outcomeNotSent', { reason: (res && res.detail) || t('settings.diag.outcomeUnknown') })
-      setGeTestMsg(t('settings.diag.sentGlobal', { label: sc.label, note: sc.note }) + outcome)
+      setGeTestMsg(t('settings.diag.sentGlobal', { label: t('settings.diag.scenario.' + sc.key), note: t('settings.diag.scenarioNote.' + sc.key) }) + outcome)
     })),
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4 } },
-      t('settings.diag.globalScenarios', { list: TEST_GEO_SCENARIOS.map((x) => x.label).join(' / ') })),
+      t('settings.diag.globalScenarios', { list: TEST_GEO_SCENARIOS.map((x) => t('settings.diag.scenario.' + x.key)).join(' / ') })),
     geTestMsg ? h('div', { role: 'status', style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, geTestMsg) : null,
     // 源状态：逐源的连接 / 增量 / 失败计数。放在这里而不是某个地区区块下面——它回答的是
     // "哪条链路在动"，与关注了哪个国家无关。
@@ -1302,6 +1307,7 @@ function SettingsPanel(props) {
       newer: 'settings.configIo.errNewer',
       read: 'settings.configIo.errRead',
       'no-file': 'settings.configIo.errNoFile',
+      'backup-failed': 'settings.configIo.errBackupFailed',
     }
     return t(own(map, res && res.error) || 'settings.configIo.errShape', { v: String((res && res.detail) || '') })
   }
@@ -1327,6 +1333,11 @@ function SettingsPanel(props) {
       setCfgState(currentCfg())
       setCfgIoBackupAt(res.backupAt)
       setCfgIoMsg(t('settings.configIo.imported'))
+    }).catch((err) => {
+      // 兜底：解析层的异常已经在 17-config-io 里转成错误码，但读文件（`file.text()` /
+      // FileReader）以及将来新增的任何一步仍可能抛。少了这个 catch，用户看到的是
+      // "点了没有任何反应"——那是最难归因的失败形态。
+      setCfgIoMsg(t('settings.configIo.errUnexpected', { detail: String((err && err.message) || err) }))
     })
   }
   const onUndoCfg = () => {

@@ -224,7 +224,13 @@ node scripts/check-contracts.mjs       # contract check: pull the live sources t
 
 ## Changelog
 
-Current version **0.9.0** (**interface language: Chinese / Japanese / English, plus settings export/import**).
+Current version **0.9.1** (**a review-and-fix pass over 0.9.0**). Five independent reviews of 0.9.0's
+localization and settings-import work turned up six user-visible defects — prefecture names that stayed
+Chinese in the English / Japanese interface, a duplicated name in the watched-prefecture line, a
+malformed settings file that made the import silently do nothing, a failed backup still reported as an
+undoable import, the sidebar status text not following a language switch, and Chinese test-scenario
+names — plus a dozen smaller issues. All are fixed, and the checks the review used became regression
+assertions (1552 → 1671).
 The interface ships three complete text sets, switched in Settings → More → Language and applied
 immediately (no restart), while everything that comes from a data source stays verbatim. Settings can be
 exported to a JSON file and loaded on another machine: importing replaces the whole configuration after
@@ -238,7 +244,7 @@ arrives first announces it, and the rest do not even enter the history, though t
 diagnostic snapshot (the only trace if that call was wrong). "Other countries / regions" finally has a
 city list too (towns of 100,000+ inhabitants, 166 countries / 5224 entries, delivered per country), so
 there is no need to type latitude and longitude by hand.
-The suite is now at **1552** assertions (1363 before 0.8.0).
+The suite is now at **1671** assertions (1363 before 0.8.0).
 See [CHANGELOG.md](./CHANGELOG.md) for the details of each release.
 
 ## Data sources

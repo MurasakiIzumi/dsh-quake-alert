@@ -12,15 +12,22 @@
 //
 // 范围（DESIGN 11.10）：只放**我们生成的文本**。设置页里这些一律不进表、原样透传：
 //   · 源侧标签：`SOURCE_CODE_TEXT` / `p2pCodeTextOf` 的来源标注（'JMA 电文' / '中央气象台' …）、
-//     `P2P_KIND_CODE`、`store.detail` / `store.sources[id].label`、`store.weatherHint.label`、地名
-//     （`prefZhOf` / `place.name` / `c.name` / `c.admin`）、`alert.detail`（正文）、`e.headline`、
-//     `e.label`（解析层的 kindLabel）、`e.suppressedReason` 与测试结果里的 `res.detail`；
+//     `P2P_KIND_CODE`、`store.sources[id].label`、`store.weatherHint.label`、地名
+//     （`place.name` / `c.name` / `c.admin`）、`alert.detail`（正文）、`e.headline`、
+//     `e.label`（解析层的 kindLabel）、测试结果里的 `res.detail`；
+//   · **曾经列在这里、0.9.1 起已经进表的两项**——留在这里是为了下一轮 review 不再把它们当漏翻：
+//     `store.detail`（源状态摘要：源名与状态文字现在都走 `t()`，见 07-store）、
+//     都道府县名（现在走 `prefLabelOf`：日文原名 / 中文名 / 罗马字三分支，见 01-constants）；
 //   · 语义标签里的专有名词原文：'気象庁'、'東京都'、'Data Source: Environment and Climate Change Canada'；
-//   · 源文本里的固定枚举（'Flood / Flash Flood / Coastal Flood Warning' / 'Watch' / 'Advisory' /
+//   · 源文本里的固定枚举（'Flood / Flood Warning' / 'Watch' / 'Advisory' /
 //     'Statement' / 'warning' / 'advisory'）——它们描述的是上游规则，不是我们的说法；
 //   · 单位与标识：'km'、'%'、'EEW'、'CENC'、'NOAA'、'NWS'、'ECCC'、'SSE'、'Web Audio'、
 //     'settings.yaml'、'localStorage'、'TROUBLESHOOTING.zh.md'、'dsh web'、'QuakeAlert'、'AI'；
 //   · 间隔符与破折号：' · '、' / '、'—'、'…'、'（'、'）'、'%' 这些不是文案。
+//
+// **归属待定（别当成漏翻）**：`e.suppressedReason`——它是管道层（11-pipeline）拼的"为什么没播报"，
+// 进履历条目的「说明」字段（日常可见），但既不在 11.10 的"要翻"清单里，也不属于"解析层 reason
+// 不翻"那一类。0.9.1 未做，登记在 CHANGELOG 的「有意不做」里。
 // ============================================================================
 
 const SETTINGS = {
@@ -153,7 +160,9 @@ const SETTINGS = {
     'settings.cities.overLimit': '…共 {n} 个，请输入关键词',
 
     // ---------- 已关注地区列表 ----------
-    'settings.watch.prefMeta': '{zh}（{jp}）',
+    // 只是**后缀**（原名），显示名由调用方按语言拼（`prefLabelOf`）——0.9.0 这里一度写成完整
+    // 形式 `'{zh}（{jp}）'`，而调用方前面已经拼过一次名字，界面上就成了「东京东京（東京都）」。
+    'settings.watch.prefMeta': '（{jp}）',
     'settings.watch.prefOrFull': ' · 全境',
     'settings.watch.prefDetail': ' · 已细化 {n} 个市区町村',
     'settings.watch.remove': '移除',
@@ -315,6 +324,26 @@ const SETTINGS = {
     'settings.diag.outcomeUnknown': '未知原因',
     'settings.diag.sentWeather': '已发送：{label}（{pref} / 警戒レベル{level}，{note}）',
     'settings.diag.scenarios': '每次点击换一个场景：{list}。',
+    // 测试场景的**显示名与说明**。场景数据本身（TEST_SCENARIOS / TEST_GEO_SCENARIOS）留在
+    // 05b / 05c 里保持纯数据，key 用它们的稳定标识（`sc.key`），所以那两个文件不必 import t()。
+    'settings.diag.scenario.landslide': '泥石流警戒情报',
+    'settings.diag.scenarioNote.landslide': '市町村级 / 电文本身即 L4',
+    'settings.diag.scenario.flood': '指定河川洪水予報（氾濫危険情報）',
+    'settings.diag.scenarioNote.flood': '级别写在主文里',
+    'settings.diag.scenario.heavyrain': '大雨危険警報',
+    'settings.diag.scenarioNote.heavyrain': '级别写在 Kind 名称里',
+    'settings.diag.scenario.stormsurge': '高潮危険警報',
+    'settings.diag.scenarioNote.stormsurge': '级别写在 Kind 名称里',
+    'settings.diag.scenario.landslide-l3': '泥石流警報（警戒レベル3）',
+    'settings.diag.scenarioNote.landslide-l3': '未达 L4：不播报',
+    'settings.diag.scenario.emsc': 'EMSC 地震（震中就在关注点）',
+    'settings.diag.scenarioNote.emsc': 'M6.2',
+    'settings.diag.scenario.usgs': 'USGS 地震（约 80km 外）',
+    'settings.diag.scenarioNote.usgs': 'M5.6 · 近处，小半径也可能不命中',
+    'settings.diag.scenario.noaa': 'NOAA 海啸注意报',
+    'settings.diag.scenarioNote.noaa': 'Tsunami Advisory',
+    'settings.diag.scenario.emsc-far': 'EMSC 远地地震（约 550km 外）',
+    'settings.diag.scenarioNote.emsc-far': 'M7.0 · 用于演示半径：半径 < 550km 时不命中',
     'settings.diag.sendGlobal': '发送测试全球警报',
     'settings.diag.needPlace': '请先在「地区」里添加一个位置，测试消息需要一个震中',
     'settings.diag.sentGlobal': '已发送：{label}（{note}）',
@@ -471,7 +500,7 @@ const SETTINGS = {
     'settings.cities.searchLabel': '{pref} の市区町村を検索',
     'settings.cities.overLimit': '…全 {n} 件です。キーワードを入力してください',
 
-    'settings.watch.prefMeta': '{zh}（{jp}）',
+    'settings.watch.prefMeta': '（{jp}）',
     'settings.watch.prefOrFull': ' · 全域',
     'settings.watch.prefDetail': ' · 市区町村 {n} 件',
     'settings.watch.remove': '削除',
@@ -556,7 +585,7 @@ const SETTINGS = {
     'settings.disaster.tradeoffCnTitle': '中国大陸の気象',
     'settings.disaster.tradeoffCn1': '大雨と地質災害の 2 種類のみです。雷電・強風・高温などは扱いません（毎日数十件になり画面が埋まるため）。',
     'settings.disaster.tradeoffCn2': '橙色以上でのみ通知します。黄色と青色は「履歴」に残るだけで、音も通知も出しません（おやすみ時間でも橙色は通さず、赤色のみ通します）。',
-    'settings.disaster.tradeoffCn3': '照合は行政区単位です。中国大陸の分支で選んだ省・市だけが登録地点となり、手入力の座標は関与しません。発表機関名が省級までの場合（海南省の直轄県など）は全省で通し、通知が多い側に倒します。',
+    'settings.disaster.tradeoffCn3': '照合は行政区単位です。中国大陸の区分で選んだ省・市だけが登録地点となり、手入力の座標は関与しません。発表機関名が省級までの場合（海南省の直轄県など）は全省で通し、通知が多い側に倒します。',
     'settings.disaster.tradeoffCn4': 'このデータには取消・最終報のフラグがありません：警報は期限が来ると一覧から消えるため、取消が届かないことは警報が有効という意味ではありません。',
     'settings.disaster.tradeoffOverseasTitle': '海外の気象',
     'settings.disaster.tradeoffOverseas1': '登録地点は「地域」ページの「その他の国・地域」で設定します。米国は郡と区画で判定し、半径 25km 以上のときは中心点の周囲も追加で照会するため、半径は近似でしかなく範囲内のすべての郡を網羅する保証はありません。カナダは半径を矩形範囲に換算して照会し、交差する警報をすべて命中とします。',
@@ -625,6 +654,24 @@ const SETTINGS = {
     'settings.diag.outcomeUnknown': '不明な理由',
     'settings.diag.sentWeather': '送信しました：{label}（{pref} / 警戒レベル{level}、{note}）',
     'settings.diag.scenarios': 'クリックごとに場面が変わります：{list}。',
+    'settings.diag.scenario.landslide': '土砂災害警戒情報',
+    'settings.diag.scenarioNote.landslide': '市町村単位 / 電文自体が L4',
+    'settings.diag.scenario.flood': '指定河川洪水予報（氾濫危険情報）',
+    'settings.diag.scenarioNote.flood': 'レベルは本文に記載',
+    'settings.diag.scenario.heavyrain': '大雨危険警報',
+    'settings.diag.scenarioNote.heavyrain': 'レベルは Kind 名に記載',
+    'settings.diag.scenario.stormsurge': '高潮危険警報',
+    'settings.diag.scenarioNote.stormsurge': 'レベルは Kind 名に記載',
+    'settings.diag.scenario.landslide-l3': '土砂災害警報（警戒レベル3）',
+    'settings.diag.scenarioNote.landslide-l3': 'L4 未満：通知しません',
+    'settings.diag.scenario.emsc': 'EMSC の地震（震源が登録地点そのもの）',
+    'settings.diag.scenarioNote.emsc': 'M6.2',
+    'settings.diag.scenario.usgs': 'USGS の地震（約 80km 離れている）',
+    'settings.diag.scenarioNote.usgs': 'M5.6 · 近いため、半径が小さいと命中しないことも',
+    'settings.diag.scenario.noaa': 'NOAA 津波注意報',
+    'settings.diag.scenarioNote.noaa': 'Tsunami Advisory',
+    'settings.diag.scenario.emsc-far': 'EMSC の遠地地震（約 550km 離れている）',
+    'settings.diag.scenarioNote.emsc-far': 'M7.0 · 半径のデモ用：半径 < 550km では命中しません',
     'settings.diag.sendGlobal': 'テストの世界警報を送信',
     'settings.diag.needPlace': '先に「地域」で地点を追加してください。テストメッセージには震源が必要です',
     'settings.diag.sentGlobal': '送信しました：{label}（{note}）',
@@ -779,7 +826,7 @@ const SETTINGS = {
     'settings.cities.searchLabel': 'Search municipalities in {pref}',
     'settings.cities.overLimit': '…{n} in total, type a keyword',
 
-    'settings.watch.prefMeta': '{zh} ({jp})',
+    'settings.watch.prefMeta': ' ({jp})',
     'settings.watch.prefOrFull': ' · whole prefecture',
     'settings.watch.prefDetail': ' · {n} municipalities',
     'settings.watch.remove': 'Remove',
@@ -880,7 +927,7 @@ const SETTINGS = {
     'settings.perm.unsupported': 'This browser does not support system notifications',
     'settings.strip.received': 'Received {n} pushes',
     'settings.strip.more': 'Details are under "More"',
-    'settings.section.language': 'Language / 言語',
+    'settings.section.language': 'Language',
     'settings.language.label': 'Interface language',
     'settings.section.source': 'Data source',
     'settings.source.prod': 'Production (live push)',
@@ -933,6 +980,24 @@ const SETTINGS = {
     'settings.diag.outcomeUnknown': 'unknown reason',
     'settings.diag.sentWeather': 'Sent: {label} ({pref} / warning level {level}, {note})',
     'settings.diag.scenarios': 'Each click moves to the next scenario: {list}.',
+    'settings.diag.scenario.landslide': 'Landslide warning information',
+    'settings.diag.scenarioNote.landslide': 'municipality level / the telegram itself is L4',
+    'settings.diag.scenario.flood': 'Designated river flood forecast (flooding risk)',
+    'settings.diag.scenarioNote.flood': 'the level is written in the body',
+    'settings.diag.scenario.heavyrain': 'Heavy rain critical warning',
+    'settings.diag.scenarioNote.heavyrain': 'the level is in the Kind name',
+    'settings.diag.scenario.stormsurge': 'Storm surge critical warning',
+    'settings.diag.scenarioNote.stormsurge': 'the level is in the Kind name',
+    'settings.diag.scenario.landslide-l3': 'Landslide warning (level 3)',
+    'settings.diag.scenarioNote.landslide-l3': 'below L4 — not announced',
+    'settings.diag.scenario.emsc': 'EMSC earthquake (epicentre right at the watch point)',
+    'settings.diag.scenarioNote.emsc': 'M6.2',
+    'settings.diag.scenario.usgs': 'USGS earthquake (~80 km away)',
+    'settings.diag.scenarioNote.usgs': 'M5.6 · nearby, so a small radius may still miss it',
+    'settings.diag.scenario.noaa': 'NOAA tsunami advisory',
+    'settings.diag.scenarioNote.noaa': 'Tsunami Advisory',
+    'settings.diag.scenario.emsc-far': 'EMSC distant earthquake (~550 km away)',
+    'settings.diag.scenarioNote.emsc-far': 'M7.0 · demonstrates the radius: not matched when radius < 550 km',
     'settings.diag.sendGlobal': 'Send test global alert',
     'settings.diag.needPlace': 'Add a location under Regions first — a test message needs an epicentre',
     'settings.diag.sentGlobal': 'Sent: {label} ({note})',

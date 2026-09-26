@@ -224,7 +224,11 @@ function stripComments(code) {
 const unknownKeys = new Map()
 for (const f of files) {
   const text = stripComments(readFileSync(path.join(SRC, f), 'utf8'))
-  for (const m of text.matchAll(/(^|[^\w$.])t\(\s*'([^']+)'/g)) {
+  // 末尾的 `(\s*\+)?` 用来**排除字符串拼接**：`t('settings.diag.scenario.' + sc.key)` 这类动态 key
+  // 只取到了前缀，并不是一个完整的 key，报出来是误报（0.9.1 加"测试场景名"表时就撞上了这个）。
+  // 动态 key 的存在性由断言守（sync-test 里"每个测试场景都有文案"那条），不在这里查。
+  for (const m of text.matchAll(/(^|[^\w$.])t\s*\(\s*['"`]([^'"`]+)['"`](\s*\+)?/g)) {
+    if (m[3]) continue
     if (!i18nKeys.has(m[2])) {
       if (!unknownKeys.has(m[2])) unknownKeys.set(m[2], [])
       unknownKeys.get(m[2]).push(f)

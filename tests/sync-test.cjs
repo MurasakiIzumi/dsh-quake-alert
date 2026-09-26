@@ -6934,6 +6934,187 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       t11.setLanguage('zh-CN')
     }
 
+    // ⑫ 0.9.1：review 结论的守卫（每条都对着 0.9.0 里真实漏掉的一类东西）
+    {
+      const t12 = loadClient().__test
+
+      // ---- 县名随语言（0.9.0 的 A 类：prefLabelOf 写好了却没被设置页用上）----
+      const wantPref = { 'zh-CN': '东京', ja: '東京都', en: 'Tokyo' }
+      for (const lang of t12.LANGS) {
+        t12.setLanguage(lang)
+        assert(t12.prefLabelOf('東京都') === wantPref[lang],
+          lang + ' 下 prefLabelOf(東京都) = ' + wantPref[lang] + '（实际 ' + t12.prefLabelOf('東京都') + '）')
+      }
+      t12.setLanguage('zh-CN')
+      assert(t12.prefLabelOf('不存在县') === '不存在县', 'prefLabelOf 认不出时原样返回（不显示空白）')
+      assert(t12.prefLabelOf('') === '', 'prefLabelOf 对空值返回空串')
+      const jpList = t12.PREFECTURES.map((p) => p.jp)
+      assert(jpList.every((jp) => typeof t12.PREF_EN[jp] === 'string' && t12.PREF_EN[jp]),
+        '47 个都道府县都有罗马字（PREF_EN）')
+      assert(Object.keys(t12.PREF_EN).length === jpList.length, 'PREF_EN 与 PREFECTURES 一一对应（无缺无多）')
+
+      // ---- t() 不能被原型链键名绕过（0.9.1 修复：改用 hasOwnProperty 取词）----
+      assert(t12.t('constructor') === 'constructor', "t('constructor') 回显 key 本身，而不是 Object 构造函数")
+      assert(t12.t('toString') === 'toString', "t('toString') 回显 key 本身")
+      assert(t12.t('valueOf') === 'valueOf', "t('valueOf') 回显 key 本身")
+      assert(t12.t('constructor', { a: 1 }) === 'constructor', '带参数时也不抛（旧实现在这里抛 TypeError）')
+
+      // ---- 测试场景名有文案（动态 key，check-imports 的字面量检查覆盖不到）----
+      const scenarios = [].concat(t12.TEST_SCENARIOS || [], t12.TEST_GEO_SCENARIOS || [])
+      assert(scenarios.length >= 9, '测试场景共 ' + scenarios.length + ' 个')
+      for (const sc of scenarios) {
+        for (const prefix of ['settings.diag.scenario.', 'settings.diag.scenarioNote.']) {
+          const k = prefix + sc.key
+          assert(t12.t(k) !== k && Boolean(t12.t(k)), '场景文案取得到：' + k)
+        }
+      }
+
+      // ---- 五个档位表的 labelKey 全部能取到文案 ----
+      // 0.9.0 那条断言的说明写的是"档位表的每个 labelKey"，实际只拼了 2 个表（另外 3 个没进
+      // 测试面）——11.8 教训 5（措辞越具体越要钉住）。这里五个表都列上，并先断言它们可见。
+      const optTables = {
+        SCALE_OPTIONS: t12.SCALE_OPTIONS, TSUNAMI_OPTIONS: t12.TSUNAMI_OPTIONS,
+        GLOBAL_MAG_OPTIONS: t12.GLOBAL_MAG_OPTIONS, CN_REPORT_MAG_OPTIONS: t12.CN_REPORT_MAG_OPTIONS,
+        RADIUS_PRESETS: t12.RADIUS_PRESETS,
+      }
+      const labelKeys = []
+      for (const name of Object.keys(optTables)) {
+        const list = optTables[name]
+        assert(Array.isArray(list) && list.length > 0, name + ' 在测试面上可见（否则这条断言会退化成"没有表要查"）')
+        for (const o of list) { assert(typeof o.labelKey === 'string', name + ' 的每一项都有 labelKey'); labelKeys.push(o.labelKey) }
+      }
+      assert(labelKeys.length >= 30, '五个档位表共 ' + labelKeys.length + ' 个 labelKey')
+      assert(labelKeys.every((k) => Boolean(t12.t(k)) && t12.t(k) !== k), '每个 labelKey 都能取到文案')
+
+      // ---- 每个源都有显示名（0.9.0 只有 jma 一条精确值断言）----
+      assert(t12.SOURCE_ORDER.every((id) => t12.sourceLabelOf(id) !== id),
+        'SOURCE_ORDER 里的每个源都有显示名：' + t12.SOURCE_ORDER.map((id) => id + '→' + t12.sourceLabelOf(id)).join(' · '))
+    }
+
+    // ⑬ 0.9.1：渲染冒烟——3 语言 × 5 页签，扫【插值残留 / 连续重复 / 漏翻的简体中文】
+    //   0.9.0 新增的 70 条断言全是"函数返回值对不对"，而 review 拓出的两条 A 类是"界面拼出来
+    //   对不对"（`东京东京（東京都）`、47 个中文县名），整类都没被覆盖。这个检查当初用十几行
+    //   临时脚本就拓出了它们，所以固化成断言。
+    //   范围：只覆盖"我们生成的界面文案"。源侧文本（kindLabel / 地名）与归属待定的
+    //   `suppressedReason` 不在内——所以 seed 里也不放它们，否则这条检查会误报。
+    {
+      const t13 = loadClient().__test
+      const smokeReact = () => ({
+        createElement: (ty, p, ...c) => ({ type: ty, props: p || {}, children: c.flat(4).filter((x) => x !== null && x !== undefined && x !== false && x !== true) }),
+        useState: (i) => [typeof i === 'function' ? i() : i, () => {}],
+        useEffect: () => {},
+        useRef: (v) => ({ current: v }),
+      })
+      const collectTexts = (node, out) => {
+        if (node === null || node === undefined || typeof node === 'boolean') return
+        if (typeof node === 'string' || typeof node === 'number') { out.push(String(node)); return }
+        if (Array.isArray(node)) { node.forEach((n) => collectTexts(n, out)); return }
+        if (node && node.children) collectTexts(node.children, out)
+      }
+      // 简体特有的字形（日文用的是另一套：東 / 報 / 発 / 関 / 個 / 時 / 間 …），所以日文界面
+      // 不会命中它。语言自己的显示名（'简体中文' / '日本語' / 'English'）按惯例用各语言的写法，
+      // 不算漏翻，要排除。
+      const SIMPLIFIED_ONLY = /[东见报灾发关个时间门问实为这们让还对开动务压页证据线边层简样买卖]/
+      const skipTexts = new Set(t13.LANGS.map((l) => t13.LANGUAGE_LABELS[l]))
+      const smokeCfg = (lang) => ({
+        version: 1, language: lang, source: 'prod', cnTransport: 'auto',
+        watch: { prefectures: ['東京都', '大阪府'], cities: [], places: [{ name: 'SiteA', lat: 35, lon: 139, radiusKm: 100 }] },
+        disasters: { earthquake: true, tsunami: true, weather: true, cnRainstorm: true, cnGeology: true, overseasWeather: true },
+        thresholds: { quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch', globalMagnitude: 4.5, cnReportMagnitude: 4.5 },
+        notify: { sound: true, system: true, volume: 0.7 }, dedupe: { windowMinutes: 10 },
+        quietHours: { enabled: true, start: '23:00', end: '07:00', breakForSevere: true },
+      })
+      // 一条履历记录，用来把"履历条目"那条渲染路径也盖住（label / headline 用日文原文，
+      // 那正是"源文本原样透传"的形态；不带 suppressedReason）。
+      const smokeHistory = JSON.stringify([{
+        key: 'smoke-1', id: 'smoke-1', kind: 'quake', label: '地震情報・各地の震度', severity: 'warn',
+        issued: '2026-09-26T10:00:00+09:00', headline: '最大震度4', hit: true, pref: '東京都',
+      }])
+      let rendered = 0
+      for (const lang of t13.LANGS) {
+        for (const tab of ['region', 'disaster', 'notify', 'history', 'misc']) {
+          const react = smokeReact()
+          const seed = {}
+          seed[t13.STORAGE_KEY] = JSON.stringify(smokeCfg(lang))
+          seed['dsh.quakeAlert.history'] = smokeHistory
+          const { exports: ex } = loadClientEx(seed, { react })
+          let tree
+          try { tree = ex.__test.SettingsPanel({ initialTab: tab }) } catch (e) {
+            assert(false, lang + ' / ' + tab + ' 设置页渲染抛错：' + e.message)
+            continue
+          }
+          const out = []
+          collectTexts(tree, out)
+          rendered++
+          const blob = out.join('\n')
+          const ph = [...new Set(blob.match(/\{[a-zA-Z]\w*\}/g) || [])]
+          assert(ph.length === 0, lang + ' / ' + tab + ' 渲染文本里没有未替换的插值' +
+            (ph.length ? '（' + ph.join(',') + '）' : ''))
+          const dup = [...new Set(out.filter((s) => /([\u4e00-\u9fff]{2,6})\1/.test(s)))]
+          assert(dup.length === 0, lang + ' / ' + tab + ' 没有重复拼接的文本' +
+            (dup.length ? '：' + JSON.stringify(dup[0].slice(0, 50)) : ''))
+          if (lang !== 'zh-CN') {
+            const leftover = [...new Set(out.filter((s) => SIMPLIFIED_ONLY.test(s) && !skipTexts.has(s)))]
+            assert(leftover.length === 0, lang + ' / ' + tab + ' 没有漏翻的简体中文' +
+              (leftover.length ? '：' + leftover.slice(0, 2).map((s) => JSON.stringify(s.slice(0, 40))).join(' ') : ''))
+          }
+        }
+      }
+      assert(rendered === 15, '渲染冒烟覆盖 3 语言 × 5 页签（实际 ' + rendered + ' 次）')
+    }
+
+    // ⑭ 0.9.1：存储层与 store 通知的守卫
+    //   0.9.0 的导出导入断言只查"内存里的配置对象变没变"，查不到 localStorage；而"切语言后
+    //   store 该重算并通知"当时完全没有断言（review 里把备份改成"失败也写"，1552 条全绿）。
+    {
+      // ---- 「校验失败什么都不写（连备份都不做）」要查**存储层** ----
+      const seed0 = { 'dsh.quakeAlert.v1': JSON.stringify(loadClient().__test.DEFAULT_CFG) }
+      const sandbox0 = loadClientEx(seed0)
+      const keysOf = () => [...sandbox0.storage.keys()].sort().join(',')
+      const beforeKeys = keysOf()
+      const badRes = sandbox0.exports.__test.importConfig('{"format":"other/app","formatVersion":1,"config":{}}')
+      assert(!badRes.ok && badRes.error === 'format', '坏文件被拒绝')
+      assert(keysOf() === beforeKeys, '校验失败时 localStorage 的键集合不变（含"连备份都不做"）：' + keysOf())
+      assert(sandbox0.exports.__test.loadConfigBackup() === null, '校验失败时不产生备份')
+
+      // ---- 备份写不进去时不能替换配置（0.9.1 修：旧实现照样替换并报成功）----
+      const fakeLs = { getItem: () => null, setItem: () => { throw new Error('QuotaExceededError') }, removeItem: () => {} }
+      const exQ = loadClientEx({}, { window: { localStorage: fakeLs } }).exports.__test
+      const qBefore = exQ.currentCfg().thresholds.quakeScale
+      const qCur = exQ.currentCfg()
+      const qWant = exQ.normalizeCfg(Object.assign({}, qCur, { thresholds: Object.assign({}, qCur.thresholds, { quakeScale: 55 }) }))
+      const qRes = exQ.importConfig(exQ.buildConfigExport(qWant))
+      assert(!qRes.ok && qRes.error === 'backup-failed', '备份写不进去时拒绝导入（错误码 backup-failed）：' + qRes.error)
+      assert(exQ.currentCfg().thresholds.quakeScale === qBefore, '拒绝导入时配置一个字都没动')
+
+      // ---- 畸形配置返回错误码而不是抛异常（0.9.1 修：旧实现抛 TypeError，UI 没有 catch → 点了没反应）----
+      const t14 = loadClient().__test
+      const weird = '{"format":"' + t14.CONFIG_FORMAT + '","formatVersion":1,"config":{"language":{"toString":null,"valueOf":null}}}'
+      let weirdThrew = false
+      let weirdRes = null
+      try { weirdRes = t14.parseConfigImport(weird) } catch (e) { weirdThrew = true }
+      assert(!weirdThrew && weirdRes && weirdRes.error === 'shape',
+        '转不成字符串的字段 → 返回 shape 错误码（而不是抛异常）')
+
+      // ---- BOM（0.9.1 修：记事本 / PowerShell 重存过的文件被当成"不是有效的 JSON"）----
+      assert(t14.parseConfigImport('\uFEFF' + t14.buildConfigExport(t14.currentCfg())).ok,
+        '带 UTF-8 BOM 的文件能导入')
+
+      // ---- 切语言要触发 store 重算 + 通知（0.9.1 修：旧实现 0 次通知、detail 停在旧语言）----
+      const exL = loadClient().__test
+      let notified = 0
+      exL.store.subscribe(() => { notified++ })
+      exL.store.pushSource('jma', { status: 'open', retries: 0 })
+      const n0 = notified
+      exL.applyCfg(Object.assign({}, exL.currentCfg(), { language: 'en' }))
+      assert(notified > n0, '切语言会通知 store 订阅者（旧实现 0 次 → 侧边栏状态点不重渲染）')
+      assert(exL.store.detail.indexOf('Connected') !== -1,
+        '切语言后 store.detail 重算成英文：' + exL.store.detail)
+      exL.setLanguage('zh-CN')
+      exL.store.recomputeStatus()
+      assert(exL.store.detail.indexOf('已连接') !== -1, '切回中文后状态文字也回来：' + exL.store.detail)
+    }
+
     // ⑧ 全球主要城市表（DESIGN 9.4）：数据结构、按国家分包下发、客户端缓存与 UI 入口
     {
       const world = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'world-cities.js')).href)

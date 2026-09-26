@@ -31,6 +31,8 @@ const CONFIG_IO = {
     'settings.configIo.errNewer': '文件来自更新版本的插件（格式版本 {v}），当前版本读不了。',
     'settings.configIo.errRead': '读取文件失败。',
     'settings.configIo.errNoFile': '没有选择文件。',
+    'settings.configIo.errBackupFailed': '当前环境无法保存备份（浏览器存储可能已满或被禁用）。为避免无法撤销，导入已取消。',
+    'settings.configIo.errUnexpected': '导入过程中出错了：{detail}',
   },
 
   ja: {
@@ -53,6 +55,8 @@ const CONFIG_IO = {
     'settings.configIo.errNewer': 'より新しいバージョンのプラグインが出力したファイルです（形式バージョン {v}）。現在のバージョンでは読み込めません。',
     'settings.configIo.errRead': 'ファイルの読み込みに失敗しました。',
     'settings.configIo.errNoFile': 'ファイルが選択されていません。',
+    'settings.configIo.errBackupFailed': 'この環境ではバックアップを保存できません（ブラウザの保存領域が満杯か、無効になっています）。元に戻せなくなるため、インポートを中止しました。',
+    'settings.configIo.errUnexpected': 'インポート中にエラーが発生しました：{detail}',
   },
 
   en: {
@@ -75,6 +79,8 @@ const CONFIG_IO = {
     'settings.configIo.errNewer': 'This file comes from a newer plugin version (format version {v}); this version cannot read it.',
     'settings.configIo.errRead': 'Could not read the file.',
     'settings.configIo.errNoFile': 'No file selected.',
+    'settings.configIo.errBackupFailed': 'Could not save a backup (browser storage may be full or disabled). The import was cancelled so it always stays undoable.',
+    'settings.configIo.errUnexpected': 'Something went wrong during the import: {detail}',
   },
 }
 

@@ -44,6 +44,14 @@ const PARTS = [CORE, SETTINGS, CONFIG_IO, UNITS]
  * 任一条不满足就抛错——bundle 装载即失败，比一条悄悄失效的断言更早、更明确。
  */
 function mergeParts(parts) {
+  // 每个语言还得有**显示名**（语言下拉的 label）。漏了的话 `LANGUAGE_OPTIONS` 会产出
+  // `{ v: 'ko', label: undefined }`——"加一种语言漏一步"的沉默失败，装载期就把它拦住
+  // （加语言 = LANGS 加一项 + LANGUAGE_LABELS 加一项 + 每份面补一栏，三者缺一不可）。
+  for (const lang of LANGS) {
+    if (typeof LANGUAGE_LABELS[lang] !== 'string' || !LANGUAGE_LABELS[lang]) {
+      throw new Error('i18n 语言缺显示名（LANGUAGE_LABELS）：' + lang)
+    }
+  }
   const tables = {}
   for (const lang of LANGS) tables[lang] = {}
   for (const part of parts) {
@@ -102,10 +110,17 @@ function getLanguage() { return currentLang }
 
 /** 取词。params 用于替换 `{name}`；缺 key 时回显 key 本身（见文件头）。 */
 function t(key, params) {
+  const k = String(key)
   const table = TABLES[currentLang] || TABLES[DEFAULT_LANGUAGE]
-  let s = table[key]
-  if (s === undefined) s = TABLES[DEFAULT_LANGUAGE][key]
-  if (s === undefined) return String(key)
+  // 用 `hasOwnProperty` 而不是直接 `table[k]`：key 恰好是 `constructor` / `toString` / `valueOf`
+  // 这类名字时，后者会命中原型链拿到一个函数——"缺 key 回显 key"的承诺不成立，而且带参数时
+  // 会在 `.replace` 上抛 TypeError。项目在 02-storage 的 `own()` 里立过同一条约定。
+  let s = Object.prototype.hasOwnProperty.call(table, k) ? table[k] : undefined
+  if (s === undefined) {
+    const def = TABLES[DEFAULT_LANGUAGE]
+    s = Object.prototype.hasOwnProperty.call(def, k) ? def[k] : undefined
+  }
+  if (s === undefined) return k
   if (params) {
     s = s.replace(/\{(\w+)\}/g, (m, name) => (
       Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : m
