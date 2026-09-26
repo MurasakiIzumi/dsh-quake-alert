@@ -99,8 +99,8 @@ function disclaimerOf(alert) {
  */
 function weatherActionHintOf(alert) {
   if (!alert) return '请关注当地官方发布的指引'
-  if (alert.locator === 'overseas') return '请关注当地官方发布的避难指引'
-  if (alert.locator === 'area') return '请关注当地气象台发布的指引'
+  if (alert.locator === 'overseas') return '请关注当地官方发布的避难与撤离指引'
+  if (alert.locator === 'area') return '请关注当地气象台发布的防御指引'
   return '请确认所在市町村的避难信息'
 }
 
@@ -111,7 +111,10 @@ function weatherActionHintOf(alert) {
 function alertTitleOf(alert) {
   if (!alert) return '灾害预警'
   // kindLabel 本身已区分「地震速报·震度速报」「地震情报·各地震度」等，不需要再拼后缀
-  if (alert.kind === 'eew') return '⚠ ' + (cnProductName(alert) || '紧急地震速报')
+  // **但「（警报）」不能省**（0.8.2 review 订正）：气象厅的「緊急地震速報」分警報与予報两级，
+  // kindLabel 写的是「紧急地震速报（警报）」，通知标题里删掉就成了两个说法（0.8.1 删过一次，
+  // 而守着它的断言说明写着"文案一个字都不能变"——测试绿、没人守）。分级是安全信息，不是括号冗余。
+  if (alert.kind === 'eew') return '⚠ ' + (cnProductName(alert) || '紧急地震速报（警报）')
   if (alert.kind === 'quake') return '🌐 ' + alert.kindLabel
   if (alert.kind === 'tsunami') return '🌊 ' + alert.kindLabel
   if (alert.kind === 'weather') return '🌧 ' + alert.kindLabel

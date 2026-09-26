@@ -21,7 +21,7 @@ import { noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effect
 import { parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of } from './05e-cn-parsers.js'
 import { parseNmcAlarm, orgOf, NMC_KIND_TEXT, NMC_LEVEL_TEXT, NMC_LEVEL_RANK, NMC_BROADCAST_MIN_RANK } from './05f-nmc-parsers.js'
 import { parseNwsAlert, parseEcccAlert, ecccKindTextOf, nwsEventKeyOf, nwsVtecKeyOf, ecccEventKeyOf, NWS_EVENT_WHITELIST, NWS_KIND_TEXT, NWS_SEVERITY, NWS_SEV_RANK, ECCC_COLOUR_SEVERITY, ECCC_COLOUR_RANK, ECCC_INCLUDE, ECCC_EXCLUDE, OVERSEAS_BROADCAST_MIN_RANK } from './05h-overseas-parsers.js'
-import { matchAlert, matchPointAlert, matchCnAreaAlert, matchOverseasAlert, cnPlaceParts, distanceKm, validGeo } from './06-matcher.js'
+import { matchAlert, matchPointAlert, matchCnAreaAlert, matchOverseasAlert, cnPlaceParts, cnWatchPlaces, distanceKm, validGeo } from './06-matcher.js'
 import { store, addEvent } from './07-store.js'
 import { unlockAudio, playSound, soundKindOf, audioState } from './08-audio.js'
 import { isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, ensureAlertChannel, closeAlertChannel, broadcastHistoryCleared, sourceIdOf, crossSourceCopyOf, noteAuthoritySuppressed, authorityStatsOf, SOURCE_RANK, SOURCE_ZH, SOURCE_AGENCY, agencyOf, CROSS_SOURCE_KINDS, rankOfSource, sourceZhOf } from './10-dedupe.js'
@@ -381,7 +381,7 @@ export const __test = {
   resetConnHealth, pruneHealth, noteFreshness, noteStale, loadHealth, publishStatus, republishDataHealth,
   SCHEMA_ESCALATE_COUNT, SCHEMA_ESCALATE_CONSECUTIVE, SCHEMA_ESCALATE_WINDOW_MS, HEALTH_TTL_MS,
   // 0.5.2：大陆气象源（nmc.cn）—— 解析层 / 契约 / 行政区层级匹配
-  parseNmcAlarm, orgOf, parseNmcAlarmResult, matchCnAreaAlert, cnPlaceParts, cnAreaOf, normAliases,
+  parseNmcAlarm, orgOf, parseNmcAlarmResult, matchCnAreaAlert, cnPlaceParts, cnWatchPlaces, cnAreaOf, normAliases,
   NMC_KIND_TEXT, NMC_LEVEL_TEXT, NMC_LEVEL_RANK, NMC_BROADCAST_MIN_RANK,
   // 0.6.0：海外气象源（美国 NWS / 加拿大 ECCC）—— 解析层 / 契约 / 事件键 / 白名单
   parseNwsAlert, parseEcccAlert, parseNwsAlertResult, parseEcccAlertResult,

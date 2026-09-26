@@ -355,8 +355,11 @@ const freshCfg = () => cloneCfg(DEFAULT_CFG);
 /**
  * 关注点的**来源分支**（0.8.0 / DESIGN 9.3）。
  *
- * 取值 jp / cn / global。它回答"这个关注点是在哪个国家的分支下加的"，3.4 的跨源权威源据此
- * 判断权威源，诊断快照里也要能看到（判错时第一个要核的就是"这个点被算作了谁的分支"）。
+ * 取值 jp / cn / global。它回答"这个关注点是在哪个国家的分支下加的"，两个消费者：
+ * ① 3.4 的跨源权威源据此判断权威源；② 06-matcher 的大陆气象（行政区层级）匹配据此挑出
+ * 参与匹配的大陆关注点（0.8.2 / DESIGN 11.9 B——此前那边是"名字里有没有 `·`"，手填坐标
+ * 只要名字带 `·` 就会被算成大陆点）。诊断快照里也要能看到（判错时第一个要核的就是
+ * "这个点被算作了谁的分支"）。
  *
  * **老配置没有这个字段，不能因此判它非法**——那等于把用户攒下的关注点整条丢掉。缺失时按
  * **名称形状推导**：设置页的「中国大陆」级联产出的名字恒为「省·市」（见 04-city-table 的
@@ -383,13 +386,33 @@ function normalizePlaces(list) {
     if (seen.has(key)) continue
     seen.add(key);
     const name = strOr(p.name, '').slice(0, 30).trim() || (lat.toFixed(2) + ', ' + lon.toFixed(2));
-    out.push({
+    const origin = placeOriginOf(p, name);
+    const entry = {
       name,
       lat,
       lon,
       radiusKm: numOr(p.radiusKm, 300, 1, 2000),
-      origin: placeOriginOf(p, name),
-    });
+      origin,
+    };
+    // 大陆关注点的省 / 市（0.8.2 / DESIGN 11.9 B）：显式落在 place 上，matcher 与诊断不再从
+    // 「省·市」这个名字反推。老配置（0.8.1 及以前）只有名字，这里**迁移一次并固化**——名字形状
+    // 已经是 `placeOriginOf` 判 'cn' 的依据，所以这一步不会改变既有归属，只是把结论写下来。
+    if (origin === 'cn') {
+      let province = strOr(p.province, '').slice(0, 20).trim();
+      let city = strOr(p.city, '').slice(0, 20).trim();
+      if (!province || !city) {
+        const i = name.indexOf('·');
+        if (i > 0 && i < name.length - 1) {
+          if (!province) province = name.slice(0, i);
+          if (!city) city = name.slice(i + 1);
+        }
+      }
+      if (province && city) {
+        entry.province = province;
+        entry.city = city;
+      }
+    }
+    out.push(entry);
     if (out.length >= MAX_WATCH_PLACES) break
   }
   return out
@@ -978,7 +1001,9 @@ function cnPlaceOf(province, city, radiusKm) {
   if (!c) return null
   const r = Number(radiusKm);
   if (!Number.isFinite(r) || r < 1 || r > 2000) return null
-  return { name: province + '·' + city, lat: c.lat, lon: c.lon, radiusKm: r, origin: 'cn' }
+  // province / city 显式落在关注点上（0.8.2 / DESIGN 11.9 B）：matcher 按行政区匹配时不再需要
+  // 从「省·市」这个名字反推。名字仍然保留——它是界面上给人看的标签，不是判据。
+  return { name: province + '·' + city, lat: c.lat, lon: c.lon, radiusKm: r, origin: 'cn', province, city }
 }
 
 // ---------- 全球主要城市表（0.8.0 / DESIGN 9.4：按国家分包，展开某国时才拉） ----------
@@ -4352,16 +4377,54 @@ function missReason(alert, watch, base) {  const list = watch && watch.prefectur
 
 // ---------- 行政区层级匹配（大陆气象源，0.5.2 / DESIGN 8.5） ----------
 /**
- * 关注点名字 → 行政区对。设置页「中国大陆」加进来的点由 04-city-table 的 cnPlaceOf 生成，
+ * 「省·市」名字 → 行政区对。设置页「中国大陆」加进来的点由 04-city-table 的 cnPlaceOf 生成，
  * 名字固定是「省·市」（用 U+00B7 分隔，以免两个省的"城区"撞名）。
- * 不含分隔符的点（手填坐标、全球关注点）返回 null——**行政区层级匹配不适用于它们**，
- * 忽略而不是报错：同一个 places 列表同时服务坐标型源（地震）与行政型源（气象）。
+ *
+ * **它不再是"这个点算不算大陆点"的判据**（0.8.2 / DESIGN 11.9 B）——那个判据是 `origin`，
+ * 见 `cnWatchPlaces`。这里只做一件事：给 0.8.1 及以前存下的老配置（place 上只有名字、
+ * 没有显式 `province` / `city`）解析出省 / 市，迁移一次之后就不再需要。
  */
 function cnPlaceParts(name) {
   const s = String(name === undefined || name === null ? '' : name).trim();
   const i = s.indexOf('·');
   if (i <= 0 || i === s.length - 1) return null
   return { province: s.slice(0, i), city: s.slice(i + 1) }
+}
+
+const trimmed = (v) => (typeof v === 'string' ? v.trim() : '');
+
+// 「一个大陆关注点都没配」的说明。noWatch 与普通未命中的区别见 11-pipeline：前者不进历史。
+const NO_CN_WATCH_REASON = '未设置中国大陆关注点（设置 → 灾害预警 → 关注地区 → 中国大陆 → 选省与城市）';
+
+/**
+ * 从关注点列表里挑出**大陆关注点**，并给出每条的省 / 市（0.8.2 / DESIGN 11.9 B）。
+ *
+ * 判据是 0.8.0 就有的显式来源分支 `origin`（DESIGN 9.3），且走 02-storage 的 `placeOriginOf`
+ * ——与 `normalizePlaces` 用**同一个函数**，两处口径不会各写一份然后漂开。
+ * 原实现是「名字里有没有 `·`」：手填坐标（origin 是 'global'）只要名字里带 `·` 就被算成大陆点，
+ * 未命中也会往履历里写；而 `origin` 缺失的老配置由 `placeOriginOf` 按同一形状规则推导，
+ * 所以这条回退不会把 0.8.1 及以前的大陆关注点判丢。
+ *
+ * 省 / 市优先读 place 上的显式字段（0.8.2 起 `cnPlaceOf` 写入），缺失时回退解析「省·市」名字。
+ * 回退**只发生在已经确定是大陆点之后**——它服务的是老配置，不是判定依据。
+ */
+function cnWatchPlaces(places) {
+  const out = [];
+  for (const p of places) {
+    if (!p) continue
+    if (placeOriginOf(p, p.name) !== 'cn') continue
+    let province = trimmed(p.province);
+    let city = trimmed(p.city);
+    if (!province || !city) {
+      const parts = cnPlaceParts(p.name);
+      if (parts) {
+        if (!province) province = parts.province;
+        if (!city) city = parts.city;
+      }
+    }
+    out.push({ place: p, province, city });
+  }
+  return out
 }
 
 /** 等级中文（与 05f 的 NMC_LEVEL_TEXT 同源；这里只需要拼 reason，不复制映射表会更好，
@@ -4372,11 +4435,14 @@ const NMC_LEVEL_ZH = { red: '红色', orange: '橙色', yellow: '黄色', blue: 
  * 大陆气象预警的匹配。规则按优先级排，每一条都对应一个"用户会问为什么"的场景：
  *
  *  ① 灾种开关（DESIGN 8.4 把它们拆成两个：暴雨的橙 / 红常年可见，地质灾害实测全是黄色）。
- *  ② 播报门槛：**橙色及以上**才打扰，黄 / 蓝只入历史。不满足时 reason 要说清是"等级不够"，
+ *  ② **先确认有没有大陆关注点，再看播报门槛**（0.8.2 调整，DESIGN 11.9 A）。原来门槛排在前面，
+ *     于是"一个大陆关注点都没配"的用户，黄 / 蓝预警会持续写进履历——同一路数据橙色以上不进历史、
+ *     蓝色却进，两种口径（11-pipeline 的 `noWatch` 只对走到后面那条分支的条目生效）。
+ *  ③ 播报门槛：**橙色及以上**才打扰，黄 / 蓝只入历史。不满足时 reason 要说清是"等级不够"，
  *     而不是含糊的"未命中"——否则用户会把"这条预警我收到了但没响"读成故障。
- *  ③ 归属：市能对上就用市；市对不上（省直辖县 / 省台发布 / 机构名错字）时**按省放行**；
+ *  ④ 归属：市能对上就用市；市对不上（省直辖县 / 省台发布 / 机构名错字）时**按省放行**；
  *     连省都认不出（国家级机构等）也放行。后两条都是 DESIGN 3.2 / 8.5 的"宁可多报绝不漏报"
- *     ——一次漏报的代价远大于一次多报。
+ *     ——一次漏报的代价远大于一次多报。**放行的对象只有真正的大陆关注点**（见 cnWatchPlaces）。
  */
 function matchCnAreaAlert(alert, cfg) {
   const d = cfg.disasters || {};
@@ -4388,25 +4454,18 @@ function matchCnAreaAlert(alert, cfg) {
   if (alert.cancelled) return { hit: false, reason: '解除消息不提醒' }
   const levelZh = NMC_LEVEL_ZH[alert.cnLevel] || String(alert.cnLevel || '');
   const what = (alert.cnKind === 'geology' ? '地质灾害' : '暴雨') + levelZh + '预警';
-  const rank = typeof alert.cnRank === 'number' ? alert.cnRank : 0;
-  if (rank < 3) {
-    return { hit: false, reason: what + '（未达橙色，仅记录）' }
-  }
   const places = (cfg.watch && cfg.watch.places) || [];
-  const cnPlaces = [];
-  for (const p of places) {
-    const parts = cnPlaceParts(p && p.name);
-    if (parts) cnPlaces.push({ place: p, province: parts.province, city: parts.city });
-  }
+  const cnPlaces = cnWatchPlaces(places);
   if (cnPlaces.length === 0) {
     // 与坐标型源同一条原则：没有关注点就明确说明怎么加，**不静默**——
     // "配错了关注点"看起来像"根本没有预警"是这套系统最该避免的误解之一。
     // `noWatch` 让 11-pipeline 能把这一类和"命中了但不在列表里"区分开（前者不进历史，0.5.4）。
-    return {
-      hit: false,
-      noWatch: true,
-      reason: '未设置中国大陆关注点（设置 → 灾害预警 → 关注地区 → 中国大陆 → 选省与城市）',
-    }
+    // 它必须排在门槛之前：否则黄 / 蓝预警会绕过 noWatch 继续进历史（DESIGN 11.9 A）。
+    return { hit: false, noWatch: true, reason: NO_CN_WATCH_REASON }
+  }
+  const rank = typeof alert.cnRank === 'number' ? alert.cnRank : 0;
+  if (rank < 3) {
+    return { hit: false, reason: what + '（未达橙色，仅记录）' }
   }
   const area = alert.cnArea || {};
   const province = String(area.province || '');
@@ -4424,6 +4483,8 @@ function matchCnAreaAlert(alert, cfg) {
   // 市级归属未知：省内有任何一个关注点就放行，并在 reason 里如实说明只定位到省。
   // 实测这一类的来源是海南省直辖县（乐东 / 昌江 / 琼中…）、上海市辖区，以及上游的机构名错字
   //（「黑龙江省齐哈尔市克山县」少了"齐"）——它们都是真实预警，丢掉就是漏报。
+  // 省名也认不出时按全国放行，同样是 DESIGN 8.4 的兜底（国家级机构发布的预警没有省可对）。
+  // 这一条以前会把**任一**关注点（含手填坐标）当放行依据，现在 `cnPlaces` 只剩真正的大陆点。
   const sameProv = cnPlaces.filter((p) => !province || p.province === province);
   if (sameProv.length > 0) {
     return {
@@ -5248,8 +5309,8 @@ function disclaimerOf(alert) {
  */
 function weatherActionHintOf(alert) {
   if (!alert) return '请关注当地官方发布的指引'
-  if (alert.locator === 'overseas') return '请关注当地官方发布的避难指引'
-  if (alert.locator === 'area') return '请关注当地气象台发布的指引'
+  if (alert.locator === 'overseas') return '请关注当地官方发布的避难与撤离指引'
+  if (alert.locator === 'area') return '请关注当地气象台发布的防御指引'
   return '请确认所在市町村的避难信息'
 }
 
@@ -5260,7 +5321,10 @@ function weatherActionHintOf(alert) {
 function alertTitleOf(alert) {
   if (!alert) return '灾害预警'
   // kindLabel 本身已区分「地震速报·震度速报」「地震情报·各地震度」等，不需要再拼后缀
-  if (alert.kind === 'eew') return '⚠ ' + (cnProductName(alert) || '紧急地震速报')
+  // **但「（警报）」不能省**（0.8.2 review 订正）：气象厅的「緊急地震速報」分警報与予報两级，
+  // kindLabel 写的是「紧急地震速报（警报）」，通知标题里删掉就成了两个说法（0.8.1 删过一次，
+  // 而守着它的断言说明写着"文案一个字都不能变"——测试绿、没人守）。分级是安全信息，不是括号冗余。
+  if (alert.kind === 'eew') return '⚠ ' + (cnProductName(alert) || '紧急地震速报（警报）')
   if (alert.kind === 'quake') return '🌐 ' + alert.kindLabel
   if (alert.kind === 'tsunami') return '🌊 ' + alert.kindLabel
   if (alert.kind === 'weather') return '🌧 ' + alert.kindLabel
@@ -7532,9 +7596,15 @@ function urlOfLocal(base, params) {
 // ============================================================================
 
 
-/** 快照格式版本（与插件版本无关，见文件头）。0.8.0 起为 2：新增 `authority` 段，
- *  `config.watch.places[]` 增加 `origin`。 */
-const DIAG_SNAPSHOT_VERSION = 2;
+/** 快照格式版本（与插件版本无关，见文件头）。逐版对应：
+ *  · 1 = 0.5.0 起的初始形状
+ *  · 2 = 0.8.0（新增 `authority` 段 + `config.watch.places[].origin`）；0.8.1 把 `config.language`
+ *    加在了 2 里没提号（review 时发现两种形状都自称 2，所以下面这条规则要真的执行）
+ *  · 3 = 0.8.2（`config.watch.places[]` 再增 `province` / `city`）
+ *
+ *  **加字段就提号**（0.8.0 的先例）：读快照的一方据此知道"这份快照有哪些键"，
+ *  缺键 = 来自更早的版本，而不是"这一项没配"。 */
+const DIAG_SNAPSHOT_VERSION = 3;
 
 const str = (v) => String(v === undefined || v === null ? '' : v);
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
@@ -7653,6 +7723,10 @@ function watchSummary(cfg) {
       // 0.8.0：来源分支（jp / cn / global）。它决定"这个关注点归哪个源"（DESIGN 9.3 → 3.4），
       // 诊断里必须能看到——权威源判错时，第一个要核的就是"这个点被算作了谁的分支"。
       origin: str(p && p.origin) || 'global',
+      // 0.8.2：大陆关注点的省 / 市（DESIGN 11.9 B）。行政区层级匹配现在读它，不再从名字反推，
+      // 所以诊断里也要看得到——"为什么这条大陆预警没命中"的第一个要核的就是这两个值。
+      // 非大陆点不写这两个键，免得快照里多出一堆空字段。
+      ...(str(p && p.origin) === 'cn' ? { province: str(p && p.province), city: str(p && p.city) } : {}),
     })),
     placesCount: places.length,
   }
@@ -7752,7 +7826,11 @@ function buildDiagSnapshot(now) {
       },
       cnTransport: str(cfg.cnTransport) || 'auto', // 'auto'（默认，SSE 可自动降级）| 'poll'（用户强制轮询）
       // 界面语言（0.8.1 先立字段）。现在只有 zh-CN；0.9.0 落地本地化后，
-      // "界面没跟着切"这类问题第一个要核的就是这一项（它总由 normalizeCfg 保证有值）。
+      // "界面没跟着切"这类问题第一个要核的就是这一项。
+      // **它是归一后的生效值，不是持久层原值**（0.8.2 review 订正）：`cfg` 来自 `currentCfg()`，
+      // 而那条路一定过 `normalizeCfg`，所以手改配置写进去的、或将来降级留下的非法值在这里
+      // 已经被换成默认值——这一项能回答"界面现在按哪个语言渲染"，回答不了"配置里原本写了什么"。
+      // 要区分后者得带 Host user 层的原值，那是 0.9.0 本地化落地时一并决定的事。
       language: str(cfg.language),
       watch: safe(() => watchSummary(cfg), {}, warnings, 'watch'),
     }), {}, warnings, 'config'),
@@ -7897,6 +7975,9 @@ const s = {
   // 全库此前只有历史条目与状态点两处 aria 属性（CHANGELOG 记过），而 DESIGN 从未把无障碍
   // 记为"有意不做"，所以这是遗漏而不是取舍。
   // `extra`（第 6 参）：调用方追加的样式（例如语言下拉要 `flex: 1` 撑满一行）。
+  // 合并顺序有讲究（0.8.2 review）：自绘箭头的三项**写在 `extra` 之后**。`background` 是简写，
+  // 调用方只要带上它就会把 `backgroundImage` 一起清掉、而且不报任何错（0.8.1 修过一次同一个坑），
+  // 所以关键样式最后落，任何 extra 都盖不掉。
   select: (value, options, onChange, textOf, label, extra) => h('select', {
     value, onChange: (e) => onChange(e.target.value),
     'aria-label': label || undefined,
@@ -7906,9 +7987,10 @@ const s = {
       // 右侧留 26px 给箭头（自绘的，位置由 backgroundPosition 定）
       padding: '4px 26px 4px 8px', fontSize: 12, minWidth: 180,
       appearance: 'none', WebkitAppearance: 'none', MozAppearance: 'none',
+    }, extra || {}, {
       backgroundImage: SELECT_ARROW, backgroundRepeat: 'no-repeat',
       backgroundPosition: 'right 8px center', backgroundSize: '10px 6px',
-    }, extra || {}),
+    }),
   }, options.map((o) => h('option', {
     key: String(o.v !== undefined ? o.v : o.g), value: String(o.v !== undefined ? o.v : o.g),
     style: { background: '#ffffff', color: '#1a1a1a' },
@@ -8682,7 +8764,10 @@ function SettingsPanel(props) {
 
     // —— 海啸：日本 552 与 NOAA CAP 共用等级闸门 ——
     disasterGroup('海啸', 'tsunami', '提醒'),
-    disasterRow('日本 · 全球（NOAA）', '按预警等级', [thSelect('tsunamiGrade', TSUNAMI_OPTIONS, false, '海啸等级')]),
+    // 0.8.2 review：note 要写清全球源看的是**关注点**（`places`），不是日本那 47 个都道府县。
+    // 0.8.1 瘦身时把这句删了，只留"按预警等级"——只配了日本县级关注的用户会以为这一行已经
+    // 覆盖 NOAA 海啸，实际匹配走的是「其他国家 / 地区」里的关注点半径。
+    disasterRow('日本 · 全球（NOAA）', '全球源按关注点半径判定', [thSelect('tsunamiGrade', TSUNAMI_OPTIONS, false, '海啸等级')]),
 
     // —— 气象：三家的门槛都固定在该机构真正代表危险的那一档 ——
     // L1/L2 要求的动作不是桌面弹窗能承载的，L3 面向老年人；L4（避難指示级）才真正涉及人身财产
@@ -8800,8 +8885,10 @@ function SettingsPanel(props) {
     store.received > 0
       ? h('span', { style: { color: '#9aa0a6' } }, '已收到 ' + store.received + ' 条推送')
       : null,
-    // 告诉用户"更细的在哪"，但已经在那一页时就不必再说
-    tab === 'misc' ? null : h('span', { style: { color: '#6b7280', fontSize: 11, marginLeft: 'auto' } }, '详情在「其他」里'));
+    // 告诉用户"更细的在哪"，但已经在那一页时就不必再说。
+    // 颜色用 #9aa0a6 而不是更暗的灰（0.8.2 review）：11px 小字在深色底上要过 AA 4.5:1，
+    // 原 #6b7280 只有约 3.4:1，和其余次要文字同一档更稳（也让整页少一种灰）。
+    tab === 'misc' ? null : h('span', { style: { color: '#9aa0a6', fontSize: 11, marginLeft: 'auto' } }, '详情在「其他」里'));
 
   /**
    * 界面语言（0.8.1 先立选项，本地化在 0.9.0）。
@@ -8928,7 +9015,9 @@ function SettingsPanel(props) {
     ),
     s.row(s.checkbox(cfg.quietHours.breakForSevere, (v) => setCfg((c) => ({ ...c, quietHours: { ...c.quietHours, breakForSevere: v } })), '紧急警报仍提醒（EEW、海啸警报、震度6弱以上、气象4级以上）')),
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 6 } },
-      '跨夜时段写成 23:00–07:00。免打扰期间仍会记录。'),
+      // 时区基准必须写出来（0.8.2 review 补回）：不写的话"23:00"是本地时间还是 JST 全靠猜，
+      // 而这个判定用的是**浏览器本地时间**（inQuietHours），跨时区用户猜错就会在半夜被响铃。
+      '按浏览器本地时间判定。跨夜时段写成 23:00–07:00。免打扰期间仍会记录。'),
   );
 
   // 测试与诊断（0.8.0 合并）：两类测试按钮都是"无灾情时验证整条链路"的入口，与源状态、
@@ -9515,7 +9604,7 @@ const __test = {
   resetConnHealth, pruneHealth, noteFreshness, noteStale, loadHealth, publishStatus, republishDataHealth,
   SCHEMA_ESCALATE_COUNT, SCHEMA_ESCALATE_CONSECUTIVE, SCHEMA_ESCALATE_WINDOW_MS, HEALTH_TTL_MS,
   // 0.5.2：大陆气象源（nmc.cn）—— 解析层 / 契约 / 行政区层级匹配
-  parseNmcAlarm, orgOf, parseNmcAlarmResult, matchCnAreaAlert, cnPlaceParts, cnAreaOf, normAliases,
+  parseNmcAlarm, orgOf, parseNmcAlarmResult, matchCnAreaAlert, cnPlaceParts, cnWatchPlaces, cnAreaOf, normAliases,
   NMC_KIND_TEXT, NMC_LEVEL_TEXT, NMC_LEVEL_RANK, NMC_BROADCAST_MIN_RANK,
   // 0.6.0：海外气象源（美国 NWS / 加拿大 ECCC）—— 解析层 / 契约 / 事件键 / 白名单
   parseNwsAlert, parseEcccAlert, parseNwsAlertResult, parseEcccAlertResult,

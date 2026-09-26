@@ -4070,11 +4070,15 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '大陆源的产品名与日本源区分开（気象庁叫「緊急地震速報」，CENC 叫「地震预警」）')
       assert(t8.alertTitleOf(eewAlert) === '⚠ 大陆地震预警',
         '大陆预警的通知标题不该套用日方产品名（用户会以为是日本气象厅发的）')
-      // 对照组：日本 EEW（556）的文案一个字都不能变——改文案的范围只限大陆源
+      // 对照组：日本 EEW（556）的文案一个字都不能变——改文案的范围只限大陆源。
+      // 0.8.2 review：0.8.1 把这里的期望值改成 '⚠ 紧急地震速报'，却把这句说明留成了"保持不变"——
+      // 断言与它自己的说明互相矛盾，等于把"没人守"藏在一条绿的断言里。
       const jpEew = t8.parse(JSON.parse(fs.readFileSync(
         path.join(ROOT, 'samples', 'eew-ibaraki-m6.7-20260823.json'), 'utf8')))
-      assert(jpEew && jpEew.kind === 'eew' && t8.alertTitleOf(jpEew) === '⚠ 紧急地震速报',
+      assert(jpEew && jpEew.kind === 'eew' && t8.alertTitleOf(jpEew) === '⚠ 紧急地震速报（警报）',
         '日本 EEW 的文案保持不变（只把大陆源换成「地震预警」）')
+      assert(t8.alertTitleOf(jpEew).indexOf('警报') !== -1 && jpEew.kindLabel.indexOf('警报') !== -1,
+        '通知标题与履历 label 对"是不是警报级"说法一致：' + t8.alertTitleOf(jpEew) + ' / ' + jpEew.kindLabel)
       assert(t8.disclaimerOf(jpEew).indexOf('気象庁') !== -1, '日本 EEW 的免责声明仍指向気象庁')
       assert(t8.authorityOf(eewAlert) === '中国地震台网（CENC）', '大陆源的"官方"是中国地震台网')
       assert(t8.disclaimerOf(eewAlert).indexOf('中国地震台网') !== -1,
@@ -4389,6 +4393,35 @@ console.log('== 机器级持久化：Host settings 桥 ==')
           return []
         }
       }
+      /** 渲染并返回 Element 树本身（要按结构断言时用；textsOfTree 只给文本）。 */
+      const renderTree = (seed, tab) => {
+        const react = mkTestReact()
+        const { exports: ex } = loadClientEx(seed || {}, { react })
+        ex.__test.setCnAreas(CN_AREAS)
+        react.__reset()
+        return ex.__test.SettingsPanel({ initialTab: tab })
+      }
+      /**
+       * 取出**页签栏**的五个按钮文本。
+       *
+       * 0.8.2 review：原来"选项卡栏渲染出五页"检查的是 '地区'/'灾害'/'通知'/'履历'/'其他' 这五个词
+       * 是否出现在渲染文本里——而它们本来就会被页面正文里的同名词（"其他国家 / 地区"等）补偿，
+       * 所以把页签标签写成 '地方' 也照样绿。这里改成按结构取：页签是唯一同时带 `onClick` 与
+       * `aria-current` 的按钮（`s.btn` 的分支按钮没有后者），因此标签写错、数量不对都会红。
+       */
+      const tabBarTexts = (tree) => {
+        const out = []
+        const walk = (n) => {
+          if (!n || typeof n !== 'object') return
+          if (Array.isArray(n)) { n.forEach(walk); return }
+          if (n.type === 'button' && n.props && typeof n.props.onClick === 'function' && 'aria-current' in n.props) {
+            out.push((n.children || []).filter((c) => typeof c === 'string').join(''))
+          }
+          if (n.children) n.children.forEach(walk)
+        }
+        walk(tree)
+        return out
+      }
       /** 预置一份本地配置：inferRegionTab 据其中的 origin 决定展开哪个分支。 */
       const seedCfg = (watch) => ({
         'dsh.quakeAlert.v1': JSON.stringify({
@@ -4401,8 +4434,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       // —— 地区页：日本分支（未配置任何关注点时的默认落点）——
       const jpTexts = safeRender({}, 'region', '设置页（地区 / 日本分支）')
       const jpHas = mkHas(jpTexts)
-      assert(jpHas('地区') && jpHas('灾害') && jpHas('通知') && jpHas('履历') && jpHas('其他'),
-        '选项卡栏渲染出五页（0.8.1：设置页不再是一列到底）')
+      const jpTabTexts = tabBarTexts(renderTree({}, 'region'))
+      assert(jpTabTexts.join('|') === '地区|灾害|通知|履历|其他',
+        '页签恰好是这五页，且标签正确（0.8.2 review：原来靠正文里的同名词兜着，标签写错也看不出来）：' + jpTabTexts.join('|'))
       assert(jpHas('关注地区'), '渲染结果里有「关注地区」')
       assert(jpHas('关注地区') && jpHas('其他国家 / 地区'),
         '第一级是唯一的「国家 / 地区」选择器（分支按钮直接是区块第一行，没有再套一层说明）')
@@ -4423,8 +4457,16 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '按灾种分组的分组标题都在（一行一个灾种）')
       assert(disHas('警戒4级以上'),
         '固定门槛写成只读文字（做成置灰下拉会让人以为能调）')
-      assert(disHas('暴雨预警') && disHas('地质灾害预警') && disHas('橙色以上') && disHas('没有取消或最终报标志'),
+      assert(disHas('全球源按关注点半径判定'),
+        '海啸行写清全球源看的是关注点（0.8.2 review：0.8.1 把这句删了，只配日本县级的用户' +
+        '会以为这一行已经覆盖 NOAA 海啸，实际匹配走 places）')
+      assert(disHas('暴雨预警') && disHas('地质灾害预警') && disHas('橙色以上才播报') &&
+        disHas('黄色和蓝色会记进「履历」') && disHas('没有取消或最终报标志'),
         '大陆气象的开关与门槛说明都在（DESIGN 10.2 要求 UI 不得假装能处理）')
+      // 正向锚点会被同一行右侧的只读门槛值（fixedGate('橙色以上')）喂饱——0.8.2 review 实测：
+      // 把判据句改成"黄色以上才播报"照样绿。所以反过来钉住"更宽的话"不许出现。
+      assert(!disHas('所有等级都播报') && !disHas('黄色以上才播报') && !disHas('蓝色以上才播报'),
+        '门槛没有被说成比「橙色以上」更宽（DESIGN 10.2：界面如实说明"哪些只记录不提醒"）')
       assert(disHas('洪水 / 山洪 / 降雨 / 风暴潮') &&
         disHas('Data Source: Environment and Climate Change Canada') &&
         disHas('打开页面时，如果某条预警已经发布超过 6 小时'),
@@ -4436,6 +4478,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(ntHas('通知与声音') && ntHas('静默时段'), '通知页含「通知与声音」与「静默时段」两块')
       assert(ntHas('试听地震音') && ntHas('测试系统通知'), '试听与测试按钮在通知页')
       assert(ntHas('跨夜时段写成 23:00–07:00'), '静默时段的说明也在（压缩成一行）')
+      assert(ntHas('按浏览器本地时间判定'),
+        '静默时段写明时区基准（判定用的是浏览器本地时间；不写的话跨时区用户只能在半夜被响铃后才知道）')
 
       // —— 履历页 ——
       const hiTexts = safeRender({}, 'history', '设置页（履历页）')
@@ -4455,11 +4499,23 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       // —— 常驻状态条：在选项卡**之外**，所以每一页都看得到，且只报"通不通 + 几条" ——
       const stripHas = (texts) => texts.some((t) => t.indexOf('未启动') !== -1)
       assert(stripHas(jpTexts) && stripHas(disTexts) && stripHas(ntTexts) && stripHas(hiTexts) && stripHas(msTexts),
-        '状态条在五页里都可见（0.8.1：不必切页就知道通不通）')
+        '状态条不随页切换消失（它挂在面板根上、不在任何 tab 分支里；0.8.2 review 把说明改准：' +
+        '这条守的是"常驻"，不是"每页内容正确"）')
       assert(jpHas('详情在「其他」里') && !msHas('详情在「其他」里'),
         '状态条指路「其他」，但已经在那一页时就不再啰嗦')
-      assert(!jpHas('已连接 EMSC') && !jpHas('（全球地震实时推送）'),
-        '状态条不再复述逐源细节——那是「其他」页「源状态」的活')
+      {
+        // 0.8.2 review：原来这条断言查的是 '已连接 EMSC'/'（全球地震实时推送）' 两串"不出现"，
+        // 而它们在 0.8.1 里已是死代码（openDetail 没有渲染消费者）——断言恒真，改坏状态条也不会红。
+        // 改成先往 store 里塞 detail，再看顶部那个常驻条会不会把它复述出来。
+        const react = mkTestReact()
+        const { exports: exD } = loadClientEx({}, { react })
+        exD.__test.store.push({ detail: '已连接 EMSC（全球地震实时推送）' })
+        exD.__test.store.pushSource('emsc', { label: 'EMSC', status: 'open', detail: '全球地震实时推送' })
+        react.__reset()
+        const tStrip = textsOfTree(exD.__test.SettingsPanel({ initialTab: 'region' }))
+        assert(!tStrip.some((x) => x.indexOf('全球地震实时推送') !== -1),
+          '状态条不再复述逐源细节（store 里塞了 detail 也不会出现在面板顶部）——那是「其他」页「源状态」的活')
+      }
       {
         // 有推送时报条数（并且与选项卡无关：这里特意渲染「履历」页）
         const react = mkTestReact()
@@ -6185,8 +6241,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(joined.indexOf('NaN') === -1, '通知文案里没有 NaN：' + joined)
       assert(joined.indexOf('距震中') === -1, '也不再把一条洪水预警说成"距震中"：' + joined)
       assert(joined.indexOf('该点所在地的官方预警') > 0, '命中行按"没有真实距离"分岔：' + joined)
-      assert(joined.indexOf('当地官方发布的避难指引') > 0 && joined.indexOf('市町村') === -1,
-        '行动提示不再套日本口径（"请确认所在市町村的避难信息"）：' + joined)
+      assert(joined.indexOf('当地官方发布的避难与撤离指引') > 0 && joined.indexOf('市町村') === -1,
+        '行动提示不再套日本口径（"请确认所在市町村的避难信息"），且"撤离"这一层指令没有被压缩掉：' + joined)
       assert(joined.indexOf('美国国家气象局（NWS）') > 0,
         '免责声明点名了正确的机构（AUTHORITY_BY_SOURCE 里登记了 nws_alerts）：' + joined)
 
@@ -6210,7 +6266,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(nmcText.indexOf('NaN') === -1, '大陆预警的通知里也没有 NaN：' + nmcText)
       assert(nmcText.indexOf('距震中') === -1, '也不把一场暴雨说成"震中"：' + nmcText)
       assert(nmcText.indexOf('按该点所在地的官方预警判定') > 0, '命中行同样是"没有距离"那一支：' + nmcText)
-      assert(nmcText.indexOf('请关注当地气象台发布的指引') > 0 && nmcText.indexOf('市町村') === -1,
+      assert(nmcText.indexOf('请关注当地气象台发布的防御指引') > 0 && nmcText.indexOf('市町村') === -1,
         '行动提示用大陆口径（不是日本的市町村避难信息）：' + nmcText)
       assert(nmcText.indexOf('中央气象台（中国气象局）') > 0, '免责声明点名中央气象台：' + nmcText)
       // 三支行动提示都在，且互不相同（防止将来把某支写死回日本口径）
@@ -6580,7 +6636,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(st.suppressed === 1 && st.bySource.p2pquake === 1,
         '抑制必须留计数（"不进历史 ≠ 不可见"）：' + JSON.stringify(st))
       const snap = t.buildDiagSnapshot()
-      assert(snap.snapshot === 2 && snap.authority && snap.authority.suppressed === 1,
+      assert(snap.snapshot === 3 && snap.authority && snap.authority.suppressed === 1,
         '诊断快照里能看到被抑制的条数：' + JSON.stringify(snap.authority))
     }
 
@@ -6654,23 +6710,48 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(rejected, 'Host schema 拒绝白名单外的 origin')
     }
 
-    // ⑨ 界面语言（0.8.1 先立选项与字段，本地化本身在 0.9.0）
+    // ⑨ 界面语言（0.8.1 立选项与字段，本地化本身在 0.9.0）
     //    现在只有简体中文，但这条链路（常量 → DEFAULT_CFG → normalizeCfg → Host schema → UI）
     //    现在就通——否则 0.9.0 加语言包时得回头改配置契约，而改契约要迁移用户配置。
+    //    0.8.2 review 后把分工定死：**Host 只校验形状、白名单在 Client**，目标是"加一种语言
+    //    只动 Client"。所以下面不再写"只有一项"（那种断言 0.9.0 一加语言就红），改成
+    //    "清单里每一项都必须能过 Host 的形状校验"——那正是加语言时最容易犯的错。
     {
       const t9 = loadClient().__test
       assert(t9.DEFAULT_CFG.language === 'zh-CN', '默认界面语言是简体中文')
-      assert(t9.LANGUAGE_OPTIONS.length === 1 && t9.LANGUAGE_OPTIONS[0].v === 'zh-CN',
-        '选项现在只有简体中文一项（0.9.0 加 日本語 / English）')
+      assert(t9.LANGUAGE_OPTIONS.some((o) => o.v === 'zh-CN'),
+        '清单里有简体中文（0.9.0 起还会有 日本語 / English / 繁中…）')
       assert(t9.normalizeCfg({ language: 'ja' }).language === 'zh-CN',
         '白名单外的语言码回默认值——手改配置写一个还没有语言包的代码不该被放行（否则界面会进入半本地化状态）')
       assert(t9.normalizeCfg({ language: 'zh-CN' }).language === 'zh-CN', '白名单内的原样保留')
       const mod9 = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
       const parsed9 = unwrapRefs(mod9.QuakeAlertSettingsSchema({ language: 'zh-CN' }))
       assert(parsed9.language === 'zh-CN', 'Host schema 认这个字段（未声明的键会被归一掉）')
-      let rejectedLang = false
-      try { mod9.QuakeAlertSettingsSchema({ language: 'ja' }) } catch (e) { rejectedLang = true }
-      assert(rejectedLang, 'Host schema 拒绝还没有语言包的代码')
+      // Host 与 Client 的分工（0.8.2 修正）：Host 只校验 BCP 47 **形状**，白名单在 Client。
+      // 理由是本插件要做十几套文案（含简繁分开的 zh-CN / zh-TW）——Host 枚举会让"加一种语言"
+      // 变成一次跨半边的契约改动（改 schema 要重启，旧 Host 还读不了新值）。
+      const acceptsJa = unwrapRefs(mod9.QuakeAlertSettingsSchema({ language: 'ja' }))
+      assert(acceptsJa.language === 'ja',
+        'Host schema 接受形状合法但当前还没有文案表的语言（ja / zh-TW / pt-BR…）：枚举留在 Client，加语言就只动 Client')
+      let rejectedShape = false
+      try { mod9.QuakeAlertSettingsSchema({ language: '日本語' }) } catch (e) { rejectedShape = true }
+      let rejectedShape2 = false
+      try { mod9.QuakeAlertSettingsSchema({ language: 42 }) } catch (e) { rejectedShape2 = true }
+      assert(rejectedShape && rejectedShape2,
+        'Host schema 仍拦住形状不合法的值（"日本語"、数字 42）——放松的是枚举，不是类型')
+      // 两侧分工的合起来的效果：Host 收下 ja，Client 认不出 → 回默认，界面不会半本地化
+      assert(t9.normalizeCfg(t9.sectionToCfg({ language: 'ja' })).language === 'zh-CN',
+        'Host 收下的未知语言到 Client 会被归一成默认（界面仍是完整的一种语言，不会半本地化）')
+      // 加语言时最容易犯的错：往 LANGUAGE_OPTIONS 里写一个 Host 收不了的值（下划线、中文名、
+      // 或者干脆漏了地区码）。这条断言把"清单"与"Host 能收下的形状"绑在一起。
+      const hostAccepts = (v) => {
+        try { return unwrapRefs(mod9.QuakeAlertSettingsSchema({ language: v })).language === v } catch (e) { return false }
+      }
+      assert(t9.LANGUAGE_OPTIONS.every((o) => hostAccepts(o.v)),
+        '清单里每个语言码都能过 Host 的形状校验（0.9.0 加语言时的守卫）：' +
+        t9.LANGUAGE_OPTIONS.map((o) => o.v).join(', '))
+      assert(t9.LANGUAGE_OPTIONS.every((o) => typeof o.label === 'string' && o.label.length > 0),
+        '每个选项都带 label（下拉里显示的名字，惯例是用该语言自己的写法：日本語 / 한국어）')
       const snap9 = loadClient().__test.buildDiagSnapshot()
       assert(snap9.config.language === 'zh-CN',
         '诊断快照里带界面语言（0.9.0 排查"界面没跟着切"时第一个要核的字段）')
@@ -6793,6 +6874,197 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     }
   } catch (e) {
     assert(false, '0.8.0 检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
+  }
+
+  // ==========================================================================
+  // 0.8.2：0.8.1 期在真机发现的两处功能缺陷（DESIGN 11.9 A / B 的清账）
+  //
+  // 两条都属于 11.8 教训 6 那一类——不在解析逻辑里，而在跨模块的语义边界上：
+  // A 是判定顺序（播报门槛挡在"有没有大陆关注点"前面），B 是判据选错（从名字形状反推来源分支）。
+  // 每条断言都同时钉住修好后的行为与旧行为的反面，对应 11.8 教训 3 的自检问法
+  // 「把守的那行改坏，这条会红吗」。
+  // ==========================================================================
+  try {
+    console.log('== 0.8.2：大陆气象的判定顺序与关注点判据 ==')
+    const { CN_AREAS: CN_AREAS_82 } = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cn-areas.js')).href)
+    const t = loadClientEx().exports.__test
+    const LEVEL_ZH = { red: '红色', orange: '橙色', yellow: '黄色', blue: '蓝色' }
+    const nmc = (level, id, title) => t.parseNmcAlarm({
+      alertid: id,
+      title: title || ('云南省丽江市宁蒗彝族自治县气象台发布暴雨' + LEVEL_ZH[level] + '预警信号'),
+      issued: '2026-09-19T03:02:45+08:00', kind: 'rainstorm', level, detail: '',
+    })
+    const cfgWithPlaces = (places) => t.normalizeCfg(Object.assign({}, t.loadCfg(), {
+      watch: { prefectures: [], cities: [], places },
+    }))
+
+    // ---- A. 门槛不能挡在「有没有关注点」前面（DESIGN 11.9 A）----
+    {
+      const cfg0 = cfgWithPlaces([])
+      assert(cfg0.watch.places.length === 0, '（前置）这份配置里一个关注点都没有')
+      for (const level of ['yellow', 'blue']) {
+        const m = t.matchAlert(nmc(level, 'a-' + level), cfg0)
+        assert(m.hit === false && m.noWatch === true,
+          level + ' + 没配大陆关注点 → 带 noWatch（修复前这一支排在门槛之后，reason 只说"未达橙色"，于是黄 / 蓝绕过 noWatch 照常进履历）')
+      }
+      // noWatch 是给 11-pipeline 用的标记，只看 matchAlert 的返回值不算数，要端到端看 store
+      const before = t.store.events.length
+      t.handleAlert(nmc('blue', 'a-blue-hist'), cfg0)
+      assert(t.store.events.length === before,
+        '蓝色 + 没配关注点 → 不写历史（与橙色的 noWatch 同口径；修复前每天几十条黄 / 蓝持续占满 HISTORY_MAX=30）')
+      // 对照：修的是判定顺序，不是门槛本身
+      const cfg1 = cfgWithPlaces([{ name: '云南省·丽江市', lat: 26.85, lon: 100.51, radiusKm: 100, origin: 'cn' }])
+      const m1 = t.matchAlert(nmc('blue', 'a-blue-contrast'), cfg1)
+      assert(m1.hit === false && m1.noWatch !== true && m1.reason.indexOf('未达橙色') !== -1,
+        '对照：配了大陆关注点之后，蓝色仍走「未达橙色，仅记录」（' + m1.reason + '）')
+      const before1 = t.store.events.length
+      t.handleAlert(nmc('orange', 'a-orange-hit'), cfg1)
+      assert(t.store.events.length === before1 + 1,
+        '对照：配了关注点、达到橙色 → 照常进历史（修复没有把"该记的"一起挡掉）')
+    }
+
+    // ---- B. 大陆关注点按显式来源分支与省 / 市判定，不靠名字里的 `·`（DESIGN 11.9 B）----
+    {
+      // ① 级联产出的关注点带显式省 / 市
+      t.setCnAreas(CN_AREAS_82)
+      const picked = t.cnPlaceOf('四川省', '成都市', 100)
+      assert(!!picked && picked.province === '四川省' && picked.city === '成都市',
+        '级联产出的关注点带显式 province / city：' + JSON.stringify(picked))
+      assert(t.cnWatchPlaces([picked]).length === 1 && t.cnWatchPlaces([picked])[0].province === '四川省',
+        'cnWatchPlaces 认它（origin=cn）并直接给出省')
+
+      // ② 显式 origin 优先于名字形状：手填坐标的名字里带 `·` 也不再是大陆关注点
+      const manual = { name: '上海市·黄浦区', lat: 31.23, lon: 121.47, radiusKm: 300, origin: 'global' }
+      const normManual = t.normalizePlaces([manual])
+      assert(normManual.length === 1 && normManual[0].origin === 'global' && normManual[0].province === undefined,
+        '显式 origin=global 不会被名字里的 `·` 改写成 cn，也不会被安上省 / 市：' + JSON.stringify(normManual[0]))
+      assert(t.cnWatchPlaces(normManual).length === 0, '手填坐标不参与大陆行政区匹配')
+
+      // ③ 老配置（只有名字，没有 origin / 省市）仍被认成大陆点，并迁移出省 / 市
+      const legacy = t.normalizePlaces([{ name: '云南省·丽江市', lat: 26.85, lon: 100.51, radiusKm: 100 }])
+      assert(legacy[0].origin === 'cn' && legacy[0].province === '云南省' && legacy[0].city === '丽江市',
+        '0.8.1 及以前存下的关注点只有名字 → 按同一形状规则迁移出省 / 市并固化：' + JSON.stringify(legacy[0]))
+
+      // ④ 省份认不出的预警（国家级机构）：只有真正的大陆关注点能让它"按全国放行"
+      const national = nmc('red', 'b-national', '中央气象台发布暴雨红色预警信号')
+      const mManual = t.matchAlert(national, cfgWithPlaces([manual]))
+      assert(mManual.hit === false && mManual.noWatch === true,
+        '名字带 `·` 的手填坐标不算大陆关注点：认不出省的预警不再被它"按全国放行"命中并播报（修复前 hit=true + 播报）')
+      const mCn = t.matchAlert(national, cfgWithPlaces([{ name: '广东省·广州市', lat: 23.13, lon: 113.26, radiusKm: 100, origin: 'cn' }]))
+      assert(mCn.hit === true && mCn.reason.indexOf('未能定位到省份') !== -1,
+        '对照：真正的大陆关注点仍按全国放行（DESIGN 8.4 的兜底没有被顺手改掉）')
+
+      // ⑤ 命中判定读显式省 / 市：名字里没有 `·` 也能命中（判据不再是名字形状）
+      const explicit = { name: '丽江市', lat: 26.85, lon: 100.51, radiusKm: 100, origin: 'cn', province: '云南省', city: '丽江市' }
+      const mExplicit = t.matchAlert(nmc('orange', 'b-explicit'), cfgWithPlaces([explicit]))
+      assert(mExplicit.hit === true && mExplicit.reason.indexOf('丽江市') !== -1,
+        '命中判定读显式省 / 市：名字里没有 `·` 也能命中（' + mExplicit.reason + '）')
+
+      // ⑥ Host schema 必须登记 province / city —— 与 origin 同一条教训：未声明的键会被 schema
+      //    归一掉，于是 Client 每次读回来都少两个字段，settingsOpsFor 把它当"用户改过"反复写回
+      const hostMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
+      const hostParsed = unwrapRefs(hostMod.QuakeAlertSettingsSchema({
+        watch: { places: [{ name: '上海市·黄浦区', lat: 31.23, lon: 121.47, origin: 'global', province: '上海市', city: '黄浦区' }] },
+      }))
+      assert(hostParsed.watch.places[0].province === '上海市' && hostParsed.watch.places[0].city === '黄浦区',
+        'Host schema 原样保留 places[].province / city')
+      const hostDefault = unwrapRefs(hostMod.QuakeAlertSettingsSchema({ watch: { places: [{ name: 'x', lat: 1, lon: 1 }] } }))
+      assert(hostDefault.watch.places[0].province === undefined && hostDefault.watch.places[0].city === undefined,
+        'Host schema **不**给 province / city 注入默认值：老配置的省 / 市要由 Client 按名字迁移一次（同 origin 的理由）')
+
+      // ⑦ 诊断快照：大陆点带省 / 市，非大陆点不写这两个键（否则快照里多出一堆空字段）
+      t.applyCfg(t.normalizeCfg(Object.assign({}, t.loadCfg(), {
+        watch: { prefectures: [], cities: [], places: [explicit, manual] },
+      })))
+      const snap = t.buildDiagSnapshot()
+      const cnRow = snap.config.watch.places.find((r) => r.origin === 'cn')
+      const globalRow = snap.config.watch.places.find((r) => r.origin === 'global')
+      assert(!!cnRow && cnRow.province === '云南省' && cnRow.city === '丽江市',
+        '诊断快照里的大陆关注点带省 / 市（"这条大陆预警为什么没命中"第一个要核的两个值）：' + JSON.stringify(cnRow))
+      assert(!!globalRow && globalRow.province === undefined && globalRow.city === undefined,
+        '诊断快照不给非大陆点写省 / 市（这些点不参与行政区匹配）')
+
+      // ⑧ 端到端：0.8.1 及以前存下的老配置（只有名字）走一遍 sectionToCfg，省 / 市被补上。
+      //    这条链路是升级用户的真实路径：Host 读回来的 places 没有这两个键。
+      const legacyConv = t.sectionToCfg({ watch: { places: [{ name: '四川省·成都市', lat: 30.66, lon: 104.07, radiusKm: 100 }] } })
+      assert(legacyConv.watch.places[0].origin === 'cn' &&
+        legacyConv.watch.places[0].province === '四川省' && legacyConv.watch.places[0].city === '成都市',
+        '老配置经 sectionToCfg 后 origin 与省 / 市都被补上：' + JSON.stringify(legacyConv.watch.places[0]))
+
+      // ⑨ 语言字段真的接了 Host 写回链路（0.8.1 说这条链路"一次立齐"，review 发现只差这一跳没守卫）：
+      //    等于默认值时发 unset，把该键交还 schema 默认层。
+      const langOps = t.settingsOpsFor(t.currentCfg()).filter((o) => o.path && o.path[0] === 'language')
+      assert(langOps.length === 1 && langOps[0].op === 'unset',
+        'language 参与 Host diff（等于默认值 → unset 交还 schema 默认层）：' + JSON.stringify(langOps))
+    }
+
+    // ---- C. review：选项卡**切换**这条路径此前没有任何断言走过（DESIGN 11.4 的局部 review）----
+    // 0.8.1 的断言只渲染了 initialTab 指定的那一页——那验证的是"一页长什么样"，
+    // 而选项卡改的是**从一页走到另一页**：切走后旧页的 DOM 是否真的消失、来回切会不会残留或白屏。
+    // 这一条正是 0.8.1 CHANGELOG 里"仍未实机复核：选项卡切换"的那件事，用状态桩可以走完。
+    {
+      const react = mkTestReact()
+      const { exports: ex } = loadClientEx({}, { react })
+      /** 找一个页签按钮：文本恰好是标签，或「标签 角标」——"其他国家 / 地区"这类内容按钮不以标签开头。 */
+      const findTab = (tree, label) => {
+        const hit = []
+        const walk = (n) => {
+          if (!n || typeof n !== 'object') return
+          if (Array.isArray(n)) { n.forEach(walk); return }
+          if (n.type === 'button' && n.props && typeof n.props.onClick === 'function') {
+            const txt = (n.children || []).filter((c) => typeof c === 'string').join('')
+            if (txt === label || txt.indexOf(label + ' ') === 0) hit.push(n)
+          }
+          if (n.children) n.children.forEach(walk)
+        }
+        walk(tree)
+        return hit[0]
+      }
+      const render = () => { react.__reset(); return ex.__test.SettingsPanel({}) }
+
+      const t1 = textsOfTree(render())
+      assert(t1.some((x) => x.indexOf('关注地区') !== -1) && !t1.some((x) => x.indexOf('清空记录') !== -1),
+        '（前置）默认落在「地区」页')
+      const toHistory = findTab(render(), '履历')
+      assert(!!toHistory, '页签是可点击的按钮')
+      // 守卫：找不到就不要再往下调用，否则一条 TypeError 会中断这一块后面的断言
+      // （变异实验里正是这样把"角标"那几条盖掉了）。
+      if (toHistory) toHistory.props.onClick()
+      const t2 = textsOfTree(render())
+      assert(t2.some((x) => x.indexOf('清空记录') !== -1) && !t2.some((x) => x.indexOf('关注地区') !== -1),
+        '点击「履历」后真的切过去，且地区页的区块不再渲染（"一次只渲染一页"的实质）')
+      const backRegion = findTab(render(), '地区')
+      assert(!!backRegion, '切到履历页后页签栏仍在（状态条与页签不随页切换）')
+      if (backRegion) backRegion.props.onClick()
+      const t3 = textsOfTree(render())
+      assert(t3.some((x) => x.indexOf('关注地区') !== -1) && !t3.some((x) => x.indexOf('清空记录') !== -1),
+        '切回「地区」页也正常（来回切换不残留上一页的内容）')
+
+      // 角标数字（0.8.1 新加的 UI）：review 的变异实验里，把角标写死成 ' 99' 也没有任何断言会红。
+      const badgeOf = (seed, label) => {
+        const reactB = mkTestReact()
+        const { exports: exB } = loadClientEx(seed, { react: reactB })
+        reactB.__reset()
+        const btn = findTab(exB.__test.SettingsPanel({}), label)
+        return btn ? (btn.children || []).filter((c) => typeof c === 'string').join('') : ''
+      }
+      assert(badgeOf({}, '地区') === '地区', '没有关注点时「地区」页签不带角标：' + badgeOf({}, '地区'))
+      const seedPlace = {
+        'dsh.quakeAlert.v1': JSON.stringify({
+          version: 1,
+          watch: { prefectures: [], cities: [], places: [{ name: '东京', lat: 35.68, lon: 139.77, radiusKm: 100, origin: 'global' }] },
+        }),
+      }
+      assert(badgeOf(seedPlace, '地区') === '地区 1', '有 1 个关注点时角标是 1：' + badgeOf(seedPlace, '地区'))
+      const seedHist = {
+        'dsh.quakeAlert.history': JSON.stringify([
+          { id: 'h1', kind: 'quake', label: '地震速报', severity: 'yellow', issued: '', headline: 'h', hit: true },
+        ]),
+      }
+      assert(badgeOf(seedHist, '履历') === '履历 1', '有 1 条记录时「履历」角标是 1：' + badgeOf(seedHist, '履历'))
+    }
+  } catch (e) {
+    assert(false, '0.8.2 检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
   }
 
   console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败')

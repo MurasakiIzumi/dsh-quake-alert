@@ -30,9 +30,15 @@ import { feedStatsOf } from './12b-feed-poll.js'
 import { overseasStatsOf } from './12e-overseas-poll.js'
 import { cnStreamRegistry } from './12c-cn-stream.js'
 
-/** 快照格式版本（与插件版本无关，见文件头）。0.8.0 起为 2：新增 `authority` 段，
- *  `config.watch.places[]` 增加 `origin`。 */
-export const DIAG_SNAPSHOT_VERSION = 2
+/** 快照格式版本（与插件版本无关，见文件头）。逐版对应：
+ *  · 1 = 0.5.0 起的初始形状
+ *  · 2 = 0.8.0（新增 `authority` 段 + `config.watch.places[].origin`）；0.8.1 把 `config.language`
+ *    加在了 2 里没提号（review 时发现两种形状都自称 2，所以下面这条规则要真的执行）
+ *  · 3 = 0.8.2（`config.watch.places[]` 再增 `province` / `city`）
+ *
+ *  **加字段就提号**（0.8.0 的先例）：读快照的一方据此知道"这份快照有哪些键"，
+ *  缺键 = 来自更早的版本，而不是"这一项没配"。 */
+export const DIAG_SNAPSHOT_VERSION = 3
 
 const str = (v) => String(v === undefined || v === null ? '' : v)
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
@@ -151,6 +157,10 @@ function watchSummary(cfg) {
       // 0.8.0：来源分支（jp / cn / global）。它决定"这个关注点归哪个源"（DESIGN 9.3 → 3.4），
       // 诊断里必须能看到——权威源判错时，第一个要核的就是"这个点被算作了谁的分支"。
       origin: str(p && p.origin) || 'global',
+      // 0.8.2：大陆关注点的省 / 市（DESIGN 11.9 B）。行政区层级匹配现在读它，不再从名字反推，
+      // 所以诊断里也要看得到——"为什么这条大陆预警没命中"的第一个要核的就是这两个值。
+      // 非大陆点不写这两个键，免得快照里多出一堆空字段。
+      ...(str(p && p.origin) === 'cn' ? { province: str(p && p.province), city: str(p && p.city) } : {}),
     })),
     placesCount: places.length,
   }
@@ -250,7 +260,11 @@ export function buildDiagSnapshot(now) {
       },
       cnTransport: str(cfg.cnTransport) || 'auto', // 'auto'（默认，SSE 可自动降级）| 'poll'（用户强制轮询）
       // 界面语言（0.8.1 先立字段）。现在只有 zh-CN；0.9.0 落地本地化后，
-      // "界面没跟着切"这类问题第一个要核的就是这一项（它总由 normalizeCfg 保证有值）。
+      // "界面没跟着切"这类问题第一个要核的就是这一项。
+      // **它是归一后的生效值，不是持久层原值**（0.8.2 review 订正）：`cfg` 来自 `currentCfg()`，
+      // 而那条路一定过 `normalizeCfg`，所以手改配置写进去的、或将来降级留下的非法值在这里
+      // 已经被换成默认值——这一项能回答"界面现在按哪个语言渲染"，回答不了"配置里原本写了什么"。
+      // 要区分后者得带 Host user 层的原值，那是 0.9.0 本地化落地时一并决定的事。
       language: str(cfg.language),
       watch: safe(() => watchSummary(cfg), {}, warnings, 'watch'),
     }), {}, warnings, 'config'),

@@ -109,8 +109,11 @@ const freshCfg = () => cloneCfg(DEFAULT_CFG)
 /**
  * 关注点的**来源分支**（0.8.0 / DESIGN 9.3）。
  *
- * 取值 jp / cn / global。它回答"这个关注点是在哪个国家的分支下加的"，3.4 的跨源权威源据此
- * 判断权威源，诊断快照里也要能看到（判错时第一个要核的就是"这个点被算作了谁的分支"）。
+ * 取值 jp / cn / global。它回答"这个关注点是在哪个国家的分支下加的"，两个消费者：
+ * ① 3.4 的跨源权威源据此判断权威源；② 06-matcher 的大陆气象（行政区层级）匹配据此挑出
+ * 参与匹配的大陆关注点（0.8.2 / DESIGN 11.9 B——此前那边是"名字里有没有 `·`"，手填坐标
+ * 只要名字带 `·` 就会被算成大陆点）。诊断快照里也要能看到（判错时第一个要核的就是
+ * "这个点被算作了谁的分支"）。
  *
  * **老配置没有这个字段，不能因此判它非法**——那等于把用户攒下的关注点整条丢掉。缺失时按
  * **名称形状推导**：设置页的「中国大陆」级联产出的名字恒为「省·市」（见 04-city-table 的
@@ -137,13 +140,33 @@ function normalizePlaces(list) {
     if (seen.has(key)) continue
     seen.add(key)
     const name = strOr(p.name, '').slice(0, 30).trim() || (lat.toFixed(2) + ', ' + lon.toFixed(2))
-    out.push({
+    const origin = placeOriginOf(p, name)
+    const entry = {
       name,
       lat,
       lon,
       radiusKm: numOr(p.radiusKm, 300, 1, 2000),
-      origin: placeOriginOf(p, name),
-    })
+      origin,
+    }
+    // 大陆关注点的省 / 市（0.8.2 / DESIGN 11.9 B）：显式落在 place 上，matcher 与诊断不再从
+    // 「省·市」这个名字反推。老配置（0.8.1 及以前）只有名字，这里**迁移一次并固化**——名字形状
+    // 已经是 `placeOriginOf` 判 'cn' 的依据，所以这一步不会改变既有归属，只是把结论写下来。
+    if (origin === 'cn') {
+      let province = strOr(p.province, '').slice(0, 20).trim()
+      let city = strOr(p.city, '').slice(0, 20).trim()
+      if (!province || !city) {
+        const i = name.indexOf('·')
+        if (i > 0 && i < name.length - 1) {
+          if (!province) province = name.slice(0, i)
+          if (!city) city = name.slice(i + 1)
+        }
+      }
+      if (province && city) {
+        entry.province = province
+        entry.city = city
+      }
+    }
+    out.push(entry)
     if (out.length >= MAX_WATCH_PLACES) break
   }
   return out

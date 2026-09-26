@@ -120,6 +120,9 @@ const s = {
   // 全库此前只有历史条目与状态点两处 aria 属性（CHANGELOG 记过），而 DESIGN 从未把无障碍
   // 记为"有意不做"，所以这是遗漏而不是取舍。
   // `extra`（第 6 参）：调用方追加的样式（例如语言下拉要 `flex: 1` 撑满一行）。
+  // 合并顺序有讲究（0.8.2 review）：自绘箭头的三项**写在 `extra` 之后**。`background` 是简写，
+  // 调用方只要带上它就会把 `backgroundImage` 一起清掉、而且不报任何错（0.8.1 修过一次同一个坑），
+  // 所以关键样式最后落，任何 extra 都盖不掉。
   select: (value, options, onChange, textOf, label, extra) => h('select', {
     value, onChange: (e) => onChange(e.target.value),
     'aria-label': label || undefined,
@@ -129,9 +132,10 @@ const s = {
       // 右侧留 26px 给箭头（自绘的，位置由 backgroundPosition 定）
       padding: '4px 26px 4px 8px', fontSize: 12, minWidth: 180,
       appearance: 'none', WebkitAppearance: 'none', MozAppearance: 'none',
+    }, extra || {}, {
       backgroundImage: SELECT_ARROW, backgroundRepeat: 'no-repeat',
       backgroundPosition: 'right 8px center', backgroundSize: '10px 6px',
-    }, extra || {}),
+    }),
   }, options.map((o) => h('option', {
     key: String(o.v !== undefined ? o.v : o.g), value: String(o.v !== undefined ? o.v : o.g),
     style: { background: '#ffffff', color: '#1a1a1a' },
@@ -905,7 +909,10 @@ function SettingsPanel(props) {
 
     // —— 海啸：日本 552 与 NOAA CAP 共用等级闸门 ——
     disasterGroup('海啸', 'tsunami', '提醒'),
-    disasterRow('日本 · 全球（NOAA）', '按预警等级', [thSelect('tsunamiGrade', TSUNAMI_OPTIONS, false, '海啸等级')]),
+    // 0.8.2 review：note 要写清全球源看的是**关注点**（`places`），不是日本那 47 个都道府县。
+    // 0.8.1 瘦身时把这句删了，只留"按预警等级"——只配了日本县级关注的用户会以为这一行已经
+    // 覆盖 NOAA 海啸，实际匹配走的是「其他国家 / 地区」里的关注点半径。
+    disasterRow('日本 · 全球（NOAA）', '全球源按关注点半径判定', [thSelect('tsunamiGrade', TSUNAMI_OPTIONS, false, '海啸等级')]),
 
     // —— 气象：三家的门槛都固定在该机构真正代表危险的那一档 ——
     // L1/L2 要求的动作不是桌面弹窗能承载的，L3 面向老年人；L4（避難指示级）才真正涉及人身财产
@@ -1023,8 +1030,10 @@ function SettingsPanel(props) {
     store.received > 0
       ? h('span', { style: { color: '#9aa0a6' } }, '已收到 ' + store.received + ' 条推送')
       : null,
-    // 告诉用户"更细的在哪"，但已经在那一页时就不必再说
-    tab === 'misc' ? null : h('span', { style: { color: '#6b7280', fontSize: 11, marginLeft: 'auto' } }, '详情在「其他」里'))
+    // 告诉用户"更细的在哪"，但已经在那一页时就不必再说。
+    // 颜色用 #9aa0a6 而不是更暗的灰（0.8.2 review）：11px 小字在深色底上要过 AA 4.5:1，
+    // 原 #6b7280 只有约 3.4:1，和其余次要文字同一档更稳（也让整页少一种灰）。
+    tab === 'misc' ? null : h('span', { style: { color: '#9aa0a6', fontSize: 11, marginLeft: 'auto' } }, '详情在「其他」里'))
 
   /**
    * 界面语言（0.8.1 先立选项，本地化在 0.9.0）。
@@ -1151,7 +1160,9 @@ function SettingsPanel(props) {
     ),
     s.row(s.checkbox(cfg.quietHours.breakForSevere, (v) => setCfg((c) => ({ ...c, quietHours: { ...c.quietHours, breakForSevere: v } })), '紧急警报仍提醒（EEW、海啸警报、震度6弱以上、气象4级以上）')),
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 6 } },
-      '跨夜时段写成 23:00–07:00。免打扰期间仍会记录。'),
+      // 时区基准必须写出来（0.8.2 review 补回）：不写的话"23:00"是本地时间还是 JST 全靠猜，
+      // 而这个判定用的是**浏览器本地时间**（inQuietHours），跨时区用户猜错就会在半夜被响铃。
+      '按浏览器本地时间判定。跨夜时段写成 23:00–07:00。免打扰期间仍会记录。'),
   )
 
   // 测试与诊断（0.8.0 合并）：两类测试按钮都是"无灾情时验证整条链路"的入口，与源状态、

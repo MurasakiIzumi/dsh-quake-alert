@@ -214,7 +214,9 @@ function cnPlaceOf(province, city, radiusKm) {
   if (!c) return null
   const r = Number(radiusKm)
   if (!Number.isFinite(r) || r < 1 || r > 2000) return null
-  return { name: province + '·' + city, lat: c.lat, lon: c.lon, radiusKm: r, origin: 'cn' }
+  // province / city 显式落在关注点上（0.8.2 / DESIGN 11.9 B）：matcher 按行政区匹配时不再需要
+  // 从「省·市」这个名字反推。名字仍然保留——它是界面上给人看的标签，不是判据。
+  return { name: province + '·' + city, lat: c.lat, lon: c.lon, radiusKm: r, origin: 'cn', province, city }
 }
 
 // ---------- 全球主要城市表（0.8.0 / DESIGN 9.4：按国家分包，展开某国时才拉） ----------
