@@ -9,6 +9,7 @@
 // ============================================================================
 
 import { h, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, STORAGE_KEY, EMSC_WS_URL, normalizePref, prefOfCode, prefCodeOf, p2pTimeToIso, cnTimeToIso, CN_TIME_RE, CN_REPORT_MAG_OPTIONS, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, LANGUAGE_OPTIONS, issuedToDate, formatIssuedLocal, P2P_TIME_RE } from './01-constants.js'
+import { LANGS, DEFAULT_LANGUAGE, LANGUAGE_LABELS, resolveLang, setLanguage, getLanguage, t, tableOf } from './00-i18n.js'
 import { loadCfg, normalizeCfg, normalizePlaces, loadHistory, normalizeHistoryEntry, inQuietHours, placeOriginOf, PLACE_ORIGINS } from './02-storage.js'
 import { SETTINGS_NS, MIGRATED_KEY, cfgToSection, sectionToCfg, currentCfg, applyCfg, settingsOpsFor, bindSettingsScope, settingsState, resetSettings, reloadFromLocal } from './03-settings-bridge.js'
 import { setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, cnAreaOf, normAliases, setWorldCountries, worldCountriesOf, countryPackOf, loadCountryCities, resetWorldCities } from './04-city-table.js'
@@ -31,7 +32,9 @@ import { createFeedClient, feedStatsOf, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY
 import { createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY } from './12c-cn-stream.js'
 import { createHealthProbe, PROBE_INTERVAL_MS, staleAfterOf } from './12d-health-probe.js'
 import { createNwsSource, createEcccSource, overseasStatsOf, nwsSamplePoints, ecccBboxOf, placesInBoxes, US_BOXES, CA_BOX, defaultFetchText, NWS_ALERTS_BASE, ECCC_ALERTS_BASE, NWS_EVENT_QUERY, MIN_SAMPLE_RADIUS_KM, MAX_REQUESTS_PER_ROUND, OVERSEAS_FRESH_GATE_MS, OVERSEAS_GATE_RESET_MS, UNCOVERED_TTL_MS, OVERSEAS_MIN_BACKOFF_MS, OVERSEAS_MAX_BACKOFF_MS } from './12e-overseas-poll.js'
-import { SettingsPanel, p2pCodeTextOf, kindColorOf, SOURCE_ORDER, SOURCE_LABELS, SOURCE_CODE_TEXT, statusMetaOf } from './13-ui-settings.js'
+import { SettingsPanel, p2pCodeTextOf, kindColorOf, SOURCE_ORDER, SOURCE_CODE_TEXT, statusMetaOf } from './13-ui-settings.js'
+import { sourceLabelOf } from './00f-source-labels.js'
+import { buildConfigExport, parseConfigImport, importConfig, undoConfigImport, loadConfigBackup, configFileName, CONFIG_FORMAT, CONFIG_FORMAT_VERSION } from './17-config-io.js'
 import { StatusIndicator } from './14-ui-status.js'
 import { buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION } from './16-diag.js'
 
@@ -362,7 +365,7 @@ export function apply(ctx) {
     name: 'settings.section',
     id: 'quake-alert',
     order: 60,
-    label: () => '灾害预警',
+    label: () => t('app.name'),
   }, (props) => h(SettingsPanel, { close: props ? props.close : undefined })))
 
   // 侧边栏底部状态指示（绿/黄/红圆点，悬停显示详情）
@@ -370,12 +373,17 @@ export function apply(ctx) {
     name: 'sidebar.footer.action',
     id: 'quake-alert-status',
     order: 50,
-    label: () => '灾害预警',
+    label: () => t('app.name'),
   }, (props) => h(StatusIndicator, props || {})))
 }
 
 // 单测钩子（客户端宿主忽略额外导出）
 export const __test = {
+  // 0.9.0：本地化机制（语言清单 / BCP 47 回退链 / 取词 / 文案表）
+  LANGS, DEFAULT_LANGUAGE, LANGUAGE_LABELS, resolveLang, setLanguage, getLanguage, t, tableOf,
+  // 0.9.0：配置导出导入（格式标识 / 校验 / 导入前备份 / 撤销）
+  buildConfigExport, parseConfigImport, importConfig, undoConfigImport, loadConfigBackup, configFileName,
+  CONFIG_FORMAT, CONFIG_FORMAT_VERSION,
   // 0.5.3：机制层（统一健康记录 + 探针 + 升级阈值）
   createHealthProbe, staleAfterOf, PROBE_INTERVAL_MS,
   resetConnHealth, pruneHealth, noteFreshness, noteStale, loadHealth, publishStatus, republishDataHealth,
@@ -394,7 +402,7 @@ export const __test = {
   MIN_SAMPLE_RADIUS_KM, MAX_REQUESTS_PER_ROUND, OVERSEAS_FRESH_GATE_MS, OVERSEAS_GATE_RESET_MS,
   UNCOVERED_TTL_MS, OVERSEAS_MIN_BACKOFF_MS, OVERSEAS_MAX_BACKOFF_MS,
   overseasStatsOf,
-  parse, parseQuake, parseEew, parseTsunami, parseJma, parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage, feedStatsOf, watchlessPoint, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn, jmaItemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf, matchAlert, matchPointAlert, distanceKm, validGeo, normalizePlaces, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, hitSeverityOf, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY, cnProductName, authorityOf, disclaimerOf, weatherActionHintOf, SOURCE_ORDER, SOURCE_LABELS, SOURCE_CODE_TEXT, SettingsPanel, statusMetaOf, buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION, inQuietHours, placeOriginOf, PLACE_ORIGINS, geoOfHypo, sourceIdOf, crossSourceCopyOf, noteAuthoritySuppressed, authorityStatsOf, SOURCE_RANK, SOURCE_ZH, SOURCE_AGENCY, agencyOf, CROSS_SOURCE_KINDS, rankOfSource, sourceZhOf, isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, ensureAlertChannel, broadcastHistoryCleared, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, setWorldCountries, worldCountriesOf, countryPackOf, loadCountryCities, resetWorldCities, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, p2pTimeToIso, cnTimeToIso, CN_TIME_RE, CN_REPORT_MAG_OPTIONS, LANGUAGE_OPTIONS, issuedToDate, formatIssuedLocal, audioState, SOURCE_CONTRACTS, parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of, failResult, noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, P2P_TIME_RE, MIGRATED_KEY }
+  parse, parseQuake, parseEew, parseTsunami, parseJma, parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage, feedStatsOf, watchlessPoint, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn, jmaItemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf, matchAlert, matchPointAlert, distanceKm, validGeo, normalizePlaces, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, hitSeverityOf, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY, cnProductName, authorityOf, disclaimerOf, weatherActionHintOf, SOURCE_ORDER, sourceLabelOf, SOURCE_CODE_TEXT, SettingsPanel, statusMetaOf, buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION, inQuietHours, placeOriginOf, PLACE_ORIGINS, geoOfHypo, sourceIdOf, crossSourceCopyOf, noteAuthoritySuppressed, authorityStatsOf, SOURCE_RANK, SOURCE_ZH, SOURCE_AGENCY, agencyOf, CROSS_SOURCE_KINDS, rankOfSource, sourceZhOf, isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, ensureAlertChannel, broadcastHistoryCleared, createWsClient, store, HISTORY_MAX, PREFECTURES, DEFAULT_CFG, STORAGE_KEY, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, setWorldCountries, worldCountriesOf, countryPackOf, loadCountryCities, resetWorldCities, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, p2pTimeToIso, cnTimeToIso, CN_TIME_RE, CN_REPORT_MAG_OPTIONS, LANGUAGE_OPTIONS, issuedToDate, formatIssuedLocal, audioState, SOURCE_CONTRACTS, parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of, failResult, noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, P2P_TIME_RE, MIGRATED_KEY }
 
 // activeClient 是 12-websocket 的模块级 let：给 12 用的赋值出口（跨模块不能写 imported binding）
 // 由 12-websocket 提供 setter；这里仅保留引用以便阅读

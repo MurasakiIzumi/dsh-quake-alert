@@ -6,12 +6,13 @@
 //       异步推送 pushCfgToHost、首次迁移与降级 bindSettingsScope、
 //       本地镜像回读 reloadFromLocal（其它标签页改配置后），
 //       以及 Host section ⇄ 本地配置的转换（cfgToSection / sectionToCfg）。
-// 依赖：01-constants、02-storage（07-store 的 store.push 在运行时才用到）。
+// 依赖：01-constants、02-storage、00-i18n（07-store 的 store.push 在运行时才用到）。
 // 降级：没有 settings 服务 / 页面非 loopback / Host 不持久化时自动退回 localStorage。
 // ============================================================================
 
 import { DEFAULT_CFG } from './01-constants.js'
 import { isPlainObject, normalizeCfg, loadCfg, saveCfg, freshCfg, loadJSON, saveJSON } from './02-storage.js'
+import { setLanguage } from './00-i18n.js'
 import { store } from './07-store.js'
 
 // ---------- 机器级持久化（0.2.0）：Host 存储为主，localStorage 为回退与镜像 ----------
@@ -61,6 +62,10 @@ function applyCfg(cfg) {
   // 「坐标相同的关注点自动合并」「name 截断到 30 字」这类不变量在内存与 localStorage 里
   // 都不成立——同一次会话里重复添加同一个点会真的存两份，直到下次加载才被悄悄合并。
   runtimeCfg = saveCfg(normalizeCfg(cfg))
+  // 语言在**写入路径**也要生效：用户在设置页切换语言时走的就是这里，而设置页是用
+  // setCfgState(next) 触发重渲染的——语言若不在此刻落到 i18n 的当前值，界面会等到
+  // 下一次配置加载才切换（表现为"改了语言当场没反应"）。
+  setLanguage(runtimeCfg.language)
   pushCfgToHost(runtimeCfg)
   return runtimeCfg
 }

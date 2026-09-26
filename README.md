@@ -30,6 +30,8 @@
 - **Data source switch**: production (live) or sandbox (replays 2023 history, roughly one message every 30 seconds, for testing).
 - **Smart de-duplication**: multiple releases for the same earthquake (intensity prompt → detailed intensity report, or successive EEW updates) notify you only once, and again only when the intensity is upgraded; when **several sources report the same earthquake** only the one that arrives first announces it (0.8.0). With several DSH pages open, only one tab plays the alert.
 - **History**: the most recent 30 processed messages, including entries that did not reach the threshold; click an entry to expand its details.
+- **Interface language (0.9.0)**: 简体中文 / 日本語 / English, switched in Settings → More → Language, and it takes effect **immediately** (no restart). Only the text **this plugin writes itself** is translated — setting labels, notification titles, action prompts, disclaimers, hit lines and history badges. Everything that comes from a source stays verbatim: headlines, descriptions, place names, the weather agency's own category names. An alert about a Japanese earthquake therefore reads as an English (or Chinese) template wrapped around Japanese place names — that is by design, not a gap.
+- **Settings export and import (0.9.0)**: write your configuration (watch regions, thresholds, language, data source, quiet hours, notification switches) to a JSON file and load it on another machine or browser. The file carries a **format version and no plugin version**; a file whose format is newer than this build can read is **refused outright** rather than half-parsed. Importing **replaces** the whole configuration, and the previous one is backed up automatically first, so "Undo last import" is always available. Alert history and source health are **not** part of the file.
 
 ## How it works
 
@@ -222,9 +224,13 @@ node scripts/check-contracts.mjs       # contract check: pull the live sources t
 
 ## Changelog
 
-Current version **0.8.0** (**settings-page consolidation + cross-source authority + global city table**).
-The settings page's region picker used to be three flat blocks (① Japan / ② Mainland China / ③ Other
-regions); it is now a **single "country / region" entry point** that unfolds only that country's own
+Current version **0.9.0** (**interface language: Chinese / Japanese / English, plus settings export/import**).
+The interface ships three complete text sets, switched in Settings → More → Language and applied
+immediately (no restart), while everything that comes from a data source stays verbatim. Settings can be
+exported to a JSON file and loaded on another machine: importing replaces the whole configuration after
+backing up the previous one, so it can always be undone.
+**0.8.0** turned the settings page's region picker from three flat blocks (① Japan / ② Mainland China / ③ Other
+regions) into a **single "country / region" entry point** that unfolds only that country's own
 controls, with every watched place listed together in the same block. "Disaster types" and "Alert
 thresholds" likewise became one per-hazard table (one hazard per row, switch and threshold side by side).
 Functionally, **the same earthquake is no longer announced once by every source** — only the source that
@@ -232,7 +238,7 @@ arrives first announces it, and the rest do not even enter the history, though t
 diagnostic snapshot (the only trace if that call was wrong). "Other countries / regions" finally has a
 city list too (towns of 100,000+ inhabitants, 166 countries / 5224 entries, delivered per country), so
 there is no need to type latitude and longitude by hand.
-The suite went from 1363 to 1427 assertions.
+The suite is now at **1552** assertions (1363 before 0.8.0).
 See [CHANGELOG.md](./CHANGELOG.md) for the details of each release.
 
 ## Data sources

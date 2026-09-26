@@ -4,12 +4,14 @@
 // 作用：唯一的常量与默认配置来源（React 依赖也在这里引入）。
 // 内容：震度文案与档位、海啸等级与排序、47 都道府县表、简写→全称映射、
 //       默认配置 DEFAULT_CFG、存储 key、重连参数、历史上限等全部共享常量。
-// 依赖：无（本文件必须最先拼接）。
+// 依赖：00-i18n（语言清单与显示名）。
 // 新增常量请优先放这里，避免散落到各功能文件里。
 // ============================================================================
 
 // ---------- 依赖 ----------
 import React from 'react'
+import { LANGS, LANGUAGE_LABELS, getLanguage } from './00-i18n.js'
+import { PREF_EN } from './00d-texts-regions.js'
 const h = React.createElement
 const { useState, useEffect, useRef } = React
 
@@ -38,31 +40,35 @@ const SCALE_TEXT = {
   45: '震度5弱', 46: '震度5弱以上', 50: '震度5强', 55: '震度6弱',
   60: '震度6强', 70: '震度7',
 }
-// 用户可选的最低震度档位（值 = P2PQuake scale 数值）
+// 用户可选的最低震度档位（值 = P2PQuake scale 数值）。
+// 选项的**文字**搬去了 `00e-texts-units.js`（三语），这里只留「值 → 文案 key」：下拉在渲染时
+// 取词，而模块级常量里的文字会在加载那一刻被固化（切语言就不跟着变）。
 const SCALE_OPTIONS = [
-  { v: 10, label: '震度1 以上' }, { v: 20, label: '震度2 以上' }, { v: 30, label: '震度3 以上' },
-  { v: 40, label: '震度4 以上' }, { v: 45, label: '震度5弱 以上' }, { v: 50, label: '震度5强 以上' },
-  { v: 55, label: '震度6弱 以上' }, { v: 60, label: '震度6强 以上' }, { v: 70, label: '震度7' },
+  { v: 10, labelKey: 'scaleOpt.10' }, { v: 20, labelKey: 'scaleOpt.20' }, { v: 30, labelKey: 'scaleOpt.30' },
+  { v: 40, labelKey: 'scaleOpt.40' }, { v: 45, labelKey: 'scaleOpt.45' }, { v: 50, labelKey: 'scaleOpt.50' },
+  { v: 55, labelKey: 'scaleOpt.55' }, { v: 60, labelKey: 'scaleOpt.60' }, { v: 70, labelKey: 'scaleOpt.70' },
 ]
 const TSUNAMI_RANK = { Watch: 1, Warning: 2, MajorWarning: 3 }
 const TSUNAMI_GRADE_TEXT = { Watch: '津波注意报', Warning: '海啸警报', MajorWarning: '大海啸警报' }
 const TSUNAMI_OPTIONS = [
-  { g: 'Watch', label: '注意报及以上' }, { g: 'Warning', label: '警报及以上' }, { g: 'MajorWarning', label: '仅大海啸警报' },
+  { g: 'Watch', labelKey: 'tsunamiOpt.Watch' },
+  { g: 'Warning', labelKey: 'tsunamiOpt.Warning' },
+  { g: 'MajorWarning', labelKey: 'tsunamiOpt.MajorWarning' },
 ]
 // 全球源（EMSC / USGS）的最低震级。全球目录里 M2.5+ 每天近百条，而用户真正关心的是
 // "我这附近有没有明显晃动"——M4.5 是全球速报的常用门槛，默认取它。
 const GLOBAL_MAG_OPTIONS = [
-  { v: 3, label: 'M3.0 以上' }, { v: 3.5, label: 'M3.5 以上' }, { v: 4, label: 'M4.0 以上' },
-  { v: 4.5, label: 'M4.5 以上（默认）' }, { v: 5, label: 'M5.0 以上' }, { v: 5.5, label: 'M5.5 以上' },
-  { v: 6, label: 'M6.0 以上' }, { v: 6.5, label: 'M6.5 以上' }, { v: 7, label: 'M7.0 以上' },
+  { v: 3, labelKey: 'magOpt.3' }, { v: 3.5, labelKey: 'magOpt.3.5' }, { v: 4, labelKey: 'magOpt.4' },
+  { v: 4.5, labelKey: 'magOpt.4.5' }, { v: 5, labelKey: 'magOpt.5' }, { v: 5.5, labelKey: 'magOpt.5.5' },
+  { v: 6, labelKey: 'magOpt.6' }, { v: 6.5, labelKey: 'magOpt.6.5' }, { v: 7, labelKey: 'magOpt.7' },
 ]
 // 大陆**地震速报**（cenc_eqlist）的最低震级。与预警分开的原因见 DESIGN 8.4：速报覆盖低到 M2.5，
 // 用预警阈值播报会被小震频繁打扰；而它又是 EEW 稀少时的唯一补报通道，所以两把旋钮而不是一把。
 // 档位比 GLOBAL_MAG_OPTIONS 少一档低值（M3.0）——大陆速报的取舍区间在 3.5–6.0。
 const CN_REPORT_MAG_OPTIONS = [
-  { v: 3.5, label: 'M3.5 以上' }, { v: 4, label: 'M4.0 以上' },
-  { v: 4.5, label: 'M4.5 以上（默认）' }, { v: 5, label: 'M5.0 以上' },
-  { v: 5.5, label: 'M5.5 以上' }, { v: 6, label: 'M6.0 以上' },
+  { v: 3.5, labelKey: 'magOpt.3.5' }, { v: 4, labelKey: 'magOpt.4' },
+  { v: 4.5, labelKey: 'magOpt.4.5' }, { v: 5, labelKey: 'magOpt.5' },
+  { v: 5.5, labelKey: 'magOpt.5.5' }, { v: 6, labelKey: 'magOpt.6' },
 ]
 
 // ---------- 关注点半径（0.5.0 / DESIGN 9.2） ----------
@@ -71,9 +77,9 @@ const CN_REPORT_MAG_OPTIONS = [
 // 套在城市上会把邻省地震也算进来）。既有配置里的 radiusKm 一律不动——
 // 静默把用户配好的半径从 300 改成 100 会让提醒变窄，那是漏报方向的变化。
 const RADIUS_PRESETS = [
-  { v: 30, label: '仅本地（约 30 km）' },
-  { v: 100, label: '本市及周边（约 100 km，默认）' },
-  { v: 300, label: '较大范围（约 300 km）' },
+  { v: 30, labelKey: 'radius.30' },
+  { v: 100, labelKey: 'radius.100' },
+  { v: 300, labelKey: 'radius.300' },
 ]
 /** 新建关注点的默认半径（既有配置不动，见上）。 */
 const DEFAULT_PLACE_RADIUS_KM = 100
@@ -126,6 +132,28 @@ function normalizePref(raw) {
   const s = String(raw === undefined || raw === null ? '' : raw).trim()
   if (!s || PREF_SET.has(s)) return s
   return Object.prototype.hasOwnProperty.call(PREF_SHORT, s) ? PREF_SHORT[s] : s
+}
+
+/**
+ * 都道府县的**显示名**（随界面语言变）。
+ *
+ * `PREFECTURES` 里的 `jp` 是**匹配用的**（P2PQuake 的 `pref` 就是这个形状，`PREF_SET` /
+ * `PREF_SHORT` 都从它派生），所以显示不能复用它——`zh` 那一栏只是"中文界面用哪几个字"。
+ * 这个函数负责挑出"给人看的那一份"：日文界面用原名，中文界面用中文名，英文界面用罗马字
+ * （`PREF_EN`）。三国语言都不缺项时，三种语言下看到的名字是同一份数据的三种写法。
+ *
+ * 认不出的**原样返回**：调用方也会把源里的 `pref` 直接传进来，那里可能是简写或空值，
+ * 不该被这里改写（简写归一由 normalizePref 负责，两件事分开）。
+ */
+function prefLabelOf(pref) {
+  const s = String(pref === undefined || pref === null ? '' : pref).trim()
+  if (!s) return ''
+  const hit = PREFECTURES.find((p) => p.jp === s)
+  if (!hit) return s
+  const lang = getLanguage()
+  if (lang === 'ja') return hit.jp
+  if (lang === 'en') return PREF_EN[hit.jp] || hit.jp
+  return hit.zh
 }
 
 // ---------- 时间：源时区 → 带偏移的 ISO 8601（DESIGN 第 4 节） ----------
@@ -186,13 +214,11 @@ function formatIssuedLocal(raw) {
   } catch (err) { return d.toISOString() }
 }
 
-// ---------- 界面语言（0.8.1 先立选项与配置字段，本地化本身在 0.9.0） ----------
-// 值用 BCP 47 的写法（zh-CN / ja / en），与三语 README 对齐。**现在只有简体中文**：
-// 先把契约（常量 → DEFAULT_CFG → normalizeCfg → Host schema → UI）立起来，
-// 0.9.0 加语言包时只需往这个数组里加项、再写文案表，不用再动配置层。
-const LANGUAGE_OPTIONS = [
-  { v: 'zh-CN', label: '简体中文' },
-]
+// ---------- 界面语言（0.8.1 立契约，0.9.0 由 00-i18n 提供） ----------
+// 选项**从 00-i18n 的语言清单派生**，不在这里另写一份：加一种语言只改 00-i18n 的 LANGS
+// 与 LANGUAGE_LABELS、再补一份文案表，配置契约（DEFAULT_CFG → normalizeCfg → Host schema）
+// 一行都不用动。值用 BCP 47 的完整标识（zh-CN / ja / en），与三语 README 对齐。
+const LANGUAGE_OPTIONS = LANGS.map((v) => ({ v, label: LANGUAGE_LABELS[v] }))
 
 const DEFAULT_CFG = {
   version: 1,
@@ -226,4 +252,4 @@ const DEFAULT_CFG = {
 }
 
 
-export { React, h, useState, useEffect, useRef, WS_URL, SANDBOX_URL, EMSC_WS_URL, STORAGE_KEY, HISTORY_KEY, HEALTH_KEY, HISTORY_MAX, MAX_WATCH_CITIES, MAX_WATCH_PLACES, RECONNECT_BASE, RECONNECT_MAX, SCALE_TEXT, SCALE_OPTIONS, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, CN_REPORT_MAG_OPTIONS, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, LANGUAGE_OPTIONS, PREFECTURES, PREF_SET, PREF_SHORT, PREF_BY_CODE, prefOfCode, prefCodeOf, normalizePref, P2P_TZ_OFFSET, P2P_TIME_RE, p2pTimeToIso, CN_TZ_OFFSET, CN_TIME_RE, cnTimeToIso, issuedToDate, formatIssuedLocal, DEFAULT_CFG }
+export { React, h, useState, useEffect, useRef, WS_URL, SANDBOX_URL, EMSC_WS_URL, STORAGE_KEY, HISTORY_KEY, HEALTH_KEY, HISTORY_MAX, MAX_WATCH_CITIES, MAX_WATCH_PLACES, RECONNECT_BASE, RECONNECT_MAX, SCALE_TEXT, SCALE_OPTIONS, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, CN_REPORT_MAG_OPTIONS, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, LANGUAGE_OPTIONS, PREFECTURES, PREF_SET, PREF_SHORT, PREF_BY_CODE, prefOfCode, prefCodeOf, normalizePref, prefLabelOf, P2P_TZ_OFFSET, P2P_TIME_RE, p2pTimeToIso, CN_TZ_OFFSET, CN_TIME_RE, cnTimeToIso, issuedToDate, formatIssuedLocal, DEFAULT_CFG }

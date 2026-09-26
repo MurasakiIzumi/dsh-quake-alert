@@ -4191,8 +4191,12 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(missing.length === 0,
         '每个有校验约定的源都出现在设置页的「源状态」里（漏了就是"某个源坏了界面上看不见"）' +
         (missing.length ? '（缺：' + missing.join(',') + '）' : ''))
-      const noLabel = T.SOURCE_ORDER.filter((id) => !T.SOURCE_LABELS[id])
-      assert(noLabel.length === 0, '状态行里的每个源都有中文标签' +
+      // 每个源都得有一个**本地化**的显示名。认不出的 id 会退回 id 本身，所以"取到的名字
+      // 就是 id"即等于"这个源没有标签"。旧写法查的是 `SOURCE_LABELS[id]` 是否存在——那张表
+      // 曾是模块级常量（里面的 t() 在模块加载时就被固化），0.9.0 改成单一来源 + 调用时取词
+      // （00f-source-labels），它不再存在。
+      const noLabel = T.SOURCE_ORDER.filter((id) => T.sourceLabelOf(id) === id)
+      assert(noLabel.length === 0, '状态行里的每个源都有显示名' +
         (noLabel.length ? '（缺：' + noLabel.join(',') + '）' : ''))
       assert(T.SOURCE_CODE_TEXT.cenc_eew && T.SOURCE_CODE_TEXT.cenc_eqlist,
         '历史的「类型」行能标出大陆源（否则会退化成 kind 兜底、与日本源混淆）')
@@ -4369,7 +4373,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.DEFAULT_PLACE_RADIUS_KM === 100, '新建关注点的默认半径是 100km（DESIGN 9.2）')
     assert(t.RADIUS_PRESETS.length === 3 && t.RADIUS_PRESETS.some((o) => o.v === 100),
       '三档语义预设，含默认档')
-    assert(t.RADIUS_PRESETS.every((o) => typeof o.label === 'string' && o.label.indexOf('km') !== -1),
+    // 档位表只保留 `labelKey`、文字在三语表里（下拉渲染时取词，见 0.9.0 的本地化），
+    // 所以这条断言查的是**取出来的文案**：每个档位都得有一句话，而且括注了公里数。
+    assert(t.RADIUS_PRESETS.every((o) => typeof o.labelKey === 'string' && t.t(o.labelKey).indexOf('km') !== -1),
       '预设用语义标签 + 括注公里数（普通用户不必理解"公里"）')
     const legacy = t.normalizePlaces([{ name: '旧点', lat: 1, lon: 2 }])
     assert(legacy[0].radiusKm === 300,
@@ -4492,9 +4498,23 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const msHas = mkHas(msTexts)
       assert(msHas('数据源') && msHas('大陆源链路') && msHas('测试与诊断') && msHas('免责声明'),
         '其他页含数据源、链路、诊断与免责')
-      assert(msHas('语言 / Language') && msHas('简体中文') && msHas('目前只有简体中文'),
-        '语言选项在「其他」页，并如实说明本地化排在 0.9.0（不做成假控件）')
+      // 0.8.1 在这里守的是"语言下拉 + 那句『目前只有简体中文，其他语言在 0.9.0 加入』"。
+      // 0.9.0 让本地化真正生效后，那句话本身变成了假话，按 11.10 规则 1（界面不解释自己）
+      // 删掉——所以断言改成守**新的事实**：三种语言的显示名都在下拉里。它守的还是同一件事
+      // （不做成"看着能切、其实没反应"的假控件），只是判据从"如实说明还没做"变成"真的做了"。
+      assert(msHas('语言 / Language') && msHas('简体中文') && msHas('日本語') && msHas('English'),
+        '语言选项在「其他」页，且中 / 日 / 英三种语言都在下拉里（不再是"选了没反应"的假控件）')
       assert(msHas('生成诊断快照') && msHas('正式（实时推送）'), '诊断快照与数据源开关都在')
+      // 端到端：把配置里的语言设成英文后，设置页**渲染出来的文本**就是英文。
+      // 这条补的是"t() 单测正确"与"界面真的跟着切"之间的那道缝——模块级求值那类缺陷
+      // （常量在模块加载时就把默认语言固化下来）正是在这条缝里藏身：单测全绿、界面不切。
+      const enSeed = {}
+      enSeed[t.STORAGE_KEY] = JSON.stringify(Object.assign({}, t.DEFAULT_CFG, { language: 'en' }))
+      const enBlob = safeRender(enSeed, 'misc', '设置页（英文）').join('\n')
+      assert(enBlob.indexOf('Source status') !== -1 && enBlob.indexOf('Export settings') !== -1,
+        '语言配成英文后，设置页渲染出的就是英文（端到端）')
+      assert(enBlob.indexOf('源状态') === -1 && enBlob.indexOf('数据源') === -1 && enBlob.indexOf('免责声明') === -1,
+        '英文界面下不再出现中文的区块标题（说明没有哪一处绕过了 t()）')
 
       // —— 常驻状态条：在选项卡**之外**，所以每一页都看得到，且只报"通不通 + 几条" ——
       const stripHas = (texts) => texts.some((t) => t.indexOf('未启动') !== -1)
@@ -6720,9 +6740,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const t9 = loadClient().__test
       assert(t9.DEFAULT_CFG.language === 'zh-CN', '默认界面语言是简体中文')
       assert(t9.LANGUAGE_OPTIONS.some((o) => o.v === 'zh-CN'),
-        '清单里有简体中文（0.9.0 起还会有 日本語 / English / 繁中…）')
-      assert(t9.normalizeCfg({ language: 'ja' }).language === 'zh-CN',
-        '白名单外的语言码回默认值——手改配置写一个还没有语言包的代码不该被放行（否则界面会进入半本地化状态）')
+        '清单里有简体中文（0.9.0 起还有 日本語 / English）')
+      // 「不在清单里的语言码」**从清单派生**，不手抄一个具体值：0.8.2 这里写的是 'ja'
+      // （当时唯一语言是 zh-CN），而 0.9.0 把 ja 加进清单之后，那个样本就变成了"清单内的值"，
+      // 断言随之变红——负样本写死就是这个后果（DESIGN 11.6：负向词表要从白名单派生）。
+      const notInList = ['pt-BR', 'ko', 'zh-TW', 'de', 'fr'].find((v) => t9.LANGS.indexOf(v) === -1)
+      assert(Boolean(notInList), '（前置）找一个不在语言清单里的合法 BCP 47 值：' + notInList)
+      assert(t9.normalizeCfg({ language: notInList }).language === 'zh-CN',
+        '白名单外的语言码回默认值——手改配置写一个还没有语言包的代码不该被放行（否则界面会进入半本地化状态）：' + notInList)
       assert(t9.normalizeCfg({ language: 'zh-CN' }).language === 'zh-CN', '白名单内的原样保留')
       const mod9 = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
       const parsed9 = unwrapRefs(mod9.QuakeAlertSettingsSchema({ language: 'zh-CN' }))
@@ -6730,18 +6755,18 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       // Host 与 Client 的分工（0.8.2 修正）：Host 只校验 BCP 47 **形状**，白名单在 Client。
       // 理由是本插件要做十几套文案（含简繁分开的 zh-CN / zh-TW）——Host 枚举会让"加一种语言"
       // 变成一次跨半边的契约改动（改 schema 要重启，旧 Host 还读不了新值）。
-      const acceptsJa = unwrapRefs(mod9.QuakeAlertSettingsSchema({ language: 'ja' }))
-      assert(acceptsJa.language === 'ja',
-        'Host schema 接受形状合法但当前还没有文案表的语言（ja / zh-TW / pt-BR…）：枚举留在 Client，加语言就只动 Client')
+      const acceptsUnknown = unwrapRefs(mod9.QuakeAlertSettingsSchema({ language: notInList }))
+      assert(acceptsUnknown.language === notInList,
+        'Host schema 接受形状合法但当前还没有文案表的语言（' + notInList + '）：枚举留在 Client，加语言就只动 Client')
       let rejectedShape = false
       try { mod9.QuakeAlertSettingsSchema({ language: '日本語' }) } catch (e) { rejectedShape = true }
       let rejectedShape2 = false
       try { mod9.QuakeAlertSettingsSchema({ language: 42 }) } catch (e) { rejectedShape2 = true }
       assert(rejectedShape && rejectedShape2,
         'Host schema 仍拦住形状不合法的值（"日本語"、数字 42）——放松的是枚举，不是类型')
-      // 两侧分工的合起来的效果：Host 收下 ja，Client 认不出 → 回默认，界面不会半本地化
-      assert(t9.normalizeCfg(t9.sectionToCfg({ language: 'ja' })).language === 'zh-CN',
-        'Host 收下的未知语言到 Client 会被归一成默认（界面仍是完整的一种语言，不会半本地化）')
+      // 两侧分工合起来的效果：Host 收下清单外的值，Client 认不出 → 回默认，界面不会半本地化
+      assert(t9.normalizeCfg(t9.sectionToCfg({ language: notInList })).language === 'zh-CN',
+        'Host 收下的未知语言到 Client 会被归一成默认（界面仍是完整的一种语言，不会半本地化）：' + notInList)
       // 加语言时最容易犯的错：往 LANGUAGE_OPTIONS 里写一个 Host 收不了的值（下划线、中文名、
       // 或者干脆漏了地区码）。这条断言把"清单"与"Host 能收下的形状"绑在一起。
       const hostAccepts = (v) => {
@@ -6755,6 +6780,158 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const snap9 = loadClient().__test.buildDiagSnapshot()
       assert(snap9.config.language === 'zh-CN',
         '诊断快照里带界面语言（0.9.0 排查"界面没跟着切"时第一个要核的字段）')
+    }
+
+    // ⑩ 0.9.0：本地化（文案表 / BCP 47 回退链 / 默认语言下逐字不变）
+    //    本地化"没坏"有三个可验的形态：三语表齐、切语言当场生效、**默认语言下与本地化
+    //    之前逐字一致**。第三条是关键：0.9.0 只是把既有字符串搬进表里，不是趁机改文案
+    //    ——真要改文案得单独走 11.10 那条"改文案必须同步断言"的门。所以下面把当年立下的
+    //    中文原文直接写进断言里（它们同时是 0.8.2 那些安全文案的锚点）。
+    {
+      const t10 = loadClient().__test
+      assert(t10.LANGS.length === 3 && t10.LANGS.indexOf('zh-CN') === 0,
+        '语言清单（顺序即下拉顺序）：' + t10.LANGS.join(' / '))
+      const keysOf = (lang) => Object.keys(t10.tableOf(lang)).sort()
+      const baseKeys = keysOf('zh-CN')
+      assert(baseKeys.length > 20, 'zh-CN 文案表有 ' + baseKeys.length + ' 条')
+      for (const lang of t10.LANGS) {
+        const cur = keysOf(lang)
+        const missing = baseKeys.filter((k) => cur.indexOf(k) === -1)
+        assert(cur.length === baseKeys.length && missing.length === 0,
+          lang + ' 与 zh-CN 的 key 集合一致（缺：[' + missing.join(', ') + ']）')
+      }
+      // 「翻过」而不是「把中文抄了三份」：同一个 key 在三种语言下不能两两相同。
+      assert(new Set(t10.LANGS.map((l) => t10.tableOf(l)['app.name'])).size === t10.LANGS.length,
+        'app.name 在三种语言下互不相同：' + t10.LANGS.map((l) => t10.tableOf(l)['app.name']).join(' / '))
+
+      // ---- 默认语言（zh-CN）下与本地化之前逐字一致 ----
+      assert(t10.alertTitleOf(null) === '灾害预警', '默认语言：无事件时的通知标题')
+      assert(t10.alertTitleOf({ kind: 'eew', source: 'p2pquake' }) === '⚠ 紧急地震速报（警报）',
+        '默认语言：EEW 标题带「（警报）」（0.8.2 从 0.8.1 的瘦身里改回来的安全分级）')
+      assert(t10.alertTitleOf({ kind: 'quake', kindLabel: '地震情報・各地の震度' }) === '🌐 地震情報・各地の震度',
+        '默认语言：日本源标题用 kindLabel 原文（源文本不翻，11.10）')
+      assert(t10.cnProductName({ source: 'cenc_eew' }) === '大陆地震预警', '默认语言：大陆源的产品名')
+      assert(t10.disclaimerOf({ source: 'usgs' }) === '仅供参考，请以美国地质调查局（USGS）的官方发布为准',
+        '默认语言：免责声明按源点名机构')
+      assert(t10.disclaimerOf({ source: 'nope' }) === '仅供参考，请以官方发布为准',
+        '默认语言：机构认不出时用中性表述（不硬编码气象厅）')
+      assert(t10.weatherActionHintOf({ locator: 'overseas' }) === '请关注当地官方发布的避难与撤离指引',
+        '默认语言：海外气象的行动提示含「撤离」（0.8.2 改回来的安全信息）')
+      assert(t10.weatherActionHintOf({ locator: 'area' }) === '请关注当地气象台发布的防御指引',
+        '默认语言：大陆气象的行动提示含「防御」')
+      assert(t10.weatherActionHintOf({}) === '请确认所在市町村的避难信息', '默认语言：日本气象的行动提示')
+
+      // ---- 切换语言当场生效，且源文本原样不动 ----
+      assert(t10.setLanguage('en') === 'en', 'setLanguage 接受清单内的值并返回生效值')
+      assert(t10.getLanguage() === 'en', 'getLanguage 反映当前语言')
+      assert(t10.alertTitleOf({ kind: 'eew', source: 'p2pquake' }) === '⚠ Earthquake Early Warning (Alert)',
+        '切到英文后通知标题跟着换')
+      assert(t10.disclaimerOf({ source: 'usgs' }) ===
+        'For reference only. Check official announcements from the U.S. Geological Survey (USGS).',
+        '切到英文后免责行跟着换（机构名一并换）')
+      assert(t10.alertTitleOf({ kind: 'quake', kindLabel: '地震情報・各地の震度' }) === '🌐 地震情報・各地の震度',
+        '切到英文后 kindLabel 仍是源语言原文——源文本一律不翻（11.10 的范围约定）')
+      assert(t10.setLanguage('ja') === 'ja' && t10.alertTitleOf(null) === '災害警報', '切到日文后标题跟着换')
+      assert(t10.weatherActionHintOf({ locator: 'area' }) === '現地の気象台が発表する防災情報をご確認ください',
+        '切到日文后行动提示跟着换')
+
+      // ---- BCP 47 回退链：地区变体落到同一语言，认不出的主语言落到默认语言 ----
+      const rb = [
+        ['zh-CN', 'zh-CN'], ['zh-HK', 'zh-CN'], ['zh-TW', 'zh-CN'], ['zh', 'zh-CN'],
+        ['ja', 'ja'], ['ja-JP', 'ja'], ['JA-jp', 'ja'],
+        ['en', 'en'], ['en-US', 'en'],
+        ['pt-BR', 'zh-CN'], ['', 'zh-CN'], [null, 'zh-CN'], ['日本語', 'zh-CN'],
+      ]
+      for (const [input, want] of rb) {
+        const got = t10.resolveLang(input)
+        assert(got === want, 'resolveLang(' + JSON.stringify(input) + ') → ' + want + '（实际 ' + got + '）')
+      }
+      assert(rb.every(([input]) => t10.LANGS.indexOf(t10.resolveLang(input)) !== -1),
+        '回退结果永远是清单里的一种语言（界面不会停在半本地化的中间态）')
+      // 缺 key 回显 key 本身：宁可界面上出现一个明显的占位符，也不要空白或悄悄退回中文。
+      assert(t10.t('no.such.key') === 'no.such.key', '缺 key 时回显 key 本身')
+      assert(t10.t('disclaimer.named', { authority: 'X' }).indexOf('X') !== -1, 't() 会替换 {name} 插值')
+      assert(t10.t('disclaimer.named', { authority: 'X' }).indexOf('{authority}') === -1,
+        '插值替换后不留占位符')
+      t10.setLanguage('zh-CN') // 复位：本块改过语言，不把状态留给后面的用例（每个用例各自 loadClient，这里是显式表态）
+    }
+
+    // ⑪ 0.9.0：配置导出导入 + 量纲文案表 + 源名
+    {
+      const t11 = loadClient().__test
+      // ---- 导出文件的结构 ----
+      const text = t11.buildConfigExport(t11.currentCfg())
+      const ioParsed = JSON.parse(text)
+      assert(ioParsed.format === t11.CONFIG_FORMAT && ioParsed.formatVersion === t11.CONFIG_FORMAT_VERSION,
+        '导出文件带格式标识与格式版本：' + ioParsed.format + ' v' + ioParsed.formatVersion)
+      assert(ioParsed.config && ioParsed.config.watch && Array.isArray(ioParsed.config.watch.places),
+        '导出的是配置本身（关注点在文件里）')
+      assert(/^quake-alert-config-\d{8}\.json$/.test(t11.configFileName(new Date(2026, 8, 26))),
+        '导出文件名带日期，便于区分多次导出：' + t11.configFileName(new Date(2026, 8, 26)))
+      assert(text.indexOf('pluginVersion') === -1,
+        '文件里**不写插件版本**：格式版本才是契约（写版本号会诱使调用方按版本做分支）')
+      assert(!('events' in ioParsed.config) && !('history' in ioParsed.config) && !('health' in ioParsed.config),
+        '文件里不含履历 / 健康记录（前者含源侧原文、换机器未必对得上；后者是会话内的时效数据）')
+
+      // ---- 往返 ----
+      const round = t11.parseConfigImport(text)
+      assert(round.ok, '导出的文件能被自己读回来（往返成立）')
+      assert(JSON.stringify(round.cfg) === JSON.stringify(t11.normalizeCfg(ioParsed.config)),
+        '往返后配置等价（两边都过 normalizeCfg）')
+
+      // ---- 坏输入：每种都给得出**可区分**的错误码（文案由界面按当前语言翻） ----
+      assert(t11.parseConfigImport('{').error === 'json', '不是 JSON → json')
+      assert(t11.parseConfigImport('null').error === 'shape', '不是对象 → shape')
+      assert(t11.parseConfigImport('{"format":"other/app","formatVersion":1,"config":{}}').error === 'format',
+        '别的应用的 JSON → format（不误吃）')
+      assert(t11.parseConfigImport('{"format":"' + t11.CONFIG_FORMAT + '","config":{}}').error === 'version',
+        '缺格式版本号 → version')
+      assert(t11.parseConfigImport('{"format":"' + t11.CONFIG_FORMAT + '","formatVersion":99,"config":{}}').error === 'newer',
+        '格式版本高于本版 → newer（直接拒绝，不尽力解析——半个配置比没有配置更危险）')
+      assert(t11.parseConfigImport('{"format":"' + t11.CONFIG_FORMAT + '","formatVersion":1,"config":[]}').error === 'shape',
+        'config 不是对象 → shape')
+
+      // ---- 导入是整体替换，且先备份（不能回退的备份等于没有备份） ----
+      const ioBefore = t11.currentCfg()
+      assert(ioBefore.thresholds.quakeScale === 40, '（前置）当前震度阈值是默认的 40')
+      const ioWant = t11.normalizeCfg(Object.assign({}, ioBefore, {
+        thresholds: Object.assign({}, ioBefore.thresholds, { quakeScale: 50 }),
+      }))
+      const ioRes = t11.importConfig(t11.buildConfigExport(ioWant))
+      assert(ioRes.ok, '导入成功')
+      assert(t11.currentCfg().thresholds.quakeScale === 50, '导入后配置被整体替换（新值生效）')
+      const ioBackup = t11.loadConfigBackup()
+      assert(ioBackup && ioBackup.cfg.thresholds.quakeScale === 40, '导入前自动备份了当前配置（撤销的依据）')
+      const ioUndo = t11.undoConfigImport()
+      assert(ioUndo.ok && t11.currentCfg().thresholds.quakeScale === 40, '撤销回到导入前的配置')
+
+      // ---- 校验失败时什么都不写（连备份都不做） ----
+      const ioBeforeBad = JSON.stringify(t11.currentCfg())
+      const ioBad = t11.importConfig('{"format":"other/app","formatVersion":1,"config":{}}')
+      assert(!ioBad.ok && ioBad.error === 'format', '坏文件被拒绝')
+      assert(JSON.stringify(t11.currentCfg()) === ioBeforeBad, '校验失败时配置一个字都没动')
+
+      // ---- 量纲文案表（震度 / 海啸 / 震级 / 半径）：三种语言都得有，且都不是占位符 ----
+      const units = t11.tableOf('zh-CN')
+      const unitKeys = Object.keys(units).filter((k) => /^(scale|scaleOpt|tsunami|tsunamiOpt|magOpt|radius)\./.test(k))
+      assert(unitKeys.length >= 30, '量纲文案表有 ' + unitKeys.length + ' 条')
+      for (const lang of t11.LANGS) {
+        const ioMissing = unitKeys.filter((k) => typeof t11.tableOf(lang)[k] !== 'string' || !t11.tableOf(lang)[k])
+        assert(ioMissing.length === 0, lang + ' 的量纲文案齐全（缺：' + ioMissing.join(',') + '）')
+      }
+      // 设置页的档位表只存 `labelKey`、文字在表里（渲染时取词）。所有 labelKey 都得能取到非空
+      // 文案——漏一条就是下拉里出现一个**空选项**，那比显示 key 更难被发现。
+      const allLabelKeys = [].concat(t11.RADIUS_PRESETS, t11.CN_REPORT_MAG_OPTIONS).map((o) => o.labelKey)
+      assert(allLabelKeys.length > 0 && allLabelKeys.every((k) => typeof k === 'string' && t11.t(k) && t11.t(k) !== k),
+        '档位表的每个 labelKey 都能取到文案：' + allLabelKeys.join(', '))
+
+      // ---- 源名随语言（00f 是唯一来源：侧边栏提示与设置页共用同一份映射） ----
+      assert(t11.sourceLabelOf('jma') !== 'jma', '源名有本地化文案：' + t11.sourceLabelOf('jma'))
+      assert(t11.sourceLabelOf('no-such-source') === 'no-such-source', '认不出的源退回 id（不显示空白）')
+      t11.setLanguage('en')
+      assert(t11.sourceLabelOf('jma') === 'JMA (weather hazards, Host polling)',
+        '切成英文后源名跟着换（映射在 00f，取词在调用时）：' + t11.sourceLabelOf('jma'))
+      t11.setLanguage('zh-CN')
     }
 
     // ⑧ 全球主要城市表（DESIGN 9.4）：数据结构、按国家分包下发、客户端缓存与 UI 入口

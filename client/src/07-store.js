@@ -4,12 +4,14 @@
 // 作用：全局 store——连接状态 + 最近预警，供设置页与状态指示订阅。
 // 内容：store 对象（status/retries/detail/received/events + 订阅）、
 //       addEvent（写入历史并落盘，key 唯一化）。
-// 依赖：01-constants、02-storage。
+// 依赖：01-constants、02-storage、00-i18n、00f-source-labels（源名与状态文字的取词）。
 // 注意：store.push({}) 是各 UI 的重渲染信号，改变它会影响所有订阅方。
 // ============================================================================
 
 import { HISTORY_MAX, HISTORY_KEY } from './01-constants.js'
 import { loadHistory, saveJSON, isPlainObject, normalizeHistoryEntry } from './02-storage.js'
+import { t } from './00-i18n.js'
+import { sourceLabelOf, statusTextOf } from './00f-source-labels.js'
 
 // ---------- 全局 store：连接状态 + 最近预警（设置页订阅） ----------
 // 0.4.0 起「连接状态」是**多源聚合**的：日本链路是 P2PQuake WebSocket，全球链路是 EMSC
@@ -45,33 +47,44 @@ const store = {
     this.push({})
   },
   recomputeStatus() {
-    const list = Object.keys(this.sources).map((k) => this.sources[k])
-    if (list.length === 0) {
+    // 遍历 **id** 而不是值：源名要按语言现取（`sourceLabelOf(id)`），而 `sources[id].label`
+    // 是 15-entry 建连时塞进来的字符串——那份是"建连那一刻的语言"，切语言后不会变。
+    const ids = Object.keys(this.sources)
+    if (ids.length === 0) {
       this.status = 'idle'; this.retries = 0; this.detail = ''
       return
     }
     // disabled（用户关掉了某个灾种）不参与聚合：它不该把整体拉成"异常"，
     // 但全部源都关掉时要如实显示成"已关闭"而不是"未启动"。
-    const active = list.filter((x) => x.status !== 'disabled')
-    if (active.length === 0) {
+    const activeIds = ids.filter((id) => this.sources[id].status !== 'disabled')
+    if (activeIds.length === 0) {
       this.status = 'disabled'; this.retries = 0
-      this.detail = list.map((x) => (x.label || '') + '：已关闭').join(' · ')
+      this.detail = ids.map((id) => t('status.sourceDisabled', { name: sourceLabelOf(id) })).join(' · ')
       return
     }
-    const pick = (s) => active.filter((x) => x.status === s)[0]
+    const pick = (s) => activeIds.filter((id) => this.sources[id].status === s)[0]
     // 红优先：任一链路停了 / 不可达，整体就不是"正常"；其次蓝（数据格式异常，用户处理不了）、
     // 黄（连接中 / 重连 / 降级）、中灰（数据过期），最后才是绿。
     // 0.4.1 起 feed 源（JMA / USGS / NOAA）也上报状态——此前只有 WebSocket 源参与聚合，
     // 于是气象 / 全球轮询链路整体死掉时侧边栏仍然是绿的（用户以为在被保护）。
-    const chosen = pick('closed') || pick('unreachable') || pick('schema-error') ||
+    const chosenId = pick('closed') || pick('unreachable') || pick('schema-error') ||
       pick('reconnecting') || pick('connecting') || pick('degraded') || pick('stale') ||
-      pick('open') || active[0]
+      pick('open') || activeIds[0]
+    const chosen = this.sources[chosenId]
     this.status = chosen.status
     this.retries = typeof chosen.retries === 'number' ? chosen.retries : 0
-    // 详情优先列异常源（全部正常时才列全部）：源多了以后逐条列会挤爆悬停提示
-    const bad = active.filter((x) => x.status !== 'open')
-    this.detail = (bad.length ? bad : active)
-      .map((x) => (x.label || '') + '：' + (x.detail || x.status)).join(' · ')
+    // 详情优先列异常源（全部正常时才列全部）：源多了以后逐条列会挤爆悬停提示。
+    // `detail` 是取数层给的具体原因（原样透传）；没有原因时退回**状态文字**，而不是裸状态码
+    // （旧写法直接把 `open` / `closed` 这种码拼进提示里，那是给开发看的，不是给用户看的）。
+    const badIds = activeIds.filter((id) => this.sources[id].status !== 'open')
+    this.detail = (badIds.length ? badIds : activeIds)
+      .map((id) => {
+        const s = this.sources[id]
+        return t('status.sourceDetail', {
+          name: sourceLabelOf(id),
+          detail: s.detail || statusTextOf(s.status, s.retries),
+        })
+      }).join(' · ')
   },
   subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn) },
 }

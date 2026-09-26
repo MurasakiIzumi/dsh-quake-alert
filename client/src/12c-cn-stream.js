@@ -85,7 +85,7 @@ export function createCnStream(opts = {}) {
     || ((url) => new window.EventSource(url))
   // 定时器注入点：探针超时与周期检查都靠它，测试要能确定性地推进（不真等 8 秒 / 5 秒）
   const setTimer = opts.setTimer || ((fn, ms) => setTimeout(fn, ms))
-  const clearTimer = opts.clearTimer || ((t) => clearTimeout(t))
+  const clearTimer = opts.clearTimer || ((timer) => clearTimeout(timer))
   // 降级工厂：默认按 12b 的轮询客户端建一个（`?source=` 分派，Host 侧早就支持）。
   // createFeedClient 也可注入：这样"降级客户端拿了哪个游标键"能被直接断言——那正是
   // "降级期间静默漏掉一段条目"的成因，光看 mode 有没有变成 poll 是测不出来的。

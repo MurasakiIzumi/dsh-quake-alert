@@ -14,6 +14,7 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+import { TABLES, LANGS } from '../client/src/00-i18n.js'
 
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'client', 'src')
 const files = readdirSync(SRC).filter((f) => f.endsWith('.js')).sort()
@@ -166,8 +167,80 @@ for (const d of dupes) {
   console.error('✗ 导出重名：' + d)
 }
 
+// ③ i18n key 引用一致性（0.9.0）：正文里 `t('some.key')` 的**字面量** key 必须在文案表里存在。
+//
+// 漏 key 时 t() 会回显 key 本身（设计如此：界面上出现 `settings.watch.title` 是一眼可见的
+// 失败），但那个失败要等到用户打开那一页才看得见。设置页有 300+ 条 key，"引用了不存在的
+// key"靠人眼核对不现实——放到这里就变成构建期失败。
+//
+// 只查字面量：`t(variable)`、`t('scale.' + v)` 这类动态拼接不在范围内（表里也可能有
+// 只被动态拼出来、从不以字面量出现的 key，所以这里不做反向检查——那会全是误报）。
+const i18nKeys = new Set(Object.keys(TABLES[LANGS[0]]))
+
+/**
+ * 只去掉注释、**保留字符串内容**（与上面的 `stripNoise` 相反：那个把字符串也清空，
+ * 因为"字符串里出现的词算不算使用"对它是否定的，而这里要找的正是字符串里的 key）。
+ *
+ * 不剥注释的话，文件头那种"本文件里的文案一律走 `t('settings.*')`"的说明会被当成一次
+ * 真实引用，报出一个根本不存在的 key——这正是这条检查第一次运行时报出来的东西。
+ */
+function stripComments(code) {
+  let out = ''
+  let i = 0
+  const n = code.length
+  while (i < n) {
+    const c = code[i]
+    const c2 = code[i + 1]
+    if (c === '/' && c2 === '*') {
+      const end = code.indexOf('*/', i + 2)
+      i = end === -1 ? n : end + 2
+      out += ' '
+      continue
+    }
+    if (c === '/' && c2 === '/') {
+      const end = code.indexOf('\n', i + 2)
+      i = end === -1 ? n : end
+      out += ' '
+      continue
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      const quote = c
+      out += c
+      i += 1
+      while (i < n) {
+        if (code[i] === '\\') { out += code[i] + (code[i + 1] || ''); i += 2; continue }
+        out += code[i]
+        if (code[i] === quote) { i += 1; break }
+        i += 1
+      }
+      continue
+    }
+    out += c
+    i += 1
+  }
+  return out
+}
+
+const unknownKeys = new Map()
+for (const f of files) {
+  const text = stripComments(readFileSync(path.join(SRC, f), 'utf8'))
+  for (const m of text.matchAll(/(^|[^\w$.])t\(\s*'([^']+)'/g)) {
+    if (!i18nKeys.has(m[2])) {
+      if (!unknownKeys.has(m[2])) unknownKeys.set(m[2], [])
+      unknownKeys.get(m[2]).push(f)
+    }
+  }
+}
+if (unknownKeys.size) {
+  problems += unknownKeys.size
+  for (const [key, where] of unknownKeys) {
+    console.error('✗ i18n key 不存在：' + key + '（被 ' + [...new Set(where)].join('、') + ' 引用）')
+  }
+}
+
 if (problems) {
   console.error('\n检查失败：' + problems + ' 处跨模块引用问题')
   process.exit(1)
 }
-console.log('跨模块引用检查通过（' + files.length + ' 个模块 / ' + owner.size + ' 个导出名）')
+console.log('跨模块引用检查通过（' + files.length + ' 个模块 / ' + owner.size + ' 个导出名 / ' +
+  i18nKeys.size + ' 条 i18n key）')

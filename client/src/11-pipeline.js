@@ -4,11 +4,12 @@
 // 作用：主链——收到一条原始消息后的完整处理顺序。
 // 内容：handleRaw（解析 → 去重 → 匹配 → 静默时段 → 跨标签页 → 通知 → 历史）、
 //       handleCancelled（取消 / 解除提醒，仅对已提醒过的事件）。
-// 依赖：05-parser、06-matcher、07-store、08-audio、09-notify、10-dedupe、01-constants。
+// 依赖：05-parser、06-matcher、07-store、08-audio、09-notify、10-dedupe、01-constants、00-i18n。
 // 重要：这是唯一把各层串起来的地方，改动前先读 06-matcher 的放行规则。
 // ============================================================================
 
-import { PREFECTURES } from './01-constants.js'
+import { PREFECTURES, prefLabelOf } from './01-constants.js'
+import { t } from './00-i18n.js'
 import { inQuietHours, own } from './02-storage.js'
 import { parse, severityOfScale, sevColor } from './05-parser.js'
 import { matchAlert, regionInWeatherWatch, validGeo } from './06-matcher.js'
@@ -45,8 +46,8 @@ function areaLabelOf(region) {
  */
 function cnProductName(alert) {
   if (!alert) return ''
-  if (alert.source === 'cenc_eew') return '大陆地震预警'
-  if (alert.source === 'cenc_eqlist') return '大陆地震速报'
+  if (alert.source === 'cenc_eew') return t('product.cnEew')
+  if (alert.source === 'cenc_eqlist') return t('product.cnEqlist')
   return ''
 }
 
@@ -57,36 +58,38 @@ function cnProductName(alert) {
  * 四川的一场 CENC 预警都会让用户"以气象厅官方发布为准"——免责声明里出现错误机构，
  * 会直接削弱这份声明本身的可信度。这里按源给出机构名，认不出时退化成中性表述。
  */
+// 值改成文案表的 key 而不是名字本身：**机构归属与语言无关**（哪个源归哪家机构是事实），
+// 而名字要跟着界面语言走，所以映射留在代码里、名字留在 00a-texts-core.js。
 const AUTHORITY_BY_SOURCE = {
-  emsc: '欧洲-地中海地震中心（EMSC）',
-  usgs: '美国地质调查局（USGS）',
-  noaa: '太平洋海啸警报中心（NOAA）',
-  cenc_eew: '中国地震台网（CENC）',
-  cenc_eqlist: '中国地震台网（CENC）',
+  emsc: 'authority.emsc',
+  usgs: 'authority.usgs',
+  noaa: 'authority.noaa',
+  cenc_eew: 'authority.cenc',
+  cenc_eqlist: 'authority.cenc',
   // 0.5.2：大陆气象预警的发布主体是**各级气象台**，汇总在中央气象台（中国气象局）的网站上。
   // 免责声明里点名"中央气象台（中国气象局）"而不是泛泛的"气象厅"——后者是日本的机构，
   // 出现在一条云南暴雨预警的免责声明里会直接削弱这份声明的可信度（同上一段的理由）。
-  nmc_alarm: '中央气象台（中国气象局）',
+  nmc_alarm: 'authority.cma',
   // 0.6.1：海外气象源。不登记的话，一条美国洪水预警的免责声明会退化成泛泛的
   // 「请以官方发布为准」——用户看不出该找哪家机构（与上面 nmc 的理由相同）。
-  nws_alerts: '美国国家气象局（NWS）',
-  eccc_alerts: '加拿大环境与气候变化部（ECCC）',
-  jma: '気象庁',
+  nws_alerts: 'authority.nws',
+  eccc_alerts: 'authority.eccc',
+  jma: 'authority.jma',
 }
 function authorityOf(alert) {
   if (!alert) return ''
   const bySource = own(AUTHORITY_BY_SOURCE, String(alert.source || ''))
-  if (bySource) return bySource
+  if (bySource) return t(bySource)
   const byCode = own(AUTHORITY_BY_SOURCE, String(alert.code === undefined ? '' : alert.code))
-  if (byCode) return byCode
+  if (byCode) return t(byCode)
   // P2PQuake 的 551 / 552 / 556 都是转播気象庁的信息（它们只有数字 code，没有 source）
-  if (alert.code === 551 || alert.code === 552 || alert.code === 556) return '気象庁'
+  if (alert.code === 551 || alert.code === 552 || alert.code === 556) return t('authority.jma')
   return ''
 }
 /** 「仅供参考」那一行。机构已知时点名，未知时用中性表述（不硬编码日本气象厅）。 */
 function disclaimerOf(alert) {
   const a = authorityOf(alert)
-  return a ? '仅供参考，请以' + a + '的官方发布为准' : '仅供参考，请以官方发布为准'
+  return a ? t('disclaimer.named', { authority: a }) : t('disclaimer.generic')
 }
 
 /**
@@ -98,10 +101,10 @@ function disclaimerOf(alert) {
  * 认定不出来源时退回**中性**表述，而不是默认套日本的制度（同 disclaimerOf 的取向）。
  */
 function weatherActionHintOf(alert) {
-  if (!alert) return '请关注当地官方发布的指引'
-  if (alert.locator === 'overseas') return '请关注当地官方发布的避难与撤离指引'
-  if (alert.locator === 'area') return '请关注当地气象台发布的防御指引'
-  return '请确认所在市町村的避难信息'
+  if (!alert) return t('action.generic')
+  if (alert.locator === 'overseas') return t('action.overseas')
+  if (alert.locator === 'area') return t('action.cnArea')
+  return t('action.jp')
 }
 
 /**
@@ -109,16 +112,16 @@ function weatherActionHintOf(alert) {
  * 旧写法把「地震情报 · 」与「各地震度」分开拼，非「各地」分支会留下一个悬空的分隔符。
  */
 function alertTitleOf(alert) {
-  if (!alert) return '灾害预警'
+  if (!alert) return t('app.name')
   // kindLabel 本身已区分「地震速报·震度速报」「地震情报·各地震度」等，不需要再拼后缀
   // **但「（警报）」不能省**（0.8.2 review 订正）：气象厅的「緊急地震速報」分警報与予報两级，
   // kindLabel 写的是「紧急地震速报（警报）」，通知标题里删掉就成了两个说法（0.8.1 删过一次，
   // 而守着它的断言说明写着"文案一个字都不能变"——测试绿、没人守）。分级是安全信息，不是括号冗余。
-  if (alert.kind === 'eew') return '⚠ ' + (cnProductName(alert) || '紧急地震速报（警报）')
+  if (alert.kind === 'eew') return '⚠ ' + (cnProductName(alert) || t('product.jpEew'))
   if (alert.kind === 'quake') return '🌐 ' + alert.kindLabel
   if (alert.kind === 'tsunami') return '🌊 ' + alert.kindLabel
   if (alert.kind === 'weather') return '🌧 ' + alert.kindLabel
-  return '灾害预警'
+  return t('app.name')
 }
 
 /**
@@ -222,9 +225,9 @@ function handleCancelled(alert, cfg) {
     issued: alert.issued, headline: alert.headline, hit: true,
   })
   const title = alert.kind === 'eew'
-    ? '✅ ' + (cnProductName(alert) || '紧急地震速报') + '已取消'
-    : (alert.kind === 'tsunami' ? '✅ 海啸预报已解除' : '✅ ' + alert.kindLabel)
-  const body = alert.headline + '\n此前发出的警报已作废。\n' + disclaimerOf(alert)
+    ? '✅ ' + t('notify.cancelTitle', { product: cnProductName(alert) || t('product.jpEewShort') })
+    : (alert.kind === 'tsunami' ? t('notify.tsunamiLifted') : '✅ ' + alert.kindLabel)
+  const body = alert.headline + '\n' + t('notify.cancelBody') + '\n' + disclaimerOf(alert)
   if (cfg.notify.sound !== false) playSound('cancel', cfg.notify.volume)
   const pageVisible = typeof document !== 'undefined' && document.visibilityState === 'visible'
   if (pageVisible) {
@@ -416,10 +419,17 @@ function handleAlert(alert, cfg, opts) {
     })
     return { notified: false, reason: 'other-tab', detail: '其它 DSH 标签页已提醒同一条' }
   }
-  const prefZh = (PREFECTURES.find((p) => p.jp === hitPref) || {}).zh || hitPref
+  // 县名走 prefLabelOf（随界面语言）：日文界面是「東京都」，中文界面「东京（東京都）」，
+  // 英文界面「Tokyo (東京都)」。命中行的**标签**也跟着语言走，但原名的括号只在
+  // "显示名与原名不同"时出现——同一种语言里不会出现「東京都（東京都）」。
+  const prefLabel = prefLabelOf(hitPref)
   const title = alertTitleOf(alert)
   const bodyLines = [alert.headline]
-  if (hitPref) bodyLines.push('命中地区：' + prefZh + (prefZh !== hitPref ? '（' + hitPref + '）' : ''))
+  if (hitPref) {
+    bodyLines.push(prefLabel !== hitPref
+      ? t('notify.hitPrefNamed', { pref: prefLabel, jp: hitPref })
+      : t('notify.hitPref', { pref: prefLabel }))
+  }
   // 全球源没有行政区，命中依据是「距某个关注点多少公里」——把距离说出来，
   // 用户才能判断这条提醒是否可信（半径是自己设的）。
   //
@@ -430,11 +440,11 @@ function handleAlert(alert, cfg, opts) {
   // 0.6.1 只给 `locator === 'overseas'` 分了岔，**大陆源仍然带着这个错误文案上线**——
   // 现在按距离是否存在分岔，任何"没有距离的行政/查询型命中"都走同一支。
   else if (m.place && typeof m.distanceKm === 'number' && Number.isFinite(m.distanceKm)) {
-    bodyLines.push('命中位置：' + m.place.name + '（距震中约 ' + Math.round(m.distanceKm) + ' km）')
+    bodyLines.push(t('notify.hitPlaceDistance', { place: m.place.name, km: Math.round(m.distanceKm) }))
   } else if (m.place) {
-    bodyLines.push('命中位置：' + m.place.name + '（按该点所在地的官方预警判定）')
+    bodyLines.push(t('notify.hitPlaceOfficial', { place: m.place.name }))
   }
-  if (alert.kind === 'tsunami') bodyLines.push('请立即远离海岸与河口')
+  if (alert.kind === 'tsunami') bodyLines.push(t('action.tsunami'))
   // 行动提示按**机构**分岔（0.6.1 加海外那一支，0.6.2 补大陆那一支）：日本气象电文对应的是
   // 市町村级的避难信息，中国大陆的预警由各级气象台发布、处置口径不同，而美加的洪水预警由
   // 当地应急部门（county / 省）发布——把日本制度套到别处既找不到对应入口，也会误导行动。

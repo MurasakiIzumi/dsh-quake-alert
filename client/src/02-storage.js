@@ -8,7 +8,8 @@
 // 依赖：01-constants。
 // ============================================================================
 
-import { PREF_SET, PREFECTURES, TSUNAMI_OPTIONS, LANGUAGE_OPTIONS, DEFAULT_CFG, STORAGE_KEY, HISTORY_KEY, HISTORY_MAX, MAX_WATCH_PLACES } from './01-constants.js'
+import { PREF_SET, PREFECTURES, TSUNAMI_OPTIONS, DEFAULT_CFG, STORAGE_KEY, HISTORY_KEY, HISTORY_MAX, MAX_WATCH_PLACES } from './01-constants.js'
+import { resolveLang, setLanguage } from './00-i18n.js'
 
 // ---------- 存储（localStorage） ----------
 // 读入的数据可能被旧版本、其它脚本或用户手工改坏。所有读入都做类型校验，
@@ -239,9 +240,11 @@ function normalizeCfg(input) {
       end: timeOr(qh.end, DEFAULT_CFG.quietHours.end),
       breakForSevere: boolOr(qh.breakForSevere, DEFAULT_CFG.quietHours.breakForSevere),
     },
-    // 界面语言（0.8.1）：白名单校验，认不出的一律回默认（不是"原样放行"——手改配置写进
-    // 一个没有语言包的代码，会让界面在 0.9.0 之后进入一个谁也说不清的半本地化状态）。
-    language: LANGUAGE_OPTIONS.some((o) => o.v === stored.language) ? stored.language : DEFAULT_CFG.language,
+    // 界面语言（0.8.1 立字段 / 0.9.0 真正生效）：走 BCP 47 惯例的逐级回退，认不出的一律落到
+    // 默认语言（不是"原样放行"——手改配置写进一个没有语言包的代码，界面会进入一个谁也说不清
+    // 的半本地化状态）。回退顺序：精确匹配 → 主语言（zh-HK / zh-TW → zh → zh-CN、ja-JP → ja）
+    // → 默认语言。
+    language: resolveLang(stored.language),
   }
 }
 function loadCfg() {
@@ -249,12 +252,16 @@ function loadCfg() {
   if (!isPlainObject(stored)) {
     const fresh = freshCfg()
     saveJSON(STORAGE_KEY, fresh)
+    // 语言要在**任何界面文本被取用之前**生效：配置是启动最早读到的状态，而通知 / 状态条
+    // 的文案可能在第一帧就渲染。所以设置语言与"读配置"绑在一起，不留给调用方记得去做。
+    setLanguage(fresh.language)
     return fresh
   }
   const cfg = normalizeCfg(stored)
   // 版本不同（插件升级 / 用户手改）时不再直接清空：按当前 schema 归一保留可识别字段，再写回当前版本号。
   // 旧实现会在这里 saveJSON(默认值)，一次版本号变化就会静默丢掉用户选好的关注地区与阈值。
   if (stored.version !== DEFAULT_CFG.version) saveJSON(STORAGE_KEY, cfg)
+  setLanguage(cfg.language)
   return cfg
 }
 function saveCfg(cfg) {

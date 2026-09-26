@@ -3,10 +3,11 @@
 //
 // 作用：侧边栏底部的连接状态指示（DESIGN 第 6 节）。
 // 内容：状态圆点（绿=已连接 / 黄=连接或重连中 / 红=已停止）+ 悬停详情 + 无障碍标签。
-// 依赖：01-constants、07-store。
+// 依赖：01-constants、07-store、00-i18n。
 // ============================================================================
 
 import { h, useState, useEffect } from './01-constants.js'
+import { t } from './00-i18n.js'
 import { store } from './07-store.js'
 import { statusMetaOf } from './13-ui-settings.js'
 
@@ -25,16 +26,16 @@ function StatusIndicator(props) {
   // （L4 以上播报后会清掉，否则这里会与事实矛盾）。不改颜色、不弹窗、不响铃。
   const hint = store.weatherHint
   const hintText = hint && typeof hint.level === 'number'
-    ? ' · 气象警报 L' + hint.level + (hint.label ? '（' + hint.label + '）' : '')
+    ? t('status.weatherHint', { level: hint.level }) + (hint.label ? t('status.weatherHintLabel', { label: hint.label }) : '')
     : ''
   return h('div', {
     role: 'status',
-    'aria-label': '灾害预警：' + meta.text + hintText,
-    title: '灾害预警：' + meta.text + (store.detail ? ' · ' + store.detail : '') + hintText,
+    'aria-label': t('app.statusPrefix') + meta.text + hintText,
+    title: t('app.statusPrefix') + meta.text + (store.detail ? ' · ' + store.detail : '') + hintText,
     style: { display: 'flex', alignItems: 'center', gap: 6, padding: wide ? '4px 8px' : '4px', fontSize: 12, color: 'inherit', cursor: 'default' },
   },
     h('span', { style: dotStyle }),
-    wide ? h('span', { style: { whiteSpace: 'nowrap' } }, '灾害预警') : null)
+    wide ? h('span', { style: { whiteSpace: 'nowrap' } }, t('app.name')) : null)
 }
 
 
