@@ -103,9 +103,26 @@ const cloneCfg = (v) => (Array.isArray(v)
   ? v.map(cloneCfg)
   : (isPlainObject(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, cloneCfg(x)])) : v))
 const freshCfg = () => cloneCfg(DEFAULT_CFG)
-// 全球关注点：[{ name, lat, lon, radiusKm }]。坐标必须落在合法范围——脏数据里的 NaN 或
+// 全球关注点：[{ name, lat, lon, radiusKm, origin }]。坐标必须落在合法范围——脏数据里的 NaN 或
 // 越界值会让距离计算得出无意义的结果，表现为"看起来配好了却永远不提醒"（静默漏报）。
 // 半径夹在 1–2000 km；同一个点重复添加是常见操作，按经纬度（三位小数）去重。
+/**
+ * 关注点的**来源分支**（0.8.0 / DESIGN 9.3）。
+ *
+ * 取值 jp / cn / global。它回答"这个关注点是在哪个国家的分支下加的"，3.4 的跨源权威源据此
+ * 判断权威源，诊断快照里也要能看到（判错时第一个要核的就是"这个点被算作了谁的分支"）。
+ *
+ * **老配置没有这个字段，不能因此判它非法**——那等于把用户攒下的关注点整条丢掉。缺失时按
+ * **名称形状推导**：设置页的「中国大陆」级联产出的名字恒为「省·市」（见 04-city-table 的
+ * cnPlaceOf，用 U+00B7 分隔以免两个省的"城区"撞名），其余（手填坐标、「用我的位置」、
+ * 将来的全球城市）都是 'global'。推导只在字段缺失时发生，写回配置后即固定。
+ */
+const PLACE_ORIGINS = { jp: true, cn: true, global: true }
+function placeOriginOf(p, name) {
+  const raw = String((p && p.origin) || '')
+  if (own(PLACE_ORIGINS, raw)) return raw
+  return String(name || '').indexOf('·') > 0 ? 'cn' : 'global'
+}
 function normalizePlaces(list) {
   const out = []
   const seen = new Set()
@@ -119,11 +136,13 @@ function normalizePlaces(list) {
     const key = lat.toFixed(3) + ',' + lon.toFixed(3)
     if (seen.has(key)) continue
     seen.add(key)
+    const name = strOr(p.name, '').slice(0, 30).trim() || (lat.toFixed(2) + ', ' + lon.toFixed(2))
     out.push({
-      name: strOr(p.name, '').slice(0, 30).trim() || (lat.toFixed(2) + ', ' + lon.toFixed(2)),
+      name,
       lat,
       lon,
       radiusKm: numOr(p.radiusKm, 300, 1, 2000),
+      origin: placeOriginOf(p, name),
     })
     if (out.length >= MAX_WATCH_PLACES) break
   }
@@ -224,4 +243,4 @@ function saveCfg(cfg) {
 // （原在 05-parser，因被 city-table / parser / matcher 共用而移到这里）
 const own = (map, key) => (Object.prototype.hasOwnProperty.call(map, key) ? map[key] : undefined)
 
-export { own, isPlainObject, numOr, boolOr, timeOr, minutesOfTime, inQuietHours, loadJSON, saveJSON, normalizeHistoryEntry, loadHistory, freshCfg, normalizePlaces, normalizeCfg, loadCfg, saveCfg }
+export { own, isPlainObject, numOr, boolOr, timeOr, minutesOfTime, inQuietHours, loadJSON, saveJSON, normalizeHistoryEntry, loadHistory, freshCfg, PLACE_ORIGINS, placeOriginOf, normalizePlaces, normalizeCfg, loadCfg, saveCfg }

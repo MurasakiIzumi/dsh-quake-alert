@@ -88,7 +88,7 @@ function validGeo(geo) {
 function matchPointAlert(alert, cfg) {
   const places = (cfg.watch && cfg.watch.places) || []
   if (places.length === 0) {
-    return { hit: false, reason: '未设置全球关注点（设置 → 灾害预警 → 全球关注点）' }
+    return { hit: false, reason: '未设置全球关注点（设置 → 灾害预警 → 关注地区 → 其他国家 / 地区）' }
   }
   // 多区域电文（CAP 允许一个 info 下多个 <area><circle>）：任一圆心落在半径内即算命中。
   // 只看第一个 circle 会让其余海域的沿海用户漏报——多区域海啸恰恰是最常见形态。
@@ -215,7 +215,7 @@ function matchCnAreaAlert(alert, cfg) {
     return {
       hit: false,
       noWatch: true,
-      reason: '未设置中国大陆关注点（设置 → 灾害预警 → 中国大陆 → 选省与城市）',
+      reason: '未设置中国大陆关注点（设置 → 灾害预警 → 关注地区 → 中国大陆 → 选省与城市）',
     }
   }
   const area = alert.cnArea || {}
@@ -271,7 +271,7 @@ function matchOverseasAlert(alert, cfg) {
     return {
       hit: false,
       noWatch: true,
-      reason: '未设置海外关注点（设置 → 灾害预警 → ③ 其他地区：坐标 + 半径）',
+      reason: '未设置海外关注点（设置 → 灾害预警 → 关注地区 → 其他国家 / 地区）',
     }
   }
   const origin = alert.originPlace

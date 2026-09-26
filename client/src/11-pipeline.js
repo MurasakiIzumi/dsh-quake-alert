@@ -15,7 +15,7 @@ import { matchAlert, regionInWeatherWatch, validGeo } from './06-matcher.js'
 import { addEvent, store } from './07-store.js'
 import { playSound, playAlertSound } from './08-audio.js'
 import { showToast, showSystemNotification } from './09-notify.js'
-import { isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, alertedEvents } from './10-dedupe.js'
+import { isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, crossSourceCopyOf, noteAuthoritySuppressed, alertedEvents } from './10-dedupe.js'
 
 /**
  * 气象灾害的**事件窗口**（分钟）。
@@ -326,6 +326,22 @@ function handleAlert(alert, cfg, opts) {
   const repeatWindow = alert.kind === 'weather'
     ? Math.max(cfg.dedupe.windowMinutes || 10, WEATHER_EVENT_WINDOW_MINUTES)
     : cfg.dedupe.windowMinutes
+  // 跨源权威源（0.8.0 / DESIGN 3.4）：同一场地震被多个源报出时，只让**一个**源向用户播报。
+  //
+  // 位置有讲究，两条都不能挪：
+  //   · **必须在 isEventRepeat 之前**——它是只读探测，而 isEventRepeat 会把这条事件写进记忆；
+  //     写进去之后 findPrevEvent 找到的就是它自己，跨源判定永远不会成立。
+  //   · **必须在 m.hit 之后**——只有"本来会播报"的副本才算被权威源压掉。没命中关注点的
+  //     副本本来就不响，把它计进 suppressed 会让诊断里那个数字失去意义。
+  //
+  // **不进历史**（DESIGN 3.4）：一场大规模余震会让同一场地震在历史里出现 2～3 条，而
+  // 「最近预警」只有 30 条——多源重复会把真正该看的记录挤掉。余震本身是不同的事件
+  // （不同的 eventKey），不受这条规则影响。
+  // 代价是"权威源判错时用户看不出来"，所以抑制必须**留下计数与原因**（noteAuthoritySuppressed）。
+  const crossSource = crossSourceCopyOf(alert)
+  if (crossSource) {
+    return { notified: false, reason: 'authority-suppressed', detail: noteAuthoritySuppressed(crossSource, alert) }
+  }
   if (isEventRepeat(alert, repeatWindow)) {
     pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,

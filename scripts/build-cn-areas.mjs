@@ -42,10 +42,12 @@
 //   node scripts/build-cn-areas.mjs --check         # 只校验产物是否与当前源一致（不写盘）
 //   node scripts/build-cn-areas.mjs --from <目录>    # 用本地已下载的 zip（离线 / 回归测试用）
 
-import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
-import { unzip } from './lib/zip.mjs'
+// dump 读取与按列解析来自 scripts/lib/geonames.mjs —— 与 build-world-cities.mjs（全球城市表）
+// 共用同一套解析器，避免"列序变了只在一边修好"这种静默错数据。
+import { createGeoReader, isCjk, parseGeonames } from './lib/geonames.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const OUT = path.join(ROOT, 'lib', 'data', 'cn-areas.js')
@@ -57,7 +59,7 @@ const FROM_DIR = fromIdx === -1 ? null : process.argv[fromIdx + 1]
 const COUNTRIES = ['CN', 'TW', 'HK', 'MO']
 
 // ---------------------------------------------------------------- 取值工具
-const isCjk = (s) => /^[\u4e00-\u9fff]+$/.test(s)
+const { readSource, txtOf } = createGeoReader({ fromDir: FROM_DIR })
 /**
  * 中文名候选的**层级相关**优先级。
  *
@@ -128,41 +130,6 @@ function aliasesOf(alternates, displayName, level) {
 }
 /** 别名上限：见 aliasesOf 的说明。 */
 const MAX_ALIASES = 8
-
-/** GeoNames 的 geoname 表（tab 分隔）→ 行数组。只留我们需要的列。 */
-function parseGeonames(text) {
-  const out = []
-  for (const line of String(text).split('\n')) {
-    if (!line) continue
-    const c = line.split('\t')
-    if (c.length < 15) continue
-    out.push({
-      name: c[1], alternates: c[3], lat: Number(c[4]), lon: Number(c[5]),
-      feature: c[7], cc: c[8], admin1: c[10], admin2: c[11], pop: Number(c[14]) || 0,
-    })
-  }
-  return out
-}
-
-async function readSource(file) {
-  if (FROM_DIR) {
-    const p = path.join(FROM_DIR, file)
-    if (!existsSync(p)) throw new Error('--from 目录里没有 ' + file + '：' + p)
-    const buf = readFileSync(p)
-    return file.endsWith('.zip') ? unzip(buf) : buf.toString('utf8')
-  }
-  const res = await fetch(BASE + file, { signal: AbortSignal.timeout(120000) })
-  if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + file)
-  const ab = await res.arrayBuffer()
-  const buf = Buffer.from(ab)
-  return file.endsWith('.zip') ? unzip(buf) : buf.toString('utf8')
-}
-
-function txtOf(entries, cc) {
-  const hit = entries.find((f) => f.name === cc + '.txt')
-  if (!hit) throw new Error(cc + '.zip 里没有 ' + cc + '.txt')
-  return hit.data.toString('utf8')
-}
 
 // ---------------------------------------------------------------- 组装
 /** 取一个国家的地理条目，切成 ADM1（省级）与 ADM2（地级）。 */

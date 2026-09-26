@@ -3,6 +3,7 @@
 //
 // 作用：三层去重与「已提醒事件」记忆。
 // 内容：消息 id 去重（防重连重放）、事件键去重（同一地震的多次发布，强度升级穿透）、
+//       **跨源权威源**（0.8.0 / DESIGN 3.4：同一事件只让一个源播报，其余只计数不进历史）、
 //       跨标签页认领（BroadcastChannel + 事件键同步）、已提醒事件集合（取消提醒用）。
 // 依赖：01-constants、07-store（通道建立时机在 15-entry 的 apply 里）、06-matcher（坐标型近似归并）。
 // 注意：通道监听必须在插件加载时就建立，否则会错过其它标签页的广播。
@@ -10,7 +11,7 @@
 
 import { validGeo, distanceKm } from './06-matcher.js'
 import { HISTORY_KEY } from './01-constants.js'
-import { saveJSON } from './02-storage.js'
+import { saveJSON, own } from './02-storage.js'
 import { store } from './07-store.js'
 
 // ---------- 去重 ----------
@@ -58,15 +59,20 @@ function issuedMsOf(alert) {
  *   · `isStrengthUpgrade` 传 true —— 它只在**消息 id 已经重复**时才被求值（handleAlert 里的
  *     `&&` 短路），也就是说调用方已经确定"这是同一条消息的又一次到达"，此时同源的坐标近似
  *     也必须认（EMSC 的修订版会挪坐标 / 跨分钟，键就变了）。
+ *
+ * 0.8.0 起判据是「**有没有可用震中**」而不是「locator 是不是 point」：日本源（551 / 556）此前
+ * 完全没有坐标，于是它和 USGS / 大陆源报的同一场地震**永不相遇**——那是 3.4 要解决的核心问题
+ * （同一场地震响两次）。现在日本源也带 geo（05-parser 的 geoOfHypo），但它**仍是行政区匹配**
+ * （不设 locator: 'point'），所以这里放宽的只是"能不能参与事件归并"，不是"怎么匹配"。
  */
 function findPrevEvent(alert, allowSameSource) {
   const prev = eventSeen.get(alert.eventKey)
   if (prev) return prev
-  if (alert.locator !== 'point' || !validGeo(alert.geo)) return null
+  if (!validGeo(alert.geo)) return null
   const at = issuedMsOf(alert)
   if (at === null) return null
   if (String(alert.eventKey || '').indexOf('test:') === 0) return null // 测试消息每次都是独立演示
-  const source = String(alert.source || '')
+  const source = sourceIdOf(alert)
   for (const v of eventSeen.values()) {
     if (!v.geo || typeof v.at !== 'number') continue
     if (!allowSameSource && source && v.source && v.source === source) continue
@@ -97,9 +103,138 @@ function isEventRepeat(alert, windowMinutes, nowMs) {
   const prev = findPrevEvent(alert, false)
   if (prev && alert.strength <= prev.strength) return true
   const at = issuedMsOf(alert)
-  const geo = (alert.locator === 'point' && validGeo(alert.geo)) ? { lat: alert.geo.lat, lon: alert.geo.lon } : null
-  eventSeen.set(alert.eventKey, { ts: now, strength: alert.strength, at, geo, source: String(alert.source || ''), win })
+  const geo = validGeo(alert.geo) ? { lat: alert.geo.lat, lon: alert.geo.lon } : null
+  eventSeen.set(alert.eventKey, { ts: now, strength: alert.strength, at, geo, source: sourceIdOf(alert), win })
   return false
+}
+
+// ---------- 跨源权威源（0.8.0 / DESIGN 3.4） ----------
+/**
+ * 把一条 Alert 归到"哪个源"——跨源判定的统一钥匙。
+ *
+ * 日本源（551 / 552 / 556）的解析器**不设 `source` 字段**：它们是 P2PQuake 转播的気象庁信息，
+ * 历来靠数字 code 认源（见 11-pipeline 的 authorityOf / 13-ui 的 SOURCE_CODE_TEXT）。
+ * 跨源归并需要一把所有源都能给的钥匙，所以在**这一处**按 code 补，而不是去改五个解析器的
+ * 既有形状（`alert.source` 的消费者不止一个，动它要连带复核每一处）。
+ */
+const SOURCE_BY_CODE = { 551: 'p2pquake', 552: 'p2pquake', 556: 'p2pquake' }
+function sourceIdOf(alert) {
+  if (!alert) return ''
+  const s = String(alert.source || '')
+  if (s) return s
+  const code = (alert.code === undefined || alert.code === null) ? '' : String(alert.code)
+  return own(SOURCE_BY_CODE, code) || ''
+}
+/**
+ * 源的权威序（数字越小越"本地权威"）。依据是 DESIGN 3.4 的表：
+ *   1 日本 P2PQuake —— 带日本境内观测点 / 预测区域，EEW 还是秒级
+ *   2 大陆预警 cenc_eew —— 台网主动发布，只针对其辖区
+ *   3 大陆速报 cenc_eqlist —— 台网编目（含境外条目），弱于预警、强于国际目录
+ *   4 USGS / EMSC —— 全球目录，任何一场地震它都有，但都不是"本地"
+ *   5 NOAA —— 海啸电文，不参与地震去重
+ *
+ * **它不决定谁先播**：先到者播是时序决定的，而 DESIGN 3.4 的"边界"一条已经明确
+ * "低优先级源先播、高优先级源后到 → 不补播"（预警的价值在时效，补播只是多一次打扰）。
+ * 所以这张表在这里只服务**诊断文案**——用户要能看出被压掉的那条来自哪个源、它比播报的那条
+ * 更权威还是更弱；判错时（把两场不同地震并成一个）这是唯一能看出端倪的地方。
+ */
+const SOURCE_RANK = { p2pquake: 1, cenc_eew: 2, cenc_eqlist: 3, usgs: 4, emsc: 4, noaa: 5 }
+/**
+ * 源的**机构**归属。跨源归并只在**跨机构**时成立（见 crossSourceCopyOf）。
+ *
+ * 为什么要有这一层：DESIGN 8.3 对**同一机构内部**的两条产品线有明确要求——"同一场地震的
+ * EEW 与速报不会响两次……走'强度未升级 → 不重播'链路，**只记历史**"。而 3.4 的"其余连历史
+ * 都不进"针对的是**同一件事被不同机构各报一遍**（实测：福克斯群岛地震同时出现在 cenc_eqlist
+ * 的整表与 USGS 里）。两者不是同一件事：
+ *   · 同机构（EEW → 速报）是**同一份信息的演进**，"台网最终测定 M3.2"本身是有价值的历史；
+ *   · 跨机构（日本台网 / USGS / EMSC）是**同一件事的重复转述**，进历史只会挤占那 30 条。
+ * 所以前者仍走 isEventRepeat（记历史、强度升级放行），只有后者走权威源抑制。
+ *
+ * `p2pquake` 与 `jma` 同属気象庁：P2PQuake 是转播渠道，两者是同一机构的两个面。
+ */
+const SOURCE_AGENCY = {
+  p2pquake: 'jma', jma: 'jma',
+  cenc_eew: 'cenc', cenc_eqlist: 'cenc',
+  usgs: 'usgs', emsc: 'emsc', noaa: 'noaa',
+}
+const agencyOf = (id) => {
+  const key = String(id === undefined || id === null ? '' : id)
+  const v = own(SOURCE_AGENCY, key)
+  return v || key // 认不出的源用它自己当机构名：两个未知源只在 id 相同时才算同一机构
+}
+/** 参与跨源归并的灾种（理由见 crossSourceCopyOf）：只有地震类有"多个源报同一件事"的形态。 */
+const CROSS_SOURCE_KINDS = { quake: true, eew: true, tsunami: true }
+const SOURCE_ZH = {
+  p2pquake: 'P2PQuake（日本）', cenc_eew: '大陆地震预警', cenc_eqlist: '大陆地震速报',
+  usgs: 'USGS', emsc: 'EMSC', noaa: 'NOAA',
+}
+const rankOfSource = (id) => {
+  const v = own(SOURCE_RANK, String(id === undefined || id === null ? '' : id))
+  return typeof v === 'number' ? v : 9
+}
+const sourceZhOf = (id) => own(SOURCE_ZH, String(id === undefined || id === null ? '' : id)) || String(id || '未知源')
+
+/**
+ * 这条是不是**同一事件在另一个源上的副本**？
+ *
+ * @returns {{source: string, mine: string, rank: number, mineRank: number}|null}
+ *   `source` = 已经播报过的那个源；null = 不是跨源副本（交给 isEventRepeat）。
+ *
+ * 只对**地震类**（quake / eew / tsunami）生效。DESIGN 3.4 解决的是"同一场地震被多个源报出"，
+ * 而气象源的地区与判据各家完全不同（日本 JMA / 大陆中央气象台 / 美国 NWS / 加拿大 ECCC），
+ * 没有对应的重复形态——把它们也纳进来只会凭空增加"两件不相干的事被并成一件"的风险。
+ *
+ * 只对**跨机构**生效（见 SOURCE_AGENCY）：同一机构内部的产品演进（大陆 EEW → 速报）仍走
+ * isEventRepeat，那是 8.3 明确要求"只记历史"的那条链路。
+ *
+ * 判据只有 `findPrevEvent(alert, false)` 一条路径：它先查精确事件键，未命中再按
+ * 「±2 分钟 + 50km」找，并且**排除同源**（同源归 isEventRepeat 管，那边的语义是
+ * "同一地震的后续发布"——会进历史、强度升级仍放行）。
+ *
+ * **跨源不比 strength**（DESIGN 3.4 硬约束一）：日本给的是震度、全球给的是震级，两者
+ * 不可换算，比大小没有意义。所以跨源副本一律抑制，不看谁的数字更大——否则一场 M6 的
+ * USGS 复核会把已经播过的震度 5 弱 EEW 当成"强度升级"再响一次。
+ *
+ * 消息 id 完全相同的**同源**重放不在这里管（isDuplicate / isStrengthUpgrade 那条链更精确）。
+ */
+function crossSourceCopyOf(alert) {
+  if (!alert || !alert.eventKey) return null
+  if (!own(CROSS_SOURCE_KINDS, String(alert.kind || ''))) return null
+  if (String(alert.eventKey).indexOf('test:') === 0) return null // 测试消息每次都是独立演示
+  const mine = sourceIdOf(alert)
+  if (!mine) return null
+  const prev = findPrevEvent(alert, false)
+  if (!prev) return null
+  const other = String(prev.source || '')
+  if (!other || other === mine) return null
+  if (agencyOf(other) === agencyOf(mine)) return null // 同机构：8.3 那条链路，交给 isEventRepeat
+  return { source: other, mine, rank: rankOfSource(other), mineRank: rankOfSource(mine) }
+}
+
+/**
+ * 被权威源压掉的条数（DESIGN 3.4 的硬要求：**"不进历史 ≠ 不可见"**）。
+ *
+ * 被抑制的条目连历史都不进，所以计数必须另留一处：权威源一旦判错（把两场不同地震并成一个
+ * = 真漏报），用户与历史里都看不出任何痕迹——而"静默失效"恰是本插件最不能接受的形态。
+ * 与 feedStatsOf / overseasStatsOf 同形：模块级、**不经过 store**（诊断每 5 秒读一次，
+ * 一个计数变化不值得让设置页那几千个市町村按钮跟着重渲）。
+ */
+const authorityStats = { suppressed: 0, bySource: {}, lastAt: 0, lastDetail: '' }
+function noteAuthoritySuppressed(info, alert) {
+  authorityStats.suppressed += 1
+  const k = String(info.source || '')
+  authorityStats.bySource[k] = (authorityStats.bySource[k] || 0) + 1
+  authorityStats.lastAt = Date.now()
+  authorityStats.lastDetail = sourceZhOf(info.source) + ' 已播报同一事件，本条（' + sourceZhOf(info.mine) + '）按权威源规则只计数、不进历史'
+  return authorityStats.lastDetail
+}
+function authorityStatsOf() {
+  return {
+    suppressed: authorityStats.suppressed,
+    bySource: Object.assign({}, authorityStats.bySource),
+    lastAt: authorityStats.lastAt || null,
+    lastDetail: authorityStats.lastDetail,
+  }
 }
 
 /**
@@ -257,4 +392,4 @@ function closeAlertChannel() {
   try { if (alertChannel) { alertChannel.close(); alertChannel = null } } catch (err) { /* 忽略 */ }
 }
 
-export { isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, ensureAlertChannel, closeAlertChannel, claimAlertForTab, broadcastHistoryCleared, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, alertedEvents }
+export { isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, ensureAlertChannel, closeAlertChannel, claimAlertForTab, broadcastHistoryCleared, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, sourceIdOf, crossSourceCopyOf, noteAuthoritySuppressed, authorityStatsOf, SOURCE_RANK, SOURCE_ZH, SOURCE_AGENCY, agencyOf, CROSS_SOURCE_KINDS, rankOfSource, sourceZhOf, alertedEvents }

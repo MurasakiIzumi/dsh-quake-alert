@@ -86,6 +86,43 @@ const unwrapRefs = (v) => {
   return v
 }
 if (!T) { console.error('FAIL: __test 未导出'); process.exit(1) }
+/**
+ * 极简 React stub：够跑完一次渲染即可（useState 有状态、useEffect 不执行）。
+ *
+ * 提到顶层是因为**两个测试块都要渲染设置页**（0.5.0 的级联控件、0.8.0 的国家 / 城市入口）。
+ * 而"能不能渲染"这件事一旦有第二份实现，就会出现"一处修好、另一处仍白屏"的盲区——
+ * 那正是 0.5.0 加级联 UI 时踩过的坑（一个拼错的 h(...) 让整页白屏而没有任何断言会失败）。
+ */
+const mkTestReact = () => {
+  const states = []
+  let idx = 0
+  return {
+    __reset() { idx = 0 },
+    createElement: (type, props, ...children) => ({
+      type, props: props || {},
+      children: children.flat(4).filter((c) => c !== null && c !== undefined && c !== false && c !== true),
+    }),
+    useState: (init) => {
+      const i = idx++
+      if (!(i in states)) states[i] = typeof init === 'function' ? init() : init
+      return [states[i], (v) => { states[i] = typeof v === 'function' ? v(states[i]) : v }]
+    },
+    useEffect: () => {},
+    useRef: (init) => ({ current: init }),
+  }
+}
+/** 渲染一棵 Element 树，取出里面所有文本节点（断言 UI 文案用）。 */
+const textsOfTree = (tree) => {
+  const texts = []
+  const walk = (node) => {
+    if (node === null || node === undefined) return
+    if (typeof node === 'string' || typeof node === 'number') { texts.push(String(node)); return }
+    if (Array.isArray(node)) { node.forEach(walk); return }
+    if (node && node.children) node.children.forEach(walk)
+  }
+  walk(tree)
+  return texts
+}
 const { EEW_AREA_EXPECT, TSUNAMI_AREA_EXPECT } = require('./area-tables.cjs')
 
 // ---- 断言工具 ----
@@ -4335,72 +4372,83 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       '缺 radiusKm 的旧条目仍按 300 兜底 —— 把用户配好的半径从 300 改成 100 会让提醒变窄（漏报方向）')
     assert(t.normalizePlaces([{ name: 'x', lat: 1, lon: 2, radiusKm: 100 }])[0].radiusKm === 100,
       '显式配的 100 被保留')
-    // ⑥ 设置页**真的渲染一次**（本项目此前从不渲染 UI，于是"设置页能不能渲染"从没被守过）
+    // ⑥ 设置页**真的渲染一次**（0.8.0：三个分支各渲染一次——统合 UI 的本质就是"一次只展开
+    //    一个分支"，只渲染默认分支的话，中国与其他国家那两条路径从没被任何断言走过）
     {
-      // 极简 React：够跑完一次渲染即可。useEffect 不执行（副作用与订阅不在本用例的范围）。
-      const mkReact = () => {
-        const states = []
-        let idx = 0
-        return {
-          __reset() { idx = 0 },
-          createElement: (type, props, ...children) => ({
-            type, props: props || {},
-            children: children.flat(4).filter((c) => c !== null && c !== undefined && c !== false && c !== true),
-          }),
-          useState: (init) => {
-            const i = idx++
-            if (!(i in states)) states[i] = typeof init === 'function' ? init() : init
-            return [states[i], (v) => { states[i] = typeof v === 'function' ? v(states[i]) : v }]
-          },
-          useEffect: () => {},
-          useRef: (init) => ({ current: init }),
+      /** 渲染一次设置页，返回它里面所有文本节点。seedStorage 决定落在哪个国家分支上。 */
+      const renderTexts = (seed) => {
+        const react = mkTestReact()
+        const { exports: ex } = loadClientEx(seed || {}, { react })
+        ex.__test.setCnAreas(CN_AREAS)
+        react.__reset()
+        return textsOfTree(ex.__test.SettingsPanel())
+      }
+      const safeRender = (seed, label) => {
+        try { return renderTexts(seed) } catch (e) {
+          assert(false, label + '渲染失败：' + e.message)
+          return []
         }
       }
-      const react = mkReact()
-      const { exports: ex } = loadClientEx({}, { react })
-      const T2 = ex.__test
-      T2.setCnAreas(CN_AREAS)
-      let tree = null
-      let err = null
-      try {
-        react.__reset()
-        tree = T2.SettingsPanel()
-      } catch (e) { err = e }
-      assert(err === null, '设置页能渲染（不抛错）' + (err ? '：' + err.message : ''))
-      const texts = []
-      const walk = (node) => {
-        if (node === null || node === undefined) return
-        if (typeof node === 'string' || typeof node === 'number') { texts.push(String(node)); return }
-        if (Array.isArray(node)) { node.forEach(walk); return }
-        if (node && node.children) node.children.forEach(walk)
-      }
-      walk(tree)
-      const has = (s) => texts.some((t) => t.indexOf(s) !== -1)
-      assert(has('① 日本：都道府县 / 市区町村'), '渲染结果里有「日本」这一级')
-      assert(has('② 中国大陆：省 / 地级市'), '渲染结果里有「中国大陆」这一级')
-      assert(has('③ 其他地区：坐标 + 半径'), '渲染结果里有「其他地区」这一级')
-      assert(has('四川省') && has('西藏自治区'), '级联的省份选项出现在渲染结果里')
-      assert(has('仅本地（约 30 km）') && has('本市及周边（约 100 km，默认）'),
+      /** 预置一份本地配置：inferRegionTab 据其中的 origin 决定展开哪个分支。 */
+      const seedCfg = (watch) => ({
+        'dsh.quakeAlert.v1': JSON.stringify({
+          version: 1,
+          watch: Object.assign({ prefectures: [], cities: [], places: [] }, watch),
+        }),
+      })
+      const mkHas = (texts) => (s) => texts.some((t) => t.indexOf(s) !== -1)
+
+      // —— 日本分支（未配置任何关注点时的默认落点）——
+      const jpTexts = safeRender({}, '设置页（日本分支）')
+      const jpHas = mkHas(jpTexts)
+      assert(jpHas('关注地区'), '渲染结果里有「关注地区」（0.8.0：三个平铺区块收成一个入口）')
+      assert(jpHas('添加关注地区：先选国家 / 地区'), '第一级是唯一的「国家 / 地区」选择器')
+      assert(jpHas('日本') && jpHas('中国大陆') && jpHas('其他国家 / 地区'),
+        '三个分支标签都在（用户一眼看到可以关注哪些地区）')
+      assert(jpHas('已关注的地区（'),
+        '已关注地区的**统一列表**在同一个区块里（"统合 UI，不统合模型"的落点）')
+      assert(jpHas('北海道') && jpHas('冲绳'), '默认落在日本分支：47 个都道府县按钮渲染出来了')
+      assert(jpHas('先选择都道府县，再可选地细化到市区町村'), '市区町村细化器也在日本分支里')
+      assert(jpHas('灾害类型与阈值'), '开关与阈值合并成一张表（0.8.0）')
+      assert(jpHas('地震') && jpHas('海啸') && jpHas('气象灾害 · 日本'),
+        '按灾种分组的分组标题都在（一行一个灾种）')
+      assert(jpHas('固定：警戒レベル4 以上'),
+        '固定门槛写成只读文字（做成置灰下拉会让人以为能调）')
+      assert(jpHas('诊断') && jpHas('生成诊断快照'), '诊断区块也在（同一页）')
+
+      // —— 中国大陆分支：由配置里的 origin=cn 推断（inferRegionTab）——
+      const cnTexts = safeRender(seedCfg({
+        places: [{ name: '四川省·成都市', lat: 30.66, lon: 104.07, radiusKm: 100, origin: 'cn' }],
+      }), '设置页（中国大陆分支）')
+      const cnHas = mkHas(cnTexts)
+      assert(cnHas('四川省') && cnHas('西藏自治区'),
+        '中国分支的省份选项渲染出来了（只渲染默认分支的话这条路径从没被走过）')
+      assert(cnHas('添加这个城市') && cnHas('用我的位置'), '级联的两个按钮都在')
+      assert(cnHas('（先选省份）'), '未选省份时城市下拉给出占位提示，而不是空的')
+      assert(cnHas('仅本地（约 30 km）') && cnHas('本市及周边（约 100 km，默认）'),
         '三档半径语义预设出现在渲染结果里')
-      assert(has('添加这个城市') && has('用我的位置'), '级联的两个按钮都在')
-      // 还没选省份时，城市下拉只显示占位项 —— 不做成"猜一个默认省"是对的选择
-      assert(has('（先选省份）'), '未选省份时城市下拉给出占位提示，而不是空的')
-      assert(has('诊断') && has('生成诊断快照'), '诊断区块也在（同一页）')
-      // 0.5.2 的教训与 0.5.0 相同：新加的 UI 必须有渲染断言守着，否则一个拼错的 h(...) 会白屏
-      // 而没有任何断言会失败。这里同时确认两个灾种开关与那段"橙色才播报 / 没有解除标志"的说明。
-      assert(has('中国大陆气象灾害') && has('暴雨预警') && has('地质灾害预警'),
-        '大陆气象灾害的两个开关渲染出来了')
-      assert(has('橙色及以上') && has('没有「解除」标志'),
+      assert(cnHas('四川省·成都市'), '统一列表里列出了这个关注点（跨分支汇总）')
+      assert(cnHas('没有取消 / 最终报标志'),
+        '设置页如实说明大陆源无取消机制（DESIGN 10.2 要求 UI 不得假装能处理）')
+
+      // —— 其他国家 / 地区分支 ——
+      const glTexts = safeRender(seedCfg({
+        places: [{ name: '东京', lat: 35.68, lon: 139.77, radiusKm: 100, origin: 'global' }],
+      }), '设置页（其他国家分支）')
+      const glHas = mkHas(glTexts)
+      assert(glHas('添加关注点') && glHas('用当前位置'), '其他国家分支给出手填坐标的入口')
+      assert(glHas('东京'), '统一列表里列出了这个关注点')
+
+      // —— 0.5.2 / 0.6.0 的安全相关文案（与分支无关，摘一处渲染结果钉住即可）——
+      const anyHas = (s) => jpTexts.concat(cnTexts, glTexts).some((t) => t.indexOf(s) !== -1)
+      assert(anyHas('暴雨预警') && anyHas('地质灾害预警'), '大陆气象灾害的两个开关渲染出来了')
+      assert(anyHas('橙色及以上') && anyHas('没有「解除」标志'),
         '设置页如实说明"橙色才播报"与"没有解除标志"（DESIGN 10.2 要求 UI 不得假装能处理）')
-      // 0.6.0：海外气象源的开关与说明。与 0.5.0 / 0.5.2 同一条纪律——新加的 UI 必须有渲染断言，
-      // 否则一个拼错的 h(...) 会白屏而没有任何断言会失败。
-      assert(has('海外气象灾害') && has('洪水 / 山洪 / 降雨 / 风暴潮预警'),
-        '海外气象的开关渲染出来了')
-      assert(has('Data Source: Environment and Climate Change Canada'),
+      assert(anyHas('洪水 / 山洪 / 降雨 / 风暴潮'), '海外气象的开关行渲染出来了')
+      assert(anyHas('Data Source: Environment and Climate Change Canada'),
         '设置页带上了 ECCC 的署名（End-use Licence v2.1.1 要求署名）')
-      assert(has('打开页面时若某条预警已发布超过 6 小时'),
+      assert(anyHas('打开页面时若某条预警已发布超过 6 小时'),
         '设置页如实说明了年龄闸门（用户知道为什么打开页面时老预警不响）')
-      T2.resetCityTable()
     }
   } catch (e) {
     assert(false, '0.5.0 设置页级联检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
@@ -5577,7 +5625,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       })
       const noneRes = await noneSrc.pollOnce()
       assert(callsNone === 0 && noneRes.noPlaces === true, '只有日本关注点时，美国源一个请求都不发')
-      assert(stNone && /关注点都不在/.test(stNone.detail) && /其他地区/.test(stNone.detail),
+      assert(stNone && /关注点都不在/.test(stNone.detail) && /其他国家 \/ 地区/.test(stNone.detail),
         '状态说清"有点但都不在美国源的覆盖范围内"（0.6.1：此前一律说"未设置"，' +
         '而用户明明在设置页看得见那个点）与去哪里配：' + (stNone && stNone.detail))
       // 真的一个点都没配时，文案回到"未设置"
@@ -6400,6 +6448,284 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     }
   } catch (e) {
     assert(false, '0.6.0 第 2 期检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
+  }
+
+  // ---- 0.8.0：跨源权威源（DESIGN 3.4）+ 关注点来源分支（DESIGN 9.3） ----
+  console.log('== 0.8.0：跨源权威源 + 关注点来源分支 ==')
+  try {
+    const mkCfg8 = (t, patch) => {
+      const cfg = JSON.parse(JSON.stringify(t.DEFAULT_CFG))
+      cfg.notify = { sound: false, system: false, volume: 0 }
+      return Object.assign(cfg, patch || {})
+    }
+    // 一场筑波附近的日本地震：551（行政区匹配）与 USGS（坐标匹配）各报一次，这才是 3.4 的正题
+    const JP_RAW = {
+      code: 551, id: 'jp-551-test',
+      issue: { time: '2026/09/07 23:25:14', type: 'DetailScale' },
+      earthquake: {
+        time: '2026/09/07 23:25:00', maxScale: 45,
+        hypocenter: { name: '茨城県南部', latitude: 36.0, longitude: 140.1, depth: 50, magnitude: 5 },
+      },
+      points: [{ pref: '茨城県', addr: '土浦市', scale: 45, isArea: false }],
+    }
+    const usgsCopyOf = (over) => Object.assign({
+      id: 'usgs:cross-1', code: 'usgs', source: 'usgs', kind: 'quake', kindLabel: 'USGS 地震',
+      locator: 'point', severity: 'orange', issued: '2026-09-07T23:25:40+09:00',
+      headline: 'M5.2 茨城県南部', magnitude: 5.2, maxScale: -1, strength: 5.2,
+      // 事件键与日本源的 `quake:` 不同 → 只能靠「±2 分钟 + 50km」的坐标近似归并
+      eventKey: 'geo:2026-09-07T14:25', geo: { lat: 36.05, lon: 140.15 },
+      regions: [], cancelled: false,
+    }, over || {})
+    const watch8 = {
+      prefectures: ['茨城県'], cities: [],
+      places: [{ name: 'つくば', lat: 36.08, lon: 140.11, radiusKm: 300, origin: 'global' }],
+    }
+    const th8 = { quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch', globalMagnitude: 4.5, cnReportMagnitude: 4.5 }
+
+    // ① 日本源补了震中坐标，但**匹配语义必须不变**
+    {
+      const t = loadClient().__test
+      const a = t.parseQuake(JP_RAW)
+      assert(a.geo && a.geo.lat === 36 && a.geo.lon === 140.1,
+        '551 带上了震中坐标（0.8.0 之前只取 name / magnitude，跨源归并无从判定）')
+      assert(a.locator !== 'point',
+        '551 **不设** locator: point —— 否则日本这一路会被降级成坐标匹配（震中 150km 外、本地却到震度 5 弱的地震会漏报，DESIGN 9.3）')
+      const e = t.parseEew({
+        code: 556, id: 'jp-556-test', issue: { time: '2026/09/07 23:25:10', eventId: 'ev-1' },
+        earthquake: { hypocenter: { name: '茨城県南部', latitude: 36.0, longitude: 140.1, magnitude: 5 } },
+        areas: [{ name: '茨城県南部', scaleTo: 45 }],
+      })
+      assert(e.geo && e.geo.lat === 36 && e.locator !== 'point', '556 同样带震中坐标、同样不改匹配语义')
+      const noLon = Object.assign({}, JP_RAW, {
+        earthquake: { time: '2026/09/07 23:25:00', maxScale: 45, hypocenter: { name: '不明', latitude: 36 } },
+      })
+      assert(t.parseQuake(noLon).geo === null,
+        '只有纬度时不出 geo —— **半个坐标比没有更糟**：跨源归并会把两场不相关的地震并成一个（漏报方向）')
+      const sentinel = Object.assign({}, JP_RAW, {
+        earthquake: { time: '2026/09/07 23:25:00', maxScale: 45, hypocenter: { name: '不明', latitude: -200, longitude: -200 } },
+      })
+      assert(t.parseQuake(sentinel).geo === null, 'P2PQuake 的"未知震中"哨兵值（-200，-200）不会被当成坐标')
+      assert(t.sourceIdOf(a) === 'p2pquake' && t.SOURCE_RANK.p2pquake === 1,
+        '551 归到 p2pquake，且它是权威序里的第 1 位（DESIGN 3.4 的表）')
+    }
+
+    // ② 跨源只在**跨机构**时成立：同一机构内部那条链路归 DESIGN 8.3 管（只记历史、不抑制）
+    {
+      const t = loadClient().__test
+      assert(t.agencyOf('cenc_eew') === t.agencyOf('cenc_eqlist'), '大陆预警与速报同属 CENC（同机构）')
+      assert(t.agencyOf('p2pquake') === t.agencyOf('jma'), 'P2PQuake 是気象庁信息的转播渠道（同一机构）')
+      assert(t.agencyOf('p2pquake') !== t.agencyOf('usgs') && t.agencyOf('cenc_eqlist') !== t.agencyOf('usgs'),
+        '日本台网 / CENC 与 USGS 是不同机构')
+      assert(t.CROSS_SOURCE_KINDS.weather !== true,
+        '气象源不参与跨源归并（各家地区与判据完全不同，没有"同一件事被重复转述"的形态）')
+    }
+
+    // ③ 端到端：日本 551 先播 → USGS 报同一场地震 → 抑制、**不进历史**、计数可查
+    {
+      const t = loadClient().__test
+      const cfg = mkCfg8(t, { watch: watch8, thresholds: th8 })
+      const r1 = t.handleAlert(t.parseQuake(JP_RAW), cfg)
+      assert(r1.notified === true, '（前置）日本 551 命中茨城県 → 播报：' + JSON.stringify(r1))
+      const r2 = t.handleAlert(usgsCopyOf(), cfg)
+      assert(r2.notified === false && r2.reason === 'authority-suppressed',
+        '同一场地震的 USGS 副本被压掉（0.8.0 之前两条各响一次）：' + JSON.stringify(r2))
+      assert(t.loadHistory().length === 1,
+        '被压掉的副本**连历史都不进**（DESIGN 3.4：多源重复会把那 30 条记录挤掉）：' + t.loadHistory().length)
+      const st = t.authorityStatsOf()
+      assert(st.suppressed === 1 && st.bySource.p2pquake === 1,
+        '抑制必须留计数（"不进历史 ≠ 不可见"）：' + JSON.stringify(st))
+      const snap = t.buildDiagSnapshot()
+      assert(snap.snapshot === 2 && snap.authority && snap.authority.suppressed === 1,
+        '诊断快照里能看到被抑制的条数：' + JSON.stringify(snap.authority))
+    }
+
+    // ④ 先到者播：USGS 先到，日本副本后到同样被抑制（DESIGN 3.4 的"不补播"）
+    {
+      const t = loadClient().__test
+      const cfg = mkCfg8(t, { watch: watch8, thresholds: th8 })
+      const r1 = t.handleAlert(usgsCopyOf(), cfg)
+      assert(r1.notified === true, '（前置）USGS 副本先到 → 播报：' + JSON.stringify(r1))
+      const r2 = t.handleAlert(t.parseQuake(JP_RAW), cfg)
+      assert(r2.notified === false && r2.reason === 'authority-suppressed',
+        '日本源后到也不补播（DESIGN 3.4：预警的价值在时效，补播只是多一次打扰）：' + JSON.stringify(r2))
+      assert(t.authorityStatsOf().bySource.usgs === 1, '计数按**已播报的那个源**分组，能看出是谁抢在前面')
+    }
+
+    // ⑤ 归并只在「±2 分钟 + 50km」内成立：过界一律各自播报（宁可多响一次，绝不漏报）
+    {
+      const t = loadClient().__test
+      const cfg = mkCfg8(t, { watch: watch8, thresholds: th8 })
+      t.handleAlert(t.parseQuake(JP_RAW), cfg)
+      const far = t.handleAlert(usgsCopyOf({ id: 'usgs:far', eventKey: 'geo:far', geo: { lat: 36.6, lon: 140.7 } }), cfg)
+      assert(far.notified === true, '震中差约 70km（>50km）→ 不归并、照常播报：' + JSON.stringify(far))
+      const late = t.handleAlert(usgsCopyOf({ id: 'usgs:late', eventKey: 'geo:late', issued: '2026-09-07T23:31:40+09:00' }), cfg)
+      assert(late.notified === true, '时间差 6 分钟（>2 分钟）→ 不归并、照常播报：' + JSON.stringify(late))
+    }
+
+    // ⑥ 关注点来源分支（origin）：显式值优先，缺失时按名称形状推导
+    {
+      const t = loadClient().__test
+      assert(t.normalizePlaces([{ name: '四川省·成都市', lat: 30.66, lon: 104.07, radiusKm: 100 }])[0].origin === 'cn',
+        '老配置没有 origin → 按名称形状推导（「省·市」= cn）')
+      assert(t.normalizePlaces([{ name: '东京', lat: 35.68, lon: 139.77, radiusKm: 100 }])[0].origin === 'global',
+        '手填坐标 / 「用我的位置」→ global')
+      assert(t.normalizePlaces([{ name: '东京', lat: 35.68, lon: 139.77, radiusKm: 100, origin: 'cn' }])[0].origin === 'cn',
+        '已经写明 origin 的原样保留（推导不覆盖显式值）')
+      assert(t.normalizePlaces([{ name: 'x', lat: 1, lon: 1, radiusKm: 100, origin: 'constructor' }])[0].origin === 'global',
+        'origin 走白名单：原型链上的键不算合法取值')
+      t.setCnAreas([{ name: '四川省', lat: 30.66, lon: 104.07, cities: [{ name: '成都市', lat: 30.66, lon: 104.07 }] }])
+      const p = t.cnPlaceOf('四川省', '成都市', 100)
+      assert(p && p.origin === 'cn', '设置页「中国大陆」级联产出的点标为 cn：' + JSON.stringify(p))
+      t.applyCfg(mkCfg8(t, {
+        watch: { prefectures: [], cities: [], places: [{ name: '东京', lat: 35.68, lon: 139.77, radiusKm: 100, origin: 'global' }] },
+      }))
+      const snap = t.buildDiagSnapshot()
+      assert(snap.config.watch.places[0].origin === 'global',
+        '诊断快照里的关注点带来源分支（权威源判错时第一个要核的就是"这个点算谁的分支"）')
+    }
+
+    // ⑦ Host schema 也必须登记 origin —— 未声明的键会被 schema 归一掉，于是 Client 每次读回来
+    //    都少一个字段、与内存副本永远不等，settingsOpsFor 会把它当"用户改过"而反复写回 Host
+    {
+      const mod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
+      const parsed = unwrapRefs(mod.QuakeAlertSettingsSchema({
+        watch: { places: [{ name: '东京', lat: 35.68, lon: 139.77, radiusKm: 100, origin: 'jp' }] },
+      }))
+      assert(parsed.watch.places[0].origin === 'jp', 'Host schema 原样保留 places[].origin')
+      const dflt = unwrapRefs(mod.QuakeAlertSettingsSchema({ watch: { places: [{ name: 'x', lat: 1, lon: 1 }] } }))
+      assert(dflt.watch.places[0].origin === undefined,
+        'Host schema **不**给 origin 注入默认值：老配置"该算哪个分支"要留给 Client 按名称形状推导，' +
+        '在这里写 default("global") 会把中国分支的老关注点全算成 global（分组与权威源诊断静默失效）')
+      // 端到端确认这条链路：Host 读回来的老配置（无 origin）经 Client 归一后仍是 cn
+      const conv = loadClient().__test.sectionToCfg({
+        watch: { places: [{ name: '四川省·成都市', lat: 30.66, lon: 104.07, radiusKm: 100 }] },
+      })
+      assert(conv.watch.places[0].origin === 'cn',
+        '无 origin 的老配置经 sectionToCfg 后按名称推导为 cn（这正是"不在 Host 给默认值"要保住的行为）')
+      let rejected = false
+      try {
+        mod.QuakeAlertSettingsSchema({ watch: { places: [{ name: 'x', lat: 1, lon: 1, origin: 'bogus' }] } })
+      } catch (e) { rejected = true }
+      assert(rejected, 'Host schema 拒绝白名单外的 origin')
+    }
+
+    // ⑧ 全球主要城市表（DESIGN 9.4）：数据结构、按国家分包下发、客户端缓存与 UI 入口
+    {
+      const world = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'world-cities.js')).href)
+      assert(Array.isArray(world.WORLD_COUNTRIES) && world.WORLD_COUNTRIES.length > 100,
+        '国家清单（' + world.WORLD_COUNTRIES.length + ' 个国家 / 地区）')
+      const codes = world.WORLD_COUNTRIES.map((c) => c.code)
+      assert(new Set(codes).size === codes.length, '国家码不重复')
+      assert(!['JP', 'CN', 'TW', 'HK', 'MO'].some((cc) => codes.indexOf(cc) !== -1),
+        '日本与中国（含台港澳）不在全球城市表里——它们有自己的分支与匹配语义，混进来既重复、口径也含糊')
+      const usIdx = codes.indexOf('US')
+      assert(usIdx !== -1, '美国在表里（海外气象源的 NWS 就按它取数）')
+      const us = world.WORLD_CITIES_BY_COUNTRY.US
+      assert(Array.isArray(us) && us.length > 50, '美国有 ' + (us ? us.length : 0) + ' 个城市')
+      assert(us.every((c) => typeof c.name === 'string' && c.name &&
+        Number.isFinite(c.lat) && Number.isFinite(c.lon) &&
+        Math.abs(c.lat) <= 90 && Math.abs(c.lon) <= 180),
+        '每条城市都带合法坐标（脏坐标会让"配好了却永远不提醒"）')
+      assert(world.WORLD_COUNTRIES[usIdx].count === us.length, '清单里的 count 与分包的实际条数一致')
+      assert(!us.some((c) => 'pop' in c), '排序用的人口字段不下发（只增体积）')
+      // 同名城市必须能区分：同国内重名的条目要把一级行政区附在名字里
+      const dupNames = new Set()
+      const seenNames = new Set()
+      for (const c of us) { if (seenNames.has(c.name)) dupNames.add(c.name); seenNames.add(c.name) }
+      assert(dupNames.size === 0, '同一国家内没有两条完全同名的条目（否则用户没法选对）')
+
+      // Host：`/areas?country=` 只给那一包；未知国家码 404（不静默回空数组）
+      const mod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
+      const routes = []
+      mod.apply({
+        effect(fn) { fn(); return () => {} },
+        inject(names, cb) {
+          if (names.indexOf('webServer') !== -1) {
+            cb({ effect(fn) { fn(); return () => {} }, webServer: { register: (r) => { routes.push(r); return () => {} } } })
+          }
+        },
+      })
+      const areas = routes.find((r) => r.path === '/dsh-quake-alert/areas')
+      const callAreas = (url) => {
+        let status = 0
+        let body = ''
+        areas.handler({ url }, { writeHead(s) { status = s }, end(b) { body = b } })
+        return { status, body }
+      }
+      const plain = callAreas('/dsh-quake-alert/areas')
+      const parsedPlain = JSON.parse(plain.body)
+      assert(plain.status === 200 && Array.isArray(parsedPlain.worldCountries) &&
+        parsedPlain.worldCountries.length === world.WORLD_COUNTRIES.length,
+        '不带参数时下发国家清单（城市本体按国家分包另取）')
+      const usRes = callAreas('/dsh-quake-alert/areas?country=us')
+      const parsedUs = JSON.parse(usRes.body)
+      assert(usRes.status === 200 && parsedUs.country === 'US' && parsedUs.cities.length === us.length,
+        '?country=us 只给美国那一包（小写也认）：' + usRes.status)
+      assert(usRes.body.length < 120000, '分包体积可控（' + usRes.body.length + ' 字节）')
+      const badRes = callAreas('/dsh-quake-alert/areas?country=ZZ')
+      assert(badRes.status === 404,
+        '未知国家码 → 404，而不是空数组："这个国家没收录"（退化成手填坐标）与"代码写错"（缺陷）必须能分开')
+      assert(callAreas('/dsh-quake-alert/areas?country=constructor').status === 404,
+        '国家码查表不过原型链（?country=constructor 不能命中原型）')
+
+      // Client：国家清单的规整 + 按需拉取（注入 fetch，不联网）
+      const s8 = loadClientEx()
+      const c8 = s8.exports.__test
+      assert(c8.setWorldCountries([]) === false && c8.setWorldCountries('x') === false, '非数组 / 空表 → 拒绝')
+      assert(c8.setWorldCountries([
+        { code: 'us', name: '美国', count: 2 }, { code: 'US', name: '重复', count: 9 },
+        { code: '', name: '坏' }, { code: 'fr', name: '法国', count: 1 },
+      ]) === true, '有一项可用即接受')
+      const list8 = c8.worldCountriesOf()
+      assert(list8.length === 2 && list8[0].code === 'US' && list8[0].name === '美国',
+        '国家码归一为大写、重复码只留第一条：' + JSON.stringify(list8))
+      assert(c8.countryPackOf('US') === null, '尚未拉取时没有缓存')
+
+      const urls = []
+      s8.sandbox.window.fetch = async (url) => {
+        urls.push(String(url))
+        return {
+          ok: true, status: 200,
+          json: async () => ({
+            country: 'US',
+            cities: [{ name: '纽约', admin: 'New York', lat: 40.71, lon: -74.01 }, { name: '坏城市', lat: 999, lon: 0 }],
+          }),
+        }
+      }
+      const pack = await c8.loadCountryCities('us')
+      assert(urls.length === 1 && urls[0] === '/dsh-quake-alert/areas?country=US', '按国家拉分包（国家码大写）：' + urls[0])
+      assert(pack.state === 'ready' && pack.cities.length === 1 && pack.cities[0].name === '纽约',
+        '坐标非法的条目被剔除（脏坐标 = 配好了却永远不提醒）：' + JSON.stringify(pack.cities))
+      await c8.loadCountryCities('US')
+      assert(urls.length === 1, '同一国家只拉一次（缓存命中）')
+      s8.sandbox.window.fetch = async () => ({ ok: false, status: 404, json: async () => ({ error: 'unknown country' }) })
+      const nf = await c8.loadCountryCities('ZZ')
+      assert(nf.state === 'ready' && nf.error === 'not-covered' && nf.cities.length === 0,
+        '404 记成 not-covered，与"拉取失败"分开：前者的出路是手填坐标，后者是重试')
+      s8.sandbox.window.fetch = async () => { throw new Error('boom') }
+      const bad = await c8.loadCountryCities('FR')
+      assert(bad.state === 'failed' && /boom/.test(bad.error), '网络失败记成 failed 并保留原因：' + JSON.stringify(bad))
+
+      // UI：「其他国家 / 地区」分支真的渲染出国家选择器（有国家清单时）
+      const react = mkTestReact()
+      const seed = {
+        'dsh.quakeAlert.v1': JSON.stringify({
+          version: 1,
+          watch: { prefectures: [], cities: [], places: [{ name: '东京', lat: 35.68, lon: 139.77, radiusKm: 100, origin: 'global' }] },
+        }),
+      }
+      const { exports: ex } = loadClientEx(seed, { react })
+      ex.__test.setWorldCountries([{ code: 'US', name: '美国', count: 620 }, { code: 'FR', name: '法国', count: 40 }])
+      react.__reset()
+      const texts = textsOfTree(ex.__test.SettingsPanel())
+      const has = (s) => texts.some((t) => t.indexOf(s) !== -1)
+      assert(has('国家 / 地区') && has('美国（620 个城市）') && has('法国（40 个城市）'),
+        '其他国家分支渲染出国家选择器与各国城市数（0.8.0 的新入口）')
+      assert(has('请选择国家 / 地区'), '未选国家时给出占位提示，而不是空下拉')
+      assert(has('也可以直接填坐标'), '手填坐标这条出口始终在（未收录国家 / 地区只能走它）')
+    }
+  } catch (e) {
+    assert(false, '0.8.0 检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
   }
 
   console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败')

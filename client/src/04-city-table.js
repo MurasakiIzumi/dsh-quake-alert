@@ -200,6 +200,11 @@ const cnCitiesOf = (province) => {
  *
  * 抽成纯函数是为了能直接断言级联的产物：用户点「添加」之后配置里到底会多出什么，
  * 比"界面上出现了两个下拉框"重要得多。名称取「省·市」以免两个省的"城区"撞名。
+ *
+ * `origin: 'cn'`（0.8.0 / DESIGN 9.3）：**关注点的来源分支**——用户在哪个国家的分支下加的
+ * 点，那个国家的源就是该点的权威源（3.4 的跨源归并据此判断，诊断里也要能看到）。
+ * 它只做标注，**不限制匹配范围**：一个坐标点对所有坐标型源（EMSC / USGS / NOAA）依然有效
+ * （DESIGN 9.3 的"不锁死机制"：差异只能来自源本身，不能人为裁剪用户能关注哪里）。
  */
 function cnPlaceOf(province, city, radiusKm) {
   if (!cnAreas) return null
@@ -209,7 +214,70 @@ function cnPlaceOf(province, city, radiusKm) {
   if (!c) return null
   const r = Number(radiusKm)
   if (!Number.isFinite(r) || r < 1 || r > 2000) return null
-  return { name: province + '·' + city, lat: c.lat, lon: c.lon, radiusKm: r }
+  return { name: province + '·' + city, lat: c.lat, lon: c.lon, radiusKm: r, origin: 'cn' }
+}
+
+// ---------- 全球主要城市表（0.8.0 / DESIGN 9.4：按国家分包，展开某国时才拉） ----------
+// 为什么不内联：整表 5224 条城市约 375KB 源码。用户只会关注一两个国家，所以 Host 按
+// `?country=XX` **分包下发**，这里按需拉取并缓存——同一国家只拉一次。
+let worldCountries = null // [{ code, name, count }]，随 /areas 一次性拿到（约 160 条）
+const worldCityPacks = new Map() // code -> { state: 'loading'|'ready'|'failed', cities, error }
+function setWorldCountries(list) {
+  if (!Array.isArray(list)) return false
+  const out = []
+  const seen = new Set()
+  for (const c of list) {
+    if (!isPlainObject(c)) continue
+    const code = typeof c.code === 'string' ? c.code.trim().toUpperCase() : ''
+    const name = typeof c.name === 'string' ? c.name.trim() : ''
+    if (!code || !name || seen.has(code)) continue
+    seen.add(code)
+    out.push({ code, name, count: Number(c.count) || 0 })
+  }
+  if (out.length === 0) return false
+  worldCountries = out
+  return true
+}
+const worldCountriesOf = () => (worldCountries ? worldCountries.slice() : [])
+const countryPackOf = (code) => worldCityPacks.get(String(code === undefined || code === null ? '' : code).trim().toUpperCase()) || null
+/**
+ * 拉某个国家的城市包。
+ *
+ * 同一国家的并发调用共用同一条在途请求（Map 里先落 `loading`）。三种失败要能分开说，
+ * 因为出路不同：`failed`（拉不到 → 重试 / 重启 dsh web）、`error: 'not-covered'`
+ *（Host 明确答 404：这个国家不在表里 → 用手填坐标）、以及正常但为空。
+ */
+async function loadCountryCities(code) {
+  const cc = String(code === undefined || code === null ? '' : code).trim().toUpperCase()
+  if (!cc) return null
+  const cur = worldCityPacks.get(cc)
+  if (cur && (cur.state === 'ready' || cur.state === 'loading')) return cur
+  worldCityPacks.set(cc, { state: 'loading', cities: [], error: '' })
+  store.push({})
+  try {
+    if (typeof window === 'undefined' || typeof window.fetch !== 'function') throw new Error('当前环境不支持 fetch')
+    const res = await window.fetch(AREAS_PATH + '?country=' + encodeURIComponent(cc), { headers: { accept: 'application/json' } })
+    if (res && res.status === 404) {
+      worldCityPacks.set(cc, { state: 'ready', cities: [], error: 'not-covered' })
+      store.push({})
+      return worldCityPacks.get(cc)
+    }
+    if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : '?'))
+    const data = await res.json()
+    const cities = (Array.isArray(data && data.cities) ? data.cities : [])
+      .filter((c) => isPlainObject(c) && typeof c.name === 'string' && validLatLon(c.lat, c.lon))
+      .map((c) => ({ name: c.name, admin: typeof c.admin === 'string' ? c.admin : '', lat: c.lat, lon: c.lon }))
+    worldCityPacks.set(cc, { state: 'ready', cities, error: '' })
+  } catch (err) {
+    worldCityPacks.set(cc, { state: 'failed', cities: [], error: String((err && err.message) || err) })
+  }
+  store.push({})
+  return worldCityPacks.get(cc)
+}
+/** 测试钩子：清掉国家清单与已缓存的包。 */
+function resetWorldCities() {
+  worldCountries = null
+  worldCityPacks.clear()
 }
 
 /**
@@ -346,6 +414,9 @@ async function loadCityTable() {
     // 0.5.0：中国行政区划表（省 → 地级市 + 坐标），供设置页的三级级联。
     // 缺失只影响大陆源的"选城市"这条路径（仍可手填坐标），不影响日本链路与既有功能。
     if (isPlainObject(data) && Array.isArray(data.cnAreas)) setCnAreas(data.cnAreas)
+    // 0.8.0：全球国家清单（城市本体按 `?country=` 分包另取，见 loadCountryCities）。
+    // 缺失只影响「其他国家 / 地区」分支的城市列表，手填坐标那条路照常可用。
+    if (isPlainObject(data) && Array.isArray(data.worldCountries)) setWorldCountries(data.worldCountries)
     pruneUnknownCities()
   } catch (err) {
     // 插件卸载造成的中止不算"失败"：下次装载应当能重试
@@ -374,4 +445,4 @@ const resetCityTable = () => {
   cnAreas = null
 }
 
-export { AREAS_PATH, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, buildAddrIndex, lookupAddrCity, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, cnAreaOf, normAliases }
+export { AREAS_PATH, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, buildAddrIndex, lookupAddrCity, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, cnAreaOf, normAliases, setWorldCountries, worldCountriesOf, countryPackOf, loadCountryCities, resetWorldCities }

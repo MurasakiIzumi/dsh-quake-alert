@@ -25,12 +25,14 @@
 import { currentCfg, settingsSync } from './03-settings-bridge.js'
 import { sourceHealthOf } from './05g-source-health.js'
 import { store } from './07-store.js'
+import { authorityStatsOf } from './10-dedupe.js'
 import { feedStatsOf } from './12b-feed-poll.js'
 import { overseasStatsOf } from './12e-overseas-poll.js'
 import { cnStreamRegistry } from './12c-cn-stream.js'
 
-/** 快照格式版本（与插件版本无关，见文件头）。 */
-export const DIAG_SNAPSHOT_VERSION = 1
+/** 快照格式版本（与插件版本无关，见文件头）。0.8.0 起为 2：新增 `authority` 段，
+ *  `config.watch.places[]` 增加 `origin`。 */
+export const DIAG_SNAPSHOT_VERSION = 2
 
 const str = (v) => String(v === undefined || v === null ? '' : v)
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
@@ -146,8 +148,31 @@ function watchSummary(cfg) {
     cities: Array.isArray(w.cities) ? w.cities.slice(0, 30) : [],
     places: places.slice(0, 20).map((p) => ({
       name: str(p && p.name), lat: num(p && p.lat), lon: num(p && p.lon), radiusKm: num(p && p.radiusKm),
+      // 0.8.0：来源分支（jp / cn / global）。它决定"这个关注点归哪个源"（DESIGN 9.3 → 3.4），
+      // 诊断里必须能看到——权威源判错时，第一个要核的就是"这个点被算作了谁的分支"。
+      origin: str(p && p.origin) || 'global',
     })),
     placesCount: places.length,
+  }
+}
+
+/**
+ * 跨源权威源（0.8.0 / DESIGN 3.4）：被权威源压掉的条数。
+ *
+ * 这一段的**唯一**存在理由：被抑制的条目连历史都不进，用户没有任何别的途径看到它们。
+ * 权威源一旦判错（把两场不同地震并成一个 = 真漏报），这个数字与 `lastDetail` 是唯一的痕迹。
+ * `bySource` 按**已播报的那个源**分组——它能回答"是不是 USGS 总在抢在日本源前面"。
+ */
+function authorityRow() {
+  const a = authorityStatsOf()
+  const bySource = {}
+  const src = (a && a.bySource) || {}
+  for (const k of Object.keys(src)) bySource[k] = num(src[k])
+  return {
+    suppressed: num(a && a.suppressed),
+    bySource,
+    lastAt: (a && a.lastAt) ? new Date(a.lastAt).toISOString() : null,
+    lastDetail: str(a && a.lastDetail),
   }
 }
 
@@ -234,6 +259,9 @@ export function buildDiagSnapshot(now) {
     // 海外源（0.6.0）：Client 直连的 REST 轮询。与 feed / streams 并列而不是塞进任一张表
     // ——它们的字段语义不同（见 overseasRows 的注释）。
     overseas: safe(overseasRows, {}, warnings, 'overseas'),
+    // 跨源权威源（0.8.0）：被压掉的跨源副本条数。**这一段是那些条目的唯一痕迹**——
+    // 它们不进历史（DESIGN 3.4），所以诊断里没有的话就彻底不可见。
+    authority: safe(authorityRow, {}, warnings, 'authority'),
     history: safe(historySummary, {}, warnings, 'history'),
     // 生成过程中被兜住的异常：诊断工具自身的失败也要可见，不能假装一切正常
     warnings,

@@ -12,9 +12,34 @@ import { PREFECTURES, SCALE_TEXT, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, normalizePre
 import { own } from './02-storage.js'
 
 // ---------- 解析器：P2PQuake code → Alert ----------
-// Alert = { id, code, kind, kindLabel, severity, issued, headline, maxScale, hypo,
+// Alert = { id, code, kind, kindLabel, severity, issued, headline, maxScale, hypo, geo,
 //           regions:[{pref, area, scale?, grade?}], cancelled, eventKey, strength }
 //           eventKey 归并同一地震的多次发布，strength 用于强度升级判定
+//           geo（0.8.0）= 震中坐标，**只服务跨源事件归并**，不参与匹配（理由见 geoOfHypo）
+
+/**
+ * 电文里的震中坐标（0.8.0 / DESIGN 3.4）。
+ *
+ * `earthquake.hypocenter` 一直带着 latitude / longitude，此前只取了 name / magnitude。
+ * 补它的唯一目的是**跨源权威源**：同一场地震会被 P2PQuake 与 USGS / EMSC / 大陆源各报一次，
+ * 判"这几条是不是同一事件"需要震中（判据是「±2 分钟 + 50km + 跨源」，见 10-dedupe）。
+ *
+ * **不设 `locator: 'point'`**：那会让 06-matcher 把它送进 matchPointAlert，于是日本这一路
+ * 从"该地区观测到的震度是否达阈值"降级成"震中距 ≤ 半径"——一场震中在 150km 外、却让本地
+ * 达到震度 5 弱的地震会被漏掉。DESIGN 9.3 明确否决这种"为了模型统一而降级匹配"。
+ * 坐标在这里与匹配完全解耦：有它只是让事件能被归并，没有它链路照常。
+ *
+ * 缺一个 / 越界 / 非有限数一律不产出 geo：**半个坐标比没有坐标更糟**——跨源归并会把
+ * 两场不相关的地震并成一个，那是漏报方向（DESIGN 3.4 的"时间或震中缺一不可判时一律不归并"）。
+ */
+function geoOfHypo(hypo) {
+  const lat = hypo ? hypo.latitude : null
+  const lon = hypo ? hypo.longitude : null
+  if (typeof lat !== 'number' || typeof lon !== 'number') return null
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null
+  return { lat, lon }
+}
 // 区域名 → 都道府县全称。
 // 551 的 points[].pref 本身就是县全称，可直接用；但 556 的 areas[].name 与 552 的
 // areas[].name 是「区域名」，其中一部分不含都道府县名（北海道用地方名、东京都用岛屿名、
@@ -141,6 +166,8 @@ function parseQuake(raw) {
     eventKey: eq.time ? 'quake:' + eq.time : '',
     strength: typeof eq.maxScale === 'number' ? eq.maxScale : -1,
     hypo: { name: hypo.name || '', magnitude: typeof hypo.magnitude === 'number' ? hypo.magnitude : null },
+    // 震中坐标（0.8.0）：只给跨源事件归并用，**不参与匹配**（见 geoOfHypo）
+    geo: geoOfHypo(hypo),
     regions: pts.map((p) => ({
       pref: normalizePref(p.pref),
       area: p.addr || '',
@@ -171,6 +198,9 @@ function parseEew(raw) {
     eventKey: (raw.issue && raw.issue.eventId) ? 'eew:' + raw.issue.eventId : '',
     strength: maxTo,
     hypo: { name: hypo.name || '', magnitude: typeof hypo.magnitude === 'number' ? hypo.magnitude : null },
+    // 震中坐标（0.8.0）：同 551（见 geoOfHypo）。EEW 是秒级信息，它是"日本这一路先播"的
+    // 主要来源，因此跨源归并恰恰最依赖它带坐标。
+    geo: geoOfHypo(hypo),
     regions: areas.flatMap((a) => regionsOfArea(a.name, a.pref, typeof a.scaleTo === 'number' ? a.scaleTo : -1, 'scale')),
     cancelled,
     raw,
@@ -215,4 +245,4 @@ function parse(raw) {
 }
 
 
-export { AREA_PREF, prefsOfArea, regionsOfArea, scaleText, scaleSuffix, sevColor, severityOfScale, parseQuake, parseEew, parseTsunami, parse }
+export { AREA_PREF, prefsOfArea, regionsOfArea, scaleText, scaleSuffix, sevColor, severityOfScale, geoOfHypo, parseQuake, parseEew, parseTsunami, parse }

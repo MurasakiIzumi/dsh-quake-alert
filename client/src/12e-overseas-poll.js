@@ -294,7 +294,7 @@ export function createOverseasSource(opts = {}) {
       reportStatus({
         status: 'open',
         detail: (anyPlaces ? '关注点都不在' + regionText + '源的覆盖范围内' : '未设置' + regionText + '关注点') +
-          '（设置 → 灾害预警 → ③ 其他地区：坐标 + 半径）',
+          '（设置 → 灾害预警 → 关注地区 → 其他国家 / 地区）',
       })
       return { applied: 0, noPlaces: true }
     }
