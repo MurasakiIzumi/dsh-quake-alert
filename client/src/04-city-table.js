@@ -130,6 +130,14 @@ const riverAreaCities = (code) => {
 // 表由 scripts/build-cn-areas.mjs 从 GeoNames 生成（含 TW/HK/MO），头部记着已知取舍。
 let cnAreas = null // [{ code, name, aliases, lat, lon, cities:[{name,aliases,lat,lon}] }]
 /**
+ * 大陆行政区划表的加载结果（0.9.4 / P2-19）：空串 = 还没失败，非空 = 失败原因。
+ *
+ * 为什么必须单独记一笔：设置页那个分支此前只看 `cityTableState`（它只反映**市町村表**），
+ * 于是 `setCnAreas` 失败时状态仍是 ready、`cnAreas` 仍是 null、province 列表为空——
+ * 界面永远落在"正在加载…"那一支，用户无论等多久都不会知道是失败了，也没有重试入口。
+ */
+let cnAreasFailed = ''
+/**
  * 别名的规整：只留**有意义**的候选。
  *
  * 丢掉单字别名（"丽"这类会匹配到半个中国）与和显示名重复的项；上限 8 条，因为候选是长尾的
@@ -156,7 +164,7 @@ function normAliases(list, name) {
  *（后者在预警产品里是"该响的地方没响"）。规整失败的整体拒绝，不做部分接受。
  */
 function setCnAreas(list) {
-  if (!Array.isArray(list)) return false
+  if (!Array.isArray(list)) { cnAreasFailed = '响应里没有 cnAreas'; return false }
   const out = []
   const seenProv = new Set()
   for (const p of list) {
@@ -179,8 +187,9 @@ function setCnAreas(list) {
     seenProv.add(name)
     out.push({ code: typeof p.code === 'string' ? p.code : '', name, aliases: normAliases(p.aliases, name), lat: p.lat, lon: p.lon, cities })
   }
-  if (out.length === 0) return false
+  if (out.length === 0) { cnAreasFailed = 'cnAreas 里没有可用的省份'; return false }
   cnAreas = out
+  cnAreasFailed = ''
   return true
 }
 function validLatLon(lat, lon) {
@@ -222,8 +231,17 @@ function cnPlaceOf(province, city, radiusKm) {
 // ---------- 全球主要城市表（0.8.0 / DESIGN 9.4：按国家分包，展开某国时才拉） ----------
 // 为什么不内联：整表 5224 条城市约 375KB 源码。用户只会关注一两个国家，所以 Host 按
 // `?country=XX` **分包下发**，这里按需拉取并缓存——同一国家只拉一次。
-let worldCountries = null // [{ code, name, count }]，随 /areas 一次性拿到（约 160 条）
+let worldCountries = null // [{ code, count, names: { 'zh-CN', 'zh-TW', ja, en } }]
 const worldCityPacks = new Map() // code -> { state: 'loading'|'ready'|'failed', cities, error }
+/** 界面语言清单（与 00-i18n 的 LANGS 同一批）：国家名的四条名字就按这个顺序兜底。 */
+const COUNTRY_NAME_LANGS = ['zh-CN', 'zh-TW', 'ja', 'en']
+/**
+ * 国家名的本地化四条（0.9.4 / PD-3）。
+ *
+ * 此前 `/areas` 下发的 `name` 是**写死的中文**（生成脚本只算了 zh-CN），于是把界面语言切成
+ * 日本語 / English 时国家下拉仍是简体中文。现在数据里带四种语言，取词时按当前语言解析，
+ * 认不出该语言时逐级退回（zh-CN → en → code），最坏情况显示 ISO 码而不是空白。
+ */
 function setWorldCountries(list) {
   if (!Array.isArray(list)) return false
   const out = []
@@ -231,16 +249,30 @@ function setWorldCountries(list) {
   for (const c of list) {
     if (!isPlainObject(c)) continue
     const code = typeof c.code === 'string' ? c.code.trim().toUpperCase() : ''
-    const name = typeof c.name === 'string' ? c.name.trim() : ''
-    if (!code || !name || seen.has(code)) continue
+    if (!code || seen.has(code)) continue
+    const names = {}
+    let any = false
+    for (const lang of COUNTRY_NAME_LANGS) {
+      const v = isPlainObject(c.names) ? c.names[lang] : undefined
+      if (typeof v === 'string' && v.trim()) { names[lang] = v.trim(); any = true }
+    }
+    // 老 Host（或别处塞进来的）只给 `name`：当作默认语言那一份，照常可用
+    if (!any && typeof c.name === 'string' && c.name.trim()) { names['zh-CN'] = c.name.trim(); any = true }
+    if (!any) continue
     seen.add(code)
-    out.push({ code, name, count: Number(c.count) || 0 })
+    out.push({ code, names, count: Number(c.count) || 0 })
   }
   if (out.length === 0) return false
   worldCountries = out
   return true
 }
-const worldCountriesOf = () => (worldCountries ? worldCountries.slice() : [])
+/** 取某个国家在当前语言下的名字（认不出就逐级退回，最后退回 ISO 码）。 */
+function countryNameOf(entry, lang) {
+  if (!entry || !isPlainObject(entry.names)) return ''
+  const want = String(lang || '')
+  return entry.names[want] || entry.names['zh-CN'] || entry.names.en || entry.code || ''
+}
+const worldCountriesOf = () => (worldCountries ? worldCountries.map((c) => Object.assign({}, c)) : [])
 const countryPackOf = (code) => worldCityPacks.get(String(code === undefined || code === null ? '' : code).trim().toUpperCase()) || null
 /**
  * 拉某个国家的城市包。
@@ -349,7 +381,10 @@ function cityAliases(city, pref) {
   if (m) out.push(m[1].slice(0, -1) + m[2])
   else if (/区$/.test(city)) out.push('東京' + city)
   if (pref) {
-    const short = String(pref).replace(/[都道府県]$/, '')
+    // 0.9.4（P3-38）：只削 県 / 都 / 府。「北海道」削出来是「北海」——那不是地名，
+    // 而且会给北海道的每个市町村造一条「北海○○市」的幻影别名（下面那一段才是北海道该走的路：
+    // 振興局名 + 「地方」变体）。
+    const short = String(pref).replace(/[都府県]$/, '')
     if (short && short !== pref) out.push(short + city)
   }
   if (pref === '北海道') {
@@ -415,7 +450,9 @@ async function loadCityTable() {
     if (isPlainObject(data) && Array.isArray(data.riverAreas)) setRiverAreas(data.riverAreas)
     // 0.5.0：中国行政区划表（省 → 地级市 + 坐标），供设置页的三级级联。
     // 缺失只影响大陆源的"选城市"这条路径（仍可手填坐标），不影响日本链路与既有功能。
+    // 0.9.4（P2-19）：缺失 / 被拒时记下原因，界面据此显示"失败 + 重试"而不是永远"加载中"。
     if (isPlainObject(data) && Array.isArray(data.cnAreas)) setCnAreas(data.cnAreas)
+    else cnAreasFailed = '响应里没有 cnAreas'
     // 0.8.0：全球国家清单（城市本体按 `?country=` 分包另取，见 loadCountryCities）。
     // 缺失只影响「其他国家 / 地区」分支的城市列表，手填坐标那条路照常可用。
     if (isPlainObject(data) && Array.isArray(data.worldCountries)) setWorldCountries(data.worldCountries)
@@ -438,6 +475,23 @@ function abortCityTableLoad() {
   }
 }
 
+/**
+ * 重试加载行政区划表（0.9.4 / P2-18）。
+ *
+ * 为什么需要它：`loadCityTable` 的守卫会把 `loading` / `ready` 直接挡回去，而全仓库唯一的
+ * 调用点是 15-entry 里那个 `ctx.effect`——只在插件装载时执行一次。于是**一次瞬时失败**
+ * （Host 刚起来还没注册路由、一次 500、一次网络抖动）就让整场会话失去市町村表：
+ * 市级收窄失效（`lookupAddrCity` 索引为空 → `regionInWatch` 一律放行 → 多报）、设置页选不出
+ * 市町村、`pruneUnknownCities` 不再运行，而用户只能刷新页面或停用再启用插件。
+ * 这里把状态复位后重跑一次，供设置页的「重试」按钮使用。
+ */
+async function retryCityTable() {
+  if (cityTableState === 'loading') return cityTableState
+  cityTableState = 'idle'
+  cnAreasFailed = ''
+  return loadCityTable()
+}
+
 
 // 供单测钩子重置表状态
 const resetCityTable = () => {
@@ -445,6 +499,10 @@ const resetCityTable = () => {
   cityTable = null; cityNameSet = null; cityTableState = 'idle'
   addrAliasIndex = null; addrAliasMax = 0; cityPrefIndex = null; riverAreas = null
   cnAreas = null
+  cnAreasFailed = ''
 }
 
-export { AREAS_PATH, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, buildAddrIndex, lookupAddrCity, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, cnAreaOf, normAliases, setWorldCountries, worldCountriesOf, countryPackOf, loadCountryCities, resetWorldCities }
+/** 大陆表的状态（0.9.4 / P2-19）：'idle' | 'ready' | 'failed'。设置页据此区分"加载中"与"失败"。 */
+const cnAreasStateOf = () => (cnAreas ? 'ready' : (cnAreasFailed ? 'failed' : 'idle'))
+
+export { AREAS_PATH, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, buildAddrIndex, lookupAddrCity, pruneUnknownCities, loadCityTable, retryCityTable, abortCityTableLoad, cityTableState, resetCityTable, setCnAreas, cnAreasStateOf, cnProvinces, cnCitiesOf, cnPlaceOf, cnAreaOf, normAliases, setWorldCountries, worldCountriesOf, countryNameOf, countryPackOf, loadCountryCities, resetWorldCities }

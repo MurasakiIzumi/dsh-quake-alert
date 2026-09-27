@@ -58,8 +58,8 @@ export function staleAfterOf(sourceId) {
 /** 毫秒 → 中文可读（诊断与状态行用）。 */
 function humanMinutes(ms) {
   const m = Math.round(ms / 60000)
-  if (m < 60) return m + ' 分钟'
-  return (Math.round(m / 6) / 10) + ' 小时'
+  if (m < 60) return m + 'm'
+  return (Math.round(m / 6) / 10) + 'h'
 }
 
 /**
@@ -72,12 +72,17 @@ function humanMinutes(ms) {
  * @param {(t: any) => void} [opts.clearTimer]
  * @param {(id: string, patch: object) => void} [opts.pushSource] 注入点（测试用）。**默认不走它**：
  *   生产路径必须经 `publishStatus` 合成（见下），注入时保持"原样推送"以便断言原始 patch。
+ * @param {(id: string) => boolean} [opts.sourceEnabled] 该源当前是否被用户开着（0.9.4 / P2-17）。
+ *   关掉的源不该被判 stale：用户主动关掉一个源之后，我们**不再去问它**了，dataTime 自然停住，
+ *   于是几小时后界面把"我已关闭"改写成"上游数据已过期（事实是我们不再问了）"，整体状态还被
+ *   这个已关闭的源拖成中灰，重新打开也不能立即自愈。默认全部视为开启（保持既有行为）。
  */
 export function createHealthProbe(opts = {}) {
   const now = opts.now || (() => Date.now())
   const intervalMs = opts.intervalMs === undefined ? PROBE_INTERVAL_MS : opts.intervalMs
   const setTimer = opts.setTimer || ((fn, ms) => setInterval(fn, ms))
   const clearTimer = opts.clearTimer || ((t) => clearInterval(t))
+  const sourceEnabled = opts.sourceEnabled || (() => true)
   // 默认经 publishStatus（0.5.4）：探针报的是**新鲜度**这一层，而展示状态要把它与连接层、
   // 数据健康层合成。此前直接 pushSource，于是"数据已恢复更新"这一句会把一条 schema-error
   // 蓝点整个刷掉，而 health 里 escalated 仍为 true —— 用户再也看不到"上游改版"的信号。
@@ -96,6 +101,17 @@ export function createHealthProbe(opts = {}) {
     for (const id of Object.keys(SOURCE_CONTRACTS)) {
       const after = staleAfterOf(id)
       if (after <= 0) continue
+      // 0.9.4（P2-17）：源被用户关掉时不判新鲜度。关掉之后 Client 不再拉它，dataTime 停在
+      // 关掉前的值——继续判 stale 就是在说"上游停更了"，而事实是我们自己不再问了。
+      // 先清掉可能残留的 stale（否则关闭那一刻的 stale 会一直挂到重开）
+      if (!sourceEnabled(id)) {
+        const recOff = sourceHealthOf(id)
+        if (recOff && recOff.fresh && recOff.fresh.stale) {
+          noteStale(id, false, t)
+          push(id, { status: 'disabled', detail: 'disabled · hazard switch off' })
+        }
+        continue
+      }
       const rec = sourceHealthOf(id)
       const dataTime = rec && rec.fresh && Number.isFinite(rec.fresh.dataTime) ? rec.fresh.dataTime : 0
       if (!(dataTime > 0)) continue
@@ -107,8 +123,8 @@ export function createHealthProbe(opts = {}) {
         // 恢复时给的是 `open`，而源自己的连接状态可能是 reconnecting —— 那由源的下一次
         // 上报（feed 源 15 秒一轮）纠正。用 05g 记录的连接状态去猜反而会引入两份真相。
         push(id, stale
-          ? { status: 'stale', detail: '上游数据已过期（超过 ' + humanMinutes(after) + ' 没有新数据）' }
-          : { status: 'open', detail: '数据已恢复更新' })
+          ? { status: 'stale', detail: 'stale · no new data for ' + humanMinutes(after) }
+          : { status: 'open', detail: 'data fresh again' })
       }
     }
     return t

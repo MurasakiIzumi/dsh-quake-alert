@@ -1,0 +1,10 @@
+# 构建产物按 LF 存取（0.9.4）
+#
+# client/client.js 是 rollup 的构建产物，scripts/build-client.mjs --check 逐字节比较
+# "重新构建的结果"与"已提交的文件"。Windows + core.autocrlf=true 的检出会把工作区里的
+# 这个文件换成 CRLF，于是 --check 在**全新检出上假报"bundle 已陈旧"**；照提示重新构建
+# 又只会把整文件的行尾改掉、产生一份与真实改动无关的整文件 diff（DESIGN 11.9 #19）。
+#
+# 只钉这一个文件，不写 `* text=auto`：那会在下一次提交时改写全仓行尾，
+# 而本仓库的行尾问题只出在"被逐字节比较的构建产物"这一处。
+client/client.js text eol=lf

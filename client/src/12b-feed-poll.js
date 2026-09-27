@@ -62,16 +62,65 @@ function saveFeedCursor(v, key) {
 async function defaultFetchJson(url, signal) {
   const AS = (typeof window !== 'undefined' && window) ? window.AbortSignal : undefined
   const timeout = (AS && typeof AS.timeout === 'function') ? AS.timeout(FEED_FETCH_TIMEOUT_MS) : undefined
-  // 组合「请求超时」与「插件停用时中止」两个信号。AbortSignal.any 不可用时退回超时信号
-  // （那一轮仍可能跑完，但下面的 stopped 检查会拦住它的 apply）。
+  /**
+   * 把「请求超时」与「插件停用时中止」合成**一个**信号。
+   *
+   * 0.9.4 修：此前写的是 `if (signal && timeout && AS.any) any([...])` / `else if (signal) sig = signal`
+   * ——在"有 AbortSignal.timeout 却没有 AbortSignal.any"的浏览器上（Chrome 103-115 /
+   * Firefox 100-123）第二支会把**超时信号整个丢掉**，只剩"停用插件才 abort"的业务信号，
+   * 而注释写的是"退回超时信号"。后果不是少一次请求：挂死的本地请求让 inFlight 永不 settle，
+   * 而 schedule() 在 await 之后才重排，于是 jma / usgs / noaa / nmc **四源同时永久停摆**，
+   * 状态还停在上一次的绿。现在不依赖 any：自建 AbortController，两个信号任一触发就中止，
+   * 超时也因此能真正掐断底层请求（12e 的 Promise.race 只是让 Promise 早点失败）。
+   */
   let sig = timeout
+  const anyFn = (AS && typeof AS.any === 'function')
+    ? AS.any
+    : ((typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function') ? AbortSignal.any : null)
   try {
-    if (signal && timeout && AS && typeof AS.any === 'function') sig = AS.any([signal, timeout])
-    else if (signal) sig = signal
+    if (signal && timeout) {
+      if (anyFn) {
+        sig = anyFn([signal, timeout])
+      } else if (typeof AbortController === 'function') {
+        const ctrl = new AbortController()
+        if (signal.aborted || timeout.aborted) {
+          ctrl.abort()
+        } else {
+          const onAbort = () => { try { ctrl.abort() } catch (err) { /* 已经中止过 */ } }
+          signal.addEventListener('abort', onAbort, { once: true })
+          timeout.addEventListener('abort', onAbort, { once: true })
+        }
+        sig = ctrl.signal
+      } else {
+        // 连 AbortController 都没有（很老的引擎）：只能保业务信号，超时退回 Promise.race 兜底
+        // ——比"完全丢掉超时"好，代价是底层请求不会被中止。
+        sig = signal
+      }
+    } else if (signal) {
+      sig = signal
+    }
   } catch (err) { sig = timeout }
-  const res = await window.fetch(url, { headers: { accept: 'application/json' }, signal: sig })
-  if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : '?'))
-  return res.json()
+  const request = window.fetch(url, { headers: { accept: 'application/json' }, signal: sig })
+    .then((res) => {
+      if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : '?'))
+      return res.json()
+    })
+  // 兜底（只在没有 AbortController 的老引擎上生效）：让这一轮至少能按时结束，
+  // 而不是把 inFlight 一直占住——"轮询链永久停摆"比"少一个中止信号"严重得多。
+  if (!(typeof AbortController === 'function') && timeout) {
+    let timer = null
+    try {
+      return await Promise.race([
+        request,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('local timeout (' + FEED_FETCH_TIMEOUT_MS + 'ms): ' + url)), FEED_FETCH_TIMEOUT_MS)
+        }),
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+  return request
 }
 
 /**
@@ -171,7 +220,7 @@ export function createFeedClient(opts = {}) {
     // 该源的灾种开关关闭时不必拉增量（Host 侧随后也会据此停轮询）。状态如实上报为「已关闭」，
     // 这样聚合状态不会因为"用户主动关掉了"而显示成异常。
     if (!enabled(getCfg())) {
-      reportStatus({ status: 'disabled', detail: '灾种开关已关闭' })
+      reportStatus({ status: 'disabled', detail: 'disabled · hazard switch off' })
       return { applied: 0, cursor: cursorNow(), skipped: true }
     }
     let data
@@ -196,7 +245,7 @@ export function createFeedClient(opts = {}) {
       if (stopped) return { applied: 0, cursor: cursorNow(), aborted: true }
       stats.errors += 1
       onError(err)
-      reportStatus({ status: 'unreachable', detail: 'Host 增量路由请求失败：' + String((err && err.message) || err) })
+      reportStatus({ status: 'unreachable', detail: 'feed route failed: ' + String((err && err.message) || err) })
       return { applied: 0, cursor: cursorNow() }
     } finally {
       abortCtl = null
@@ -205,7 +254,7 @@ export function createFeedClient(opts = {}) {
     // Host 回显的源必须与请求的一致：Host 比 Client 旧（或参数被改写）时会把 jma 的原文
     // 交给 noaa 的解析器，解析必然失败、而游标仍在推进——那些条目被永久跳过且表面正常。
     if (data && data.source && data.source !== id) {
-      const err = new Error('源不匹配：请求 ' + id + '，Host 返回 ' + data.source)
+      const err = new Error('source mismatch: asked ' + id + ', host returned ' + data.source)
       stats.errors += 1
       onError(err)
       reportStatus({ status: 'unreachable', detail: err.message })
@@ -228,7 +277,7 @@ export function createFeedClient(opts = {}) {
       stats.tailSync += 1
       setCursor(data.cursor)
       stats.cursor = cursorNow()
-      reportStatus({ status: 'open', detail: '已对齐当前位置 · ' + hostDetail() })
+      reportStatus({ status: 'open', detail: 'aligned · ' + hostDetail() })
       return { applied: 0, cursor: cursorNow(), tail: true }
     }
     // 本地还没有游标、响应却没带 tail 标记 → 对面是不认 `since=tail` 的旧版 Host
@@ -292,16 +341,16 @@ export function createFeedClient(opts = {}) {
     lastHostErrors = hostErrors
     lastHostDropped = hostDropped
     const warn = []
-    if (data && data.truncated) warn.push('有增量缺口（Host 环缓冲已淘汰旧条目）')
-    if (reset) warn.push('Host 游标重置过')
-    if (errDelta) warn.push('Host 侧新增失败 ' + errDelta + ' 次')
-    if (dropDelta) warn.push('Host 侧新增放弃详情 ' + dropDelta + ' 条')
+    if (data && data.truncated) warn.push('gap: host ring buffer evicted entries')
+    if (reset) warn.push('host cursor reset')
+    if (errDelta) warn.push('host fetch failures +' + errDelta)
+    if (dropDelta) warn.push('host detail drops +' + dropDelta)
     // stale 有**自己的状态**（中灰「数据已过期」），不折叠进 degraded：它表示"源在响应、
     // 但给的是旧数据"，与"链路有故障"是两类，DESIGN 的六态里也是分开的。
     reportStatus({
       status: host.stale ? 'stale' : (warn.length ? 'degraded' : 'open'),
-      detail: '已收到 ' + stats.received + ' 条增量 · ' + hostDetail() +
-        (host.stale ? ' · 上游数据已过期（源在响应，但数据是旧的）' : '') +
+      detail: 'received ' + stats.received + ' increments · ' + hostDetail() +
+        (host.stale ? ' · upstream data stale' : '') +
         (warn.length ? ' · ' + warn.join('；') : ''),
     })
     return { applied, cursor: cursorNow(), truncated: !!(data && data.truncated), reset, more: !!(data && data.more) }
@@ -310,11 +359,11 @@ export function createFeedClient(opts = {}) {
   /** 状态文案里的 Host 侧摘要：只在本源当前有问题时才值得占位置（正常时保持简短）。 */
   function hostDetail() {
     const h = stats.host
-    if (!h) return '最近拉取 ' + new Date(stats.lastAt).toLocaleTimeString()
+    if (!h) return 'last fetch ' + new Date(stats.lastAt).toLocaleTimeString()
     const errs = Number(h.errors) || 0
     const idle = Number(h.idleSkips) || 0
-    return 'Host 轮询 ' + (Number(h.polls) || 0) + ' 次' + (errs ? '，失败 ' + errs + ' 次' : '') +
-      (idle ? '，节流跳过 ' + idle + ' 次' : '')
+    return 'host polls ' + (Number(h.polls) || 0) + (errs ? ' · fails ' + errs : '') +
+      (idle ? ' · idle ' + idle : '')
   }
 
   function pollSerial() {

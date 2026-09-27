@@ -58,17 +58,18 @@
 // ============================================================================
 
 import { isPlainObject, own } from './02-storage.js'
+import { t } from './00-i18n.js'
 
 /** NWS 的 `event` → 内部灾种与播报档位。白名单是**精确匹配**（见文件头 ②）。 */
 const NWS_EVENT_WHITELIST = {
-  'Flood Warning': { kind: 'flood', text: '洪水', rank: 3 },
-  'Flash Flood Warning': { kind: 'flashFlood', text: '山洪', rank: 3 },
-  'Coastal Flood Warning': { kind: 'coastalFlood', text: '沿海洪水', rank: 3 },
-  'Flood Watch': { kind: 'flood', text: '洪水警戒', rank: 1 },
-  'Flood Advisory': { kind: 'flood', text: '洪水注意', rank: 1 },
-  'Coastal Flood Watch': { kind: 'coastalFlood', text: '沿海洪水警戒', rank: 1 },
-  'Coastal Flood Advisory': { kind: 'coastalFlood', text: '沿海洪水注意', rank: 1 },
-  'Coastal Flood Statement': { kind: 'coastalFlood', text: '沿海洪水说明', rank: 1 },
+  'Flood Warning': { kind: 'flood', text: 'kind.nwsFlood', rank: 3 },
+  'Flash Flood Warning': { kind: 'flashFlood', text: 'kind.nwsFlashFlood', rank: 3 },
+  'Coastal Flood Warning': { kind: 'coastalFlood', text: 'kind.nwsCoastalFlood', rank: 3 },
+  'Flood Watch': { kind: 'flood', text: 'kind.nwsFloodWatch', rank: 1 },
+  'Flood Advisory': { kind: 'flood', text: 'kind.nwsFloodAdvisory', rank: 1 },
+  'Coastal Flood Watch': { kind: 'coastalFlood', text: 'kind.nwsCoastalWatch', rank: 1 },
+  'Coastal Flood Advisory': { kind: 'coastalFlood', text: 'kind.nwsCoastalAdvisory', rank: 1 },
+  'Coastal Flood Statement': { kind: 'coastalFlood', text: 'kind.nwsCoastalStatement', rank: 1 },
 }
 /** NWS 的 severity → 配色（忠实映射，不拔高；与 nmc 的"四色即等级"同一口径）。 */
 const NWS_SEVERITY = { Extreme: 'red', Severe: 'orange', Moderate: 'yellow', Minor: 'info' }
@@ -92,20 +93,27 @@ const ECCC_INCLUDE = /rain|flood|surge|hydrolog|water|precipitation/i
  */
 function ecccKindTextOf(nameEn) {
   const s = String(nameEn || '')
-  if (/storm surge|surge/i.test(s)) return '风暴潮预警'
-  if (/flash flood/i.test(s)) return '山洪预警'
-  if (/flood/i.test(s)) return '洪水预警'
-  if (/rain|precipitation/i.test(s)) return '降雨预警'
-  if (/hydrolog|water/i.test(s)) return '水文预警'
-  return '气象预警'
+  if (/storm surge|surge/i.test(s)) return t('kind.caStormSurge')
+  if (/flash flood/i.test(s)) return t('kind.caFlashFlood')
+  if (/flood/i.test(s)) return t('kind.caFlood')
+  if (/rain|precipitation/i.test(s)) return t('kind.caRain')
+  if (/hydrolog|water/i.test(s)) return t('kind.caHydrology')
+  return t('kind.caWeather')
 }
 
 /** 播报门槛（两个源共用）：`overseasRank >= 3` 才打扰用户，否则只进历史。 */
 export const OVERSEAS_BROADCAST_MIN_RANK = 3
 
 /** NWS 的 `event` → 中文（供 UI / 测试使用）。 */
-export const NWS_KIND_TEXT = Object.fromEntries(
-  Object.entries(NWS_EVENT_WHITELIST).map(([ev, v]) => [ev, v.text]),
+/** NWS 的 event → **当前界面语言**的灾种名（供 UI / 测试使用）。
+ *  **必须是函数**：写成模块级常量会在加载时求值，把语言冻在那一刻（切语言后不跟着变）。 */
+export function nwsKindTextOf(ev) {
+  const rule = own(NWS_EVENT_WHITELIST, String(ev || ''))
+  return rule ? t(rule.text) : ''
+}
+/** 兼容既有调用方：整张表（按当前语言求值）。 */
+export const nwsKindTextMap = () => Object.fromEntries(
+  Object.entries(NWS_EVENT_WHITELIST).map(([ev, v]) => [ev, t(v.text)]),
 )
 
 /**
@@ -126,7 +134,12 @@ function nwsVtecKeyOf(vtecList) {
   if (!Array.isArray(vtecList)) return ''
   for (const raw of vtecList) {
     // 不在行首锚定：实测存在一条字符串里带多段 VTEC 的产品，取第一段即可。
-    const m = /\/O\.[A-Z]{3}\.([A-Z0-9]{4})\.([A-Z]{2})\.([A-Z])\.(\d{4})\./.exec(String(raw || ''))
+    // 0.9.4（P2-12）：ETN 段由 `\d{4}` 放宽到 `\d{4,6}`。NWS 规范写的是 4 位事件追踪号，
+    // 但实测样本里出现过 `/O.NEW.KRLX.FA.W.01370.…/`（5 位）——写死 4 位会让整段失配，
+    // 而失配的后果不是"少一个键"：调用方会退回 0.6.1 已证伪的 references 兜底
+    // （逐版串联 → 每次 Update 各得一键 → 重复响铃），且没有任何地方能看出这件事。
+    // 5/6 位是**上界放宽**，不会把两个不同事件并成一个（ETN 本身仍要求 ≥4 位数字）。
+    const m = /\/O\.[A-Z]{3}\.([A-Z0-9]{4})\.([A-Z]{2})\.([A-Z])\.(\d{4,6})\./.exec(String(raw || ''))
     if (m) return m[1] + '.' + m[2] + '.' + m[3] + '.' + m[4]
   }
   return ''
@@ -158,9 +171,10 @@ function nwsEventKeyOf(id, references, vtecList) {
   let best = null
   for (const r of refs) {
     if (!r || typeof r.identifier !== 'string' || !r.identifier) continue
-    const t = Number.isFinite(Date.parse(r.sent)) ? Date.parse(r.sent) : Number.POSITIVE_INFINITY
-    if (!best || t < best.t || (t === best.t && String(r.identifier) < String(best.id))) {
-      best = { t, id: r.identifier }
+    // 局部变量不叫 `t`（那是 00-i18n 的取词函数）
+    const sentMs = Number.isFinite(Date.parse(r.sent)) ? Date.parse(r.sent) : Number.POSITIVE_INFINITY
+    if (!best || sentMs < best.sentMs || (sentMs === best.sentMs && String(r.identifier) < String(best.id))) {
+      best = { sentMs, id: r.identifier }
     }
   }
   const base = best ? best.id : id
@@ -216,7 +230,7 @@ function parseNwsAlert(feature, opts) {
     // kind 复用 'weather'：与日本气象电文 / 大陆气象预警共用"进历史 / 配色 / 文案"整条链路。
     // 真正区分三者的是 locator（overseas / area / regions）。
     kind: 'weather',
-    kindLabel: '美国' + rule.text + '（' + (String(p.senderName || '').trim() || 'NWS') + '）',
+    kindLabel: t('kind.usHazard', { hazard: t(rule.text) }) + '（' + (String(p.senderName || '').trim() || 'NWS') + '）',
     source: 'nws_alerts',
     locator: 'overseas',
     severity: sev ? own(NWS_SEVERITY, sev) : 'info',
@@ -291,7 +305,7 @@ function parseEcccAlert(feature, opts) {
     id: 'eccc:' + code + ':' + areaKey + ':' + published,
     code: 'eccc_alerts',
     kind: 'weather',
-    kindLabel: '加拿大' + textZh + '（ECCC）',
+    kindLabel: t('kind.caHazard', { hazard: textZh }) + '（ECCC）',
     source: 'eccc_alerts',
     locator: 'overseas',
     severity: own(ECCC_COLOUR_SEVERITY, colour),

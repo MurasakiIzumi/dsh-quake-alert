@@ -8,7 +8,7 @@
 // 背景：P2PQuake 约每 10 分钟强制断线，重连是常态路径而非异常。
 // ============================================================================
 
-import { WS_URL, SANDBOX_URL, RECONNECT_BASE, RECONNECT_MAX } from './01-constants.js'
+import { WS_URL, SANDBOX_URL, RECONNECT_BASE, RECONNECT_MAX, p2pTimeToIso } from './01-constants.js'
 import { currentCfg } from './03-settings-bridge.js'
 import { publishStatus } from './05g-source-health.js'
 import { handleRaw } from './11-pipeline.js'
@@ -29,6 +29,29 @@ const CONNECT_TIMEOUT_MS = 15 * 1000
  */
 const STALE_AFTER_MS = 20 * 60 * 1000
 const STALE_CHECK_MS = 60 * 1000
+
+/**
+ * 断线补拉（0.9.4 / C5）。
+ *
+ * P2PQuake 的 WS **没有回放**：断线窗口（退避 1–60 秒，加上网络中断本身可能是几分钟）里发出去的
+ * 551 / 552 / 556 就此永久丢失——而 EEW 的有效窗口只有几十秒，等价于漏报。
+ * 官方 REST `/v2/history` 返回的正是**与 WS 推送同一套 JSON**，所以补拉之后走同一条主链：
+ * 消息级去重按 id 生效，与直播流重叠的部分不会二次响铃（跨标签页认领也照旧）。
+ *
+ * 三条边界：
+ *   · **只在重连时补**。首次连接没有"缺口"可言——用户刚打开页面时把几小时前的旧警报当新闻
+ *     刷屏，是这套系统明确不做的。
+ *   · 窗口取 2 分钟，与 Host 侧 JMA 轮询器的冷启动容差同一个量级与理由：覆盖常见的网络抖动与
+ *     休眠唤醒，又不把真正过期的电文当实时警报播出去。
+ *   · 时间认不出的条目不补（补拉是恢复路径，宁可少补一条也不播一条说不清时间的旧消息），
+ *     但会计数（`backfillSkipped`）——它是可见的。
+ */
+export const P2P_HISTORY_URL = 'https://api.p2pquake.net/v2/history'
+export const P2P_HISTORY_CODES = [551, 552, 556]
+export const P2P_HISTORY_WINDOW_MS = 2 * 60 * 1000
+export const P2P_HISTORY_LIMIT = 20
+/** 两次补拉之间的最小间隔：重连可能连续发生（退避最密 1 秒一次），别把 REST 打成洪水。 */
+export const P2P_HISTORY_MIN_GAP_MS = 5 * 1000
 
 // ---------- WebSocket 客户端 ----------
 /**
@@ -112,7 +135,7 @@ function createWsClient(opts) {
       if (stopped || ws !== target) return // 已经换过连接 / 已清理，忽略这次
       // 先关掉这条卡住的连接：否则 1 秒后 connect() 只是覆盖 ws 引用，旧 socket 无人回收
       teardown()
-      scheduleReconnect('连接超时（建连无响应）')
+      scheduleReconnect('connect timeout (no response)')
     }, connectTimeoutMs)
     if (connectTimer && typeof connectTimer.unref === 'function') connectTimer.unref()
   }
@@ -125,7 +148,7 @@ function createWsClient(opts) {
       if (stopped) return
       if (lastActivityAt && Date.now() - lastActivityAt > staleAfterMs) {
         // 这条连接确实已经死了，不必再等退避：立刻换一条，onopen 会刷新 lastActivityAt
-        report({ status: 'reconnecting', retries, detail: '久无数据（疑似连接已断开），正在重连' })
+        report({ status: 'reconnecting', retries, detail: 'stale link · reconnecting' })
         teardown()
         connect()
         return
@@ -142,15 +165,76 @@ function createWsClient(opts) {
     report({
       status: 'reconnecting',
       retries,
-      detail: (reason || '连接断开') + '，正在重连（第 ' + retries + ' 次）',
+      detail: (reason || 'disconnected') + ' · retry ' + retries,
     })
     const delay = Math.min(RECONNECT_MAX, RECONNECT_BASE * Math.pow(2, retries - 1))
     timer = setTimeout(connect, delay)
   }
+  let everOpened = false
+  let lastBackfillAt = 0
+  /** 补拉的计数（诊断 / 测试用）：试了几次、补进几条、因时间过期跳过几条、失败几次。 */
+  const backfillStats = { attempts: 0, fed: 0, skipped: 0, errors: 0, lastAt: 0, lastDetail: '' }
+  /** 一条历史消息的时间（毫秒）。P2PQuake 的 `time` 与 551/556 的 issue / earthquake.time 都试。 */
+  function historyTimeMs(raw) {
+    const cands = [
+      raw && raw.time,
+      raw && raw.issue && raw.issue.time,
+      raw && raw.earthquake && raw.earthquake.time,
+    ]
+    for (const c of cands) {
+      const iso = p2pTimeToIso(String(c === undefined || c === null ? '' : c))
+      // 局部变量不叫 `t`（那是 00-i18n 的取词函数，遮蔽了本函数里的 t('key') 会去调 Date.parse）
+      const ms = Date.parse(iso)
+      if (Number.isFinite(ms)) return ms
+    }
+    return NaN
+  }
+  const fetchJson = o.fetchJson || ((url) => window.fetch(url).then((res) => {
+    if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : '?'))
+    return res.json()
+  }))
+  /**
+   * 重连后补拉断线窗口里的消息（见文件头 P2P_HISTORY_* 的说明）。**逐条**交给主链：
+   * 一条坏数据不该让整次补拉白做，而且主链自己就是按条去重的。
+   */
+  function backfillAfterGap() {
+    if (stopped) return
+    const now = Date.now()
+    if (lastBackfillAt && now - lastBackfillAt < P2P_HISTORY_MIN_GAP_MS) return
+    lastBackfillAt = now
+    backfillStats.attempts += 1
+    const url = P2P_HISTORY_URL + P2P_HISTORY_CODES.map((c) => '&codes=' + c).join('') + '&limit=' + P2P_HISTORY_LIMIT
+    Promise.resolve()
+      .then(() => fetchJson(url))
+      .then((list) => {
+        if (stopped || !Array.isArray(list)) return
+        // 由旧到新交给主链：这样后到的（更新的）消息不会先被处理
+        const rows = list.map((raw) => ({ raw, t: historyTimeMs(raw) }))
+          .filter((r) => r.raw && typeof r.raw === 'object')
+          .sort((a, b) => (Number.isFinite(a.t) ? a.t : 0) - (Number.isFinite(b.t) ? b.t : 0))
+        for (const r of rows) {
+          if (stopped) return
+          if (!Number.isFinite(r.t) || (now - r.t) > P2P_HISTORY_WINDOW_MS) {
+            backfillStats.skipped += 1
+            continue
+          }
+          try {
+            onRaw(r.raw, currentCfg())
+            backfillStats.fed += 1
+          } catch (err) { backfillStats.errors += 1; backfillStats.lastDetail = String((err && err.message) || err) }
+        }
+        backfillStats.lastAt = Date.now()
+      })
+      .catch((err) => {
+        // 补拉失败**不改变连接状态**：它只是一条恢复路径，把它算成"源不可达"会让状态点无谓变红
+        backfillStats.errors += 1
+        backfillStats.lastDetail = String((err && err.message) || err)
+      })
+  }
   const connect = () => {
     if (stopped) return
     const url = urlOf()
-    report({ status: 'connecting', retries, detail: '正在连接 ' + url })
+    report({ status: 'connecting', retries, detail: 'connecting · ' + url })
     try { ws = new window.WebSocket(url) } catch (err) {
       scheduleReconnect()
       return
@@ -163,6 +247,10 @@ function createWsClient(opts) {
       lastActivityAt = Date.now()
       armStaleWatch()
       report({ status: 'open', retries: 0, detail: openDetailOf(url) })
+      // 0.9.4（C5）：**重连**时补拉断线窗口里的消息（首次连接没有缺口）。见 backfillAfterGap。
+      const isReconnect = everOpened
+      everOpened = true
+      if (isReconnect) backfillAfterGap()
     }
     ws.onmessage = (ev) => {
       lastActivityAt = Date.now()
@@ -185,7 +273,7 @@ function createWsClient(opts) {
         report({
           status: 'degraded',
           retries,
-          detail: '消息处理连续失败 ' + processFails + ' 次：' + String((err && err.message) || err),
+          detail: 'processing failed x' + processFails + ': ' + String((err && err.message) || err),
         })
       }
     }
@@ -218,8 +306,9 @@ function createWsClient(opts) {
       stopped = true
       teardown()
       unbindVisibility()
-      report({ status: 'closed', retries, detail: '已停止（插件停用）' })
+      report({ status: 'closed', retries, detail: 'stopped (plugin disabled)' })
     },
+    backfillStatsOf() { return Object.assign({}, backfillStats) },
     restart() {
       stopped = false
       retries = 0 // 切数据源后立即从 1s 退避重新开始，而不是沿用上一条连接的退避进度

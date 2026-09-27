@@ -58,8 +58,6 @@ const CORE = {
     'action.tsunami': '请立即远离海岸与河口',
 
     // 源在状态区块里的显示名（短标签，与免责声明里点名的全称是两回事）。
-    'source.jma': '気象庁',
-    'source.nmc': '中央气象台',
     'status.emscConnected': '已连接 EMSC（全球地震实时推送）',
     // 源状态摘要（07-store 拼的悬停提示 / 侧边栏 title）：源名与分隔符都要跟着语言走，
     // 状态码本身由 00f 的 statusTextOf 翻。
@@ -83,7 +81,7 @@ const CORE = {
 
     // 状态圆点的提示后缀（气象警报的静默提示，只在该源未达播报门槛时出现）。
     'status.weatherHint': ' · 气象警报 L{level}',
-    'status.weatherHintLabel': '（{label}）',
+    'status.weatherHintLabel': '（{label}）'
   },
 
   'zh-TW': {
@@ -121,9 +119,6 @@ const CORE = {
     'notify.hitPlaceDistance': '命中位置：{place}（距震央約 {km} km）',
     'notify.hitPlaceOfficial': '命中位置：{place}（依該點所在地的官方預警判定）',
     'action.tsunami': '請立即遠離海岸與河口',
-
-    'source.jma': '気象庁',
-    'source.nmc': '中央氣象台',
     'status.emscConnected': '已連線 EMSC（全球地震即時推送）',
     'status.sourceDisabled': '{name}：已關閉',
     'status.sourceDetail': '{name}：{detail}',
@@ -142,7 +137,7 @@ const CORE = {
     'source.noAbortController': '請求逾時（本環境沒有 AbortController）',
 
     'status.weatherHint': ' · 氣象警報 L{level}',
-    'status.weatherHintLabel': '（{label}）',
+    'status.weatherHintLabel': '（{label}）'
   },
 
   ja: {
@@ -180,9 +175,6 @@ const CORE = {
     'notify.hitPlaceDistance': 'ヒット位置：{place}（震源から約 {km} km）',
     'notify.hitPlaceOfficial': 'ヒット位置：{place}（その地点の公式警報による判定）',
     'action.tsunami': 'ただちに海岸と河口から離れてください',
-
-    'source.jma': '気象庁',
-    'source.nmc': '中国気象台',
     'status.emscConnected': 'EMSC に接続しました（全球地震のリアルタイム配信）',
     'status.sourceDisabled': '{name}：停止中',
     'status.sourceDetail': '{name}：{detail}',
@@ -201,7 +193,7 @@ const CORE = {
     'source.noAbortController': 'リクエストがタイムアウト（この環境に AbortController がありません）',
 
     'status.weatherHint': ' · 気象警報 L{level}',
-    'status.weatherHintLabel': '（{label}）',
+    'status.weatherHintLabel': '（{label}）'
   },
 
   en: {
@@ -241,9 +233,6 @@ const CORE = {
     'notify.hitPlaceDistance': 'Hit: {place} (~{km} km from the epicentre)',
     'notify.hitPlaceOfficial': 'Hit: {place} (matched against the official alert for that location)',
     'action.tsunami': 'Move away from the coast and river mouths immediately.',
-
-    'source.jma': 'JMA',
-    'source.nmc': 'CMA',
     'status.emscConnected': 'Connected to EMSC (global earthquake push)',
     'status.sourceDisabled': '{name}: disabled',
     'status.sourceDetail': '{name}: {detail}',
@@ -262,8 +251,8 @@ const CORE = {
     'source.noAbortController': 'Request timed out (no AbortController in this environment)',
 
     'status.weatherHint': ' · Weather alert L{level}',
-    'status.weatherHintLabel': ' ({label})',
-  },
+    'status.weatherHintLabel': ' ({label})'
+  }
 }
 
 export { CORE }

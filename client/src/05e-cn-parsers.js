@@ -31,6 +31,7 @@
 
 import { cnTimeToIso } from './01-constants.js'
 import { isPlainObject } from './02-storage.js'
+import { t } from './00-i18n.js'
 import { severityOfMagnitude, geoEventKey } from './05c-global-parsers.js'
 
 /**
@@ -54,7 +55,7 @@ function magText(mag) {
 
 /** 震中名 + 深度 的公共 headline 片段。 */
 function placeText(name, depthKm) {
-  return (name ? ' · ' + name : '') + (depthKm === null ? '' : ' · 深 ' + Math.round(depthKm) + 'km')
+  return (name ? ' · ' + name : '') + (depthKm === null ? '' : t('kind.cencDepth', { depth: Math.round(depthKm) }))
 }
 
 /**
@@ -80,13 +81,13 @@ function parseCencEew(raw) {
   const reportIso = cnTimeToIso(raw.ReportTime)
   const reportNum = numOrNull(raw.ReportNum)
   const headline = magText(mag) + placeText(place, depth) +
-    (reportNum !== null && reportNum > 1 ? '（第 ' + reportNum + ' 报）' : '')
+    (reportNum !== null && reportNum > 1 ? t('kind.cencReportNo', { n: reportNum }) : '')
   return {
     // id 前缀 cenc: ——与速报的 EventID 是两套命名空间，实测不会撞（EEW 是 b4kybfnuqayyy 这类）
     id: 'cenc:' + id,
     code: 'cenc_eew',
     kind: 'eew',
-    kindLabel: '大陆地震预警（CENC）',
+    kindLabel: t('kind.cencEew'),
     source: 'cenc_eew',
     // 无分区烈度 → 坐标 + 半径匹配（DESIGN 8.3）；
     // 震级闸门共用 thresholds.globalMagnitude（DESIGN 8.4：它不是速报，与预警同档）
@@ -142,7 +143,7 @@ function parseCencEqlistItem(item) {
     id: 'cenc:' + eventId,
     code: 'cenc_eqlist',
     kind: 'quake',
-    kindLabel: '大陆地震速报（CENC）',
+    kindLabel: t('kind.cencEqlist'),
     source: 'cenc_eqlist',
     locator: 'point',
     // 速报不是预警：它管分钟级确认与补报，用**独立**的震级门槛（thresholds.cnReportMagnitude），

@@ -151,7 +151,14 @@ if (FROM_ZIP) {
   zipBuf = readFileSync(FROM_ZIP)
   console.log('使用本地 zip：' + FROM_ZIP)
 } else {
-  const res = await fetch(SOURCE_URL, { redirect: 'follow' })
+  // 0.9.4（P3-49）：这是全项目唯一没有超时的 fetch。构建脚本卡在半挂起的连接上时没有任何反馈，
+  // 而它拉的是几十 MB 的气象厅源包——超时值取得比运行时链路宽（120 秒）。
+  const res = await fetch(SOURCE_URL, {
+    redirect: 'follow',
+    signal: typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+      ? AbortSignal.timeout(120 * 1000)
+      : undefined,
+  })
   if (!res.ok) {
     console.error('下载失败：HTTP ' + res.status + ' ' + SOURCE_URL)
     process.exit(1)

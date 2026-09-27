@@ -14,9 +14,9 @@ import { inQuietHours, own } from './02-storage.js'
 import { parse, severityOfScale, sevColor } from './05-parser.js'
 import { matchAlert, regionInWeatherWatch, validGeo } from './06-matcher.js'
 import { addEvent, store } from './07-store.js'
-import { playSound, playAlertSound } from './08-audio.js'
+import { playSound, playAlertSound, soundAllowedFor } from './08-audio.js'
 import { showToast, showSystemNotification } from './09-notify.js'
-import { isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, crossSourceCopyOf, noteAuthoritySuppressed, alertedEvents } from './10-dedupe.js'
+import { isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, forgetAlerted, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, crossSourceCopyOf, noteAuthoritySuppressed } from './10-dedupe.js'
 
 /**
  * 气象灾害的**事件窗口**（分钟）。
@@ -26,6 +26,10 @@ import { isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent
  * 若还用默认的 10 分钟窗口，窗口一过每一条更新都会被当成新事件重新响铃。
  * 取 3 小时：窗口内强度未升级只记历史，升级（L3→L4、注意報→危険警報）仍会提醒；
  * 解除时会 forgetEvent 清掉记忆，所以"解除后再次发布"不会被吞掉。
+ *
+ * 0.9.4（C4）：这个 3 小时**不是** `ALERTED_MAX_MS` 的 24 小时（见 10-dedupe 的说明）——
+ * 那个回答"这条解除是否对应我刚提醒过的事件"，这个回答"同一官署同一灾种的后续电文要不要再响"。
+ * 两处代码都与各自的注释一致；此前一份审查报告把两者当成同一个窗口，得出"文档与实现不符"的结论。
  */
 const WEATHER_EVENT_WINDOW_MINUTES = 180
 
@@ -195,7 +199,7 @@ function handleCancelled(alert, cfg) {
   if (!wasRecentlyAlerted(alert)) {
     pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
-      issued: alert.issued, headline: alert.headline + '（未命中：取消 / 解除消息，且此前未提醒过该事件）', hit: false,
+      issued: alert.issued, headline: alert.headline + t('hist.missSuffix', { reason: t('reason.cancelNoPriorAlert') }), hit: false,
     })
     return
   }
@@ -205,18 +209,20 @@ function handleCancelled(alert, cfg) {
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
       issued: alert.issued, headline: alert.headline, hit: true,
       suppressed: true,
-      suppressedReason: '静默时段 ' + cfg.quietHours.start + '–' + cfg.quietHours.end + '（取消 / 解除不穿透）',
+      suppressedReason: t('reason.cancelNoPierceQuiet', { start: cfg.quietHours.start, end: cfg.quietHours.end }),
     })
     return
   }
-  alertedEvents.delete(cancelKeyOf(alert)) // 同一条取消只提醒一次
+  // 0.9.4（C6）：用 forgetAlerted 而不是直接 delete —— 删除也要落盘，否则刷新之后
+  // 这条已被取消的事件又变成"提醒过"，同键的解除会重复提示。
+  forgetAlerted(alert) // 同一条取消只提醒一次
   // 灾害过程已结束：忘掉事件键，这样"解除之后再次发布"会被当成新事件而不是重复（见 10-dedupe）
   forgetEvent(cancelKeyOf(alert))
   if (!claimAlertForTab('cancel:' + (alert.id || cancelKeyOf(alert)), '')) {
     pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
       issued: alert.issued, headline: alert.headline, hit: true,
-      suppressed: true, suppressedReason: '其它 DSH 标签页已提醒',
+      suppressed: true, suppressedReason: t('reason.otherTab'),
     })
     return
   }
@@ -269,7 +275,7 @@ function handleAlert(alert, cfg, opts) {
   // 历史条目统一带上解析层的正文（0.6.1 review，理由同 handleCancelled 里的说明）。
   const pushEvent = (fields) => addEvent(Object.assign({ detail: alert.detail }, fields))
   if (watchlessPoint(alert, cfg)) {
-    return { notified: false, reason: 'no-watch-point', detail: '全球源消息，但未设置全球关注点' }
+    return { notified: false, reason: 'no-watch-point', detail: t('reason.noGlobalWatch') }
   }
   // 诊断计数：用 push 带出去，让设置页的"已收到 N 条推送"立刻反映（直接自增不会触发重渲，
   // 徽标会滞后到下一次 push；而 clearSources 时会归零，不再跨代累积）。
@@ -286,11 +292,11 @@ function handleAlert(alert, cfg, opts) {
   const dup = isDuplicate(alert.id, cfg.dedupe.windowMinutes)
   const upgrading = dup && isStrengthUpgrade(alert)
   if (dup && !upgrading) {
-    return { notified: false, reason: 'duplicate', detail: '同一条消息刚处理过（去重窗口内）' }
+    return { notified: false, reason: 'duplicate', detail: t('reason.duplicateMessage') }
   }
   if (alert.cancelled) {
     handleCancelled(alert, cfg)
-    return { notified: false, reason: 'cancelled', detail: '这是取消 / 解除消息' }
+    return { notified: false, reason: 'cancelled', detail: t('reason.clearedIsNotAlert') }
   }
   const m = matchAlert(alert, cfg)
   // 气象强度的**回落**要在命中与未命中两条路径上都写回事件记忆（0.6.1 review）。
@@ -300,26 +306,34 @@ function handleAlert(alert, cfg, opts) {
   // （档位不变），记忆强度不会被下调；随后回升时 `isStrengthUpgrade` 判 false → 永久静默，
   // 正是 weakenEvent 注释里声明要防住的那条漏报。它只在强度确实更低时下调，所以对未命中
   // 路径（"关注地区未命中"）没有副作用。
+  // 只有气象下调"已播报强度"的记忆。**不是漏了另外两个灾种，是刻意不推广**（0.9.4 复核）：
+  // 551 的「震源情报」（震源已知、震度未公布）`strength` 是 **-1**（`typeof eq.maxScale === 'number'
+  // ? eq.maxScale : -1`），而它与该地震的「各地震度」共用同一个事件键（都取自 `earthquake.time`）。
+  // 一旦对地震也调 weakenEvent，日本气象厅的正常电文序列「速报 → 震源情报 → 各地震度」里那条
+  // 震源情报就会把记忆强度从 45/50 拉到 -1，随后**同一场地震**的各地震度被 `isStrengthUpgrade`
+  // 判成"升级"再响一次铃——那是每一场有感地震都多响一次，把降级保护变成了骚扰。
+  // 海啸（552）那边没有可归并的事件 id（README 已登记"同一海啸多次发布会逐条提醒"），
+  // 所以对它调用与不调用没有区别；真要有区别时再连同"强度语义"一起定。
   if (alert.kind === 'weather') weakenEvent(alert)
   if (!m.hit) {
     // 气象警报：即使不播报（L3 及以下），也把"正在升级"留给侧边栏 tooltip
     updateWeatherHint(alert, cfg)
     // 全球源（坐标型）的"未命中"通常不进历史：USGS 的 24 小时目录有近百条 M2.5+，
     // 逐条记"未命中"会把历史列表刷满与用户无关的地震，真正该看的提醒反而被挤掉。
-    // **但「坐标缺失」是例外**——那不是"离得远"，而是"根本没法判定"。DESIGN 3.1 要求
-    // 这种情况不猜、如实说明；若也丢进 /dev/null，用户看到的就是"根本没有地震"，
-    // 与"未设置关注点"（更早由 watchlessPoint 拦下，有意不回历史）是完全不同的两件事。
     //
-    // 0.5.4：`m.noWatch`（**未配置**关注点，命中概率恒为 0）同样不进历史。大陆气象源
-    // （nmc_alarm）走行政区匹配，不在 watchlessPoint 的覆盖范围内，而它默认就在拉——
-    // 一条都没配大陆关注点的用户，每天会有几十条「未命中：未设置中国大陆关注点」挤进
-    // HISTORY_MAX=30 的「最近预警」，真正的地震 / 海啸提醒被挤出去。这与坐标型源那条
-    // 「真正的提醒会被刷掉」是同一个失败形态（DESIGN 3.2 对 point 源已定过这个口径）。
-    // 与坐标型的差别是**不整条丢弃**：设置页与诊断仍需要"有预警、但你没配关注点"这个信息。
-    if (!m.noWatch && (alert.locator !== 'point' || !validGeo(alert.geo))) {
+    // 0.9.4（PD-1，产品决策）：这条口径**推广到所有源**——"没命中 / 未达档位"的条目一律不进历史。
+    // 起因是历史被 L1〜L3 与 Watch/Advisory 占满（日气象约 170 条/天、NWS 的 Watch/Advisory 占其
+    // 洪水类 53%）。用户选择的做法是排除"完全未命中"，代价是少了一个"我在被监控"的信号。
+    // **但"判不了"必须留痕**：region 数据缺失、坐标缺失、震源情报无震度、海外源没有来源关注点
+    // 这些不是"离得远"而是"根本没法判定"（DESIGN 3.1 要求如实说明），丢掉它们就回到"用户以为
+    // 当时没有预警"那种形态。matcher 用 `cannotJudge` 把这两类分开。
+    //
+    // `m.noWatch`（**未配置**关注点，命中概率恒为 0）仍然不进历史，理由见原注（0.5.4）：
+    // 一个都没配的用户，每天几十条「未命中：未设置关注点」会把 HISTORY_MAX 占满。
+    if (!m.noWatch && m.cannotJudge === true) {
       pushEvent({
         id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
-        issued: alert.issued, headline: alert.headline + '（未命中：' + m.reason + '）', hit: false,
+        issued: alert.issued, headline: alert.headline + t('hist.missSuffix', { reason: m.reason }), hit: false,
       })
     }
     return { notified: false, reason: 'not-hit', detail: m.reason }
@@ -360,9 +374,9 @@ function handleAlert(alert, cfg, opts) {
     pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
-      suppressed: true, suppressedReason: '同一地震的后续发布（强度未升级）',
+      suppressed: true, suppressedReason: t('reason.eventRepeatSuppressed'),
     })
-    return { notified: false, reason: 'event-repeat', detail: '同一事件的后续发布，强度未升级' }
+    return { notified: false, reason: 'event-repeat', detail: t('reason.eventRepeatDetail') }
   }
   // 事件级去重没拦下、但记忆说"这个事件在 24 小时内已经真正播报过" → 判为跨会话重放
   // （Host 重启按回看窗口重投），只记历史不响铃。
@@ -376,9 +390,9 @@ function handleAlert(alert, cfg, opts) {
     pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
-      suppressed: true, suppressedReason: '同一事件在最近 24 小时内已提醒过（等强度，不重复响铃）',
+      suppressed: true, suppressedReason: t('reason.replaySuppressed'),
     })
-    return { notified: false, reason: 'replayed', detail: '该事件在最近 24 小时内已经提醒过，本次只记历史' }
+    return { notified: false, reason: 'replayed', detail: t('reason.replayDetail') }
   }
   // 打开页面时才发现的老预警（0.6.0 的年龄闸门，DESIGN 4.7.6）：**仍然命中、仍然进历史**，
   // 但不响铃、不弹通知——海外气象源是**按关注点查询**的，页面一打开就会把当前生效的预警全拉回来，
@@ -402,9 +416,9 @@ function handleAlert(alert, cfg, opts) {
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true,
-      suppressedReason: '打开页面时该预警已发布约 ' + hours + ' 小时（只记历史，不打扰）',
+      suppressedReason: t('reason.staleOnArrival', { hours: hours }),
     })
-    return { notified: false, reason: 'stale-on-arrival', detail: '发布较早，仅记录' }
+    return { notified: false, reason: 'stale-on-arrival', detail: t('reason.staleOnArrivalDetail') }
   }
   // 静默时段：命中但不响铃、不弹通知，只记历史。红色等级（EEW、大海啸警报）默认可穿透。
   if (!options.skipQuietHours && inQuietHours(cfg) && !(hitSeverity === 'red' && cfg.quietHours.breakForSevere !== false)) {
@@ -412,10 +426,10 @@ function handleAlert(alert, cfg, opts) {
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
       suppressed: true,
-      suppressedReason: '静默时段 ' + cfg.quietHours.start + '–' + cfg.quietHours.end +
-        (hitSeverity === 'red' ? '（未开启红色等级穿透）' : ''),
+      suppressedReason: t('reason.quietHours', { start: cfg.quietHours.start, end: cfg.quietHours.end }) +
+        (hitSeverity === 'red' ? t('reason.quietNoRedPierce') : ''),
     })
-    return { notified: false, reason: 'quiet-hours', detail: '当前处于静默时段' }
+    return { notified: false, reason: 'quiet-hours', detail: t('reason.quietHoursDetail') }
   }
   // 其它 DSH 标签页已经播报过同一条消息 → 本标签页静默，避免多个页面同时响铃。
   // 用消息 id 而不是事件键：多标签页收到的是同一条消息，而同一事件的不同消息（如强度升级）不应被拦。
@@ -425,9 +439,9 @@ function handleAlert(alert, cfg, opts) {
     pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
-      suppressed: true, suppressedReason: '其它 DSH 标签页已提醒',
+      suppressed: true, suppressedReason: t('reason.otherTab'),
     })
-    return { notified: false, reason: 'other-tab', detail: '其它 DSH 标签页已提醒同一条' }
+    return { notified: false, reason: 'other-tab', detail: t('reason.otherTabDetail') }
   }
   // 县名走 prefLabelOf（随界面语言）：日文界面是「東京都」，中文界面「东京（東京都）」，
   // 英文界面「Tokyo (東京都)」。命中行的**标签**也跟着语言走，但原名的括号只在
@@ -466,7 +480,8 @@ function handleAlert(alert, cfg, opts) {
   })
   updateWeatherHint(alert, cfg)
   const vol = cfg.notify.volume
-  if (cfg.notify.sound !== false) playAlertSound(alert, vol)
+  // 0.9.4（C1）：总开关 + 分灾害开关（地震含 EEW / 海啸 / 气象），见 soundAllowedFor
+  if (soundAllowedFor(cfg, alert)) playAlertSound(alert, vol)
   const pageVisible = typeof document !== 'undefined' && document.visibilityState === 'visible'
   const body = bodyLines.join('\n')
   if (pageVisible) {
@@ -481,4 +496,4 @@ function handleAlert(alert, cfg, opts) {
 }
 
 
-export { handleCancelled, handleRaw, handleAlert, updateWeatherHint, alertTitleOf, watchlessPoint, hitSeverityOf, cnProductName, authorityOf, disclaimerOf, weatherActionHintOf }
+export { WEATHER_EVENT_WINDOW_MINUTES, handleCancelled, handleRaw, handleAlert, updateWeatherHint, alertTitleOf, watchlessPoint, hitSeverityOf, cnProductName, authorityOf, disclaimerOf, weatherActionHintOf }

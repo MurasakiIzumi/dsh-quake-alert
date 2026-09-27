@@ -1,0 +1,24 @@
+# 依赖与 CI action 的更新跟踪（0.9.4）
+#
+# 为什么加这个：workflow 里的第三方 action 用的是可移动的大版本标签（`actions/checkout@v4`），
+# 那是"跟着上游走"的便利与"标签被移动"的风险之间的折中。硬钉 commit SHA 更安全，但需要联网
+# 核对 SHA、且更新全靠人手——对一个人维护的仓库更容易变成"钉死在旧版本"。用 Dependabot
+# 跟住二者：标签保持可读，更新以 PR 形式到来，红线（新版本要过 CI）由上面那个 workflow 守。
+#
+# 注意它只提 PR，不自动合并——本项目没有自动合并的先例，也不打算有。
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "deps"

@@ -21,6 +21,7 @@
 // ============================================================================
 
 import { isPlainObject } from './02-storage.js'
+import { t } from './00-i18n.js'
 
 /** 取第一个可用数值（全球源的坐标/震级可能同时存在于两三个地方，按优先级回退）。
  *  经 toNumOrNull 归一，所以**数字字符串也算**：源侧类型并不稳定（CAP 的 parameter 里全是字符串，
@@ -75,13 +76,14 @@ function severityOfMagnitude(mag) {
  * 键永远不相等，跨源归并彻底失效，同一场地震响两次（实测样本里 cenc_eqlist 含境外地震，
  * 福克斯群岛 M6.5 这类事件 USGS / EMSC 也会推，所以这条路径是走得到的，不是理论问题）。
  *
- * 无法解析时退回原串切片：宁可归并失败多响一次，也不能为了一致性把消息丢掉。
+ * 无法解析时返回 null（0.9.4 改，见 geoEventKey）。
  */
 function minuteKeyOf(timeIso) {
   const s = String(timeIso === undefined || timeIso === null ? '' : timeIso)
-  const t = Date.parse(s)
-  if (!Number.isFinite(t)) return s.slice(0, 16)
-  return new Date(t).toISOString().slice(0, 16)
+  // 局部变量不叫 `t`（那是 00-i18n 的取词函数，遮蔽了本函数里的 t('key') 会去调 Date.parse）
+  const ms = Date.parse(s)
+  if (!Number.isFinite(ms)) return null
+  return new Date(ms).toISOString().slice(0, 16)
 }
 
 /**
@@ -105,9 +107,22 @@ function oneDp(n) {
   return s === '-0.0' ? '0.0' : s
 }
 
+/**
+ * 时间不可解析时的事件键序号。**只增不减**，且带调用序号，所以两段时间不可解析的事件
+ * 永远不会得到同一个键（见 geoEventKey 的说明）。
+ */
+let unknownTimeSeq = 0
+
 function geoEventKey(timeIso, lat, lon) {
   const min = minuteKeyOf(timeIso)
-  return 'geo:' + min + '@' + oneDp(lat) + ',' + oneDp(lon)
+  // 0.9.4 修：此前时间不可解析时回退 `String(timeIso).slice(0, 16)`，而**空串会切片成空串**
+  // —— 于是键退化成 `geo:@30.9,99.9`，该震中之后**所有**事件共用这一个键：isEventRepeat 先由
+  // eventSeen 精确命中，再按"强度未升级"判重复 → 后续地震全部静默（漏报）。
+  // 触发前提是源侧改时间格式或字段改名，而那正是解析层最该保守的地方。
+  // 现在给一个**不可能与其它事件相同**的键：代价是同一事件也可能多响一次（消息级 id 去重仍在，
+  // 事件级归并失效），方向与全项目一致——宁可多响一次，也不让不同事件互相吃掉。
+  const at = min === null ? ('!t' + (++unknownTimeSeq)) : min
+  return 'geo:' + at + '@' + oneDp(lat) + ',' + oneDp(lon)
 }
 
 /** epoch 毫秒或 ISO 字符串 → ISO 字符串（USGS 给毫秒，EMSC 给字符串，统一到后者）。 */
@@ -138,12 +153,12 @@ function parseEmsc(raw) {
   const time = toIso(p.time)
   const unid = String(p.unid || p.source_id || d.id || '').trim()
   const headline = 'M' + (mag === null ? '—' : mag) + (region ? ' · ' + region : '') +
-    (depth === null ? '' : ' · 深 ' + Math.round(depth) + 'km')
+    (depth === null ? '' : t('kind.depthSuffix', { depth: Math.round(depth) }))
   return {
     id: 'emsc:' + (unid || (lat + ',' + lon + ',' + time)),
     code: 'emsc',
     kind: 'quake',
-    kindLabel: '全球地震（EMSC）',
+    kindLabel: t('kind.globalEmsc'),
     source: 'emsc',
     locator: 'point',
     severity: severityOfMagnitude(mag),
@@ -171,17 +186,22 @@ function parseUsgsFeature(f) {
   const coords = (isPlainObject(f.geometry) && Array.isArray(f.geometry.coordinates)) ? f.geometry.coordinates : []
   const lon = firstNumber(coords[0], p.lon)
   const lat = firstNumber(coords[1], p.lat)
+  // 0.9.4（P3-30）：坐标不完整时**不造事件对象**。此前缺 geometry 时 geo 是
+  // `{lat: null, lon: null}`、id 是 `'usgs:null,null,<time>'`——matcher 虽然会被 validGeo 挡下，
+  // 但这个"看起来有效"的对象仍会进历史与诊断，而且**不同地震的 id 会撞在一起**（同一个 null 组合）。
+  if (typeof lat !== 'number' || !Number.isFinite(lat) ||
+      typeof lon !== 'number' || !Number.isFinite(lon)) return null
   const depth = firstNumber(coords[2], null)
   const mag = firstNumber(p.mag, null)
   const place = String(p.place || '').trim()
   const time = toIso(p.time)
   const headline = 'M' + (mag === null ? '—' : mag) + (place ? ' · ' + place : '') +
-    (depth === null ? '' : ' · 深 ' + Math.round(depth) + 'km')
+    (depth === null ? '' : t('kind.depthSuffix', { depth: Math.round(depth) }))
   return {
     id: 'usgs:' + String(f.id || p.code || (lat + ',' + lon + ',' + time)),
     code: 'usgs',
     kind: 'quake',
-    kindLabel: '全球地震（USGS）',
+    kindLabel: t('kind.globalUsgs'),
     source: 'usgs',
     locator: 'point',
     severity: severityOfMagnitude(mag),
@@ -203,11 +223,11 @@ function parseUsgsFeature(f) {
   }
 }
 
-/** USGS summary feed（FeatureCollection）→ Alert[]。 */
-function parseUsgsFeed(json) {
-  const feats = (isPlainObject(json) && Array.isArray(json.features)) ? json.features : []
-  return feats.map(parseUsgsFeature).filter(Boolean)
-}
+// 0.9.4（P3-42）：**删掉了 `parseUsgsFeed`（整文件 FeatureCollection → Alert[]）**。
+// 它在生产路径上没有调用点：Host 把每条 entry 的原文交给 Client，Client 逐条走
+// `parseUsgsFeature`（`scripts/check-contracts.mjs` 也是取 `features[0]`）。留着一个只有测试
+// 用的整文件映射器，会让下一个人以为存在"整包解析"这条路。回归里改成由测试自己 map
+// 真实样本的每个 feature —— 覆盖面不变，形状的错觉没有了。
 
 // NOAA tsunami.gov 的事件分级。CAP 的 <severity>（Minor/Moderate/…）对海啸不够具体，
 // 真正决定行动的是 <event> 名称，实测样本是 "Tsunami Information"（Minor）。
@@ -221,11 +241,19 @@ function parseUsgsFeed(json) {
 // 恰恰是这里最不能漏的一类。
 // 「Tsunami Information」= 0：它在语义上低于日本的「津波注意報」，是"没有破坏性海啸"的信息类
 // 电文——按 1 处理会让它在半径内直接响铃（全球海啸无法用等级收敛）。
+// 0.9.4（P2-11）：改为**整串锚定**匹配，并去掉"什么都能匹配"的兜底。
+// 此前用 `/Tsunami Warning/i` 这样的子串匹配，于是 "Not a Tsunami Warning"、
+// "Tsunami Warning Cancellation" 这类 event 也会被抬到最高档（3）并通过等级闸门 ——
+// 误报方向，而海啸的误报会直接让用户按"大海啸"行动。event 名是**受控词表**（CAP 里由发布
+// 机构填写），所以锚定整串是安全的；大小写与多余空格先归一。
+// 兜底那一项原本是 `[/./, '海啸信息（NOAA）', 0, 'info']`：任何新 event 都会被静默归成
+// "信息类"。等级 0 确实不会响铃（安全方向），但它把"上游加了新 event 名"这件事藏了起来。
+// 现在未识别的 event 用**如实标签**（带原始 event 名）落历史，等级仍是 0。
 const NOAA_EVENT_RULES = [
-  [/Tsunami Warning/i, '大海啸警报（NOAA）', 3, 'red'],
-  [/Tsunami Advisory/i, '海啸警报（NOAA）', 2, 'orange'],
-  [/Tsunami Watch/i, '海啸警报（NOAA）', 2, 'orange'],
-  [/Tsunami Information/i, '海啸信息（NOAA）', 0, 'info'],
+  [/^tsunami warning$/, 'kind.noaaMajorWarning', 3, 'red'],
+  [/^tsunami advisory$/, 'kind.noaaWarning', 2, 'orange'],
+  [/^tsunami watch$/, 'kind.noaaWarning', 2, 'orange'],
+  [/^tsunami information( statement)?$/, 'kind.noaaInfo', 0, 'info'],
 ]
 
 /**
@@ -265,20 +293,26 @@ function parseNoaaCap(xml, entry) {
   }
   const geo = geoList.length ? geoList[0] : { lat: null, lon: null }
   const mag = toNumOrNull(params.EventPreliminaryMagnitude)
-  const rule = NOAA_EVENT_RULES.find(([re]) => re.test(event)) ||
-    [/./, '海啸信息（NOAA）', 0, 'info']
+  // 整串锚定匹配（0.9.4，见 NOAA_EVENT_RULES）。认不出时**如实标注**而不是冒充"海啸信息"：
+  // 等级仍是 0（不会响铃），但历史与诊断里能看出"上游加了一个我们不认识的事件名"。
+  const eventNorm = String(event || '').trim().toLowerCase().replace(/\s+/g, ' ')
+  const matched = NOAA_EVENT_RULES.find(([re]) => re.test(eventNorm))
+  // 匹配到时 rule[1] 是**文案 key**（要取词）；没匹配到时已经是取好词的句子，	() 对不存在的
+  // key 会原样回显，所以下面统一过一遍 t() 是安全的。
+  const rule = matched || [null, t('kind.noaaUnrecognized', { event: String(event || '—').slice(0, 40) }), 0, 'info']
+  const ruleLabel = t(rule[1])
   const cancelled = msgType === 'Cancel'
   const origin = String(params.EventOriginTime || sent || '')
   const eventName = String(params.EventLocationName || areaDesc || '').trim()
-  const headline = (capHeadline || event || 'NOAA 海啸信息') + (eventName ? ' · ' + eventName : '') +
-    (mag === null ? '' : ' · 前震 M' + mag)
+  const headline = (capHeadline || event || t('kind.noaaInfo')) + (eventName ? ' · ' + eventName : '') +
+    (mag === null ? '' : t('kind.noaaForeshock', { mag: mag }))
   // identifier 形如 PHEB-1-26234000，中间的数字是消息版本号——同一事件的多版要归并成一个键
   const eventKey = 'noaa:' + identifier.replace(/-\d+-/, '-')
   return {
     id: 'noaa:' + (identifier || (entry && entry.id) || eventKey),
     code: 'noaa',
     kind: 'tsunami',
-    kindLabel: cancelled ? rule[1] + '（已解除）' : rule[1],
+    kindLabel: cancelled ? ruleLabel + t('kind.cancelledSuffix') : ruleLabel,
     source: 'noaa',
     locator: 'point',
     severity: cancelled ? 'info' : rule[3],
@@ -314,13 +348,13 @@ function parseNoaaCap(xml, entry) {
  * 四个场景覆盖两个维度：三个源各自的解析路径，以及"半径内命中 / 半径外不命中"。
  */
 export const TEST_GEO_SCENARIOS = [
-  { key: 'emsc', label: 'EMSC 地震（震中就在关注点）', note: 'M6.2', source: 'emsc' },
-  { key: 'usgs', label: 'USGS 地震（约 80km 外）', note: 'M5.6 · 近处，小半径也可能不命中', source: 'usgs' },
-  { key: 'noaa', label: 'NOAA 海啸警报', note: 'Tsunami Advisory', source: 'noaa' },
+  { key: 'emsc', source: 'emsc' },
+  { key: 'usgs', source: 'usgs' },
+  { key: 'noaa', source: 'noaa' },
   // 半径是可配的（1–2000km，新建默认 100km），所以这里**不能承诺"一定不命中"**：
   // 旧的「超出默认 300km 半径，刻意不命中」既是 0.4.0 的旧默认值（0.5.0 起新建默认 100km），
   // 也把半径 ≥556km 的用户引向相反的事实——那条测试会真的响铃（0.5.4 修正文案）。
-  { key: 'emsc-far', label: 'EMSC 远地地震（约 550km 外）', note: 'M7.0 · 用于演示半径：半径 < 550km 时不命中', source: 'emsc' },
+  { key: 'emsc-far', source: 'emsc' },
 ]
 
 // 纬度偏移 1 度约 111km；夹在 ±89.5 以内，避免极端位置把纬度推到界外
@@ -352,7 +386,7 @@ export function buildTestGlobalMessage(place, nowMs, key) {
   const p = place || {}
   const lat = (typeof p.lat === 'number' && Number.isFinite(p.lat)) ? p.lat : 0
   const lon = (typeof p.lon === 'number' && Number.isFinite(p.lon)) ? p.lon : 0
-  const name = String(p.name || '关注点')
+  const name = String(p.name || 'watch point')
   const stamp = new Date(ms).toISOString()
   const scenario = TEST_GEO_SCENARIOS.filter((s) => s.key === key)[0] || TEST_GEO_SCENARIOS[0]
 
@@ -360,8 +394,6 @@ export function buildTestGlobalMessage(place, nowMs, key) {
     const shifted = shiftLat(lat, 0.7) // 约 78km
     return {
       source: 'usgs',
-      label: scenario.label,
-      note: scenario.note,
       payload: {
         type: 'FeatureCollection',
         features: [{
@@ -369,7 +401,7 @@ export function buildTestGlobalMessage(place, nowMs, key) {
           id: 'QUAKEALERT-TEST-usgs-' + ms,
           geometry: { type: 'Point', coordinates: [lon, shifted, 25] },
           properties: {
-            mag: 5.6, place: name + ' 附近（测试）', time: ms, updated: ms,
+            mag: 5.6, place: name + ' region (test)', time: ms, updated: ms,
             magType: 'mww', tsunami: 0, alert: null, title: 'M 5.6 - QuakeAlert test',
           },
         }],
@@ -379,8 +411,6 @@ export function buildTestGlobalMessage(place, nowMs, key) {
   if (scenario.key === 'noaa') {
     return {
       source: 'noaa',
-      label: scenario.label,
-      note: scenario.note,
       payload: capTestXml('QUAKEALERT-TEST-NOAA-' + ms, 'Tsunami Advisory', 'TEST TSUNAMI ADVISORY',
         name, lat, lon, 7.1, stamp),
     }
@@ -390,8 +420,6 @@ export function buildTestGlobalMessage(place, nowMs, key) {
   const mag = far ? 7.0 : 6.2
   return {
     source: 'emsc',
-    label: scenario.label,
-    note: scenario.note,
     payload: {
       action: 'update',
       data: {
@@ -402,7 +430,7 @@ export function buildTestGlobalMessage(place, nowMs, key) {
           source_id: 'test', unid: 'QUAKEALERT-TEST-' + scenario.key + '-' + ms,
           source_catalog: 'QuakeAlert-TEST', auth: 'QuakeAlert',
           time: stamp, lastupdate: stamp,
-          flynn_region: name + ' 附近（测试）',
+          flynn_region: name + ' region (test)',
           lat: shifted, lon, depth: 10,
           mag, magtype: 'mw', evtype: 'ke',
         },
@@ -433,4 +461,4 @@ export function parseTestGlobalMessage(msg) {
 }
 
 
-export { parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, toIso }
+export { parseEmsc, parseUsgsFeature, parseNoaaCap, severityOfMagnitude, geoEventKey, toIso }

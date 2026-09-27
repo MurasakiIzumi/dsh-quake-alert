@@ -79,10 +79,20 @@ export const SOURCE_CONTRACTS = {
     pollMs: null,
     timezone: 'Asia/Tokyo（+09:00）—— issue.time / earthquake.time / areas[].arrivalTime 都是裸 JST，由 p2pTimeToIso 补偏移',
     required: [
-      'code：必须是 551 / 552 / 556 之一',
-      '551：id（或 _id）string、issue.time string、earthquake.time string、earthquake.maxScale number、points[]（每项 pref string / addr string / scale number）',
-      '552：id string、areas[]（每项 name string、grade ∈ {MajorWarning, Warning, Watch}）',
-      '556：id string、issue.eventId string、earthquake.hypocenter object、areas[]（每项 name string、scaleTo number）',
+      // 0.9.4（C2 / P3-41）：这一份此前比实现严——把"实现会容忍的东西"也写成了必需。
+      // 逐条核对过 parseEpspResult（05d）与三个解析器（05-parser）之后改成"实现真的会拦下的"。
+      // 判据本身没变，改的是这份说明：按旧的写法写 fixture 会以为某个字段必需，写出假断言。
+      'code：必须是 551 / 552 / 556 之一（其它 code 判 empty，不算故障）',
+      '每条都要：id（或 _id）string、issue.time string',
+      '551：earthquake 是对象、earthquake.maxScale 是 number、points 是数组，且 points[] 每一项是对象；' +
+      'scale / pref / addr **只在存在时**要求类型正确（0.4.2 起有意放宽：单个观测点缺字段' +
+      '不该让整条警报消失，预警产品里丢整条的代价是漏报）',
+      '552：areas 是数组、每项是对象，grade **只在存在时**要求是字符串——**不查枚举**：' +
+      '未知等级按 rank 0 处理、正文照原样显示（与解析器 areas.map 里的 `|| "—"` 一致）',
+      '556：earthquake 与 earthquake.hypocenter 是对象、areas 是数组且每项必须有非空 name；' +
+      'scaleTo **只在存在时**要求是 number',
+      '时间是"客观不可能"检查（越界判 value），**缺 earthquake.time 不判 schema**：' +
+      '它只喂事件归并键（`quake:` + eq.time），缺了就退化成不做事件级去重，警报本身照发',
     ],
     empty: 'code 不是 551/552/556（P2PQuake 还会推火山、其他情报等与本插件无关的消息）',
     staleAfterMs: null,
@@ -99,12 +109,18 @@ export const SOURCE_CONTRACTS = {
     timezone: 'Asia/Tokyo（+09:00）—— Head/ReportDateTime 带 +09:00；Control/DateTime 是 UTC（Z）。' +
       '两者都带偏移，解析器优先取 ReportDateTime',
     required: [
-      '<Report> 根元素',
-      'Control/Title 或 Head/Title（至少一个非空）',
-      'Head/ReportDateTime 或 Control/DateTime（发布时间）',
-      '至少一个 <Item>，其 <Kind> 能给出 Name 或 Status',
-      '区域：<Area> 下的 <Name> 或 <Code>（codeType 或码位数决定粒度）',
+      // 0.9.4（C2 / P3-41）：实现真正判 schema 的只有下面三条（parseJmaResult）。
+      '电文非空',
+      '不是 HTML（返回 `<!DOCTYPE html>` / `<html` 判 schema：拦截页或地址失效最常见）',
+      '<Report> 根元素（防災情報XML 的标志）',
     ],
+    // 此前这几条被写在 required 里，但它们**不判 schema**——缺 Items、缺 Area、缺 ReportDateTime
+    // 都会被解析成"与本插件无关 / 区域判不了"，按 empty 归类。P1-8 的实验也印证了这条：
+    // 未知 codeType 的电文仍会在历史里留痕，但那由**匹配层**的 cannotJudge 负责（见 11-pipeline），
+    // 不是在这里判源故障。写在这里而不是删掉：它是读电文结构的人最需要知道的事。
+    tolerant: '电文结构本身（Item / Kind、Area / Name / Code、ReportDateTime、Control/Title）' +
+      '**不作 schema 判据**：缺 Items、缺 Area、只有注意報或"なし"的电文一律归 empty，' +
+      '由匹配层的 cannotJudge 决定要不要留痕。',
     empty: '警戒レベル 0 且不是解除的电文：天气预报、府県気象情報、火山、观测资料，以及"只有注意報 /' +
       ' なし"的警报电文（L1〜L2 按设计既不播报也不进历史，所以归入 empty 而不是失败）',
     staleAfterMs: 3 * 60 * 60 * 1000,
@@ -140,13 +156,17 @@ export const SOURCE_CONTRACTS = {
     pollMs: 120 * 1000,
     timezone: 'UTC（properties.time/updated 是 epoch 毫秒，经 toIso 转成带 Z 的 ISO）',
     required: [
-      '顶层 GeoJSON：features[] 数组',
-      '每个 feature：geometry.coordinates = [经度, 纬度, 深度km]',
-      'properties object：mag number、time number',
-      '顶层 metadata.generated number（feed 生成时刻，用于 stale 判定）',
+      // 0.9.4（C2 / P3-41）：逐条核对 parseUsgsResult（05d）与 Host 侧的取数层后的写法。
+      '顶层 GeoJSON：features[] 数组（**Host 侧校验**：lib/global-sources.js 的 parseUsgsEntries）',
+      '每个 feature：properties 是对象、mag 是 number、time 是 number（epoch 毫秒或可解析的时间）',
+      '震中坐标：geometry.coordinates[0..1] **或** properties.lat/lon（解析器两条都认，' +
+      '此前写成"必须 geometry.coordinates"是比实现严的声明）',
+      '坐标不越界（越界判 value，与"缺坐标判 schema"是两种不同的结论）',
     ],
     tolerant: 'feature.id（缺失时解析器按 properties.code / 坐标兜底出稳定 id）与 properties.updated' +
-      '（当前实现不读它，修订版靠 properties.time + 坐标近似归并）——两者缺失都不判 schema。',
+      '（当前实现不读它，修订版靠 properties.time + 坐标近似归并）——两者缺失都不判 schema。' +
+      '另：`metadata.generated` 是**停更判据的输入而不是 schema 判据**——缺了它只意味着"新鲜度未知"' +
+      '（usgsFeedGeneratedAt 返回 NaN，停更检测不触发），不会把这一帧判成故障。',
     empty: 'features 为空数组（该窗口内没有 M2.5+ 事件，罕见但正常）',
     staleAfterMs: 30 * 60 * 1000,
     staleReason: 'USGS 摘要 feed 每 5 分钟重新生成，metadata.generated 是它的生成时刻；' +
@@ -176,7 +196,7 @@ export const SOURCE_CONTRACTS = {
   //   ② cenc_eqlist 的字段**全是字符串**，而 cenc_eew 的字段是 number；两个源来自同一上游，
   //      所以不能按"同一家的风格"写解析，只能按实测样本写。
   cenc_eew: {
-    label: 'Wolfx CENC 地震预警',
+    label: 'Wolfx CENC EEW',
     region: 'cn',
     disasters: ['eew'],
     transport: 'ws',
@@ -203,7 +223,7 @@ export const SOURCE_CONTRACTS = {
       '中继是否存活由 cenc_eqlist 探（它每天都有数据）——这也是两个源都要接的原因之一。',
   },
   cenc_eqlist: {
-    label: 'Wolfx CENC 地震速报',
+    label: 'Wolfx CENC eqlist',
     region: 'cn',
     disasters: ['quake'],
     transport: 'ws',
@@ -211,7 +231,9 @@ export const SOURCE_CONTRACTS = {
     pollMs: null,
     timezone: 'Asia/Shanghai（+08:00，无夏令时）—— time / ReportTime 是裸北京时间，由 cnTimeToIso 补偏移',
     required: [
-      '整表载荷：No1…NoN（数值序，No1 最新）+ md5',
+      // 0.9.4（C2 / P3-41）：核对 parseCencEqlistItemResult / parseCencEqlistResult 之后的写法。
+      '整表载荷：No1…NoN（数值序，No1 最新）；**md5 不是判据**——它只作诊断读数与' +
+      '（P3-31 之前）的整表短路，缺了照常逐条比对',
       '每项：EventID string 非空',
       '每项：latitude / longitude 为数字字符串或数值，且落在合法范围内',
       '每项：magnitude 为数字字符串或数值（缺它这条速报就没有阈值可判）',
@@ -232,7 +254,7 @@ export const SOURCE_CONTRACTS = {
   // 与其它源的差异：匹配走**行政区层级**（locator:'area'），因此"title 能解析出机构名"是
   // **必需字段**——解析不出就等于这条预警无法归属，而不是"少了一个可选字段"。
   nmc_alarm: {
-    label: '中央气象台预警信号（nmc.cn）',
+    label: 'CMA warning signals (nmc.cn)',
     region: 'cn',
     disasters: ['weather'],
     transport: 'feed',
@@ -243,7 +265,9 @@ export const SOURCE_CONTRACTS = {
       '所以 Client 这里拿到的时间已经可以直接 Date.parse。',
     required: [
       'alertid string 非空（每条预警的唯一键，Host 用它去重与拼详情 URL）',
-      'kind ∈ {rainstorm, geology}（Host 从 pic 的灾种码译出）',
+      'kind 是 string；`{rainstorm, geology}` 之外的取值判 **empty 而不是 schema**' +
+      '（0.9.4 / C2：实现里走的是 `own(NMC_KIND_TEXT, kind)` 判空，说明这两种之外只是"不在我们范围内"，' +
+      '不是源坏了——此前写在 required 里会让人以为要判故障）',
       'level ∈ {red, orange, yellow, blue}（Host 从 pic 的等级码译出）',
       'title string 非空，且形如「…气象台发布…预警信号」——**匹配完全依赖它**，解析不出机构名即判 schema',
       'issued 可解析的 ISO 时间（Host 已补 +08:00）',
@@ -267,7 +291,7 @@ export const SOURCE_CONTRACTS = {
   //   · staleAfterMs 只能是 null（空响应是常态，判不出上游停更）；
   //   · 时间语义相反（NWS 自带偏移、ECCC 是 UTC `Z`，都不需要补本地时区）。
   nws_alerts: {
-    label: '美国国家气象局预警（api.weather.gov）',
+    label: 'NWS alerts (api.weather.gov)',
     region: 'us',
     disasters: ['weather'],
     transport: 'rest',
@@ -305,7 +329,7 @@ export const SOURCE_CONTRACTS = {
       '能发现的只有 schema 判据能抓到的结构改版（DESIGN 4.7.7 第 2 条）。',
   },
   eccc_alerts: {
-    label: '加拿大环境与气候变化部预警（api.weather.gc.ca）',
+    label: 'ECCC alerts (api.weather.gc.ca)',
     region: 'ca',
     disasters: ['weather'],
     transport: 'rest',

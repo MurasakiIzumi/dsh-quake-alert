@@ -5,9 +5,21 @@
 # .publish/   投稿到 awesome-dsh-plugin 的准备物（条目 yml + 投稿指引）——投稿物本身属于另一个仓库
 # .tmp-hs/    Hindsight 检索的中间产物（文档 / 列表 / 分块），用完即弃
 # REVIEW.md   全项目 review 报告（本地留档，不入库）
+# 测试A/B.txt 两份独立审查报告；测试C.txt 是它们的统合清单。与 REVIEW.md 同一处理：
+#             面向作者的排障与账目材料，对包读者没有价值，且会随修复过期。
 /.publish/
 /.tmp-hs/
 /REVIEW.md
+/测试A.txt
+/测试B.txt
+/测试C.txt
+
+# ---- GeoNames 源数据（构建脚本的输入，3.3MB，用完即弃）----
+# build-world-cities.mjs 用 `--from <目录>` 从本地读它们（联网时它会自己下载）。
+# 属于第三方数据（CC BY 4.0），不进仓库：产物 lib/data/world-cities.js 才是要提交的东西。
+/cities15000.zip
+/cities15000.txt
+/admin1CodesASCII.txt
 
 # ---- 依赖与构建产物 ----
 node_modules/
@@ -18,3 +30,6 @@ dist/
 .DS_Store
 Thumbs.db
 *.log
+/.ci-checkout/
+/.node22/
+/.ci.zip

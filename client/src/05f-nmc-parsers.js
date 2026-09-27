@@ -33,12 +33,13 @@
 // ============================================================================
 
 import { isPlainObject, own } from './02-storage.js'
+import { t } from './00-i18n.js'
 import { cnAreaOf } from './04-city-table.js'
 
 /** 灾种标识 → 中文（与 Host 的 NMC_KINDS 值域对齐）。 */
-const NMC_KIND_TEXT = { rainstorm: '暴雨', geology: '地质灾害' }
+const NMC_KIND_TEXT = { rainstorm: 'kind.cnRainstorm', geology: 'kind.cnGeology' }
 /** 等级 → 中文（与图标编码 `001`..`004` 的对应关系见 lib/nmc-source.js）。 */
-const NMC_LEVEL_TEXT = { red: '红色', orange: '橙色', yellow: '黄色', blue: '蓝色' }
+const NMC_LEVEL_TEXT = { red: 'kind.cnLevelRed', orange: 'kind.cnLevelOrange', yellow: 'kind.cnLevelYellow', blue: 'kind.cnLevelBlue' }
 /**
  * 等级 → severity（DESIGN 2 节的配色语义）：红 → red、橙 → orange、黄 → yellow、蓝 → info。
  *
@@ -92,7 +93,12 @@ function parseNmcAlarm(raw) {
   // 直查会让 'constructor' 这类键命中原型链返回函数对象（severity 变成函数、headline 里
   // 嵌进函数源码）。契约层（05d）已同步改成 own()，两处是同一个约定。
   const rank = own(NMC_LEVEL_RANK, level) || 0
-  const kindText = own(NMC_KIND_TEXT, kind)
+  // 灾种名与等级词都是**我们给起的**（电文原文只有编码）→ 按界面语言取词（0.9.4）。
+  // 表里存的是 key，取词在这里做；`kind.cnLabel` / `kind.cnHeadline` 是模板。
+  const kindKey = own(NMC_KIND_TEXT, kind)
+  const levelKey = own(NMC_LEVEL_TEXT, level)
+  const kindText = kindKey ? t(kindKey) : ''
+  const levelText = levelKey ? t(levelKey) : ''
   return {
     // 前缀 nmc: ——与其它源的 id 命名空间分开（alertid 是纯数字串，不加前缀会与
     // P2PQuake 的数字 eventId 撞在同一个集合里，去重表可以按 id 建索引）。
@@ -101,7 +107,7 @@ function parseNmcAlarm(raw) {
     // kind 复用 'weather'：它是气象灾害，与日本气象电文共用"进历史 / 配色 / 文案"的整条链路。
     // 真正区分两者的是 locator（'area' = 走行政区层级匹配，见 06-matcher）。
     kind: 'weather',
-    kindLabel: '大陆' + kindText + '预警（中央气象台）',
+    kindLabel: t('kind.cnLabel', { kind: kindText, level: levelText }),
     source: 'nmc_alarm',
     locator: 'area',
     severity: own(NMC_LEVEL_SEVERITY, level),
@@ -109,7 +115,7 @@ function parseNmcAlarm(raw) {
     reportTime: issued,
     // 文案用**发布地 + 灾种 + 等级**，不用行政区表里的名字：表里的名字是 GeoNames 的显示名，
     // 实测会挑到旧名（「思茅市」而气象台写「普洱市」），照搬会让用户对不上号。
-    headline: (place ? place + ' · ' : '') + kindText + own(NMC_LEVEL_TEXT, level) + '预警',
+    headline: t('kind.cnHeadline', { place: (place ? place + ' · ' : ''), kind: kindText, level: levelText }),
     maxScale: -1,
     level: 0,
     // regions 是日本源的概念（都道府县 + 市町村）。大陆源不用它——归属放在 cnArea 里，

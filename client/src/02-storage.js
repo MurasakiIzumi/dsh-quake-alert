@@ -8,7 +8,7 @@
 // 依赖：01-constants。
 // ============================================================================
 
-import { PREF_SET, PREFECTURES, TSUNAMI_OPTIONS, DEFAULT_CFG, STORAGE_KEY, HISTORY_KEY, HISTORY_MAX, MAX_WATCH_PLACES } from './01-constants.js'
+import { PREF_SET, PREFECTURES, TSUNAMI_OPTIONS, SCALE_OPTIONS, DEFAULT_CFG, STORAGE_KEY, HISTORY_KEY, HISTORY_MAX, HISTORY_MAX_AGE_MS, MAX_WATCH_PLACES, MAX_WATCH_CITIES, LEGACY_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM } from './01-constants.js'
 import { resolveLang, setLanguage } from './00-i18n.js'
 
 // ---------- 存储（localStorage） ----------
@@ -16,11 +16,39 @@ import { resolveLang, setLanguage } from './00-i18n.js'
 // 任何异常都退回默认值——一条脏数据绝不能把整个插件拖崩（曾因 history 非数组
 // 触发 loadJSON(...).slice is not a function，导致模块加载失败、设置页与连接全部消失）。
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
-const numOr = (v, fallback, min, max) => {
-  if (typeof v !== 'number' || !Number.isFinite(v)) return fallback
-  if (typeof min === 'number' && v < min) return min
-  if (typeof max === 'number' && v > max) return max
-  return v
+/**
+ * 历史条目是否还在「过去 5 天」里（0.9.4 / D-1，见 HISTORY_MAX_AGE_MS）。
+ *
+ * **以这条记录的写入时刻（`at`）为准**，不是电文的发布时刻（`issued`）。两个理由：
+ *  ① 设计稿的用意是"防陈年条目占位"——占位的是**已经躺在列表里**的那些记录，所以计时从落笔开始；
+ *  ② 用 `issued` 会让"历史里还有哪些条目"取决于今天几号，而本项目的回归明确要求断言不依赖当天
+ *     日期（0.6.1 修过一条同类断言）。落笔时刻由我们自己写，测试可以注入，行为确定。
+ * 老记录（0.9.4 之前写的）没有 `at`，退回按 `issued` 判一次——那正是这次要清掉的历史；
+ * 两者都认不出时**保留**（宁可留一条说不清时间的记录，也不因为缺字段把用户的历史删掉）。
+ */
+export function withinHistoryAge(e, now) {
+  // `at > 0` 才算"有写入时刻"：归一化会给老条目补 `at: 0`（表示不知道），那一支要退回 issued
+  const written = (e && typeof e.at === 'number' && Number.isFinite(e.at) && e.at > 0) ? e.at : NaN
+  if (Number.isFinite(written)) return (now - written) <= HISTORY_MAX_AGE_MS
+  const issued = Date.parse(String((e && e.issued) || ''))
+  if (Number.isFinite(issued)) return (now - issued) <= HISTORY_MAX_AGE_MS
+  return true
+}
+/**
+ * 数值归一：夹取到 [min,max]，类型不符时回退默认值。
+ *
+ * 0.9.4：**数字字符串也当数值**（`"100"` → 100）。此前只认 `typeof v === 'number'`，于是一份
+ * 把数字写成字符串的配置（手工改过的 JSON、别的工具生成的）会让 `radiusKm: "100"` 静默变成
+ * 默认的 **300 km** —— 不是"保守取值"而是把半径放大 3 倍，用户看到的是"提醒的区域莫名变大了"。
+ * 夹取语义没变：越界仍然夹到边界。
+ */
+function numOr(v, fallback, min, max) {
+  let n = v
+  if (typeof n === 'string' && n.trim() !== '') n = Number(n)
+  if (typeof n !== 'number' || !Number.isFinite(n)) return fallback
+  if (typeof min === 'number' && n < min) return min
+  if (typeof max === 'number' && n > max) return max
+  return n
 }
 const boolOr = (v, fallback) => (typeof v === 'boolean' ? v : fallback)
 // 「HH:MM」时间字符串校验（允许 1 位小时，如 "7:05"）
@@ -89,12 +117,19 @@ function normalizeHistoryEntry(e, i) {
     hit: e.hit === true,
     suppressed: e.suppressed === true,
     suppressedReason: strOr(e.suppressedReason, ''),
+    // 写入时刻（0.9.4 / D-1）：历史保留的"过去 5 天"以它为准（见 withinHistoryAge）。
+    // 老条目没有它 → 0（表示"不知道"，此时退回按 issued 判一次）。
+    at: (typeof e.at === 'number' && Number.isFinite(e.at)) ? e.at : 0,
   }
 }
-function loadHistory() {
+function loadHistory(nowMs) {
   const v = loadJSON(HISTORY_KEY, null)
   if (!Array.isArray(v)) return []
-  return v.filter((e) => isPlainObject(e)).slice(0, HISTORY_MAX).map(normalizeHistoryEntry)
+  const now = typeof nowMs === 'number' && Number.isFinite(nowMs) ? nowMs : Date.now()
+  return v
+    .filter((e) => isPlainObject(e) && withinHistoryAge(e, now))
+    .slice(0, HISTORY_MAX)
+    .map(normalizeHistoryEntry)
 }
 // 每次都返回全新对象：避免调用方改动嵌套字段时污染 DEFAULT_CFG 常量。
 // 由 DEFAULT_CFG **深拷贝派生**（而不是手抄字段清单）：freshCfg 是 settingsOpsFor 判断
@@ -127,26 +162,45 @@ function placeOriginOf(p, name) {
   if (own(PLACE_ORIGINS, raw)) return raw
   return String(name || '').indexOf('·') > 0 ? 'cn' : 'global'
 }
-function normalizePlaces(list) {
+/**
+ * @param {object[]} list
+ * @param {{ total?: number, dropped?: number, radiusFixed?: number }} [audit]
+ *   0.9.4 加的**体检账本**（可选）：normalizePlaces 的契约是"任何脏输入都归一成合法配置"，
+ *   也就是**静默**丢弃非法条目。那对 localStorage 里的历史数据是对的（不能因为一条脏数据
+ *   就让整份配置失效），但对"导入一份配置"这个动作不对：用户看到"已导入配置。"，实际少了
+ *   一半关注点，而配置里、界面里、诊断里都看不出来——数据丢失方向且无任何反馈。
+ *   传了 audit 就顺手记下"总共几条 / 丢了几条 / 几条的半径不是数值"，供界面如实说明。
+ */
+function normalizePlaces(list, audit) {
   const out = []
   const seen = new Set()
   for (const p of list) {
-    if (!isPlainObject(p)) continue
+    if (audit) audit.total += 1
+    if (!isPlainObject(p)) { if (audit) audit.dropped += 1; continue }
     // 用显式范围判断而不是 numOr：numOr 对越界值是**夹取**，而经纬度越界意味着这份数据本身
     // 是坏的（例如把半径填进了纬度列）。夹到边界会造出一个"看起来合法"的错误关注点。
     const lat = (typeof p.lat === 'number' && Number.isFinite(p.lat) && Math.abs(p.lat) <= 90) ? p.lat : null
     const lon = (typeof p.lon === 'number' && Number.isFinite(p.lon) && Math.abs(p.lon) <= 180) ? p.lon : null
-    if (lat === null || lon === null) continue
+    if (lat === null || lon === null) { if (audit) audit.dropped += 1; continue }
     const key = lat.toFixed(3) + ',' + lon.toFixed(3)
-    if (seen.has(key)) continue
+    if (seen.has(key)) { if (audit) audit.dropped += 1; continue }
     seen.add(key)
     const name = strOr(p.name, '').slice(0, 30).trim() || (lat.toFixed(2) + ', ' + lon.toFixed(2))
     const origin = placeOriginOf(p, name)
+    // 半径"不是数值"（缺失 / null / true / 乱字符串）时 numOr 会退回 300；数字字符串是合法的
+    // （0.9.4 起 numOr 接受它），所以这里只在真正回退时记账。
+    const radiusOk = (typeof p.radiusKm === 'number' && Number.isFinite(p.radiusKm)) ||
+      (typeof p.radiusKm === 'string' && p.radiusKm.trim() !== '' && Number.isFinite(Number(p.radiusKm)))
+    if (audit && !radiusOk) audit.radiusFixed += 1
     const entry = {
       name,
       lat,
       lon,
-      radiusKm: numOr(p.radiusKm, 300, 1, 2000),
+      // 半径用统一常量（0.9.4 / P3-37）：这里此前硬编码 `300, 1, 2000`，而 01-constants 已经导出了
+    // DEFAULT_PLACE_RADIUS_KM / MIN_PLACE_RADIUS_KM / MAX_PLACE_RADIUS_KM —— 设置页按常量渲染
+    // 档位、归一化按硬编码夹取，两边一改一不改就会出现"界面允许 100、存进去变成 300"这类错位。
+    // 注意默认值取 MIN/MAX 与默认半径三个常量，而不是"默认半径当兜底"：兜底值就是默认半径。
+    radiusKm: numOr(p.radiusKm, LEGACY_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM),
       origin,
     }
     // 大陆关注点的省 / 市（0.8.2 / DESIGN 11.9 B）：显式落在 place 上，matcher 与诊断不再从
@@ -173,7 +227,31 @@ function normalizePlaces(list) {
   return out
 }
 // 逐字段校验 + 回退默认值：任何形状的输入都归一成一份合法配置
-function normalizeCfg(input) {
+// audit（0.9.4，可选）：关注点体检账本，见 normalizePlaces。只有导入路径会传它。
+/**
+ * 数值归一 + **吸附到最近的合法档位**（0.9.4 / PD-2，产品决策）。
+ *
+ * 机器级配置（`settings.yaml` / profile 条目）可以被手工改成任意数字：`quakeScale: 42` 此前会
+ * 原样进入配置，而界面上只有 5 的倍数档——下拉选不中它、显示会错位，用户也说不清当前阈值是多少。
+ * Host schema 只校验范围（改成严格枚举会让脏值**注册失败**，比现状更糟，DESIGN 11.9 #2 已排除），
+ * 所以"就近对齐"放在 Client 这一步：先按既有语义夹到 [min,max]，再吸附到最近的档位。
+ * 档位清单直接取界面用的那份（SCALE_OPTIONS / *_MAG_OPTIONS），不另抄一套。
+ */
+function snapOr(v, fallback, options, min, max) {
+  const n = numOr(v, fallback, min, max)
+  // 0 在这两个字段上有明确含义（"来者不拒"，匹配层是 `scale >= threshold`），而它不是档位表里
+  // 的一项——按"最近档位"吸附会把它推到 10，等于**收窄**了用户的范围（漏报方向），所以保留它。
+  if (n === 0) return 0
+  const vals = (Array.isArray(options) ? options : [])
+    .map((o) => (o && typeof o === 'object' ? o.v : o))
+    .filter((x) => typeof x === 'number' && Number.isFinite(x))
+  if (vals.length === 0) return n
+  let best = vals[0]
+  for (const o of vals) if (Math.abs(o - n) < Math.abs(best - n)) best = o
+  return best
+}
+
+function normalizeCfg(input, audit) {
   // 兜底：调用方（loadCfg / sectionToCfg / applyCfg）都保证传对象，但归一化函数自己不该因为
   // 传进 null/undefined 就抛错——它的契约是"任何脏输入都能归一成一份合法配置"。
   const stored = isPlainObject(input) ? input : {}
@@ -195,11 +273,12 @@ function normalizeCfg(input) {
         ? Array.from(new Set(w.prefectures.filter((p) => typeof p === 'string' && PREF_SET.has(p))))
         : [],
       // 市区町村：这里只保证类型、去重与规模；名字是否真实存在由数据表加载后校验
+      // 上限用 MAX_WATCH_CITIES 常量（0.9.4 / P3-37，此前硬编码 300，与设置页的上限各说各话）
       cities: Array.isArray(w.cities)
-        ? Array.from(new Set(w.cities.filter((c) => typeof c === 'string' && c.length > 0 && c.length <= 30))).slice(0, 300)
+        ? Array.from(new Set(w.cities.filter((c) => typeof c === 'string' && c.length > 0 && c.length <= 30))).slice(0, MAX_WATCH_CITIES)
         : [],
       // 全球关注点（0.4.0 新增）。旧配置没有这个字段 → 归一成空数组，不影响日本模式
-      places: Array.isArray(w.places) ? normalizePlaces(w.places) : [],
+      places: Array.isArray(w.places) ? normalizePlaces(w.places, audit) : [],
     },
     disasters: {
       earthquake: boolOr(d.earthquake, DEFAULT_CFG.disasters.earthquake),
@@ -214,22 +293,31 @@ function normalizeCfg(input) {
       overseasWeather: boolOr(d.overseasWeather, DEFAULT_CFG.disasters.overseasWeather),
     },
     thresholds: {
-      quakeScale: numOr(t.quakeScale, DEFAULT_CFG.thresholds.quakeScale, 0, 70),
-      eewScale: numOr(t.eewScale, DEFAULT_CFG.thresholds.eewScale, 0, 70),
+      // 0.9.4（PD-2）：夹取之后**吸附到界面上的合法档位**（手改的 42 → 40）。见 snapOr。
+      quakeScale: snapOr(t.quakeScale, DEFAULT_CFG.thresholds.quakeScale, SCALE_OPTIONS, 0, 70),
+      eewScale: snapOr(t.eewScale, DEFAULT_CFG.thresholds.eewScale, SCALE_OPTIONS, 0, 70),
       // 白名单校验，同时避免 'constructor' 之类的原型链键被当成合法等级
       tsunamiGrade: TSUNAMI_OPTIONS.some((o) => o.g === t.tsunamiGrade)
         ? t.tsunamiGrade
         : DEFAULT_CFG.thresholds.tsunamiGrade,
-      // 全球源的最低震级（0.4.0）。0 是有意义的取值（来者不拒），所以下界是 0 而不是 1
+      // 全球源的最低震级（0.4.0）。0 是有意义的取值（来者不拒），所以下界是 0 而不是 1。
+      // **不吸附档位**（0.9.4 / PD-2 的边界）：下拉里那些 M3〜M7 只是常用预设，而 M6.7 这样的
+      // 自定义门槛是合法且有意义的——按预设吸附会把用户的实际门槛改掉（那是改语义，不是纠错）。
+      // 吸附只用于**震度档位**（10/20/…/70 这种离散阶梯，非档位值没有意义）。
       globalMagnitude: numOr(t.globalMagnitude, DEFAULT_CFG.thresholds.globalMagnitude, 0, 10),
       // 大陆速报的独立门槛（0.5.0）。新增字段必须在这里同步，否则 applyCfg 会**静默丢弃**它
-      // ——这正是 DESIGN 11.6 第 10 条那个"有保护的残留"：忘了同步时回归断言会失败。
+      // ——这正是 DESIGN 11.6 第 10 条那个"有保护的残留"：忘了同步时回归断言会失败。同上，不吸附。
       cnReportMagnitude: numOr(t.cnReportMagnitude, DEFAULT_CFG.thresholds.cnReportMagnitude, 0, 10),
     },
     notify: {
       sound: boolOr(n.sound, DEFAULT_CFG.notify.sound),
       system: boolOr(n.system, DEFAULT_CFG.notify.system),
       volume: numOr(n.volume, DEFAULT_CFG.notify.volume, 0, 1),
+      // 分灾害音效开关（0.9.4 / C1）：**必须在这里同步**，否则 applyCfg 会静默丢弃它们，
+      // 表现是"关掉了海啸的声音，刷新之后它又自己开了"。
+      soundQuake: boolOr(n.soundQuake, DEFAULT_CFG.notify.soundQuake),
+      soundTsunami: boolOr(n.soundTsunami, DEFAULT_CFG.notify.soundTsunami),
+      soundWeather: boolOr(n.soundWeather, DEFAULT_CFG.notify.soundWeather),
     },
     dedupe: {
       windowMinutes: numOr(de.windowMinutes, DEFAULT_CFG.dedupe.windowMinutes, 1, 1440),

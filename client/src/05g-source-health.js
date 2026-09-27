@@ -179,7 +179,7 @@ export function noteParseResult(sourceId, res, now, opts) {
   const kind = res.kind === 'value' ? 'value' : (res.kind === 'empty' ? 'empty' : 'schema')
   if (kind === 'empty') {
     r.counters.empty += 1
-    if (!(opts && opts.perItem)) clearData(sourceId, '数据格式已恢复正常', t)
+    if (!(opts && opts.perItem)) clearData(sourceId, 'schema recovered')
     return false
   }
   r.counters[kind] += 1
@@ -197,7 +197,7 @@ export function noteParseResult(sourceId, res, now, opts) {
   r.data = { errorKey: key, kind, detail: String(res.detail || ''), at: t, firstAt, count, escalated: !!escalated }
   if (escalated && !wasEscalated) {
     try {
-      console.warn('[dsh-quake-alert] ' + sourceId + ' 连续解析失败（' + kind + '，' + count + ' 条）：' + res.detail)
+      console.warn('[dsh-quake-alert] ' + sourceId + ' repeated parse failures (' + kind + ', ' + count + '): ' + res.detail)
     } catch (e) { /* 忽略 */ }
     persist()
     publishStatus(sourceId, { status: connBaseOf(sourceId), detail: kind + '：' + res.detail })
@@ -210,7 +210,7 @@ export function noteSourceSuccess(sourceId, now) {
   const t = now === undefined ? Date.now() : now
   const r = ensure(sourceId)
   r.counters.ok += 1
-  return clearData(sourceId, '数据格式已恢复正常', t)
+  return clearData(sourceId, 'schema recovered')
 }
 
 /**
@@ -228,7 +228,7 @@ export function pruneHealth(now) {
     r.consecutiveFail = 0
     healed += 1
     if (wasEscalated) {
-      publishStatus(id, { status: connBaseOf(id), detail: '数据格式异常已超过 24 小时没有复现，自动恢复' })
+      publishStatus(id, { status: connBaseOf(id), detail: 'schema error not seen for 24h · auto-recovered' })
     }
   }
   if (healed) persist()
@@ -288,7 +288,7 @@ export function sourceHealthOf(sourceId) {
 export function effectiveStatusOf(sourceId, connStatus, detail) {
   const r = health.get(sourceId)
   if (r && r.data && r.data.escalated) return { status: 'schema-error', detail: r.data.kind + '：' + r.data.detail }
-  if (r && r.fresh && r.fresh.stale) return { status: 'stale', detail: detail || '上游数据已过期' }
+  if (r && r.fresh && r.fresh.stale) return { status: 'stale', detail: detail || 'upstream data stale' }
   return { status: connStatus, detail }
 }
 
@@ -351,7 +351,7 @@ export function retrySource(sourceId, now) {
   r.data = null
   r.consecutiveFail = 0
   persist()
-  publishStatus(sourceId, { status: connBaseOf(sourceId), detail: '已手动重试，等待下一批数据' })
+  publishStatus(sourceId, { status: connBaseOf(sourceId), detail: 'manual retry · awaiting next batch' })
   return true
 }
 

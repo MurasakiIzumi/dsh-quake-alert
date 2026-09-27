@@ -12,6 +12,43 @@
 import { inflateRawSync } from 'node:zlib'
 
 /**
+ * 标准 CRC32（zip 用的多项式 0xEDB88320）。表按需构建一次。
+ *
+ * 0.9.4（P3-49）：此前这个读取器**从不校验 CRC**，只按 compSize 切片——下载被截断 / 中间层
+ * 注入坏字节时，坏数据会"成功地"进入 `lib/data/`（生成的区域表看起来正常，运行时才发现某些
+ * 区域归不到市町村）。zip 的中央目录里就带着 CRC 与解压后长度，校验它们几乎不要成本。
+ */
+let crcTable = null
+function crc32(buf) {
+  if (!crcTable) {
+    crcTable = new Int32Array(256)
+    for (let n = 0; n < 256; n++) {
+      let c = n
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1)
+      crcTable[n] = c
+    }
+  }
+  let crc = -1
+  for (let i = 0; i < buf.length; i++) crc = (crc >>> 8) ^ crcTable[(crc ^ buf[i]) & 0xff]
+  return (crc ^ -1) >>> 0
+}
+
+/** 解压后的内容与中央目录里的长度 / CRC 对不上就抛错（坏数据不许进 lib/data/）。 */
+function verify(e, data) {
+  if (typeof e.uncompSize === 'number' && e.uncompSize > 0 && data.length !== e.uncompSize) {
+    throw new Error('zip 条目长度不符（' + e.name + '：期望 ' + e.uncompSize + '，实得 ' + data.length + '）')
+  }
+  if (typeof e.crc32 === 'number' && e.crc32 !== 0) {
+    const got = crc32(data)
+    if (got !== (e.crc32 >>> 0)) {
+      throw new Error('zip 条目 CRC 不符（' + e.name + '：期望 ' + (e.crc32 >>> 0).toString(16) +
+        '，实得 ' + got.toString(16) + '）')
+    }
+  }
+  return data
+}
+
+/**
  * 解出 zip 内的所有条目。
  * @param {Buffer} buf zip 文件内容
  * @returns {{ name: string, data: Buffer }[]}
@@ -27,16 +64,18 @@ export function unzip(buf) {
     if (buf.readUInt32LE(p) !== 0x02014b50) throw new Error('zip 中央目录损坏（第 ' + i + ' 项）')
     const flags = buf.readUInt16LE(p + 8)
     const method = buf.readUInt16LE(p + 10)
+    const crc = buf.readUInt32LE(p + 16)
     const compSize = buf.readUInt32LE(p + 20)
+    const uncompSize = buf.readUInt32LE(p + 24)
     const nameLen = buf.readUInt16LE(p + 28)
     const extraLen = buf.readUInt16LE(p + 30)
     const commentLen = buf.readUInt16LE(p + 32)
     const localOffset = buf.readUInt32LE(p + 42)
     const name = buf.subarray(p + 46, p + 46 + nameLen).toString('utf8')
-    entries.push({ name, method, compSize, localOffset, utf8: (flags & 0x800) !== 0 })
+    entries.push({ name, method, crc32: crc, compSize, uncompSize, localOffset, utf8: (flags & 0x800) !== 0 })
     p += 46 + nameLen + extraLen + commentLen
   }
-  return entries.map((e) => ({ name: e.name, data: readEntry(buf, e) }))
+  return entries.map((e) => ({ name: e.name, data: verify(e, readEntry(buf, e)) }))
 }
 
 /** 从尾部向前找 End of Central Directory（注释最长 65535 字节，所以搜索窗口是 22+65535）。 */

@@ -37,10 +37,12 @@ import { cnStreamRegistry } from './12c-cn-stream.js'
  *  · 2 = 0.8.0（新增 `authority` 段 + `config.watch.places[].origin`）；0.8.1 把 `config.language`
  *    加在了 2 里没提号（review 时发现两种形状都自称 2，所以下面这条规则要真的执行）
  *  · 3 = 0.8.2（`config.watch.places[]` 再增 `province` / `city`）
+ *  · 4 = 0.9.2 新增 `delivery` 段（段是 0.9.2 加的，但号当时忘了提——0.9.4 补上，
+ *    并把"加段也要提号"写进规则：读快照的一方据此知道"这份快照有哪些键"，
+ *    缺键 = 来自更早的版本，而不是"这一项没配"）
  *
- *  **加字段就提号**（0.8.0 的先例）：读快照的一方据此知道"这份快照有哪些键"，
- *  缺键 = 来自更早的版本，而不是"这一项没配"。 */
-export const DIAG_SNAPSHOT_VERSION = 3
+ *  **加字段就提号**（0.8.0 的先例）。 */
+export const DIAG_SNAPSHOT_VERSION = 4
 
 const str = (v) => String(v === undefined || v === null ? '' : v)
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
@@ -121,13 +123,17 @@ function overseasRows() {
 }
 
 /** 大陆源（12c）：**链路模式是这里最要紧的一列**——降级意味着延迟从秒级变成最长 15 秒。 */
-function streamRows() {
+function streamRows(warnings) {
   const out = {}
+  // 0.9.4（P2-26）：这里（以及 mode / stringify 两处）此前把 `[]` 当 warnings 传进去 —— 而 safe()
+  // 是往里 push 的，于是"诊断片段自己抛错"这条信息被丢进一个没人看的空数组，与文件头
+  // "诊断工具在任何状态下都必须能产出东西、失败也要可见"直接冲突。改成把调用方的 warnings 传下去。
+  const warn = Array.isArray(warnings) ? warnings : []
   for (const id of Object.keys(cnStreamRegistry)) {
     const reg = cnStreamRegistry[id]
-    const s = safe(() => reg.stats(), {}, [], 'stream:' + id) || {}
+    const s = safe(() => reg.stats(), {}, warn, 'stream:' + id) || {}
     out[id] = {
-      mode: safe(() => reg.mode(), 'unknown', [], 'mode:' + id),
+      mode: safe(() => reg.mode(), 'unknown', warn, 'mode:' + id),
       connections: num(s.connections), syncs: num(s.syncs),
       received: num(s.received), applied: num(s.applied),
       errors: num(s.errors), sseErrors: num(s.sseErrors), probeTimeouts: num(s.probeTimeouts),
@@ -274,7 +280,7 @@ export function buildDiagSnapshot(now) {
     // 数据健康：schema-error 的**原因**在这里（蓝点的解释）
     dataHealth: safe(() => sourceHealthOf() || {}, {}, warnings, 'health'),
     feed: safe(feedRows, {}, warnings, 'feed'),
-    streams: safe(streamRows, {}, warnings, 'streams'),
+    streams: safe(() => streamRows(warnings), {}, warnings, 'streams'),
     // 海外源（0.6.0）：Client 直连的 REST 轮询。与 feed / streams 并列而不是塞进任一张表
     // ——它们的字段语义不同（见 overseasRows 的注释）。
     overseas: safe(overseasRows, {}, warnings, 'overseas'),
@@ -300,12 +306,20 @@ export function buildDiagSnapshot(now) {
  * @returns {Promise<{ ok: boolean, text: string, error?: string }>}
  */
 export async function copyDiagSnapshot(now) {
-  const text = safe(() => JSON.stringify(buildDiagSnapshot(now), null, 2), '{}', [], 'stringify')
+  // 0.9.4（P2-26）：stringify 失败时把原因**带回去**，而不是 `[]` 丢掉 + 返回 ok:true。
+  // 诊断工具自己失败却报"复制成功、内容是 {}"，是最难归因的一种形态。
+  const warnings = []
+  const text = safe(() => JSON.stringify(buildDiagSnapshot(now), null, 2), '{}', warnings, 'stringify')
   try {
     if (typeof navigator !== 'undefined' && navigator && navigator.clipboard &&
         typeof navigator.clipboard.writeText === 'function') {
       await navigator.clipboard.writeText(text)
-      return { ok: true, text }
+      // 快照生成时被兜住的异常要**跟着结果回给界面**（0.9.4 / P2-26）：复制确实成功了，
+      // 所以不能报 ok:false（那会被界面读成"剪贴板不可用"），但也绝不能只说"已复制"——
+      // 用户以为手里是一份完整诊断，而里面其实少了几个片段。
+      return warnings.length
+        ? { ok: true, text, warning: warnings.join('；') }
+        : { ok: true, text }
     }
   } catch (err) {
     return { ok: false, text, error: str((err && err.message) || err) }

@@ -52,7 +52,7 @@ function buildConfigExport(cfg, now) {
 
 /**
  * 解析并校验一份导入文本。**不做任何写入**（纯函数，便于直接断言各种坏输入）。
- * @returns {{ok:true,cfg:object,formatVersion:number}|{ok:false,error:string,detail?:string}}
+ * @returns {{ok:true,cfg:object,formatVersion:number,warnings:object}|{ok:false,error:string,detail?:string}}
  *   error 取值：`json`（不是 JSON）/ `shape`（不是本插件配置的结构）/
  *   `format`（其它应用的 JSON）/ `version`（版本号缺失或非法）/ `newer`（版本高于本版能读的）
  */
@@ -78,12 +78,16 @@ function parseConfigImport(text) {
   // 这种**转不成字符串**的对象）会在归一里抛。让它抛出去的话，UI 那条 `.then` 链上没人接得住
   // ——用户点「导入」之后界面毫无反应，而这是最难归因的一类失败（11.8 教训 4）。
   let cfg
+  // 关注点体检账本（0.9.4）：归一化会**静默**丢弃坐标非法的关注点，而"导入"这个动作上静默
+  // 等于数据丢失无反馈——用户看到"已导入配置。"，实际少了几个点，界面上看不出来。
+  // 这里把账本一起交出去，由界面如实说明（见 13-ui-settings 的 onImportCfg）。
+  const audit = { total: 0, dropped: 0, radiusFixed: 0 }
   try {
-    cfg = normalizeCfg(parsed.config)
+    cfg = normalizeCfg(parsed.config, audit)
   } catch (err) {
     return { ok: false, error: 'shape', detail: String((err && err.message) || err) }
   }
-  return { ok: true, cfg, formatVersion: v }
+  return { ok: true, cfg, formatVersion: v, warnings: audit }
 }
 
 /**
@@ -127,7 +131,7 @@ function importConfig(text, now) {
   // 另一份配置"是不可逆的破坏性操作。宁可这次导入失败并如实说明，也不要在没有退路的情况下替换。
   if (!backupAt) return { ok: false, error: 'backup-failed' }
   const next = applyCfg(parsed.cfg)
-  return { ok: true, cfg: next, backupAt }
+  return { ok: true, cfg: next, backupAt, warnings: parsed.warnings }
 }
 
 /**

@@ -9,6 +9,7 @@
 // ============================================================================
 
 import { TSUNAMI_RANK } from './01-constants.js'
+import { t } from './00-i18n.js'
 import { own, placeOriginOf } from './02-storage.js'
 import { lookupAddrCity, normKana } from './04-city-table.js'
 import { OVERSEAS_BROADCAST_MIN_RANK } from './05h-overseas-parsers.js'
@@ -88,13 +89,13 @@ function validGeo(geo) {
 function matchPointAlert(alert, cfg) {
   const places = (cfg.watch && cfg.watch.places) || []
   if (places.length === 0) {
-    return { hit: false, reason: '未设置全球关注点（设置 → 灾害预警 → 关注地区 → 其他国家 / 地区）' }
+    return { hit: false, reason: t('reason.noGlobalWatch') }
   }
   // 多区域电文（CAP 允许一个 info 下多个 <area><circle>）：任一圆心落在半径内即算命中。
   // 只看第一个 circle 会让其余海域的沿海用户漏报——多区域海啸恰恰是最常见形态。
   const pts = (Array.isArray(alert.geoList) && alert.geoList.length ? alert.geoList : [alert.geo]).filter(validGeo)
   if (pts.length === 0) {
-    return { hit: false, reason: '本条消息未携带可用坐标，无法判定震中距' }
+    return { hit: false, cannotJudge: true, reason: t('reason.noCoordinates') }
   }
   // 海啸的**等级闸门**同样适用于全球源（0.4.1）。NOAA CAP 的 <event> 决定等级
   // （Warning=3 / Advisory・Watch=2 / Information=0，见 05c 的 NOAA_EVENT_RULES），
@@ -107,7 +108,7 @@ function matchPointAlert(alert, cfg) {
       : (typeof alert.maxScale === 'number' ? alert.maxScale : 0)
     const minRank = own(TSUNAMI_RANK, (cfg.thresholds || {}).tsunamiGrade) || 1
     if (rank < minRank) {
-      return { hit: false, reason: '海啸等级未达阈值（本条 ' + rank + ' < ' + minRank + '）' }
+      return { hit: false, reason: t('reason.tsunamiBelowGrade', { rank: rank, min: minRank }) }
     }
   }
   // 震级门槛分两把（0.5.0）：坐标型**预警**（EMSC / USGS / cenc_eew）用 globalMagnitude，
@@ -115,7 +116,7 @@ function matchPointAlert(alert, cfg) {
   // M2.5 且每天都有数据，用预警门槛播报会被小震频繁打扰（DESIGN 8.4）。
   const th = cfg.thresholds || {}
   const minMag = alert.speedReport ? th.cnReportMagnitude : th.globalMagnitude
-  const magName = alert.speedReport ? '速报震级阈值' : '全球震级阈值'
+  const magName = alert.speedReport ? t('reason.magThresholdReport') : t('reason.magThresholdGlobal')
   const mag = typeof alert.magnitude === 'number' && Number.isFinite(alert.magnitude) ? alert.magnitude : null
   // 震级阈值只作用于地震。海啸的严重性由它自己的等级决定（上面的闸门），
   // 不该被"引发它的那次地震有多大"过滤掉：NOAA 电文里那个前震震级只是参考值，而且用同一个
@@ -123,7 +124,7 @@ function matchPointAlert(alert, cfg) {
   // 而海啸恰恰是这里最不能漏的一类。
   const quakeLike = alert.kind === 'quake' || alert.kind === 'eew'
   if (quakeLike && mag !== null && typeof minMag === 'number' && mag < minMag) {
-    return { hit: false, reason: 'M' + mag + ' 低于' + magName + ' M' + minMag }
+    return { hit: false, reason: t('reason.magBelow', { mag: mag, name: magName, min: minMag }) }
   }
   let nearest = null
   for (const g of pts) {
@@ -133,8 +134,7 @@ function matchPointAlert(alert, cfg) {
       if (d <= p.radiusKm) {
         return {
           hit: true,
-          reason: (mag === null ? '' : 'M' + mag + ' · ') + '距 ' + p.name + ' 约 ' + Math.round(d) +
-            ' km（半径 ' + p.radiusKm + ' km）',
+          reason: t('reason.pointHit', { mag: (mag === null ? '' : t('reason.magOnly', { mag: mag }) + ' · '), place: p.name, km: Math.round(d), radius: p.radiusKm }),
           place: p,
           distanceKm: d,
         }
@@ -143,8 +143,7 @@ function matchPointAlert(alert, cfg) {
   }
   return {
     hit: false,
-    reason: '震中距最近的关注点（' + nearest.p.name + '）约 ' + Math.round(nearest.d) +
-      ' km，超过设定半径 ' + nearest.p.radiusKm + ' km',
+    reason: t('reason.nearestWatch', { place: nearest.p.name, km: Math.round(nearest.d), radius: nearest.p.radiusKm }),
   }
 }
 
@@ -154,9 +153,9 @@ function missReason(alert, watch, base) {  const list = watch && watch.prefectur
   let reason = base
   if (list && list.length > 0) {
     const unknown = alert.regions.filter((r) => !r.pref).length
-    if (unknown > 0) reason = base + '（另有 ' + unknown + ' 个区域名未能识别归属县）'
+    if (unknown > 0) reason = t('reason.missUnknownAreas', { base: base, n: unknown })
   }
-  if (cities.length > 0) reason += '（已按所选 ' + cities.length + ' 个市区町村收窄）'
+  if (cities.length > 0) reason += t('reason.missNarrowedByCities', { n: cities.length })
   return reason
 }
 
@@ -179,7 +178,7 @@ function cnPlaceParts(name) {
 const trimmed = (v) => (typeof v === 'string' ? v.trim() : '')
 
 // 「一个大陆关注点都没配」的说明。noWatch 与普通未命中的区别见 11-pipeline：前者不进历史。
-const NO_CN_WATCH_REASON = '未设置中国大陆关注点（设置 → 灾害预警 → 关注地区 → 中国大陆 → 选省与城市）'
+const NO_CN_WATCH_REASON = t('reason.noCnWatch')
 
 /**
  * 从关注点列表里挑出**大陆关注点**，并给出每条的省 / 市（0.8.2 / DESIGN 11.9 B）。
@@ -214,7 +213,8 @@ function cnWatchPlaces(places) {
 
 /** 等级中文（与 05f 的 NMC_LEVEL_TEXT 同源；这里只需要拼 reason，不复制映射表会更好，
  *  但 06 不该依赖解析层——所以就地写一份最小的，并靠回归断言钉住两边一致。 */
-const NMC_LEVEL_ZH = { red: '红色', orange: '橙色', yellow: '黄色', blue: '蓝色' }
+// 等级词与灾种名是**我们给起的**（不是电文原文）→ 按界面语言取词（0.9.4）
+const NMC_LEVEL_KEY = { red: 'kind.cnLevelRed', orange: 'kind.cnLevelOrange', yellow: 'kind.cnLevelYellow', blue: 'kind.cnLevelBlue' }
 
 /**
  * 大陆气象预警的匹配。规则按优先级排，每一条都对应一个"用户会问为什么"的场景：
@@ -232,13 +232,15 @@ const NMC_LEVEL_ZH = { red: '红色', orange: '橙色', yellow: '黄色', blue: 
 function matchCnAreaAlert(alert, cfg) {
   const d = cfg.disasters || {}
   if (alert.cnKind === 'geology') {
-    if (d.cnGeology === false) return { hit: false, reason: '大陆地质灾害提醒已关闭' }
+    if (d.cnGeology === false) return { hit: false, reason: t('reason.cnGeologyOff') }
   } else if (d.cnRainstorm === false) {
-    return { hit: false, reason: '大陆暴雨提醒已关闭' }
+    return { hit: false, reason: t('reason.cnRainstormOff') }
   }
-  if (alert.cancelled) return { hit: false, reason: '解除消息不提醒' }
-  const levelZh = NMC_LEVEL_ZH[alert.cnLevel] || String(alert.cnLevel || '')
-  const what = (alert.cnKind === 'geology' ? '地质灾害' : '暴雨') + levelZh + '预警'
+  if (alert.cancelled) return { hit: false, reason: t('reason.clearedMuted') }
+  // 等级词与灾种名都是**我们给起的**（不是电文原文）→ 按界面语言取词（0.9.4，见 00g-texts-events）
+  const levelWord = t(NMC_LEVEL_KEY[alert.cnLevel] || 'kind.cnLevelUnknown')
+  const kindWord = t(alert.cnKind === 'geology' ? 'kind.cnGeology' : 'kind.cnRainstorm')
+  const what = t('kind.cnWhat', { kind: kindWord, level: levelWord })
   const places = (cfg.watch && cfg.watch.places) || []
   const cnPlaces = cnWatchPlaces(places)
   if (cnPlaces.length === 0) {
@@ -250,7 +252,7 @@ function matchCnAreaAlert(alert, cfg) {
   }
   const rank = typeof alert.cnRank === 'number' ? alert.cnRank : 0
   if (rank < 3) {
-    return { hit: false, reason: what + '（未达橙色，仅记录）' }
+    return { hit: false, reason: t('reason.cnLandslideOnlyRecorded', { what: what }) }
   }
   const area = alert.cnArea || {}
   const province = String(area.province || '')
@@ -258,11 +260,11 @@ function matchCnAreaAlert(alert, cfg) {
   if (city) {
     const hit = cnPlaces.find((p) => p.province === province && p.city === city)
     if (hit) {
-      return { hit: true, reason: what + ' · 命中关注点 ' + hit.province + '·' + hit.city, place: hit.place }
+      return { hit: true, reason: t('reason.cnHit', { what: what, province: hit.province, city: hit.city }), place: hit.place }
     }
     return {
       hit: false,
-      reason: what + '（' + province + '·' + city + '）不在关注列表里',
+      reason: t('reason.cnNotWatched', { what: what, province: province, city: city }),
     }
   }
   // 市级归属未知：省内有任何一个关注点就放行，并在 reason 里如实说明只定位到省。
@@ -274,11 +276,13 @@ function matchCnAreaAlert(alert, cfg) {
   if (sameProv.length > 0) {
     return {
       hit: true,
-      reason: what + ' · ' + (province ? '仅能定位到 ' + province + '（' + (area.org || '发布机构未给出市级）') + '）' : '未能定位到省份，按全国放行'),
+      reason: province
+      ? t('reason.cnProvinceOnly', { what: what, province: province, org: (area.org || t('reason.cnOrgPlaceholder')) })
+      : t('reason.cnNoProvince', { what: what }),
       place: sameProv[0].place,
     }
   }
-  return { hit: false, reason: what + ' · 归属未识别（' + (area.org || '机构名未知') + '）' }
+  return { hit: false, reason: t('reason.cnOrgUnknown', { what: what, org: (area.org || t('reason.cnOrgNameUnknown')) }) }
 }
 
 /**
@@ -296,77 +300,78 @@ function matchCnAreaAlert(alert, cfg) {
  */
 function matchOverseasAlert(alert, cfg) {
   const d = cfg.disasters || {}
-  if (d.overseasWeather === false) return { hit: false, reason: '海外气象提醒已关闭' }
+  if (d.overseasWeather === false) return { hit: false, reason: t('reason.overseasWeatherOff') }
   // **防御性守卫，不是本函数的正常输入路径**（0.6.1 review 订正注释）：取消 / 解除消息由
   // 11-pipeline 的 handleAlert 在 matchAlert **之前**就交给 handleCancelled 了，所以线上
   // 走到这里的一定不是 cancelled。保留它是为了守住 matchAlert 的对外不变量——"cancelled 的
   // 消息永远不返回 hit"，避免将来多一条调用路径时把一条"已作废"当成新警报播出去。
-  if (alert.cancelled) return { hit: false, reason: '取消消息不提醒' }
+  if (alert.cancelled) return { hit: false, reason: t('reason.cancelledMuted') }
   const places = (cfg.watch && cfg.watch.places) || []
   if (places.length === 0) {
     return {
       hit: false,
       noWatch: true,
-      reason: '未设置海外关注点（设置 → 灾害预警 → 关注地区 → 其他国家 / 地区）',
+      reason: t('reason.noOverseasWatch'),
     }
   }
   const origin = alert.originPlace
-  if (!origin) return { hit: false, reason: '这条海外预警未携带来源关注点，无法判定' }
+  if (!origin) return { hit: false, cannotJudge: true, reason: t('reason.overseasNoOrigin') }
   // 关注点还在不在：按"名字 + 坐标"比对（用户只改半径时仍是同一个点，命中判定不变）。
   const still = places.some((p) => p && p.name === origin.name && p.lat === origin.lat && p.lon === origin.lon)
   if (!still) {
-    return { hit: false, reason: '来源关注点「' + (origin.name || '未命名') + '」已不在关注列表里' }
+    return { hit: false, reason: t('reason.overseasOriginGone', { place: (origin.name || t('reason.placeUnnamed')) }) }
   }
   const rank = typeof alert.overseasRank === 'number' ? alert.overseasRank : 0
   if (rank < OVERSEAS_BROADCAST_MIN_RANK) {
     return {
       hit: false,
-      reason: (alert.headline || '海外气象预警') + '（未达播报档位，仅记录）',
+      reason: t('reason.overseasBelowLevel', { headline: (alert.headline || t('reason.overseasHeadlineFallback')) }),
     }
   }
   return {
     hit: true,
-    reason: '命中关注点「' + (origin.name || '未命名') + '」· ' + (alert.headline || ''),
+    reason: t('reason.overseasHit', { place: (origin.name || t('reason.placeUnnamed')), headline: (alert.headline || '') }),
     place: origin,
   }
 }
 
 function matchAlert(alert, cfg) {
   const w = cfg.watch || {}
-  const t = cfg.thresholds || {}
+  // 局部变量**不能叫 	**：那是 00-i18n 的取词函数，遮蔽之后本函数里的 t('reason…') 会变成
+  // 调用配置对象（TypeError）。0.9.4 引入本地化时踩到过，check-imports 现在会拦这种遮蔽。
+  const th = cfg.thresholds || {}
   // 这条消息里是否存在**能归到县**的区域：决定"归不到县的区域"要不要放行（见 regionInWatch）
   const anyPref = (alert.regions || []).some((r) => !!r.pref)
   if (alert.kind === 'eew' || alert.kind === 'quake') {
-    if ((cfg.disasters || {}).earthquake === false) return { hit: false, reason: '地震提醒已关闭' }
-    if (alert.cancelled) return { hit: false, reason: '取消消息不提醒' }
+    if ((cfg.disasters || {}).earthquake === false) return { hit: false, reason: t('reason.quakeOff') }
+    if (alert.cancelled) return { hit: false, reason: t('reason.cancelledMuted') }
     // 全球源（EMSC / USGS）只有震中坐标、没有行政区区域 → 走坐标匹配
     if (alert.locator === 'point') return matchPointAlert(alert, cfg)
     // 551 的「震源情报 / 远地地震」没有 points，无从按震度判定——明确说明，避免用户误以为链路故障
     if (alert.regions.length === 0) {
       return {
         hit: false,
-        reason: alert.kind === 'eew'
-          ? '本条 EEW 未携带区域数据，无法按阈值判定'
-          : '本条为震源情报，无震度数据，无法按阈值判定',
+        cannotJudge: true,
+        reason: alert.kind === 'eew' ? t('reason.eewNoAreaData') : t('reason.hypocenterOnly'),
       }
     }
-    const threshold = alert.kind === 'eew' ? t.eewScale : t.quakeScale
+    const threshold = alert.kind === 'eew' ? th.eewScale : th.quakeScale
     const hitRegion = alert.regions.find((r) => regionInWatch(r, w, alert.kind === 'quake', anyPref) && typeof r.scale === 'number' && r.scale >= threshold)
     return hitRegion
-      ? { hit: true, reason: alert.kind === 'eew' ? 'EEW 预测震度达标' : '观测震度达标', region: hitRegion }
-      : { hit: false, reason: missReason(alert, w, '关注地区未命中或强度低于阈值') }
+      ? { hit: true, reason: alert.kind === 'eew' ? t('reason.hitEewScale') : t('reason.hitObservedScale'), region: hitRegion }
+      : { hit: false, reason: missReason(alert, w, t('reason.quakeMissed')) }
   }
   if (alert.kind === 'tsunami') {
-    if ((cfg.disasters || {}).tsunami === false) return { hit: false, reason: '海啸提醒已关闭' }
-    if (alert.cancelled) return { hit: false, reason: '解除消息不提醒' }
+    if ((cfg.disasters || {}).tsunami === false) return { hit: false, reason: t('reason.tsunamiOff') }
+    if (alert.cancelled) return { hit: false, reason: t('reason.clearedMuted') }
     // NOAA CAP 的海啸同样是坐标型（CAP 里给的是 circle / polygon，不是日本的津波予報区）
     if (alert.locator === 'point') return matchPointAlert(alert, cfg)
-    if (alert.regions.length === 0) return { hit: false, reason: '本条没有海啸预报区数据' }
-    const minRank = own(TSUNAMI_RANK, t.tsunamiGrade) || 1
+    if (alert.regions.length === 0) return { hit: false, cannotJudge: true, reason: t('reason.noTsunamiAreas') }
+    const minRank = own(TSUNAMI_RANK, th.tsunamiGrade) || 1
     const hitRegion = alert.regions.find((r) => regionInWatch(r, w, false, anyPref) && (own(TSUNAMI_RANK, r.grade) || 0) >= minRank)
     return hitRegion
-      ? { hit: true, reason: '海啸等级达标', region: hitRegion }
-      : { hit: false, reason: missReason(alert, w, '关注地区未命中或等级低于阈值') }
+      ? { hit: true, reason: t('reason.hitTsunamiGrade'), region: hitRegion }
+      : { hit: false, reason: missReason(alert, w, t('reason.tsunamiMissed')) }
   }
   if (alert.kind === 'weather') {
     // 海外气象源（0.6.0）走**查询即匹配**：取数器是按关注点查的（NWS 按点、ECCC 按 bbox），
@@ -376,9 +381,9 @@ function matchAlert(alert, cfg) {
     // 规则：那边的粒度是市町村、兜底是"区域级条目放行"；这边的粒度是地级市、兜底是"省级放行"，
     // 而且多一道**等级门槛**（DESIGN 8.4：橙色及以上才播报）。
     if (alert.locator === 'area') return matchCnAreaAlert(alert, cfg)
-    if ((cfg.disasters || {}).weather === false) return { hit: false, reason: '气象灾害提醒已关闭' }
-    if (alert.cancelled) return { hit: false, reason: '解除消息不提醒' }
-    if (alert.regions.length === 0) return { hit: false, reason: '本条电文未携带可判定的区域' }
+    if ((cfg.disasters || {}).weather === false) return { hit: false, reason: t('reason.weatherOff') }
+    if (alert.cancelled) return { hit: false, reason: t('reason.clearedMuted') }
+    if (alert.regions.length === 0) return { hit: false, cannotJudge: true, reason: t('reason.jmaNoUsableArea') }
     // 播报边界写死在 L4：L1〜L3 仍然解析、仍然进历史（灰色条目），只是不打扰。
     // 依据见 DESIGN 10.3——L3 是「高齢者等避難」，与 DSH 用户群不匹配；L4 才是避难指示级。
     //
@@ -393,17 +398,17 @@ function matchAlert(alert, cfg) {
       return {
         hit: false,
         reason: missReason(alert, w, anyL4
-          ? '关注地区未命中，或命中地区未达 L4'
-          : '警戒レベル' + (alert.level || '—') + '（未达 L4，仅记录）'),
+          ? t('reason.weatherMissedL4')
+          : t('reason.weatherBelowL4', { level: (alert.level || '—') })),
       }
     }
     return {
       hit: true,
-      reason: '警戒レベル' + lvOf(hitRegion) + '（' + (hitRegion.city || hitRegion.area) + '）',
+      reason: t('reason.hitLevel', { level: lvOf(hitRegion), area: (hitRegion.city || hitRegion.area) }),
       region: hitRegion,
     }
   }
-  return { hit: false, reason: '不支持的 code' }
+  return { hit: false, cannotJudge: true, reason: t('reason.unsupportedCode') }
 }
 
 

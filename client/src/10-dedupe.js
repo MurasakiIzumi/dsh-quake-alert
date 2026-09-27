@@ -10,9 +10,11 @@
 // ============================================================================
 
 import { validGeo, distanceKm } from './06-matcher.js'
-import { HISTORY_KEY } from './01-constants.js'
-import { saveJSON, own } from './02-storage.js'
+import { t } from './00-i18n.js'
+import { HISTORY_KEY, ALERTED_KEY } from './01-constants.js'
+import { saveJSON, loadJSON, own } from './02-storage.js'
 import { store } from './07-store.js'
+import { sourceLabelOf } from './00f-source-labels.js'
 
 // ---------- 去重 ----------
 // 三层：① 消息 id（防重连重放）② 事件键（同一地震的多次发布）③ 跨标签页（多开 DSH 页面）
@@ -20,17 +22,30 @@ import { store } from './07-store.js'
 // 时钟回拨（NTP 校正 / 用户改时间 / 休眠唤醒后的时钟修正）的处理：把记录时间**夹到 now**，
 // 而不是删除。删掉等于一次性清空三层去重记忆——本该被窗口抑制的重复消息会重新播报，
 // alertedEvents 清空还会让随后的解除找不到"此前提醒过的事件"（少一条有用的解除提示）。
-const seen = new Map() // id -> ts
+const seen = new Map() // id -> { ts, win }
 function isDuplicate(id, windowMinutes) {
   if (!id) return false
   const now = Date.now()
   const win = Math.max(1, windowMinutes || 10) * 60 * 1000
   for (const [k, v] of seen) {
-    if (v > now) { seen.set(k, now); continue }
-    if (now - v > win) seen.delete(k)
+    // 0.9.4（P3-39）：清理要用**这条记录自己的窗口**，而不是本次调用的窗口——本次的窗口可能
+    // 属于另一个源 / 另一段设置，用它清掉别人的记录，本该被抑制的重复就会重走一遍主链
+    //（isEventRepeat 在 0.5.4 修过同一形态，这里一直留着旧写法）。
+    const ts = typeof v === 'object' && v !== null ? v.ts : v
+    const own = (typeof v === 'object' && v !== null && typeof v.win === 'number') ? v.win : win
+    if (ts > now) { seen.set(k, { ts: now, win: own }); continue }
+    if (now - ts > own) seen.delete(k)
   }
-  if (seen.has(id)) return true
-  seen.set(id, now)
+  const prev = seen.get(id)
+  if (prev) {
+    // 0.9.4（P2-20）：命中即**刷新**时间戳。固定窗口意味着同一条被持续投递的预警每过一个窗口
+    // 就被当成"新消息"重走整条主链（parse / match / 写历史 + 一次 localStorage 同步写），
+    // 而它从头到尾都是同一条——窗口的语义应当是"这段时间内见过就算重复"，不是"首次见到起算"。
+    const own = typeof prev.win === 'number' ? prev.win : win
+    seen.set(id, { ts: now, win: own })
+    return true
+  }
+  seen.set(id, { ts: now, win })
   return false
 }
 // 同一次地震会连发「震度速报 → 震源情报 → 各地震度」或 EEW 多报（serial 递增）。
@@ -42,10 +57,13 @@ function isDuplicate(id, windowMinutes) {
 // 所以键未命中时再按「±2 分钟 + 50km」找一次。
 const GEO_NEAR_MS = 2 * 60 * 1000
 const GEO_NEAR_KM = 50
-const eventSeen = new Map() // eventKey -> { ts, strength, at, geo }
+/** 强度是否可用于比较（0.9.4 / P3-40）：只有有限数值才算数，见 isEventRepeat 里的说明。 */
+const isFiniteStrength = (v) => typeof v === 'number' && Number.isFinite(v)
+const eventSeen = new Map() // eventKey -> { ts, strength, at, geo, source, win, kind, test }
 function issuedMsOf(alert) {
-  const t = Date.parse(String((alert && alert.issued) || ''))
-  return Number.isFinite(t) ? t : null
+  // 局部变量不叫 `t`（那是 00-i18n 的取词函数）
+  const ms = Date.parse(String((alert && alert.issued) || ''))
+  return Number.isFinite(ms) ? ms : null
 }
 /**
  * 找"这一条可能对应的先前事件记录"。
@@ -76,6 +94,15 @@ function findPrevEvent(alert, allowSameSource) {
   for (const v of eventSeen.values()) {
     if (!v.geo || typeof v.at !== 'number') continue
     if (!allowSameSource && source && v.source && v.source === source) continue
+    // 0.9.4：候选也要过滤。此前只过滤"来者"（上面那行与 crossSourceCopyOf 里各一次），
+    // 于是两类**不可见的漏报**：
+    //   ① 一条 NOAA 海啸警报只要落在"此前 2 分钟内播报过的另一机构地震"震中 50km 内，
+    //      就被判成同一事件的副本而完全静默（跨源不比 strength，没有任何"升级"能救回来）；
+    //   ② 用户点过一次"发送测试全球警报"（震中 = 首个关注点、source = emsc）后，2 分钟内
+    //      同坐标附近的真实地震也会被压掉。
+    // 灾种不同、或对方是演示消息，就不该算"同一事件的副本"。
+    if (v.test) continue
+    if (v.kind && alert.kind && v.kind !== alert.kind) continue
     if (Math.abs(v.at - at) <= GEO_NEAR_MS && distanceKm(alert.geo.lat, alert.geo.lon, v.geo.lat, v.geo.lon) <= GEO_NEAR_KM) {
       return v
     }
@@ -101,10 +128,25 @@ function isEventRepeat(alert, windowMinutes, nowMs) {
     if (now - v.ts > own) eventSeen.delete(k)
   }
   const prev = findPrevEvent(alert, false)
-  if (prev && alert.strength <= prev.strength) return true
+  // 0.9.4（P3-40）：强度必须是**有限数值**才参与比较，判据写显式。缺失时 `undefined <= x`
+  // 恒为 false，于是这条消息永远不被判重复——当前六个解析器都在赋值，所以它此前只是"回归风险"
+  // （新加解析器忘了赋 strength 就会变成重复响铃）。方向仍然与全项目一致：
+  // 说不清是不是升级 → 放行（宁可多响一次，也不因为缺字段把升级静默掉）。
+  if (prev && isFiniteStrength(alert.strength) && alert.strength <= prev.strength) return true
   const at = issuedMsOf(alert)
   const geo = validGeo(alert.geo) ? { lat: alert.geo.lat, lon: alert.geo.lon } : null
-  eventSeen.set(alert.eventKey, { ts: now, strength: alert.strength, at, geo, source: sourceIdOf(alert), win })
+  // kind / test 一并存下来：findPrevEvent 的**近似**那一级要靠它们过滤候选（0.9.4），
+  // 而在此之前记录里根本没有 kind 字段，所以那种过滤想写也写不出来。
+  eventSeen.set(alert.eventKey, {
+    ts: now,
+    strength: alert.strength,
+    at,
+    geo,
+    source: sourceIdOf(alert),
+    win,
+    kind: String(alert.kind || ''),
+    test: String(alert.eventKey || '').indexOf('test:') === 0,
+  })
   return false
 }
 
@@ -164,15 +206,15 @@ const agencyOf = (id) => {
 }
 /** 参与跨源归并的灾种（理由见 crossSourceCopyOf）：只有地震类有"多个源报同一件事"的形态。 */
 const CROSS_SOURCE_KINDS = { quake: true, eew: true, tsunami: true }
-const SOURCE_ZH = {
-  p2pquake: 'P2PQuake（日本）', cenc_eew: '大陆地震预警', cenc_eqlist: '大陆地震速报',
-  usgs: 'USGS', emsc: 'EMSC', noaa: 'NOAA',
-}
+// 源显示名**不再自建一份中文表**（0.9.4）：00f 的 settings.sourceLabels.* 已经是那份唯一的映射，
+// 而且是四语的（这里此前是写死的中文，诊断说明在英文界面下会冒出「大陆地震速报」）。
+// 认不出的源退回 id 本身（至少能看出是哪个源，而不是空白）。
+const sourceNameOf = (id) => sourceLabelOf(id) || String(id || t('reason.sourceUnknown'))
 const rankOfSource = (id) => {
   const v = own(SOURCE_RANK, String(id === undefined || id === null ? '' : id))
   return typeof v === 'number' ? v : 9
 }
-const sourceZhOf = (id) => own(SOURCE_ZH, String(id === undefined || id === null ? '' : id)) || String(id || '未知源')
+const sourceZhOf = (id) => sourceNameOf(id)
 
 /**
  * 这条是不是**同一事件在另一个源上的副本**？
@@ -225,7 +267,7 @@ function noteAuthoritySuppressed(info, alert) {
   const k = String(info.source || '')
   authorityStats.bySource[k] = (authorityStats.bySource[k] || 0) + 1
   authorityStats.lastAt = Date.now()
-  authorityStats.lastDetail = sourceZhOf(info.source) + ' 已播报同一事件，本条（' + sourceZhOf(info.mine) + '）按权威源规则只计数、不进历史'
+  authorityStats.lastDetail = t('reason.authoritySuppressed', { source: sourceZhOf(info.source), mine: sourceZhOf(info.mine) })
   return authorityStats.lastDetail
 }
 function authorityStatsOf() {
@@ -292,8 +334,52 @@ function forgetEvent(eventKey) {
 // 已实际提醒过的事件（eventKey → ts）。
 // 取消 / 解除消息只在「此前确实提醒过同一事件」时才补一条：既避免「没收到警报却收到取消」的困惑，
 // 也让用户知道已经发出的警报作废（EEW 取消 / 海啸解除本身是有用信息，不该静默）。
+//
+// 0.9.4（C4）**这份记忆与"事件级去重的窗口"是两件事，别把它们当成同一个数字**：
+//   · 这里的 24 小时回答"这条**取消 / 解除**是否对应我刚提醒过的事件"——解除必然晚于发布
+//     （实测 2026-09-07 東京都「大雨特別警報」13:57 发布、19:01 解除，相隔 5 小时），
+//     所以窗口必须按"一条气象事件可能持续多久"来取。
+//   · `WEATHER_EVENT_WINDOW_MINUTES`（11-pipeline 里的 180 分钟）回答的是另一件事：
+//     "同一官署 + 同一灾种的后续电文要不要再响一次"。
+// 此前一份审查报告把两者混为一谈（说"实测 24 小时而文档写 3 小时"），结论是文档与实现不符——
+// 实际两处代码都与各自的注释一致，缺的是**把这两个窗口的分工写清楚**。
 const ALERTED_MAX_MS = 1440 * 60 * 1000
 const alertedEvents = new Map()
+/**
+ * 落盘（0.9.4 / C6）：把"真正播报过的事件"写进 localStorage，刷新 / 重开标签页后仍然有效。
+ *
+ * 为什么必须持久化：Host 重启后会按冷启动回看窗口（USGS 6 小时 / NOAA 24 小时）重新投递缓冲里的
+ * 事件，而消息级去重只有 10 分钟、事件级只有 3 小时——页面一刷新，这份 24 小时记忆就没了，
+ * 同一场地震会被再报一次。它同时也是"解除能找到此前提醒过的事件"的依据。
+ *
+ * 写法上：**先清理再落盘**（同内存里的清理规则），并且只写有限数值、只在真的变了时写
+ * （`alertedEvents` 的写入频率与播报次数同阶，一天几条，不存在写盘压力）。
+ */
+function persistAlerted() {
+  const now = Date.now()
+  const out = {}
+  for (const [k, v] of alertedEvents) {
+    if (typeof v !== 'number' || !Number.isFinite(v)) continue
+    if (v > now) { alertedEvents.set(k, now); out[k] = now; continue }
+    if (now - v > ALERTED_MAX_MS) { alertedEvents.delete(k); continue }
+    out[k] = v
+  }
+  saveJSON(ALERTED_KEY, out)
+}
+/** 启动时读回（0.9.4 / C6）。认不出的形状一律当"没有记忆"，过期条目直接丢掉。 */
+function loadAlerted() {
+  const raw = loadJSON(ALERTED_KEY, null)
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return
+  const now = Date.now()
+  for (const k of Object.keys(raw)) {
+    const v = raw[k]
+    if (typeof v !== 'number' || !Number.isFinite(v)) continue
+    const ts = v > now ? now : v
+    if (now - ts > ALERTED_MAX_MS) continue
+    alertedEvents.set(k, ts)
+  }
+}
+loadAlerted()
 /**
  * 取消 / 解除的匹配键。
  *
@@ -311,6 +397,19 @@ function rememberAlerted(alert) {
     if (now - v > ALERTED_MAX_MS) alertedEvents.delete(k)
   }
   alertedEvents.set(key, now)
+  persistAlerted()
+}
+/**
+ * 忘掉"此前提醒过"的某个事件（0.9.4 / C6：删除也要落盘）。
+ *
+ * 取消 / 解除链路在播报后会删掉这条记忆（同一条取消只提醒一次）。只在新增时落盘的话，
+ * 这次删除不会写进 localStorage——刷新之后那条已被取消的事件又变成"提醒过"，
+ * 随后再来一条同键的解除就会重复提示。
+ */
+function forgetAlerted(alert) {
+  const key = cancelKeyOf(alert)
+  if (!key) return
+  if (alertedEvents.delete(key)) persistAlerted()
 }
 /**
  * 取消 / 解除消息是否有"此前确实提醒过的同一事件"。
@@ -392,4 +491,4 @@ function closeAlertChannel() {
   try { if (alertChannel) { alertChannel.close(); alertChannel = null } } catch (err) { /* 忽略 */ }
 }
 
-export { isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, ensureAlertChannel, closeAlertChannel, claimAlertForTab, broadcastHistoryCleared, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, sourceIdOf, crossSourceCopyOf, noteAuthoritySuppressed, authorityStatsOf, SOURCE_RANK, SOURCE_ZH, SOURCE_AGENCY, agencyOf, CROSS_SOURCE_KINDS, rankOfSource, sourceZhOf, alertedEvents }
+export { isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, ensureAlertChannel, closeAlertChannel, claimAlertForTab, broadcastHistoryCleared, cancelKeyOf, rememberAlerted, forgetAlerted, wasRecentlyAlerted, sourceIdOf, crossSourceCopyOf, noteAuthoritySuppressed, authorityStatsOf, SOURCE_RANK, sourceNameOf, SOURCE_AGENCY, agencyOf, CROSS_SOURCE_KINDS, rankOfSource, sourceZhOf, alertedEvents }

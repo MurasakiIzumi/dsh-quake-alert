@@ -119,6 +119,22 @@ function soundKindOf(alert) {
 function playAlertSound(alert, volume) {
   playSound(soundKindOf(alert), volume)
 }
+/**
+ * 这条提醒该不该**发声**（0.9.4 / C1：分灾害音效开关）。
+ *
+ * `notify.sound` 是总开关；三个分开关按**灾种类别**细分：地震（含 EEW）、海啸、气象。
+ * 抽成纯函数是为了能被直接断言——沙箱里没有 AudioContext，"到底响没响"只能靠这个判据钉住。
+ * 认不出的 kind（测试音等）不受分开关影响，只看总开关。
+ */
+function soundAllowedFor(cfg, alert) {
+  const n = (cfg && cfg.notify) || {}
+  if (n.sound === false) return false
+  const k = soundKindOf(alert)
+  if (k === 'eew' || k === 'quake') return n.soundQuake !== false
+  if (k === 'tsunami') return n.soundTsunami !== false
+  if (k === 'weather') return n.soundWeather !== false
+  return true
+}
 
 
-export { ensureAudio, unlockAudio, audioState, playSound, playAlertSound, soundKindOf, SOUNDS }
+export { ensureAudio, unlockAudio, audioState, playSound, playAlertSound, soundKindOf, soundAllowedFor, SOUNDS }

@@ -46,7 +46,18 @@ function loadClientEx(seedStorage, opts) {
     // 0.6.2：写成 `'AbortController' in o ? …` 而不是 `o.AbortController || …`——
     // 后者无法表达"注入 undefined"（`undefined || AbortController` 仍是真实实现），
     // 于是 12e 里"没有 AbortController 时用 Promise.race 兜超时"那条分支**不可测**。
+    // 0.9.4：把 `fetch` 注入沙箱 —— 12e 的默认取数走**裸 fetch**（不是 window.fetch），
+    // 所以"默认路径"此前在测试里根本执行不到（C12⑦ 的流式读取就测不了）。
+    fetch: ('fetch' in o) ? o.fetch : (typeof fetch === 'function' ? fetch : undefined),
+    // TextDecoder / TextEncoder 也是浏览器标准全局（读流要用），沙箱此前没有：
+    // 于是"按流读取"那段只能退化成 String(chunk)（字节数组的逗号串），测试写出假绿。
+    TextDecoder: ('TextDecoder' in o) ? o.TextDecoder : (typeof TextDecoder === 'function' ? TextDecoder : undefined),
+    TextEncoder: ('TextEncoder' in o) ? o.TextEncoder : (typeof TextEncoder === 'function' ? TextEncoder : undefined),
     AbortController: ('AbortController' in o) ? o.AbortController : AbortController,
+    // 0.9.4：`Date` 注入点。bundle 跑在**自己的 vm realm** 里，宿主侧改 `Date.now` 对它没有影响，
+    // 于是"去重窗口是否随命中刷新"这类依赖时钟推进的判定在此前根本测不了。
+    // 与 AbortController 同一写法（`'Date' in o` 才能表达"注入 undefined"）。
+    Date: ('Date' in o) ? o.Date : Date,
   }
   // client.js 的 handleRaw 用裸 `document` 判断页面可见性（浏览器里就是 window.document），
   // 注入 document 的用例需要把它同时挂到沙箱全局，否则永远走「后台」分支。
@@ -123,6 +134,31 @@ const textsOfTree = (tree) => {
   walk(tree)
   return texts
 }
+/**
+ * 按元素类型收集节点（断言**属性**用）。
+ *
+ * 为什么需要它：`textsOfTree` 只看得见文本节点，而 `<option>` 的 `value`、`<select>` 的
+ * `onChange` 都是属性。0.9.4 出过一次只有它能发现的真缺陷——国家下拉每个 option 的 value
+ * 全是 `undefined`（链式 map 第二段取错字段），标签却完全正常，所以"只查标签"的断言全绿。
+ */
+const nodesOfType = (tree, type) => {
+  const out = []
+  const walk = (node) => {
+    if (node === null || node === undefined) return
+    if (Array.isArray(node)) { node.forEach(walk); return }
+    if (typeof node !== 'object') return
+    if (node.type === type) out.push(node)
+    if (node.children) node.children.forEach(walk)
+  }
+  walk(tree)
+  return out
+}
+const optionsOfTree = (tree) => nodesOfType(tree, 'option').map((n) => ({
+  v: n.props ? n.props.value : undefined,
+  key: n.props ? n.props.key : undefined,
+  text: n.children && n.children.length ? n.children[0] : undefined,
+}))
+const selectsOfTree = (tree) => nodesOfType(tree, 'select')
 const { EEW_AREA_EXPECT, TSUNAMI_AREA_EXPECT } = require('./area-tables.cjs')
 
 // ---- 简体专有字表（0.9.3 review）----
@@ -401,7 +437,7 @@ console.log('== 重连：计数从第 1 次开始，restart 重置退避 ==')
   assert(sockets.length === 1 && t.store.status === 'connecting', 'start() 建立连接并进入 connecting')
   sockets[0].onclose()
   assert(t.store.retries === 1 && t.store.status === 'reconnecting', '首次断开 → 重连计数为 1（不再显示「第 0 次」）')
-  assert(t.store.detail.indexOf('第 1 次') !== -1, '状态文案显示「第 1 次」')
+  assert(t.store.detail.indexOf('retry 1') !== -1, '状态文案显示重试次数（retry 1）：' + t.store.detail)
   sockets[0].onclose()
   assert(t.store.retries === 2, '连续断开 → 计数递增')
   client.restart()
@@ -492,6 +528,69 @@ console.log('== 震源情报（无 points）给出明确说明 ==')
   }
   const m = t.matchAlert(t.parse(dest), cfg)
   assert(m.hit === false && m.reason.indexOf('震源情报') !== -1, '未命中原因说明「震源情报，无震度数据，无法按阈值判定」')
+}
+
+console.log('== 0.9.4：weakenEvent 不推广到地震（P2-21 的结论是"不能改"） ==')
+{
+  // 一份审查报告建议把 `weakenEvent` 从"只对气象"推广到全部灾种。**不能推广**：
+  // 551 震源情报的 strength 是 -1，而与各地震度共用同一个事件键（都取自 earthquake.time），
+  // 于是"速报 → 震源情报 → 各地震度"这条正常序列里，震源情报会把记忆强度拉到 -1，
+  // 随后的各地震度被判成升级、**同一次地震再响一次**。这条断言就是那个反面：
+  // 真把 weakenEvent 推广到地震，它会红。
+  const t = loadClient().__test
+  const raw = readSample('quake-kumamoto-detailscale-20260907.json')
+  const cfg = JSON.parse(JSON.stringify(t.DEFAULT_CFG))
+  cfg.notify = { sound: false, system: false, volume: 0 }
+  cfg.watch = { prefectures: ['熊本県'], cities: [], places: [] }
+  // 样本是熊本県的震度3（maxScale 30）；阈值设 10 让它命中，断言与"样本恰好是几级"解耦
+  cfg.thresholds.quakeScale = 10
+  const r1 = t.handleAlert(t.parseQuake(raw), cfg)
+  assert(r1.notified === true, '（前置）各地震度 → 播报：' + JSON.stringify(r1))
+  // 同一场地震的震源情报（无 points → 无震度数据）：事件键相同，强度 -1
+  const originRaw = {
+    code: 551, id: String(raw.id) + '-origin', issue: { time: raw.issue.time, type: 'OriginTime' },
+    earthquake: { time: raw.earthquake.time, hypocenter: raw.earthquake.hypocenter },
+  }
+  const origin = t.parseQuake(originRaw)
+  assert(origin.strength === -1, '震源情报的 strength 是 -1（"没有震度"的哨兵值）：' + origin.strength)
+  assert(origin.eventKey === t.parseQuake(raw).eventKey, '震源情报与各地震度**共用事件键**（都取自 earthquake.time）')
+  const r2 = t.handleAlert(origin, cfg)
+  assert(r2.notified === false, '震源情报不播报（无震度数据）')
+  // 修订版各地震度：新 id（真·重新发布，不走消息级去重），同事件键、同强度
+  const again = Object.assign({}, raw, { id: String(raw.id) + '-v2' })
+  const r3 = t.handleAlert(t.parseQuake(again), cfg)
+  assert(r3.notified === false,
+    '随后的各地震度不再响铃（若把 weakenEvent 推广到地震，这里会因为"从 -1 升级"而再响一次）')
+}
+
+console.log('== 0.9.4：消息级去重窗口"命中即刷新"，且记录用自己的窗口（P2-20 / P3-39） ==')
+{
+  const t = loadClient().__test
+  // 同一条被持续投递：每 9 分钟来一次（窗口 10 分钟）。固定窗口下第 2 次会跨过窗口边界被
+  // 当成新消息重走整条主链；"命中即刷新"之后它一直是同一条。
+  // 时钟必须注入到**沙箱自己的 realm**（bundle 在那里跑，宿主侧改 Date.now 对它无效）。
+  const clockRef = { t: Date.UTC(2026, 8, 21, 0, 0, 0) }
+  class SandboxDate extends Date {
+    constructor(...args) { if (args.length === 0) super(clockRef.t); else super(...args) }
+    static now() { return clockRef.t }
+  }
+  const td = loadClientEx({}, { Date: SandboxDate }).exports.__test
+  const id = 'dup-refresh-94'
+  assert(td.isDuplicate(id, 10) === false, '（前置）首次登记该 id')
+  clockRef.t += 9 * 60 * 1000
+  assert(td.isDuplicate(id, 10) === true, '9 分钟后仍判重复')
+  clockRef.t += 9 * 60 * 1000
+  assert(td.isDuplicate(id, 10) === true, '再 9 分钟（合计 18 分钟）仍判重复 —— 命中刷新了窗口')
+  clockRef.t += 11 * 60 * 1000
+  assert(td.isDuplicate(id, 10) === false, '真正静默 11 分钟后才重新走主链（刷新不是"永不过期"）')
+  // 记录用自己的窗口（P3-39）：先用 60 分钟的窗口登记，再用 1 分钟的窗口调用，
+  // 这条记录**不该**被后者的窗口清掉（否则真正的重复会重走主链）
+  const id2 = 'dup-own-window-94'
+  clockRef.t += 1000
+  assert(td.isDuplicate(id2, 60) === false, '（前置）用 60 分钟窗口登记')
+  clockRef.t += 5 * 60 * 1000
+  td.isDuplicate('another-id', 1) // 本次调用的窗口只有 1 分钟
+  assert(td.isDuplicate(id2, 60) === true, '5 分钟后仍判重复：清理用的是记录自己的 60 分钟窗口')
 }
 
 console.log('== 震度信息进入 headline（阈值就是按震度设的） ==')
@@ -1184,6 +1283,23 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const smallPayload = { cursor: 2, entries: [{ seq: 1, id: 'a' }] }
     capFeedEntries(smallPayload)
     assert(smallPayload.more === undefined && smallPayload.entries.length === 1, '正常增量不受截断影响')
+    // 0.9.4（P2-22）：**字节**上限。只限条数挡不住"50 条 × 98KB ≈ 5MB"（JMA 单条实测 98KB），
+    // 而 JSON.stringify 还会让 Host 内存再翻一倍。这条路由没有来源校验。
+    {
+      const many = { cursor: 500, entries: Array.from({ length: 50 }, (_, i) => ({ seq: i + 1, id: 'b' + i, xml: 'x'.repeat(60 * 1024) })) }
+      capFeedEntries(many, 50, 1024 * 1024)
+      assert(many.entries.length < 50 && many.more === true,
+        '按字节截断（60KB × 50 条 → 只留 ' + many.entries.length + ' 条）')
+      const total = many.entries.reduce((n, e) => n + e.xml.length, 0)
+      assert(total <= 1024 * 1024, '留下的总量在上限内：' + total)
+      const oneGiant = { cursor: 1, entries: [{ seq: 1, id: 'g', xml: 'y'.repeat(2 * 1024 * 1024) }] }
+      capFeedEntries(oneGiant, 50, 1024 * 1024)
+      assert(oneGiant.entries.length === 1,
+        '单条就超预算时也留一条（那一条正是用户要看的数据，全清掉等于"什么都没收到"）')
+      const noByteCap = { cursor: 1, entries: [{ seq: 1, id: 'n', xml: 'z'.repeat(2 * 1024 * 1024) }] }
+      capFeedEntries(noByteCap, 50, 0)
+      assert(noByteCap.more === undefined, 'maxBytes=0 时不按字节截断（显式不限）')
+    }
   } catch (e) {
     assert(false, '真实市区町村表 / Host 路由验证失败：' + e.message)
   }
@@ -1219,7 +1335,16 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const { unzip } = await import(pathToFileURL(path.join(ROOT, 'scripts', 'lib', 'zip.mjs')).href)
     const zlib = require('node:zlib')
     // 手工构造最小 zip：覆盖 store / deflate 两条路径与日文 UTF-8 文件名
-    const buildZip = (name, content, deflate) => {
+    // withCrc=true 时写入**正确的 CRC32**（下面用它验证"坏数据必须被拦下"）
+    const crc32Of = (buf) => {
+      let crc = -1
+      for (const b of buf) {
+        crc ^= b
+        for (let k = 0; k < 8; k++) crc = (crc & 1) ? (0xEDB88320 ^ (crc >>> 1)) : (crc >>> 1)
+      }
+      return (crc ^ -1) >>> 0
+    }
+    const buildZip = (name, content, deflate, withCrc) => {
       const nameBuf = Buffer.from(name, 'utf8')
       const raw = Buffer.from(content, 'utf8')
       const data = deflate ? zlib.deflateRawSync(raw) : raw
@@ -1232,6 +1357,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const central = Buffer.alloc(46)
       central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6)
       central.writeUInt16LE(0x800, 8); central.writeUInt16LE(method, 10)
+      if (withCrc) central.writeUInt32LE(crc32Of(raw), 16)
       central.writeUInt32LE(data.length, 20); central.writeUInt32LE(raw.length, 24)
       central.writeUInt16LE(nameBuf.length, 28)
       const cdOffset = local.length + nameBuf.length + data.length
@@ -1248,6 +1374,28 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     let threw = false
     try { unzip(Buffer.from('not a zip at all')) } catch (err) { threw = true }
     assert(threw, '非 zip 输入抛出明确错误（不静默返回空）')
+
+    // 0.9.4（P3-49）：CRC32 与"解压后长度"必须校验。此前只按 compSize 切片——下载被截断 /
+    // 中间层注入坏字节时，坏数据会"成功地"进入 lib/data/（生成的区域表看着正常，
+    // 运行时才发现某些区域归不到市町村）。
+    {
+      const crcName = 'c.csv'
+      const good = buildZip(crcName, 'payload-12345', false, true)
+      assert(unzip(good)[0].data.toString('utf8') === 'payload-12345', '（对照）CRC 正确时正常解出')
+      const nameLen = Buffer.byteLength(crcName, 'utf8')
+      const corrupted = Buffer.from(good)
+      const dataAt = 30 + nameLen // 本地文件头(30) + 文件名之后就是数据
+      corrupted[dataAt + 2] = corrupted[dataAt + 2] ^ 0xff
+      let crcMsg = ''
+      try { unzip(corrupted) } catch (err) { crcMsg = String(err.message) }
+      assert(crcMsg.indexOf('CRC') !== -1, '数据被改坏 → CRC 不符抛错（坏数据不许进 lib/data/）：' + crcMsg)
+      const badLen = Buffer.from(good)
+      const cdOff = badLen.length - 22 - (46 + nameLen)
+      badLen.writeUInt32LE(999, cdOff + 24) // 中央目录里的"解压后长度"
+      let lenMsg = ''
+      try { unzip(badLen) } catch (err) { lenMsg = String(err.message) }
+      assert(lenMsg.indexOf('长度不符') !== -1, '解压后长度不符也抛错：' + lenMsg)
+    }
   } catch (e) {
     assert(false, 'zip 读取器验证失败：' + e.message)
   }
@@ -1340,7 +1488,89 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     await pFail.pollOnce()
     assert(f2.calls.filter((u) => u === 'detail-7').length === failTries, '放弃之后不再重复请求同一个坏 URL')
 
-    // ⑥b 单级源的修订版：USGS 复核震级上修是最常见的路径，必须能进缓冲
+    // ⑥b 0.9.4（P1-1）：详情重试用尽、而 entry **自带回退载荷**时，不许丢整条
+    //     nmc.cn 的橙 / 红档是唯一会响铃、唯一能穿透静默时段的一档，也正是 needDetail 挑出来
+    //     拉详情的那一档。旧实现在详情 503 时一律 detailDropped + 记已见 —— 那条预警从 Host 起
+    //     就不存在，用户界面与"当时没有预警"完全同形。parseNmcList 早把列表字段拼成了同形
+    //     payload，用它入库即可：少的是"防御指南"那一段正文，不是这条预警本身。
+    clock += 60 * 1000
+    const feedFallback = atom([entry(9, new Date(clock).toISOString())])
+    const fFb = fakeFetch({ [FEED]: () => feedFallback }) // detail-9 未登记 → 详情请求抛错
+    const pFb = createPoller({
+      feedUrl: FEED, fetchText: fFb.fn, now: () => clock,
+      backfillMs: 5 * 60 * 1000, maxDetailRetries: 0,
+      parseFeed: (xml) => parseAtomEntries(xml).map((e) => Object.assign({}, e, { payload: '{"alertid":"' + e.id + '","detail":""}' })),
+      needDetail: () => true,
+    })
+    const rFb = await pFb.pollOnce()
+    assert(rFb.added === 1, '详情抓取失败但有回退载荷 → 这条预警仍然进缓冲（不再整条丢）')
+    assert(pFb.stats().detailFallback === 1 && pFb.stats().detailDropped === 0,
+      '计入 detailFallback 而不是 detailDropped（一个"进了但少一段说明"，一个"真的没进"，UI 要分开看）')
+    const fbSnap = pFb.snapshot(0)
+    assert(fbSnap.entries.length === 1 && fbSnap.entries[0].xml.indexOf('detail-9') !== -1,
+      '入库的是 entry 自带的回退载荷（预警本身在，只是没有详情正文）')
+    clock += 60 * 1000
+    const fbTries = fFb.calls.filter((u) => u === 'detail-9').length
+    await pFb.pollOnce()
+    assert(fFb.calls.filter((u) => u === 'detail-9').length === fbTries, '回退入库后不再反复请求同一个坏 URL')
+
+    // ⑥c 0.9.4（C7①）：失败路径要有退避，且一轮成功立刻回到正常间隔
+    {
+      const realSetTimeout = globalThis.setTimeout
+      const delays = []
+      let pending = null
+      globalThis.setTimeout = (fn, ms) => { delays.push(ms); pending = fn; return { unref() {} } }
+      try {
+        let failing = true
+        const pB = createPoller({
+          feedUrl: FEED,
+          fetchText: async () => { if (failing) throw new Error('boom'); return atom([]) },
+          now: () => clock, intervalMs: 60 * 1000, maxBackoffMs: 10 * 60 * 1000,
+        })
+        pB.start()
+        assert(delays.length === 1 && delays[0] === 1500, '启动后首轮延迟不受退避影响')
+        await pending()
+        assert(delays[1] === 120 * 1000, '第 1 次失败：间隔翻倍（旧实现恒为 60s，永不收敛）')
+        await pending()
+        assert(delays[2] === 240 * 1000, '第 2 次失败：继续翻倍')
+        for (let i = 0; i < 5; i += 1) await pending()
+        assert(delays[delays.length - 1] === 10 * 60 * 1000, '连续失败退避到上限后封顶（不再放大）')
+        failing = false
+        await pending()
+        assert(delays[delays.length - 1] === 60 * 1000, '一轮成功立刻回到 intervalMs（恢复不被退避拖住）')
+        assert(pB.stats().lastError.indexOf('feed fetch failed') === 0,
+          '抓取失败也写 lastError（此前只有解析 / 详情失败写）：' + pB.stats().lastError)
+        pB.stop()
+      } finally {
+        globalThis.setTimeout = realSetTimeout
+      }
+    }
+
+    // ⑥d 0.9.4（C7 附）：stop() 要中止**在飞**的请求，而不是让它在超时里跑完
+    {
+      let sawSignal = null
+      let release = null
+      const gate = new Promise((res) => { release = res })
+      const pAb = createPoller({
+        feedUrl: FEED,
+        fetchText: async (url, init) => {
+          sawSignal = init && init.signal
+          await gate
+          if (sawSignal && sawSignal.aborted) { const e = new Error('aborted'); e.name = 'AbortError'; throw e }
+          return atom([])
+        },
+        now: () => clock,
+      })
+      const flying = pAb.pollOnce()
+      pAb.stop()
+      release()
+      const rAb = await flying
+      assert(sawSignal && typeof sawSignal.aborted === 'boolean', '抓取收到外部中止信号（0.9.4 新增的第二个入参）')
+      assert(rAb && rAb.aborted === true, 'stop() 后这一轮判定为"被中止"')
+      assert(pAb.stats().errors === 0 && pAb.stats().lastError === '', '被自己中止不算源故障（不污染 lastError / errors）')
+    }
+
+    // ⑥e 单级源的修订版：USGS 复核震级上修是最常见的路径，必须能进缓冲
     clock += 60 * 1000
     let revUpdated = new Date(clock).toISOString()
     const revEntry = () => [{ id: 'us123', title: 'rev', updated: revUpdated, payload: 'body' }]
@@ -1487,7 +1717,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const ft = createFetchText({ maxBodyBytes: 10, timeoutMs: 1234 })
       let msg = ''
       try { await ft('https://example.test/big') } catch (e) { msg = e.message }
-      assert(msg.indexOf('过大') !== -1, '响应体超过上限 → 抛错（不把内存吃满）')
+      assert(msg.indexOf('too large') !== -1, '响应体超过上限 → 抛错（不把内存吃满）：' + msg)
       assert(seenInit && seenInit.signal !== undefined, '默认请求带上超时信号（对端挂起不会把轮询拖停）')
       const ft2 = createFetchText({ maxBodyBytes: 1024, timeoutMs: 1234 })
       assert((await ft2('https://example.test/ok')) === 'x'.repeat(64), '上限内的响应正常返回')
@@ -1495,6 +1725,45 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       let msg2 = ''
       try { await ft2('https://example.test/bad') } catch (e) { msg2 = e.message }
       assert(msg2.indexOf('503') !== -1, '非 2xx 仍然抛错（原有行为不变）')
+
+      // 0.9.4（C7②）：content-length 说的是**压缩前**的长度，而 fetch 交给我们的是解压后的正文
+      // ——几 KB 的 gzip 炸弹能解出几百 MB。改为按 body 流读取、边读边计数、超限即 cancel。
+      const enc = new globalThis.TextEncoder()
+      const streamRes = (chunks) => ({
+        ok: true, status: 200, headers: { get: () => null },
+        body: new globalThis.ReadableStream({
+          start(c) { for (const s of chunks) c.enqueue(enc.encode(s)); c.close() },
+        }),
+        text: async () => { throw new Error('有 body 流时不该回退到 res.text()') },
+      })
+      globalThis.fetch = async () => streamRes(['x'.repeat(64), 'y'.repeat(64)])
+      const ftStream = createFetchText({ maxBodyBytes: 10, timeoutMs: 1234 })
+      let msgStream = ''
+      try { await ftStream('https://example.test/stream') } catch (e) { msgStream = e.message }
+      assert(msgStream.indexOf('too large') !== -1, '有 body 流时按流读取、超限立刻判定（解压后的体积才拦得住）：' + msgStream)
+      globalThis.fetch = async () => streamRes(['héllo'])
+      const ftStreamOk = createFetchText({ maxBodyBytes: 1024, timeoutMs: 1234 })
+      assert((await ftStreamOk('https://example.test/stream-ok')) === 'héllo',
+        '流式读取正确解码（多字节字符跨块不被打断）')
+
+      // 0.9.4：外部中止信号与超时信号**两个都要带上**——漏掉超时则对端挂起能拖停整条轮询，
+      // 漏掉外部则 stop() 形同虚设。AbortSignal.any 不可用时优先保外部信号（其调用方是 stop()）。
+      const ftExt = createFetchText({ timeoutMs: 1234 })
+      const acExt = new globalThis.AbortController()
+      globalThis.fetch = async (url, init) => { seenInit = init; return { ok: true, status: 200, text: async () => 'ok' } }
+      await ftExt('https://example.test/ext', { signal: acExt.signal })
+      assert(seenInit && seenInit.signal !== undefined, '带外部信号时仍保留超时信号（两个都带上）')
+      acExt.abort()
+      assert(seenInit.signal.aborted === true, '外部信号中止 → 请求信号随之中止（stop() 能掐断在飞请求）')
+      const realAny = globalThis.AbortSignal.any
+      try {
+        delete globalThis.AbortSignal.any
+        const acOld = new globalThis.AbortController()
+        await ftExt('https://example.test/ext-old', { signal: acOld.signal })
+        assert(seenInit.signal === acOld.signal, '无 AbortSignal.any 时退化为"优先保外部信号"（stop() 仍然有效）')
+      } finally {
+        globalThis.AbortSignal.any = realAny
+      }
     } finally {
       globalThis.fetch = realFetch
     }
@@ -1653,6 +1922,27 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(f.regions.length >= 1 && f.regions.some((r) => r.prefUnknown),
       'VXKO → 样本用占位码认不出归属时标记 prefUnknown（放行而不是漏报）')
 
+    // ②' 0.9.4（P1-8）：**一条电文的所有区域都不认识**时，不许既不播报也不留痕
+    //     一份只读审查报告断言这种情况"从界面上与当时没有预警完全同形"。实测**不成立**：
+    //     regions 为空时 matchAlert 返回 hit:false + 原因，handleAlert 的 !m.hit 分支仍会写历史
+    //     （11-pipeline 的 pushEvent），条目上带着「（未命中：本条电文未携带可判定的区域）」。
+    //     这条断言就是为了把"留痕"钉住——将来谁把这行改成直接 return，用户就真的看不见了。
+    {
+      const allUnknown = jma('jma-vxko-flood.xml').replace(/codeType="[^"]*"/g, 'codeType="水位観測所"')
+      const u = t.parseJma(allUnknown, { id: 'unknown-areas' })
+      assert(u && u.regions.length === 0, '（前置）全未知 codeType → regions 为空（不猜码位数造幻影区域）')
+      const cfgU = JSON.parse(JSON.stringify(t.DEFAULT_CFG))
+      cfgU.notify = { sound: false, system: false, volume: 0 }
+      cfgU.watch = { prefectures: ['東京都'], cities: [], places: [] }
+      const before = t.loadHistory().length
+      const rU = t.handleAlert(u, cfgU)
+      assert(rU.notified === false && rU.detail === '本条电文未携带可判定的区域',
+        '不播报，但如实给出原因：' + JSON.stringify(rU))
+      const hU = t.loadHistory()
+      assert(hU.length === before + 1 && String(hU[0].headline).indexOf('未命中') !== -1,
+        'regions 全空时仍进历史（"区域一个都不认识"不能让用户以为当时没有预警）')
+    }
+
     // ③ 新体系分灾种电文（Ｒ０６）：级别写在 <Kind><Name> 里
     const s = t.parseJma(jma('jma-vpww56-landslide.xml'), { id: 'vpww56' })
     assert(s && s.level === 4 && s.kindLabel === '泥石流警报', 'VPWW56（土砂）→ L4 / 泥石流警报')
@@ -1711,9 +2001,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       '副本先后到达时只有第一条播报，其余按同事件重复只记历史')
 
     const cxl = t.parseJma(jma('jma-vpno50-tokyo-cancel-20260907.xml'), { id: 'https://x/20260907190104_0_VPNO50_130000.xml' })
-    assert(cxl && cxl.cancelled === true && cxl.level === 0,
-      'VPNO50 解除报知 → cancelled=true 且 level=0（不被「気象特別警報報知」标题兜底误抬成 L5）')
-    assert(cxl.kindLabel.indexOf('已解除') !== -1, '解除报知 → 标签标注已解除')
+    // 0.9.4：这条电文的正文是「東京都の特別警報を警報に切り替えました。」——是**降级**不是解除：
+    // 特別警報结束，但警報（L4）仍然有效。按解除处理会在历史里写「已解除」，事实相反。
+    assert(cxl && cxl.cancelled === false && cxl.downgraded === true && cxl.level === 4,
+      'VPNO50 的「特別警報 → 警報」切换 → 判为降级（L4 仍有效），不再当解除（DESIGN 11.9 #5）')
+    assert(cxl.kindLabel.indexOf('降级') !== -1, '降级报知 → 标签如实写「降级」而不是「已解除」')
 
     const legacyXml = (kindName, text) => '<?xml version="1.0"?><Report><Control>' +
       '<Title>気象特別警報・警報・注意報</Title><DateTime>2026-09-12T00:00:00Z</DateTime></Control>' +
@@ -1806,7 +2098,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       '震中在关注点半径内 → 命中（距东京 ' + Math.round(m1.distanceKm) + 'km）')
     const far = point(43.0618, 141.3545, 6.0) // 札幌，距东京约 830km
     const m2 = t.matchPointAlert(far, cfgWith([tokyo]))
-    assert(m2.hit === false && m2.reason.indexOf('超过设定半径') !== -1, '震中在半径外 → 不命中，原因写明超出半径')
+    // 0.9.4：未命中原因改为按界面语言取词（reason.nearestWatch），所以断言改成查**结构化的事实**
+    // （距离数字与半径都在理由里），而不是钉一句中文散文——钉散文的断言在本地化之后必然假红。
+    assert(m2.hit === false && /约 \d+ km/.test(m2.reason) && m2.reason.indexOf('东京') !== -1 &&
+      m2.reason.indexOf(String(tokyo.radiusKm)) !== -1,
+      '震中在半径外 → 不命中，理由里给出实际距离与半径：' + m2.reason)
     const weak = point(35.0, 140.0, 4.4)
     const m3 = t.matchPointAlert(weak, cfgWith([tokyo]))
     assert(m3.hit === false && m3.reason.indexOf('低于全球震级阈值') !== -1, '震级低于阈值 → 不命中')
@@ -1871,15 +2167,30 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.parseEmsc(null) === null && t.parseEmsc('x') === null, 'EMSC → 脏输入不抛错')
 
     // ② USGS：FeatureCollection，geometry.coordinates = [经度, 纬度, 深度km]
-    const us = t.parseUsgsFeed(JSON.parse(gf('usgs-all-hour.geojson')))
-    assert(us.length >= 3, 'USGS → 解析出 ' + us.length + ' 条事件')
+    // 0.9.4（P3-42）：整文件映射器已删（生产路径是 Host 逐条给原文、Client 逐条 parseUsgsFeature）。
+    // 覆盖不变：这里自己 map 真实样本的每个 feature。
+    const usFeed = JSON.parse(gf('usgs-all-hour.geojson'))
+    const us = usFeed.features.map(t.parseUsgsFeature).filter(Boolean)
+    assert(us.length >= 3 && us.length === usFeed.features.length,
+      'USGS → 真实样本的每个 feature 都解析成功（' + us.length + '/' + usFeed.features.length + '）')
     const u0 = us[0]
     assert(u0.kind === 'quake' && u0.source === 'usgs' && u0.locator === 'point', 'USGS → 坐标型地震 Alert')
     assert(Math.abs(u0.geo.lat) <= 90 && Math.abs(u0.geo.lon) <= 180 && typeof u0.geo.lat === 'number',
       'USGS → 经纬度没写反（coordinates 顺序是 lon,lat）')
     assert(u0.issued.indexOf('T') !== -1 && u0.issued.indexOf('Z') !== -1, 'USGS → epoch 毫秒已转成 ISO 字符串')
     assert(us.every((a) => a.regions.length === 0), 'USGS → 全部没有行政区区域')
-    assert(t.parseUsgsFeed({}).length === 0 && t.parseUsgsFeed(null).length === 0, 'USGS → 空 / 脏输入返回空数组')
+    // 0.9.4（P3-30）：缺坐标不再造"看起来有效"的事件对象
+    assert(t.parseUsgsFeature(null) === null && t.parseUsgsFeature([]) === null, 'USGS → 脏输入返回 null')
+    assert(t.parseUsgsFeature({ properties: { mag: 5 } }) === null,
+      'USGS → 有 properties 但**没有 geometry** → null（此前会产出 geo:{lat:null,lon:null} 与 id:"usgs:null,null,…"）')
+    assert(t.parseUsgsFeature({ geometry: { coordinates: [null, null] }, properties: { mag: 5 } }) === null,
+      'USGS → coordinates 值是 null 同样返回 null')
+    const twoNoGeo = [
+      { properties: { mag: 5, time: 1 } },
+      { properties: { mag: 6, time: 2 } },
+    ].map(t.parseUsgsFeature).filter(Boolean)
+    assert(twoNoGeo.length === 0,
+      'USGS → 两条都缺坐标时不产出任何事件（此前两条的 id 会撞成同一个 "usgs:null,null,…"）')
 
     // 两个全球源对同一场地震 → 同一个事件键（否则接了第二个源就会响两次）
     const sameTime = '2026-09-12T02:15:12.43Z'
@@ -1903,7 +2214,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(nc && nc.cancelled === true && nc.kindLabel.indexOf('已解除') !== -1, 'NOAA CAP → msgType=Cancel 判为解除、标签标注已解除')
     assert(nc.eventKey === 'noaa:PHEB-26234000', 'NOAA CAP → 解除与发布归并到同一个事件键（取消链路才找得到原事件）')
     assert(t.parseNoaaCap('not xml', {}) === null, 'NOAA CAP → 非 CAP 文本返回 null')
-    assert(t.parseUsgsFeed([{ properties: { mag: 5 } }]).length === 0, 'USGS → 非 FeatureCollection 输入返回空数组')
 
     // ④ 端到端：全球源 Alert 走坐标匹配，震级阈值独立于日本的震度阈值
     const gcfg = {
@@ -2040,7 +2350,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     }
     const farMsg = t.parseTestGlobalMessage(t.buildTestGlobalMessage(place, 1700000000002, 'emsc-far'))
     const mFar = t.matchAlert(farMsg, gcfg())
-    assert(mFar.hit === false && mFar.reason.indexOf('超过设定半径') !== -1, '远地场景 → 半径外不命中')
+    assert(mFar.hit === false && mFar.reason.indexOf(String(place.radiusKm)) !== -1,
+      '远地场景 → 半径外不命中，理由里带上半径：' + mFar.reason)
     assert(t.matchAlert(farMsg, gcfg(4.5, 1500)).hit === true,
       '把半径调到 1500km → 同一条远地消息命中（证明是半径在起作用，不是消息无效）')
 
@@ -2089,6 +2400,21 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         assert(one && one.kindLabel.indexOf(word) === 0,
           ev + ' 的标签以「' + word + '」开头，与档位同口径（实际：' + (one && one.kindLabel) + '）')
       }
+      // 0.9.4（P2-11）：event 名改为**整串锚定**匹配。子串匹配会把下面这些抬到最高档（3）
+      // 并通过等级闸门 —— 而海啸的误报会让用户按"大海啸"行动。
+      const notWarning = t.parseNoaaCap(capSrc.replace(/<event>[^<]*<\/event>/, '<event>Not a Tsunami Warning</event>'), { id: 'not' })
+      assert(notWarning && notWarning.tsunamiRank === 0 && notWarning.kindLabel.indexOf('未识别') !== -1,
+        '"Not a Tsunami Warning" 不再被抬成大海啸警报（子串匹配的误报方向）')
+      const cancelWorded = t.parseNoaaCap(capSrc.replace(/<event>[^<]*<\/event>/, '<event>Tsunami Warning Cancellation</event>'), { id: 'cx' })
+      assert(cancelWorded && cancelWorded.tsunamiRank === 0,
+        '"Tsunami Warning Cancellation" 不再被抬成大海啸警报（作废电文按最高档提示是反的）')
+      // 未识别的 event 名：等级仍是 0（不会响铃），但标签**如实**带出原始 event 名，
+      // 而不是冒充"海啸信息"——上游加了新事件名这件事必须看得见。
+      const unknownEv = t.parseNoaaCap(capSrc.replace(/<event>[^<]*<\/event>/, '<event>Tsunami Threat Message</event>'), { id: 'unk' })
+      assert(unknownEv && unknownEv.tsunamiRank === 0 && unknownEv.kindLabel.indexOf('Tsunami Threat Message') !== -1,
+        '未识别的 event 名如实出现在标签里：' + (unknownEv && unknownEv.kindLabel))
+      assert(t.matchAlert(unknownEv, { watch: { places: [{ name: 'Scotia', lat: -60.48, lon: -47.19, radiusKm: 300 }], prefectures: [], cities: [] }, thresholds: { tsunamiGrade: 'Watch', globalMagnitude: 0 }, disasters: { tsunami: true } }).hit === false,
+        '未识别的 event 仍然不响铃（等级 0）——可见但不打扰')
     }
   } catch (err) {
     assert(false, '全球测试消息验证失败：' + err.message)
@@ -2305,6 +2631,51 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, 'feed 游标持久化验证失败：' + e.message)
   }
 
+  console.log('== 0.9.4：本地请求超时不能被丢掉（P1-3）==')
+  try {
+    // 有 AbortSignal.timeout 却没有 AbortSignal.any 的浏览器（Chrome 103-115 / Firefox 100-123）：
+    // 旧代码 `else if (signal) sig = signal` 会把**超时整个丢掉**，只剩"停用插件才 abort"的业务信号。
+    // 挂死的本地请求让 inFlight 永不 settle，而 schedule() 在 await 之后才重排 —— 四源一起永久停摆。
+    const seenSignals = []
+    const instances = []
+    class RecorderAC extends AbortController { constructor() { super(); instances.push(this) } }
+    const fakeTimeout = {
+      aborted: false, handlers: [],
+      addEventListener(type, fn) { if (type === 'abort') this.handlers.push(fn) },
+    }
+    const s = loadClientEx(undefined, {
+      window: {
+        AbortController: RecorderAC,
+        AbortSignal: { timeout: () => fakeTimeout }, // 只有 timeout，**没有 any**
+        fetch: (url, init) => new Promise((_, reject) => {
+          const sig = init && init.signal
+          seenSignals.push(sig)
+          if (sig && typeof sig.addEventListener === 'function') {
+            sig.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+          }
+        }),
+      },
+    })
+    const c = s.exports.__test.createFeedClient({
+      apply: () => true, getCfg: () => ({ disasters: { weather: true } }), onStatus: () => {},
+    })
+    const flying = c.pollOnce()
+    await new Promise((r) => setImmediate(r))
+    const business = instances.length ? instances[0].signal : null
+    assert(!!business && seenSignals.length === 1, '（前置）这一轮真的发出了本地请求')
+    assert(seenSignals[0] && seenSignals[0] !== business,
+      '没有 AbortSignal.any 时也不直接把业务信号当请求信号（超时没有被丢掉）')
+    assert(seenSignals[0].aborted === false, '（前置）请求信号此刻尚未中止')
+    fakeTimeout.aborted = true
+    for (const fn of fakeTimeout.handlers.slice()) fn()
+    assert(seenSignals[0].aborted === true && business.aborted === false,
+      '超时信号单独触发即可中止请求（业务信号未被中止 —— 正是修复前丢掉的那一半）')
+    const r = await flying
+    assert(r && r.applied === 0, '超时后这一轮能结束（修复前 inFlight 永不 settle，整条轮询链停摆）')
+  } catch (e) {
+    assert(false, '0.9.4 本地请求超时验证失败：' + e.message)
+  }
+
   console.log('== 0.3.2：河川区域表端到端装配（P1）与地名假名归一（P4）==')
   try {
     const citiesMod2 = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cities.js')).href)
@@ -2344,6 +2715,50 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       '河川区域表随响应到位：目黒川 → ' + t2.riverAreaCities(meguro.code).join('/'))
     assert(t2.citiesOfPref('東京都').indexOf('目黒区') !== -1, '市区町村表同时到位（東京都含目黒区）')
 
+    // ①' 0.9.4（P2-18 / P2-19）：一次瞬时失败要能重试，且失败**看得见**
+    {
+      const calls = []
+      let fail = true
+      const tR = loadClientEx(undefined, {
+        window: {
+          fetch: async (url) => {
+            calls.push(url)
+            if (fail) throw new Error('一次瞬时失败')
+            return { ok: true, status: 200, json: async () => areasPayload }
+          },
+        },
+      }).exports.__test
+      const st1 = await tR.loadCityTable()
+      assert(st1 === 'failed' && tR.cityTableState() === 'failed', '一次瞬时失败 → 状态 failed（不静默）')
+      // 0.9.4 之前唯一的调用点是插件装载时的 ctx.effect：这一次失败就让整场会话没有市町村表，
+      // 用户只能刷新页面。现在有重试入口。
+      fail = false
+      const st2 = await tR.retryCityTable()
+      assert(st2 === 'ready' && calls.length === 2, '重试后装载成功（不必刷新页面）')
+      assert(tR.citiesOfPref('東京都').indexOf('目黒区') !== -1, '重试成功后表真的可用')
+
+      // P2-19：cnAreas 缺失时状态要能区分"失败"与"加载中"（此前界面永远显示"正在加载…"）
+      const tN = loadClientEx(undefined, {
+        window: { fetch: async () => ({ ok: true, status: 200, json: async () => ({ prefectures: areasPayload.prefectures, riverAreas: areasPayload.riverAreas }) }) },
+      }).exports.__test
+      assert(tN.cnAreasStateOf() === 'idle', '（前置）还没加载 → idle')
+      await tN.loadCityTable()
+      assert(tN.cnAreasStateOf() === 'failed',
+        '响应里没有 cnAreas → 大陆表状态 failed（此前只看市町村表的状态，于是永远是"正在加载…"）')
+      const tRej = loadClientEx(undefined, {
+        window: { fetch: async () => ({ ok: true, status: 200, json: async () => ({ prefectures: areasPayload.prefectures, cnAreas: [] }) }) },
+      }).exports.__test
+      await tRej.loadCityTable()
+      assert(tRej.cnAreasStateOf() === 'failed', 'cnAreas 为空数组（被拒）同样记 failed')
+      assert(tRej.cnProvinces().length === 0, '（对照）表确实没装进来')
+      const tOk = loadClientEx(undefined, {
+        window: { fetch: async () => ({ ok: true, status: 200, json: async () => areasPayload }) },
+      }).exports.__test
+      await tOk.loadCityTable()
+      assert(tOk.cnAreasStateOf() === 'ready' && tOk.cnProvinces().length > 0,
+        '正常响应 → ready（' + tOk.cnProvinces().length + ' 个省级项）')
+    }
+
     // ② 两表名称一致性（P4 根因）：河川表里每个市町村都要能反查到市区町村表的规范写法
     const unresolved = []
     const seenCity = new Set()
@@ -2363,8 +2778,12 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t2.normKana('南あるぷす市') === t2.normKana('南アルプス市'), '平假名 ↔ 片假名归一（南あるぷす市 ↔ 南アルプス市）')
     assert(t2.prefsOfCity('金ケ崎町').join() === '岩手県', '河川表写法也能反查到县（金ケ崎町 → 岩手県）')
     assert(t2.prefsOfCity('南アルプス市').join() === '山梨県', '假名种类不同也能反查到县（南アルプス市 → 山梨県）')
-    assert(t2.canonicalCityOf('金ケ崎町') === '金け崎町' && t2.canonicalCityOf('南アルプス市') === '南あるぷす市',
-      '规范名取市区町村表的写法（用于与用户勾选的名字比对）')
+    // 0.9.4（P2-29）：市区町村表的写法已修正（金け崎町 → 金ケ崎町、南あるぷす市 → 南アルプス市），
+    // 所以现在两张表给出的是同一个规范名——这正是"规范名取市区町村表的写法"这条断言要的语义。
+    assert(t2.canonicalCityOf('金ケ崎町') === '金ケ崎町' && t2.canonicalCityOf('南アルプス市') === '南アルプス市',
+      '规范名取市区町村表的写法（两张表已一致，不再有"河川表对、市町村表错"的第二种答案）')
+    assert(t2.canonicalCityOf('金け崎町') === '金ケ崎町',
+      '旧的错写法（金け崎町）仍能归一到规范名——用户配置里可能存着它')
 
     // ④ 端到端匹配：真实 12 位河川区域码 + L4（氾濫危険情報）电文
     const vxkoXml = (code, name) => '<?xml version="1.0" encoding="UTF-8"?>' +
@@ -2549,7 +2968,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     cKA.start()
     await new Promise((r) => setTimeout(r, 90))
     assert(socketsKA[0].closed === true, '超时后立即关闭卡住的连接（不留下无人回收的 socket）')
-    assert(tKA.store.detail.indexOf('连接超时') !== -1 && tKA.store.retries === 1, '状态文案写明「连接超时」并计入退避')
+    assert(tKA.store.detail.indexOf('connect timeout') !== -1 && tKA.store.retries === 1,
+      '状态文案写明连接超时并计入退避：' + tKA.store.detail)
     await new Promise((r) => setTimeout(r, 1100)) // 退避 1s 后才真正重连
     assert(socketsKA.length === 2, '退避结束后重新发起连接（此前会永远卡在「连接中…」）')
     cKA.stop()
@@ -2877,13 +3297,19 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(h53.eventKey === 'jma:summary:大雨:280000',
       '総合副本的事件键 = 灾种 + 編集官署名コード（不含发布时刻，解除才能匹配上）')
     // 真实解除电文（気象庁样本）：Kind 全是「解除」、主文里也不含灾种词
-    // → 灾种只能退化成中性的「气象」，键与发布的「大雨」不同 ⇒ 当前**不提示**解除。
-    // 这不是同义反复，而是把"键推导依赖主文文案"这条机制限制固定下来（见 DESIGN 11.6 #3）。
+    // → 灾种认不出，键里用**显式未知标记** `?`（0.9.4 之前退回「气象」，那看起来像一个具体灾种，
+    // 既不表达"认不出"，又会与将来真叫「气象」的键撞车）。键与发布的「大雨」不同 ⇒ 这条
+    // 报知本身不提示解除——**这是已知限制**，见 DESIGN 11.9 #5：要正确表达它需要按官署记住
+    // "当前生效的事件"，那是一类新的事件语义（C 类）。
+    // 0.9.4 已修的是同一族的另一半：正文写着「…を警報に切り替えました」的电文不再被当成解除。
     const cancelXml = fs.readFileSync(path.join(ROOT, 'samples', 'jma-vpno50-tokyo-cancel-20260907.xml'), 'utf8')
     const cancelAlert = t.parseJma(cancelXml, { id: 'https://x/20260907190104_0_VPNO50_130000.xml' })
-    assert(cancelAlert && cancelAlert.cancelled === true, '真实解除报知 → cancelled=true（只看 Body 副本的 Status）')
-    assert(cancelAlert.eventKey === 'jma:summary:气象:130000',
-      '真实解除报知的灾种认不出（Kind 只有「解除」、主文无灾种词）→ 键与发布的不同，故不提示（DESIGN 11.6 #3）')
+    assert(cancelAlert && cancelAlert.downgraded === true && cancelAlert.cancelled === false,
+      '真实「特別警報 → 警報」报知 → 降级（cancelled=false）')
+    assert(cancelAlert.eventKey === 'jma:summary:?:130000',
+      '认不出灾种时用显式未知标记 `?`，不再冒充「气象」这个具体灾种')
+    assert(cancelAlert.regions.length > 0,
+      '降级电文**保留区域**（解除才清空）：否则它连"哪个地区降级了"都说不出来，只能进历史')
     // 对照：主文里认得出灾种时，解除与发布能算到同一个键
     const cancelSame = Object.assign({}, h53, { cancelled: true, level: 0, strength: 0, regions: [] })
     assert(t.cancelKeyOf(cancelSame) === h53.eventKey, '（对照）同一灾种的解除与发布共用同一个 cancelKeyOf 键')
@@ -2900,7 +3326,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const rBad = await badFeed.pollOnce()
     assert(rBad.parseFailed === true && badFeed.stats().errors === 1,
       'Host：feed 被替换成 HTML / 改版 → 计入 errors（此前与"没有数据"同形）')
-    assert(String(badFeed.stats().lastError).indexOf('解析失败') !== -1, 'Host：失败原因可读（供 TROUBLESHOOTING 引用）')
+    assert(String(badFeed.stats().lastError).indexOf('parse failed') !== -1,
+      'Host：失败原因可读（供 TROUBLESHOOTING 引用）：' + badFeed.stats().lastError)
     const goodEmpty = pollerMod.createPoller({
       feedUrl: 'https://example.test/usgs', parseFeed: gsMod.parseUsgsEntries, singleStage: true,
       idleMs: 0, now: () => t0, startedAt: t0,
@@ -3252,8 +3679,15 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(T.geoEventKey('2026-09-17T22:19:52+08:00', 52.85, -171.4) ===
       T.geoEventKey('2026-09-17T14:19:52Z', 52.85, -171.4),
       'geoEventKey 自身对两种偏移给出同一把钥匙（回归：此前直接切字符串，永久失效）')
-    assert(T.geoEventKey('乱码', 1, 2) === 'geo:乱码@1.0,2.0',
-      '时间不可解析时退回原串切片，不抛错、不丢消息')
+    // 0.9.4（P1-5）：时间不可解析时的键**不能与任何其它事件相同**。此前回退原串切片，
+    // 空串会切成空串 → 键退化成 `geo:@30.9,99.9`，该震中之后所有事件共用一个键，
+    // isEventRepeat 精确命中后按"强度未升级"判重复 → 后续地震全部静默（漏报）。
+    assert(/^geo:!t\d+@1\.0,2\.0$/.test(T.geoEventKey('乱码', 1, 2)),
+      '时间不可解析时不抛错、仍产出可用的键（改为唯一键，不再退化成同一把钥匙）')
+    assert(T.geoEventKey('', 30.9, 99.9) !== T.geoEventKey('', 30.9, 99.9),
+      '空时间 + 同一震中的两条**不同**消息得到不同的键（修复前会永久互判重复）')
+    assert(T.geoEventKey('2026-09-17T14:19:52Z', 1, 2) === T.geoEventKey('2026-09-17T14:19:52Z', 1, 2),
+      '对照：时间可解析时键仍然是稳定的（同一条消息仍会被判重）')
 
     // ⑨ 阈值分档：速报走 cnReportMagnitude，预警走 globalMagnitude
     const placeXinlong = {
@@ -3277,8 +3711,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const far = JSON.parse(JSON.stringify(placeXinlong))
     far.watch.places = [{ name: '远处', lat: 20, lon: 90, radiusKm: 100 }]
     const farHit = T.matchAlert(eewXinlong, far)
-    assert(farHit.hit === false && farHit.reason.indexOf('超过设定半径') !== -1,
-      '震中在半径外 → 不命中，且理由里给出实际距离')
+    assert(farHit.hit === false && farHit.reason.indexOf('100') !== -1,
+      '震中在半径外 → 不命中，且理由里给出实际距离：' + farHit.reason)
     const noPlace = JSON.parse(JSON.stringify(placeXinlong))
     noPlace.watch.places = []
     assert(T.matchAlert(eewXinlong, noPlace).hit === false && T.matchAlert(eewXinlong, noPlace).reason.indexOf('未设置') !== -1,
@@ -3570,6 +4004,83 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '中继不再推任何帧时，停更由例行检查（时钟）推动 —— 心跳检查关掉也不该把它一起关掉')
     }
 
+    // ④b-2 0.9.4（P1-2）：REST 兜底必须**真的存在**
+    //      lib/index.js 与 wolfx-source.js 的注释一直宣称"WS 不可达时的 HTTP 轮询降级通道"，
+    //      但全仓没有任何 REST 取数代码：wss:// 被中间设备掐断时，两个大陆源静默停摆、状态还是绿的。
+    //      这是超承诺 + 真实缺口，两个方向都要修——这里钉住"通道现在真的在跑"。
+    {
+      const flush = () => new Promise((r) => setImmediate(r))
+      const clockR = { t: Date.parse('2026-09-18T14:40:00Z') }
+      const schedR = makeSched(clockR)
+      const socketsR = []
+      const callsR = []
+      let restFail = false
+      let lastInit = null
+      const srcR = wx.createWolfxSource({
+        id: 'cenc_eqlist', now: () => clockR.t,
+        setTimer: (f, m) => schedR.set(f, m), clearTimer: (k) => schedR.clear(k),
+        createSocket: () => { const x = makeSocket(); socketsR.push(x); return x },
+        idleMs: 0, firstDelayMs: 0, heartbeatTimeoutMs: 0, connectTimeoutMs: 5 * 60 * 1000,
+        restPollMs: 60 * 1000,
+        fetchText: async (url, init) => {
+          callsR.push(url); lastInit = init || null
+          if (restFail) throw new Error('HTTP 503')
+          return JSON.stringify(listRaw)
+        },
+      })
+      srcR.markRead(); srcR.start(); schedR.advance(0)
+      await flush()
+      assert(callsR.length === 1 && callsR[0] === 'https://api.wolfx.jp/cenc_eqlist.json',
+        'WS 未连上时按 REST 快照地址取数（此前这条"降级通道"没有任何代码）')
+      assert(srcR.stats().restPolls === 1 && srcR.stats().restFetched === 1, 'REST 的"试了几次 / 成几次"分开计数')
+      assert(srcR.stats().frames === 0, 'REST 快照不计入 WS 数据帧（否则"连上了但没数据"这个归类会失效）')
+      assert(srcR.snapshot(0).entries.length === 3, 'REST 拿到的整表走**同一个** handleDataFrame 入缓冲（不另写一份解析）')
+      assert(lastInit && lastInit.signal !== undefined, 'REST 请求带中止信号（stop() 能掐断在飞请求）')
+
+      // 节流：重连退避的每个 tick 都请求一次就太吵了，restPollMs 内不重复
+      socketsR[0].onclose({ code: 1006 })
+      schedR.advance(1000)
+      await flush()
+      assert(callsR.length === 1, 'restPollMs 之内不重复请求 REST（重连退避 1s→2s→… 不该放大成 REST 频率）')
+
+      // 越过节流窗口：REST 失败要留下原因，不能静默
+      restFail = true
+      socketsR[1].onclose({ code: 1006 })
+      clockR.t += 61 * 1000
+      schedR.advance(2000)
+      await flush()
+      assert(srcR.stats().restPolls === 2 && srcR.stats().restFetched === 1, '（前置）第二次 REST 尝试发生且未成功')
+      assert(srcR.stats().restLastError.indexOf('REST 兜底失败') === 0,
+        'REST 失败留下原因（"连不上 WS 又拿不到 REST" = 网络层，与"最近没有地震"必须不同形）')
+      srcR.stop()
+
+      // stop() 中止在飞的 REST 请求
+      let aborted = null
+      let releaseR = null
+      const gateR = new Promise((r) => { releaseR = r })
+      const srcR2 = wx.createWolfxSource({
+        id: 'cenc_eew', now: () => clockR.t,
+        setTimer: (f, m) => schedR.set(f, m), clearTimer: (k) => schedR.clear(k),
+        createSocket: () => { const x = makeSocket(); socketsR.push(x); return x },
+        idleMs: 0, firstDelayMs: 0, heartbeatTimeoutMs: 0, connectTimeoutMs: 0,
+        fetchText: async (url, init) => {
+          aborted = init && init.signal
+          await gateR
+          const e = new Error('aborted'); e.name = 'AbortError'; throw e
+        },
+      })
+      srcR2.markRead(); srcR2.start()
+      clockR.t += 5 * 60 * 1000
+      schedR.advance(0)
+      await flush()
+      assert(aborted && aborted.aborted === false, '（前置）REST 请求在飞')
+      srcR2.stop()
+      assert(aborted.aborted === true, 'stop() 中止在飞的 REST 请求（不留一条 20 秒超时的挂起请求）')
+      releaseR()
+      await flush()
+      assert(srcR2.stats().restLastError === '', '被自己中止不算故障（不写 restLastError）')
+    }
+
     // ④c 静默失效与速率约束（0.5.1 修）
     {
       // 整表"有 NoN 项却一条都解析不出来"必须与"空表"**不同形**（DESIGN 4.5）：字段改名会让
@@ -3591,6 +4102,78 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const err2 = h.src.stats().errors
       s.onmessage({ data: JSON.stringify({ type: 'cenc_eqlist' }) })
       assert(h.src.stats().errors === err2, '空表仍不计失败（源正常但当前没有速报数据）')
+
+      // 0.9.4（P2-13）：**逐条**失败要有计数。上游把某几个字段改名时，45/50 条仍解析得出来，
+      // "整表全坏"那条判据永远不触发 —— 5 条真实地震凭空消失而界面依旧绿色"已连接"。
+      {
+        const h3 = harness('cenc_eqlist')
+        h3.src.markRead(); h3.src.start(); h3.sched.advance(0)
+        const s3 = h3.sockets[0]
+        s3.onopen()
+        const partial = JSON.parse(JSON.stringify(listRaw))
+        // 挑**最旧**的 3 条把坐标字段改名（只坏 3 条，整表仍有 47 条可解析）。
+        // 挑最旧的是为了与冷启动的年龄闸门解耦：否则"入缓冲条数变少"就分不清是闸门还是丢条。
+        let renamed = 0
+        const keysDesc = Object.keys(partial).filter((k) => /^No\d+$/.test(k))
+          .sort((a, b) => Number(b.slice(2)) - Number(a.slice(2)))
+        for (const k of keysDesc) {
+          if (renamed >= 3) break
+          partial[k].Longitude = partial[k].longitude
+          delete partial[k].longitude
+          renamed += 1
+        }
+        const errBefore3 = h3.src.stats().errors
+        s3.onmessage({ data: JSON.stringify(partial) })
+        assert(h3.src.stats().itemSkipped === 3,
+          '逐条丢弃有计数（itemSkipped=' + h3.src.stats().itemSkipped + '）—— 此前那 3 条无声消失')
+        assert(h3.src.stats().errors === errBefore3, '个别条目脏不算源的故障（不把蓝点点亮）')
+        assert(h3.src.stats().lastError.indexOf('有 3 条无法解析') !== -1,
+          '原因写进 lastError（"少了 3 条"与"这批没有新地震"必须不同形）')
+        assert(h3.src.stats().lastAdded === 3, '窗口内的新鲜条目照常入缓冲（闸门与"丢条"互不干扰）')
+        h3.src.stop()
+      }
+
+      // 0.9.4（P3-31）：md5 只是**观测读数**，不再是"整表没变"的闸门。
+      // md5 是上游自己给的：它改了表却忘了刷指纹时，旧实现整帧跳过、lastAdded 归零，
+      // 与"没有新地震"完全同形——真实地震就这么消失。
+      {
+        const h4 = harness('cenc_eqlist')
+        h4.src.markRead(); h4.src.start(); h4.sched.advance(0)
+        const s4 = h4.sockets[0]
+        s4.onopen()
+        s4.onmessage({ data: JSON.stringify(listRaw) })
+        const addedFirst = h4.src.stats().lastAdded
+        assert(addedFirst === 3, '（前置）首次整表放行窗口内的新鲜条目：' + addedFirst)
+        // 同 md5、但表里**多了一条新事件**：模拟"上游改表没刷 md5"
+        const stale = JSON.parse(JSON.stringify(listRaw))
+        stale.No51 = {
+          EventID: 'CD.20260919120000.001', latitude: '30.5', longitude: '100.5', magnitude: '4.0',
+          time: '2026-09-19 12:00:00', placeName: '测试地', ReportTime: '2026-09-19 12:00:10',
+        }
+        // 数据时间落在窗口内（用同一批样本里最新那条的时间字段，确保过年龄闸门）
+        stale.No51.time = listRaw.No1.time
+        stale.No51.ReportTime = '2026-09-19 12:00:10'
+        s4.onmessage({ data: JSON.stringify(stale) })
+        assert(h4.src.stats().lastAdded >= 1,
+          '指纹说"没变"但表里确实有新条目 → 仍然入库（旧实现整帧跳过，真实地震消失）')
+        assert(h4.src.stats().md5StaleFrames === 1,
+          '并且记一个可数读数 md5StaleFrames（"上游改表不刷指纹"这件事是可见的）')
+        h4.src.stop()
+      }
+
+      // 0.9.4（P3-36）：速报的去重记忆必须**长于整表覆盖窗口**（约 20 天），否则表里那些老条目
+      // 每帧都被重新当成"新候选"、再被年龄闸门挡下 → ageSkipped 在没有新事件时也持续增长
+      {
+        const h5 = harness('cenc_eqlist', { seenTtlMs: undefined })
+        assert(h5.src.stats().seenTtlMs === undefined || true, '（前置）不显式传 TTL 时用源自己的默认')
+        const seenTtlDefault = wx.createWolfxSource({ id: 'cenc_eqlist' }).stats()
+        assert(seenTtlDefault && seenTtlDefault.running === false, '（前置）能建出源')
+        const eqTtl = wx.EQLIST_SEEN_TTL_MS
+        const pushTtl = wx.DEFAULT_SEEN_TTL_MS
+        assert(eqTtl > 20 * 24 * 60 * 60 * 1000 && eqTtl > pushTtl,
+          '速报 TTL（' + (eqTtl / 86400000) + ' 天）长于整表窗口（约 20 天）与通用 TTL（' + (pushTtl / 86400000) + ' 天）')
+        h5.src.stop()
+      }
       h.src.stop()
 
       // pruneSeen 必须真的被调用：TTL 是"记忆时长"而不是装饰（poller 每轮清一次）
@@ -3756,7 +4339,60 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(src.subs.length === 0, '断开后订阅被清掉')
       assert(res.frames.length === n, '断开后不再写帧')
 
-      // Last-Event-ID 优先于 ?since=（重连时浏览器自动带上，比页面首次那次的游标新）
+      // 0.9.4（P3-34）：补发期间断开时，**不许**再装订阅与心跳（cleanup 有幂等守卫，
+      // 装完就没人能清了——那是一条永远不会被回收的订阅 + 一个永远在跑的定时器）。
+      {
+        const srcB = {
+          reads: 0, subs: [], snapCount: 0,
+          markRead() { this.reads++ },
+          snapshot() {
+            this.snapCount += 1
+            return {
+              cursor: 3, reset: false, truncated: false, frozen: false,
+              entries: [{ seq: 1, id: 'a', title: '', updated: '', xml: '{}' },
+                { seq: 2, id: 'b', title: '', updated: '', xml: '{}' },
+                { seq: 3, id: 'c', title: '', updated: '', xml: '{}' }],
+            }
+          },
+          subscribe(fn) { this.subs.push(fn); return () => { this.subs = this.subs.filter((f) => f !== fn) } },
+        }
+        let intervals = 0
+        const hB = host.createStreamHandler({
+          sources: { cenc_eew: srcB },
+          setInterval: () => { intervals += 1; return 1 },
+          clearInterval: () => {},
+        })
+        const rB = fakeRes()
+        // 第二轮补发（第 2 条 entry）时 write 抛错 → cleanup 跑过 → 后面的订阅/心跳不该再装
+        let writes = 0
+        rB.write = () => { writes += 1; if (writes === 3) throw new Error('客户端已断开'); return true }
+        hB({ url: '/dsh-quake-alert/stream?source=cenc_eew&since=0', headers: {} }, rB)
+        assert(writes === 3, '（前置）补发到第 3 次写时抛错：' + writes)
+        assert(srcB.subs.length === 0, '补发期间断开 → 不装订阅者（修复前会装上且再也清不掉）')
+        assert(intervals === 0, '也不装心跳定时器（同上）')
+        assert(srcB.reads === 0, '也不 markRead（markRead 会让 Host 的按需轮询为一个已断开的页面继续拉源）')
+      }
+
+      // 0.9.4（P3-34）：背压。持续 false 到上限就断流（不丢帧、让 Client 重连补齐）
+      {
+        const srcC = {
+          subs: [],
+          markRead() {},
+          snapshot() { return { cursor: 0, entries: [], truncated: false, reset: false, frozen: false } },
+          subscribe(fn) { this.subs.push(fn); return () => { this.subs = this.subs.filter((f) => f !== fn) } },
+        }
+        const hC = host.createStreamHandler({ sources: { cenc_eew: srcC }, setInterval: () => 1, clearInterval: () => {} })
+        const rC = fakeRes()
+        rC.write = () => false // 一直背压：客户端不读
+        hC({ url: '/dsh-quake-alert/stream?source=cenc_eew', headers: {} }, rC)
+        assert(srcC.subs.length === 1, '（前置）订阅已装上')
+        for (let i = 0; i <= host.MAX_SSE_BACKPRESSURE + 2; i += 1) {
+          if (srcC.subs[0]) srcC.subs[0]({ seq: i, id: 's' + i, title: '', updated: '', xml: '{}' })
+        }
+        assert(srcC.subs.length === 0,
+          '连续背压超过 ' + host.MAX_SSE_BACKPRESSURE + ' 帧 → 主动断流并清掉订阅（Host 侧内存不再无上界）')
+      }
+
       const src2 = Object.assign({}, src, { snaps: [], reads: 0, subs: [] })
       const h2 = host.createStreamHandler({ sources: { cenc_eew: src2 }, setInterval: () => 1, clearInterval: () => {} })
       const r2 = fakeRes()
@@ -3879,6 +4515,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         createEventSource: (url) => { const es = fakeES(url); created.push(es); return es },
         setTimer: (fn, ms) => sched.set(fn, ms),
         clearTimer: (k) => sched.clear(k),
+        // 0.9.4：静默判据用注入的时钟（默认 Date.now()），所以这里必须跟着假时钟走，
+        // 否则"推进 20 秒"在 now() 眼里仍是 0 秒，那条判定在测试里永远不触发。
+        now: () => clock.t,
         getCfg: () => cfg,
         enabled: (c) => (c.disasters || {}).earthquake !== false,
         loadCursor: () => (o.cursor === undefined ? null : o.cursor),
@@ -3958,11 +4597,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         source: 'cenc_eew', cursor: 5, reset: true, truncated: true, frozen: true, replayed: 3, stale: false,
       })
       const lastOf = (x) => x.statuses[x.statuses.length - 1]
-      assert(lastOf(h).status === 'degraded' && lastOf(h).detail.indexOf('增量缺口') !== -1,
-        'sync 的告警先上报（增量缺口 / 游标重置 / Host 未运行）')
+      assert(lastOf(h).status === 'degraded' && lastOf(h).detail.indexOf('gap:') !== -1,
+        'sync 的告警先上报（增量缺口 / 游标重置 / Host 未运行）：' + lastOf(h).detail)
       h.created[0].emit('status', { source: 'cenc_eew', cursor: 6, stale: false, dataTime: 0 })
-      assert(lastOf(h).status === 'degraded' && lastOf(h).detail.indexOf('增量缺口') !== -1,
-        'status 帧不得把 sync 的告警抹成"已连接"（条件仍然成立）')
+      assert(lastOf(h).status === 'degraded' && lastOf(h).detail.indexOf('gap:') !== -1,
+        'status 帧不得把 sync 的告警抹成"已连接"（条件仍然成立）：' + lastOf(h).detail)
       h.client.stop()
 
       // 降级客户端必须继承 SSE 的游标：否则降级瞬间从 `since=tail` 起步，
@@ -4095,6 +4734,61 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '真实 EEW 帧经 SSE → 契约 → 主链 → 播报并进历史（整条消费链贯通）')
       assert(hist[0].headline.indexOf('新龙') !== -1, '历史里的文案来自真实载荷')
       c.stop()
+    }
+
+    // ⑤' 0.9.4（P2-14 / P2-15 / P2-16）：游标与存活判据的三处修正
+    {
+      // ① 游标在 apply **之后**推进（P2-16，与 12b 的口径一致：已处理到的最后一条）
+      const hOrder = cnHarness({
+        over: {
+          apply: () => { hOrder.order.push('apply'); return true },
+          saveCursor: (v) => { hOrder.order.push('save:' + v) },
+        },
+      })
+      hOrder.order = []
+      hOrder.client.start()
+      hOrder.created[0].emit('sync', { cursor: 10, replayed: 0, reset: false, truncated: false, frozen: false })
+      hOrder.order.length = 0
+      hOrder.created[0].emit('entry', { seq: 11, id: 'cenc:a', xml: '{}' })
+      assert(hOrder.order.join(',') === 'apply,save:11',
+        '游标在 apply 之后推进（修复前是 save:11,apply —— apply 抛错时那条永久不再投递）')
+
+      // ② 从轮询升回 SSE 时要重新读盘取游标（P2-14）。降级期间推进游标的是轮询客户端，
+      //    12c 自己的内存 since 停在进入降级之前；不读盘就会带着过期游标建连、整段重放。
+      const cursorRef = { v: 100 }
+      const hCursor = cnHarness({
+        cfg: { disasters: { earthquake: true }, cnTransport: 'poll' },
+        over: { loadCursor: () => cursorRef.v },
+      })
+      hCursor.client.start()
+      assert(hCursor.created.length === 0 && hCursor.fallbacks.indexOf('start') !== -1,
+        '（前置）选了强制轮询 → 一开始就不建 SSE')
+      cursorRef.v = 777 // 降级期间轮询客户端把游标推进到 777（写的是同一个存储键）
+      hCursor.setCfg({ disasters: { earthquake: true }, cnTransport: 'auto' })
+      hCursor.sched.advance(5000) // 周期检查：用户改回「自动」→ 升回 SSE
+      assert(hCursor.created.length === 1, '改回自动后升回 SSE')
+      assert(hCursor.created[0].url.indexOf('since=777') !== -1,
+        '升回 SSE 时用的是**降级期间推进过的**游标（修复前带的是进降级前那个值 → 整段重放）')
+
+      // ③ 已连接的流"持续静默"要能判死（P2-15）。此前 sawSyncThisConn 一为 true 就再无降级路径，
+      //    而被中间设备静默掐断的长连接不会触发 onerror —— 界面停在"SSE 已连接"。
+      const hSilent = cnHarness({ over: { silenceDeadMs: 12000 } })
+      hSilent.client.start()
+      hSilent.created[0].emit('sync', { cursor: 5, replayed: 0, reset: false, truncated: false, frozen: false })
+      assert(hSilent.client.modeOf() === 'sse' && hSilent.created.length === 1, '（前置）已连上并收到过首帧')
+      hSilent.sched.advance(20000) // 假时钟推过 12 秒的静默阈值（周期检查每 5 秒一轮）
+      assert(hSilent.client.stats().silentDeaths === 1,
+        '超过阈值没有任何帧 → 记一次 silentDeaths（Host 每 15 秒有状态帧，所以这是可靠的死连接判据）')
+      assert(hSilent.created.length === 2, '判死后重连这条流，而不是永远停在"SSE 已连接"')
+      assert(hSilent.statuses.some((p) => /SSE silent \d+s → dead/.test(String(p.detail))),
+        '把"判定连接已死"说出来（降级 / 失联绝不能被静默）')
+      const quietDead = hSilent.client.stats().silentDeaths
+      hSilent.created[1].emit('status', { stale: false, dataTime: 0 })
+      // 只推进一个周期：状态帧刚把计时器归零，不该判死（真实 Host 每 15 秒一个状态帧，
+      // 而阈值是 45 秒 = 3 倍余量，所以"帧在流动"与"静默"不会互相误判）。
+      hSilent.sched.advance(5000)
+      assert(hSilent.client.stats().silentDeaths === quietDead,
+        '有帧在流动时不判死（状态帧本身就算活着）')
     }
 
     // ⑥ 同一场地震：EEW 已播报 → 速报（震级下修）不二次响铃
@@ -4238,6 +4932,35 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '快照不含插件版本——版本号只在 package.json / CHANGELOG / README 三处（避免多一个会漂移的位置）')
       assert(snap.config.cnTransport === 'auto', '快照带链路选择（诊断"为什么走轮询"要看它）')
       assert(Array.isArray(snap.warnings), '生成过程中被兜住的异常要可见（不是假装一切正常）')
+      // 0.9.4（P3-47）：`pnpm check` 里的 `node --check` 文件清单是手写的，新增数据文件不会被
+      // 自动纳入（此前漏了 cities.js / cn-areas.js / river-areas.js）。清单仍然手写——但这里
+      // 保证它**完整**：lib 下每个 .js 都必须出现在 check 脚本里。
+      {
+        const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
+        const cmd = String((pkg.scripts && pkg.scripts.check) || '')
+        const listed = []
+        for (const m of cmd.matchAll(/node --check ([^\s&]+)/g)) listed.push(m[1].replace(/\\/g, '/'))
+        const walkLib = (dir, out) => {
+          for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+            const p = path.join(dir, e.name)
+            if (e.isDirectory()) walkLib(p, out)
+            else if (e.name.endsWith('.js')) out.push(path.relative(ROOT, p).replace(/\\/g, '/'))
+          }
+        }
+        const all = []
+        walkLib(path.join(ROOT, 'lib'), all)
+        const missing = all.filter((f) => listed.indexOf(f) === -1)
+        assert(all.length >= 9 && missing.length === 0,
+          'check 脚本覆盖 lib 下全部 ' + all.length + ' 个 .js（漏掉：' + (missing.join(', ') || '无') + '）')
+        // 0.9.4（P3-51）：`files` 必须把**运行时会读的**文件都发出去。lib/index.js 会在运行时
+        // 动态 import lib/data/*.js（市町村表 / 河川表 / 大陆行政区划 / 全球城市），少一个就是
+        // "装出来的包直接不可用"——而那在仓库里跑测试是发现不了的（测试读的是工作区）。
+        const files = Array.isArray(pkg.files) ? pkg.files : []
+        const notPackaged = all.filter((f) => !files.some((entry) => f === entry || f.indexOf(entry + '/') === 0))
+        assert(notPackaged.length === 0,
+          'package.json 的 files 覆盖 lib 下全部文件（漏掉：' + (notPackaged.join(', ') || '无') + '）')
+        assert(files.indexOf('client') !== -1, 'client（构建产物 + 源码）随包分发——README 的打包口径据此写')
+      }
       assert(snap.config.watch && Array.isArray(snap.config.watch.places),
         '关注点摘要含坐标——匹配失败通常就靠"距最近关注点多少公里"来判')
       // 脏状态也必须能产出：诊断工具在真出事时最不该抛错
@@ -4725,6 +5448,43 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(text.length > 20 && text.indexOf('<') === -1, '详情页 → 纯文本正文（' + text.length + ' 字）')
       assert(text.indexOf('地质灾害') !== -1, '正文里含灾种说明（#alarmtext 还在原位置）')
       assert(nmc.extractAlarmText('<html>没有正文容器</html>') === '', '没有 #alarmtext → 空串（文案少一段，不让整条预警作废）')
+
+      // 0.9.4（P2-24）：**第二个 #alarmtext 块（"防御指南"）不能再丢**。实测 5 份真实详情页里
+      // 4 份都有它，而此前到第一个 </div> 就收尾——文件头恰恰把"防御指引"写成拉详情的理由。
+      {
+        const twoBlocks = '<html><body>' +
+          '<div id=alarmtext>某某县气象台发布暴雨橙色预警。</div>' +
+          '<div class="x"><div id=alarmtext>防御指南：暂停户外作业，转移危险地带人员。</div></div>' +
+          '</body></html>'
+        const got = nmc.extractAlarmText(twoBlocks)
+        assert(got.indexOf('暴雨橙色预警') !== -1 && got.indexOf('防御指南') !== -1,
+          '两个 #alarmtext 块都取到（正文 + 防御指南）：' + JSON.stringify(got))
+        assert(got.indexOf('\n') !== -1, '两段之间保留换行（挤成一行会让"该怎么做"难以辨认）')
+        const realTwo = detailOf('detail-geology-yellow.html')
+        const blocks = (realTwo.match(/id=alarmtext/g) || []).length
+        assert(blocks >= 1 && nmc.extractAlarmText(realTwo).length >= text.length,
+          '真实详情页（含 ' + blocks + ' 个 #alarmtext 块）提取不短于第一个块')
+      }
+      // 0.9.4（P2-23）：列表被 pageSize 截断要**可见**，而不是尾部静默消失
+      {
+        const list = listSample.data.page.list
+        // 合成的"单页给完"响应（样本 fixture 本身是裁剪过的，count 仍是上游的真实总数）
+        const singlePage = nmc.nmcPageInfoOf(JSON.stringify({
+          data: { page: Object.assign({}, listSample.data.page, { count: list.length, totalPage: 1 }) },
+        }))
+        assert(singlePage.listCount === list.length && singlePage.truncated === false,
+          '（对照）count 与 list 等长、totalPage=1 → 未截断')
+        const multi = nmc.nmcPageInfoOf(JSON.stringify({
+          data: { page: Object.assign({}, listSample.data.page, { count: 900, totalPage: 2 }) },
+        }))
+        assert(multi.truncated === true && multi.totalPage === 2,
+          '上游说还有第 2 页 → truncated（旧实现从不读 totalPage / count）')
+        const sampleInfo = nmc.nmcPageInfoOf(JSON.stringify(listSample))
+        assert(sampleInfo.count > 0 && sampleInfo.truncated === true,
+          '（真实样本）count(' + sampleInfo.count + ') > list(' + sampleInfo.listCount +
+          ') → 报截断：这份 fixture 是裁剪过的，所以它确实"看起来被截断"')
+        assert(nmc.nmcPageInfoOf('不是 JSON').truncated === false, '认不出分页信息时不误报截断')
+      }
     }
     assert(Number.isFinite(nmc.nmcFeedTime(JSON.stringify(listSample))),
       '上游数据时间取自列表里最新一条（stale 判定用它，而不是"我们收到多少条"）')
@@ -4978,8 +5738,36 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       } finally {
         T.SOURCE_CONTRACTS.usgs.staleAfterMs = orig
       }
-      // ② staleAfterMs 为 null 的推送源不判（日本可能数小时没有有感地震，而连接是好的）
-      T.resetSourceHealth()
+      // ①' 0.9.4（P2-17）：**关掉的源不判停更**。用户主动关掉一个源之后 Client 不再拉它，
+      //     dataTime 自然停住；继续判 stale 就是在说"上游停更了"，而事实是我们自己不再问了
+      //     —— 界面还会被这个已关闭的源拖成中灰，重新打开也不能立即自愈。
+      {
+        const origNoaa = T.SOURCE_CONTRACTS.noaa.staleAfterMs
+        try {
+          T.SOURCE_CONTRACTS.noaa.staleAfterMs = 60 * 1000
+          // 对照：默认探针（不看开关）确实会把它判成 stale —— 这正是要修掉的行为
+          T.resetSourceHealth()
+          T.noteFreshness('noaa', clock)
+          clock += 61 * 1000
+          probe.tick()
+          assert(T.sourceHealthOf('noaa').fresh.stale === true, '（对照）不看开关时，关掉的源会被判停更')
+          // 修好之后：源被关掉 → 不判，并把残留的 stale 清掉（否则会一直挂到重开）
+          const offProbe = T.createHealthProbe({
+            now: () => clock,
+            pushSource: (id, p) => pushes.push([id, p]),
+            sourceEnabled: (id) => id !== 'noaa',
+          })
+          const before = pushes.length
+          offProbe.tick()
+          assert(T.sourceHealthOf('noaa').fresh.stale === false,
+            '源被关掉时不判停更（"我已关闭"不该被改写成"上游数据已过期"）')
+          assert(pushes.slice(before).some((x) => x[0] === 'noaa' && x[1].status === 'disabled'),
+            '并显式上报 disabled（把上一刻的 stale 清掉，而不是留在界面上）')
+        } finally {
+          T.SOURCE_CONTRACTS.noaa.staleAfterMs = origNoaa
+        }
+      }
+      // ② staleAfterMs 为 null 的推送源不判（日本可能数小时没有有感地震，而连接是好的）      T.resetSourceHealth()
       T.noteFreshness('p2pquake', clock)
       clock += 10 * 60 * 60 * 1000
       probe.tick()
@@ -5453,6 +6241,18 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(T6.nwsEventKeyOf('self.1', [], null) === 'nws:self', '没有 references → 自身 identifier')
       assert(T6.nwsEventKeyOf('self.1', [], []) === 'nws:self',
         'VTEC 是空数组时同样退回兜底')
+      // 0.9.4（P2-12）：ETN 段由 4 位放宽到 4~6 位。实测出现过 5 位（`/O.NEW.KRLX.FA.W.01370.…`），
+      // 写死 4 位会让整段失配 → 退回 0.6.1 已证伪的 references 兜底（逐版串联 → 每次 Update
+      // 各得一键 → 重复响铃），而且没有任何地方能看出这件事。
+      // 用**真实样本**改 VTEC（手搓 fixture 会被 schema 判据挡下，那是另一条链路的守卫）。
+      const vtecBase = JSON.parse(JSON.stringify(nwsByEvent('Flood Warning')))
+      vtecBase.properties.parameters.VTEC = ['/O.NEW.KRLX.FA.W.01370.260101T0000Z-260102T0000Z/']
+      assert(T6.parseNwsAlertResult(vtecBase, { place: usPlace }).alert.eventKey === 'nws:KRLX.FA.W.01370',
+        '5 位 ETN 也能提出 VTEC 键（不再退回 references 兜底）')
+      const vtec4 = JSON.parse(JSON.stringify(vtecBase))
+      vtec4.properties.parameters.VTEC = ['/O.EXT.KILN.FL.W.0067.260101T0000Z-260102T0000Z/']
+      assert(T6.parseNwsAlertResult(vtec4, { place: usPlace }).alert.eventKey === 'nws:KILN.FL.W.0067',
+        '对照：4 位 ETN 仍照旧（剔除 ACTION 段）')
       // 真实的多引用样本：Coastal Flood Watch 有 3 条 references（两条 sent 相同）
       const cfw = nwsByEvent('Coastal Flood Watch')
       assert(cfw.properties.references.length === 3, '（前置）Coastal Flood Watch 有 3 条 references')
@@ -5756,7 +6556,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       // detail **只放语义信息**（0.6.0 review 修正）：正常情况下它为空——计数由设置页的
       // OVERSEAS_STAT_ORDER 从 stats 直接读，这样 detail 变化才等于"语义变化"，
       // 上报去重键才敢把它算进去（否则每轮都会被判成变化、页面反复重渲）。
-      assert(status && status.status === 'open' && /已按 1 个关注点查询/.test(status.detail || ''),
+      assert(status && status.status === 'open' && /queried 1 watch points/.test(status.detail || ''),
         '正常一轮的状态是 open，detail 是非单调的语义摘要（review B-1：留空会让悬停显示裸状态词 open）：' + JSON.stringify(status))
     }
 
@@ -5959,7 +6759,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       await src.pollOnce()
       assert(seen.length === 2, '状态推送 2 次（"未设置" → 空），第 3 次相同则不再推：' + JSON.stringify(seen))
       assert(/未设置/.test(seen[0]), '第一次说明去哪里配关注点：' + seen[0])
-      assert(seen[1] === 'open|已按 1 个关注点查询',
+      assert(seen[1] === 'open|queried 1 watch points',
         '第二次 detail 变成"已按 N 个关注点查询"——不会把"未设置"的旧文案一直挂在设置页上：' + seen[1])
     }
 
@@ -6206,7 +7006,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(typeof T6.overseasStatsOf.eccc_alerts.errors === 'number' &&
         typeof T6.overseasStatsOf.eccc_alerts.received === 'number',
         '快照字段齐全：' + JSON.stringify(Object.keys(T6.overseasStatsOf.eccc_alerts)))
-      assert(status && /已按 1 个关注点查询/.test(status.detail || ''), '状态上报正常：' + JSON.stringify(status))
+      assert(status && /queried 1 watch points/.test(status.detail || ''), '状态上报正常：' + JSON.stringify(status))
     }
 
     // ---- 41. NWS 白名单三处同源：服务端过滤参数必须等于白名单键集 ----
@@ -6482,9 +7282,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(r.failed === 1 && src.stats().errors === 1, '超时算失败：' + JSON.stringify({ failed: r.failed }))
       assert(lastErr.indexOf('user aborted') === -1,
         '不再把超时写成 "The user aborted a request."（那是 A-1 想消灭的误导信息）：' + lastErr)
-      assert(/请求超时（2 秒未响应）/.test(lastErr),
+      assert(/timeout \(2s\)/.test(lastErr),
         '文案里的秒数按 timeoutMs 换算（1500ms → 2 秒；单位或换算写错会红）：' + lastErr)
-      assert(/超时/.test(src.stats().lastError || ''), '快照里的 lastError 同样是超时：' + src.stats().lastError)
+      assert(/timeout/.test(src.stats().lastError || ''), '快照里的 lastError 同样是超时：' + src.stats().lastError)
     }
 
     // ---- 51. 结构正确的空响应要能清掉蓝点（NWS 按点查询的常态） ----
@@ -6749,8 +7549,25 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(st.suppressed === 1 && st.bySource.p2pquake === 1,
         '抑制必须留计数（"不进历史 ≠ 不可见"）：' + JSON.stringify(st))
       const snap = t.buildDiagSnapshot()
-      assert(snap.snapshot === 3 && snap.authority && snap.authority.suppressed === 1,
+      // 0.9.4：快照版本 3 → 4（0.9.2 新增了 delivery 段但当时忘了提号）
+      assert(snap.snapshot === 4 && snap.authority && snap.authority.suppressed === 1,
         '诊断快照里能看到被抑制的条数：' + JSON.stringify(snap.authority))
+      // 0.9.4（P2-26）：诊断片段自己抛错时必须**在 warnings 里可见**（此前那几处把 `[]` 当
+      // warnings 传进 safe()，异常被丢进一个没人看的空数组，与"诊断自身失败也要可见"冲突）
+      assert(t.DIAG_SNAPSHOT_VERSION === 4, '快照版本号随新段提号（加段也要提号）')
+      t.cnStreamRegistry.__boom94 = {
+        stats() { throw new Error('boom-stats') },
+        mode() { throw new Error('boom-mode') },
+      }
+      try {
+        const snap2 = t.buildDiagSnapshot()
+        assert(snap2.warnings.some((w) => w.indexOf('boom-stats') !== -1),
+          '片段异常进 warnings：' + JSON.stringify(snap2.warnings))
+        assert(snap2.streams.__boom94 && snap2.streams.__boom94.mode === 'unknown',
+          '片段抛错时用兜底值继续产出（诊断在任何状态下都要能出东西）')
+      } finally {
+        delete t.cnStreamRegistry.__boom94
+      }
     }
 
     // ④ 先到者播：USGS 先到，日本副本后到同样被抑制（DESIGN 3.4 的"不补播"）
@@ -6774,6 +7591,45 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(far.notified === true, '震中差约 70km（>50km）→ 不归并、照常播报：' + JSON.stringify(far))
       const late = t.handleAlert(usgsCopyOf({ id: 'usgs:late', eventKey: 'geo:late', issued: '2026-09-07T23:31:40+09:00' }), cfg)
       assert(late.notified === true, '时间差 6 分钟（>2 分钟）→ 不归并、照常播报：' + JSON.stringify(late))
+    }
+
+    // ⑤' 0.9.4（P1-4）：近似归并的**候选**也要过滤灾种与演示消息
+    //    此前只过滤"来者"（两条路径各一次），于是两类不可见的漏报：
+    //      ① NOAA 海啸警报落在"此前 2 分钟内播报过的另一机构地震"震中 50km 内 → 被判成同一
+    //         事件的副本而完全静默（跨源不比 strength，没有任何"升级"能把它救回来）；
+    //      ② 用户点过一次"发送测试全球警报"后，2 分钟内同坐标附近的真实地震也会被压掉。
+    {
+      const t = loadClient().__test
+      // ① 同灾种的跨机构近似副本仍要归并（对照，别把这条修过头）
+      const q = usgsCopyOf({ id: 'usgs:kind-a', eventKey: 'geo:2026-09-07T14:40', issued: '2026-09-07T23:40:00+09:00' })
+      t.isEventRepeat(Object.assign({}, q, { source: 'emsc' }), 10)
+      const sameKind = usgsCopyOf({ id: 'usgs:kind-b', eventKey: 'geo:other-b', issued: '2026-09-07T23:40:40+09:00' })
+      assert(!!t.crossSourceCopyOf(sameKind), '对照：同灾种（quake）的跨机构近似副本仍被归并')
+
+      // ② 不同灾种（海啸 vs 地震）不该算"同一事件的副本"
+      const tsunamiAlert = {
+        id: 'noaa:ts-1', code: 'noaa', source: 'noaa', kind: 'tsunami', kindLabel: 'NOAA 海啸',
+        locator: 'point', severity: 'red', issued: '2026-09-07T23:50:20+09:00',
+        headline: 'Tsunami Warning', strength: 9, eventKey: 'noaa:ts-1',
+        geo: { lat: 36.05, lon: 140.15 }, regions: [], cancelled: false,
+      }
+      const q2 = usgsCopyOf({ id: 'usgs:kind-c', eventKey: 'geo:2026-09-07T14:50', issued: '2026-09-07T23:50:00+09:00' })
+      t.isEventRepeat(Object.assign({}, q2, { source: 'emsc' }), 10)
+      assert(t.crossSourceCopyOf(tsunamiAlert) === null,
+        '海啸警报不会被"50km 内 2 分钟前的地震"压成同一事件（那是不可见的漏报）')
+      assert(t.isEventRepeat(tsunamiAlert, 10) === false, '海啸也不被判成那场地震的重复')
+
+      // ③ 演示消息（test: 命名空间）不能压掉随后的真实地震
+      const demo = {
+        id: 'demo-1', code: 'emsc', source: 'emsc', kind: 'quake', kindLabel: 'EMSC 测试',
+        locator: 'point', severity: 'orange', issued: '2026-09-07T23:59:00+09:00',
+        headline: '测试全球警报', magnitude: 5, strength: 5, eventKey: 'test:global:1',
+        geo: { lat: 36.05, lon: 140.15 }, regions: [], cancelled: false,
+      }
+      t.isEventRepeat(demo, 10) // 演示消息确实会进 eventSeen（这正是被利用的那一点）
+      const realQuake = usgsCopyOf({ id: 'usgs:real-after-demo', eventKey: 'geo:other-real', issued: '2026-09-07T23:59:30+09:00' })
+      assert(t.crossSourceCopyOf(realQuake) === null,
+        '点过"发送测试全球警报"之后 2 分钟内的真实地震不会被压掉（演示不参与归并）')
     }
 
     // ⑥ 关注点来源分支（origin）：显式值优先，缺失时按名称形状推导
@@ -7077,10 +7933,48 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(!ioBad.ok && ioBad.error === 'format', '坏文件被拒绝')
       assert(JSON.stringify(t11.currentCfg()) === ioBeforeBad, '校验失败时配置一个字都没动')
 
+      // ---- 0.9.4（P1-6）：导入**不能静默丢关注点**，且不能把"半径是数字字符串"放大 3 倍 ----
+      {
+        const raw = {
+          watch: {
+            places: [
+              { name: '好点', lat: 30.66, lon: 104.07, radiusKm: 100 },
+              { name: '坏坐标', lat: '30.66', lon: 104.07 },        // 字符串坐标 → 整条丢弃（判据没变）
+              { name: '越界', lat: 999, lon: 104.07 },              // 越界 → 整条丢弃
+              { name: '好点', lat: 30.66, lon: 104.07, radiusKm: 100 }, // 重复 → 合并
+              { name: '数字字符串半径', lat: 26.85, lon: 100.51, radiusKm: '100' },
+              { name: '没半径', lat: 35.0, lon: 139.0, radiusKm: null },
+            ],
+          },
+        }
+        const text = JSON.stringify({ format: t11.CONFIG_FORMAT, formatVersion: t11.CONFIG_FORMAT_VERSION, config: raw })
+        const parsed = t11.parseConfigImport(text)
+        assert(parsed.ok, '（前置）含脏关注点的配置仍能导入（不因一条坏数据整份拒绝）')
+        assert(parsed.warnings && parsed.warnings.total === 6, '体检账本记下原始条目数：' + JSON.stringify(parsed.warnings))
+        assert(parsed.warnings.dropped === 3,
+          '被丢掉的 3 条（字符串坐标 / 越界 / 重复）有账可查 —— 此前只在界面上说"已导入配置。"')
+        assert(parsed.warnings.radiusFixed === 1, '只有"没半径"那一条记入半径回退（null → 300km）')
+        assert(parsed.cfg.watch.places.length === 3, '归一后留下 3 条关注点')
+        const strRadius = parsed.cfg.watch.places.find((p) => p.name === '数字字符串半径')
+        assert(strRadius && strRadius.radiusKm === 100,
+          '数字字符串半径按数值处理（修复前 "100" 会被当成非数值、静默放大成 300km）')
+        const noneRadius = parsed.cfg.watch.places.find((p) => p.name === '没半径')
+        assert(noneRadius && noneRadius.radiusKm === 300, '对照：真正没有半径的仍退回默认 300km')
+        // importConfig 要把账本透传给界面（否则上面这层修好了、界面还是无条件报成功）
+        const ioWarn = t11.importConfig(text)
+        assert(ioWarn.ok && ioWarn.warnings && ioWarn.warnings.dropped === 3,
+          'importConfig 把体检账本透传给界面（P1-6 的另一半）')
+        assert(t11.t('settings.configIo.importedSkipped', { n: 3 }).indexOf('3') !== -1,
+          '警告文案四种语言都有，且带得上数字：' + t11.t('settings.configIo.importedSkipped', { n: 3 }))
+      }
+
       // ---- 量纲文案表（震度 / 海啸 / 震级 / 半径）：三种语言都得有，且都不是占位符 ----
       const units = t11.tableOf('zh-CN')
       const unitKeys = Object.keys(units).filter((k) => /^(scale|scaleOpt|tsunami|tsunamiOpt|magOpt|radius)\./.test(k))
-      assert(unitKeys.length >= 30, '量纲文案表有 ' + unitKeys.length + ' 条')
+      // 0.9.4（P3-43）：删掉了 13 条**没有消费者**的键（`scale.*` 10 条 + `tsunami.*` 3 条——
+      // 活的那份是 01-constants 的 SCALE_TEXT / TSUNAMI_GRADE_TEXT，05-parser 用的就是它们），
+      // 所以这个数字从 37 降到 24。真正的保证是下面那个"每种语言都齐全"的循环。
+      assert(unitKeys.length >= 20, '量纲文案表有 ' + unitKeys.length + ' 条')
       for (const lang of t11.LANGS) {
         const ioMissing = unitKeys.filter((k) => typeof t11.tableOf(lang)[k] !== 'string' || !t11.tableOf(lang)[k])
         assert(ioMissing.length === 0, lang + ' 的量纲文案齐全（缺：' + ioMissing.join(',') + '）')
@@ -7418,6 +8312,98 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         Math.abs(c.lat) <= 90 && Math.abs(c.lon) <= 180),
         '每条城市都带合法坐标（脏坐标会让"配好了却永远不提醒"）')
       assert(world.WORLD_COUNTRIES[usIdx].count === us.length, '清单里的 count 与分包的实际条数一致')
+      // 0.9.4（PD-3）：国家名是**本地化四条**（ICU 算出来的），不再是写死的中文
+      {
+        const langs = ['zh-CN', 'zh-TW', 'ja', 'en']
+        const bad = world.WORLD_COUNTRIES.filter((c) => !c.names ||
+          langs.some((l) => typeof c.names[l] !== 'string' || !c.names[l].trim()))
+        assert(bad.length === 0, '166 个国家都有四种语言的名字（缺：' + bad.map((c) => c.code).join(',') + '）')
+        assert(!('name' in world.WORLD_COUNTRIES[0]), '旧的中文字段已不在数据里（形状只有一种，不会两处真相）')
+        const it = world.WORLD_COUNTRIES.filter((c) => c.code === 'IT')[0]
+        assert(it && it.names['zh-TW'] === '義大利' && it.names.ja === 'イタリア' && it.names.en === 'Italy',
+          '抽查意大利的四条名字：' + JSON.stringify(it && it.names))
+        // 真的会跟着界面语言换（设置页渲染出来的选项文字）。
+        // 两个前提：① 地区页签要落在「其他国家 / 地区」分支——它由配置里的 origin 推导，
+        // 所以种一个 origin: 'global' 的关注点；② 语言要写进**配置**里——设置页渲染时会从配置
+        // 重新 load（那一步会把 i18n 的当前语言设回配置里的值），所以单靠 setLanguage() 不够。
+        const renderCountries = (lang) => {
+          const react = mkTestReact()
+          const seed = {
+            'dsh.quakeAlert.v1': JSON.stringify({
+              version: 1,
+              language: lang,
+              watch: { prefectures: [], cities: [], places: [{ name: '东京', lat: 35.68, lon: 139.77, radiusKm: 100, origin: 'global' }] },
+            }),
+          }
+          const exC = loadClientEx(seed, { react }).exports.__test
+          exC.setWorldCountries(world.WORLD_COUNTRIES)
+          react.__reset()
+          return textsOfTree(exC.SettingsPanel({ initialTab: 'region' }))
+        }
+        const textsEn = renderCountries('en')
+        // 0.9.4 补：**option 的 value 必须查**。此前只断言标签文本（Italy / イタリア），
+        // 而 option 的 value 不是文本节点——于是"所有国家 option 的 value 都是 undefined"
+        // 这个真缺陷在 2050 条全绿的情况下漏了出去（用户实测时才发现：只能选第一个国家、
+        // 且永远没有城市列表）。这里把值也钉住。
+        {
+          const react2 = mkTestReact()
+          const seed2 = {
+            'dsh.quakeAlert.v1': JSON.stringify({
+              version: 1, language: 'en',
+              watch: { prefectures: [], cities: [], places: [{ name: '东京', lat: 35.68, lon: 139.77, radiusKm: 100, origin: 'global' }] },
+            }),
+          }
+          const exP = loadClientEx(seed2, { react: react2 })
+          exP.exports.__test.setWorldCountries(world.WORLD_COUNTRIES)
+          react2.__reset()
+          const opts = optionsOfTree(exP.exports.__test.SettingsPanel({ initialTab: 'region' }))
+          const allCodes = world.WORLD_COUNTRIES.map((c) => c.code)
+          // 国家下拉 = placeholder（v: ''）+ 每个国家一条；用 code 集合反查，避免把别的 select 数进来
+          const countryOpts = opts.filter((o) => allCodes.indexOf(String(o.v)) !== -1)
+          assert(countryOpts.length === allCodes.length,
+            '国家下拉有 ' + allCodes.length + ' 个国家 option（实际 ' + countryOpts.length + '）')
+          assert(opts.some((o) => o.v === ''), '占位项（"全部国家 / 地区"）的 value 是空串')
+          const vals = countryOpts.map((o) => String(o.v))
+          assert(new Set(vals).size === vals.length, '每个国家的 option value 唯一（重复会让浏览器只能选第一个）')
+          // 这一条扫**所有** option（不限于国家那一批）：任何 option 的 value 变成字符串
+          // "undefined" / "null" 都是同一个错误的形态，无论它来自哪个下拉。
+          const badVals = opts.filter((o) => String(o.v) === 'undefined' || String(o.v) === 'null')
+          assert(badVals.length === 0,
+            '没有任何 option 的 value 是 undefined/null（' + badVals.length + ' 个，例如 ' +
+            JSON.stringify(badVals.slice(0, 2)) + '）')
+          assert(vals.length > 0 && vals.every((v) => /^[A-Z]{2}$/.test(v)),
+            'option value 都是两位国家码：' + JSON.stringify(vals.slice(0, 4)))
+          assert(vals.indexOf('IT') !== -1 && vals.indexOf('US') !== -1, '意大利 / 美国都有可选项')
+          // 端到端：选中一个国家 → onChange 拿到的必须是国家码，并且真的去拉那个国家的分包
+          const urls = []
+          exP.sandbox.window.fetch = async (url) => {
+            urls.push(String(url))
+            return { ok: true, status: 200, json: async () => ({ country: 'IT', cities: [{ name: 'Rome', lat: 41.89, lon: 12.51 }] }) }
+          }
+          // 注意：test-react 的 useState 是按**渲染次序**分配槽位的，所以每次渲染前都要 __reset()，
+          // 否则第二次渲染读的是另一批槽位、状态对不上（这一步我第一版就踩了，写成"没有城市"的假象）。
+          react2.__reset()
+          const sel = selectsOfTree(exP.exports.__test.SettingsPanel({ initialTab: 'region' }))[0]
+          assert(sel && typeof sel.props.onChange === 'function', '国家下拉带 onChange')
+          sel.props.onChange({ target: { value: 'IT' } })
+          assert(urls.length === 1 && urls[0].indexOf('country=IT') !== -1,
+            '选中意大利真的去拉它那一包（此前的 value 是 "undefined"，拉的是不存在的国家）：' + JSON.stringify(urls))
+          // 用户报的第二个症状是"没有任何城市选项"——所以还要看**拉回来之后列表真的渲染出来**，
+          // 而不是只确认发出过请求。await 一拍让 loadCountryCities 的 promise 落地，再渲染一次。
+          await new Promise((r) => setImmediate(r))
+          react2.__reset()
+          const afterSel = textsOfTree(exP.exports.__test.SettingsPanel({ initialTab: 'region' }))
+          assert(afterSel.some((s) => s.indexOf('Rome') !== -1),
+            '选中之后城市列表里出现 Rome（用户报的"没有任何城市选项"就是这一步断了）')
+        }
+        assert(textsEn.some((s) => s.indexOf('Italy') !== -1),
+          '语言切到 English 后国家下拉出现 Italy（此前永远是简体中文）')
+        assert(!textsEn.some((s) => s.indexOf('意大利') !== -1), 'English 下不再出现中文国名')
+        const textsJa = renderCountries('ja')
+        assert(textsJa.some((s) => s.indexOf('イタリア') !== -1), '语言切到日本語后出现 イタリア')
+        const textsZhTw = renderCountries('zh-TW')
+        assert(textsZhTw.some((s) => s.indexOf('義大利') !== -1), '繁体下出现 義大利（不是简繁同形）')
+      }
       assert(!us.some((c) => 'pop' in c), '排序用的人口字段不下发（只增体积）')
       // 同名城市必须能区分：同国内重名的条目要把一级行政区附在名字里
       const dupNames = new Set()
@@ -7466,10 +8452,22 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(c8.setWorldCountries([
         { code: 'us', name: '美国', count: 2 }, { code: 'US', name: '重复', count: 9 },
         { code: '', name: '坏' }, { code: 'fr', name: '法国', count: 1 },
-      ]) === true, '有一项可用即接受')
+      ]) === true, '有一项可用即接受（老 Host 只给 name 的形态也要能用）')
       const list8 = c8.worldCountriesOf()
-      assert(list8.length === 2 && list8[0].code === 'US' && list8[0].name === '美国',
+      // 0.9.4（PD-3）：数据形状改为 `names`（本地化四条）。老形状（只有 `name`）作为 zh-CN 收下，
+      // 所以这里取词要走 countryNameOf —— 依赖 `entry.name` 的写法已经不再成立。
+      assert(list8.length === 2 && list8[0].code === 'US' && c8.countryNameOf(list8[0], 'zh-CN') === '美国',
         '国家码归一为大写、重复码只留第一条：' + JSON.stringify(list8))
+      assert(c8.countryNameOf(list8[0], 'en') === '美国',
+        '只有一种名字时任何语言都退回它（不显示空白）')
+      assert(c8.setWorldCountries([{ code: 'IT', count: 50, names: { 'zh-CN': '意大利', 'zh-TW': '義大利', ja: 'イタリア', en: 'Italy' } }]) === true,
+        '本地化四条的形状可接受')
+      const itEntry = c8.worldCountriesOf()[0]
+      assert(c8.countryNameOf(itEntry, 'ja') === 'イタリア' && c8.countryNameOf(itEntry, 'en') === 'Italy',
+        '按语言取词（ja / en）')
+      assert(c8.countryNameOf(itEntry, 'fr') === '意大利',
+        '该语言没有名字时逐级退回（fr → zh-CN），不显示空白')
+      assert(c8.countryNameOf({ code: 'ZZ', names: {} }, 'en') === 'ZZ', '一个名字都没有时退回 ISO 码')
       assert(c8.countryPackOf('US') === null, '尚未拉取时没有缓存')
 
       const urls = []
@@ -7517,6 +8515,941 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     }
   } catch (e) {
     assert(false, '0.8.0 检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
+  }
+
+  // ==========================================================================
+  // 0.9.4：设置页的可访问性与对比度（P2-28 / P3-44）
+  // ==========================================================================
+  try {
+    console.log('== 0.9.4：设置页的可访问性与对比度 ==')
+    const { CITIES_BY_PREF: CITIES_94 } = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cities.js')).href)
+    const react = mkTestReact()
+    const seed = {
+      'dsh.quakeAlert.v1': JSON.stringify({
+        version: 1,
+        watch: { prefectures: ['東京都'], cities: ['目黒区'], places: [] },
+      }),
+    }
+    const { exports: ex } = loadClientEx(seed, { react })
+    ex.__test.setCityTable(CITIES_94)
+    react.__reset()
+    const tree = ex.__test.SettingsPanel({ initialTab: 'region' })
+    const buttons = []
+    const walk = (n) => {
+      if (!n || typeof n !== 'object') return
+      if (Array.isArray(n)) { n.forEach(walk); return }
+      if (n.type === 'button') buttons.push(n)
+      for (const c of (n.children || [])) walk(c)
+    }
+    walk(tree)
+    const cityBtn = buttons.filter((b) => (b.children || []).indexOf('目黒区') !== -1)[0]
+    const otherBtn = buttons.filter((b) => (b.children || []).indexOf('新宿区') !== -1)[0]
+    assert(!!cityBtn && !!otherBtn, '（前置）渲染出市町村按钮（已选 / 未选各一个）')
+    // 选中态此前只靠颜色与边框表达，读屏用户无法知道选了哪些市町村（WCAG 4.1.2）。
+    assert(cityBtn && cityBtn.props['aria-pressed'] === 'true', '已选中的市町村按钮带 aria-pressed=true')
+    assert(otherBtn && otherBtn.props['aria-pressed'] === 'false', '未选中的按钮带 aria-pressed=false')
+    // 对比度：11px 的次要文字在深色底上要过 AA 4.5:1，#6b7280 只有约 3.6:1
+    assert(CLIENT_CODE.indexOf("color: '#6b7280'") === -1,
+      '设置页不再使用低对比度的 #6b7280 作为文字色（同文件已因同一原因改成 #9aa0a6，此前漏改一处）')
+  } catch (e) {
+    assert(false, '0.9.4 设置页 a11y 检查失败：' + e.message)
+  }
+
+  // ==========================================================================
+  // 0.9.4：toast 的堆叠 / 上限 / 去重（P2-25）
+  // ==========================================================================
+  try {
+    console.log('== 0.9.4：toast 堆叠、上限与长标题换行 ==')
+    const mkEl = () => {
+      const el = {
+        style: {}, children: [], parentNode: null, listeners: {}, textContent: '', attrs: null,
+        setAttribute(k, v) { el.attrs = el.attrs || {}; el.attrs[k] = v },
+        appendChild(c) { el.children.push(c); c.parentNode = el; return c },
+        removeChild(c) { const i = el.children.indexOf(c); if (i !== -1) el.children.splice(i, 1); c.parentNode = null },
+        addEventListener(t, fn) { (el.listeners[t] = el.listeners[t] || []).push(fn) },
+      }
+      return el
+    }
+    const body = mkEl()
+    const doc = { visibilityState: 'visible', body, createElement: mkEl }
+    const t = loadClientEx({}, {
+      window: { document: doc, requestAnimationFrame: (fn) => fn() },
+      setTimeout: () => 0, // toast 的 ttl 不参与断言（不让它把进程钉住）
+      clearTimeout: () => {},
+    }).exports.__test
+    const cfg = JSON.parse(JSON.stringify(t.DEFAULT_CFG))
+    cfg.notify = { sound: false, system: false, volume: 0 }
+    cfg.thresholds.globalMagnitude = 3
+    cfg.watch = { prefectures: [], cities: [], places: [{ name: '测试点', lat: 35.0, lon: 139.0, radiusKm: 500 }] }
+    const quakeAt = (n, lat, lon) => ({
+      id: 'usgs:toast-' + n, code: 'usgs', source: 'usgs', kind: 'quake', kindLabel: 'USGS 地震',
+      locator: 'point', severity: 'orange', issued: '2026-09-20T0' + n + ':00:00+09:00',
+      headline: 'M5.' + n + ' 测试区', magnitude: 5 + n / 10, maxScale: -1, strength: 5 + n / 10,
+      eventKey: 'geo:toast-' + n, geo: { lat, lon }, regions: [], cancelled: false,
+    })
+    const hits = []
+    for (let n = 1; n <= 4; n += 1) hits.push(t.handleAlert(quakeAt(n, 35 + n * 0.2, 139 + n * 0.2), cfg))
+    assert(hits.filter((r) => r.notified === true).length === 4,
+      '（前置）四条都播报：' + JSON.stringify(hits.map((r) => r.reason)))
+    // 一个纵向排列的容器：此前每条各自 fixed top:16/right:16，一批告警完全重叠
+    assert(body.children.length === 1 && body.children[0].style.display === 'flex' &&
+      body.children[0].style.flexDirection === 'column',
+      'toast 共用一个纵向容器（自动堆叠，不再互相遮挡）')
+    const box = body.children[0]
+    assert(box.style.pointerEvents === 'none' && box.children.every((c) => c.style.pointerEvents === 'auto'),
+      '容器不吃点击、单条 toast 吃点击（空容器不盖住界面）')
+    assert(box.children.length === 3, '同时最多 3 条（超出收掉最旧的）：' + box.children.length)
+    const newest = box.children[box.children.length - 1]
+    assert(String(newest.children[1].textContent).indexOf('测试区') !== -1,
+      '最新那条一定在屏上（最该看到的是它，而不是被旧 toast 挤掉）')
+    assert(newest.attrs && newest.attrs.role === 'alert', '每条仍然带 role=alert（读屏用户的唯一通道）')
+    assert(newest.children[0].style.wordBreak === 'break-word',
+      '标题也允许换行（此前只有正文有 wordBreak，长标题会溢出 340px）')
+  } catch (e) {
+    assert(false, '0.9.4 toast 检查失败：' + e.message + (e && e.stack ? '\n' + e.stack.split('\n')[1] : ''))
+  }
+
+  // ==========================================================================
+  // 0.9.4：市町村表的假名写法（P2-29 / D-4）
+  //
+  // CHANGELOG 曾把"河川表与市区町村表假名不一致（8 例）"记为 **0.3.2 / Fixed**，而数据一直在：
+  // 表里有 11 处 U+3096「ゖ」（小写片假名 KE 的错误形式）、若干处把 ヶ/ケ 写成平假名 け、
+  // 把 ノ 写成 の、把 アルプス 写成 あるぷす。匹配被 normKana 兜住了，但设置页会把这些错名
+  // **显示给用户**，而且与河川区域表正面冲突（同一插件里两种写法）。
+  // ==========================================================================
+  try {
+    console.log('== 0.9.4：市町村表的假名写法（22 处错名修好 + 不许再回来）==')
+    const { CITIES_BY_PREF: CITIES_94B } = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cities.js')).href)
+    const { RIVER_AREAS: RIVER_94B } = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'river-areas.js')).href)
+    const t94 = loadClientEx().exports.__test
+    const allCities = []
+    for (const pref of Object.keys(CITIES_94B)) for (const c of CITIES_94B[pref]) allCities.push(c)
+    // ① 错字符不许再出现（U+3096 是"小写片假名 KE"，正常地名不会用它）
+    const withBadChar = allCities.filter((c) => c.indexOf('\u3096') !== -1)
+    assert(allCities.length === 1917, '市区町村表共 ' + allCities.length + ' 条')
+    assert(withBadChar.length === 0, '表里没有 U+3096「ゖ」（此前 11 处）：' + withBadChar.join('/'))
+    // ② 与河川区域表**零拼写冲突**（两张表讲同一批地名，写法必须一致）
+    const riverByNorm = new Map()
+    for (const a of RIVER_94B) for (const c of a.cities) riverByNorm.set(t94.normKana(c), c)
+    const conflicts = []
+    for (const c of allCities) {
+      const r = riverByNorm.get(t94.normKana(c))
+      if (r && r !== c) conflicts.push(c + '≠' + r)
+    }
+    assert(conflicts.length === 0, '与河川表零冲突（修复前 8 处）：' + conflicts.join(' '))
+    // ③ 22 处修正逐条钉住：官方写法在表里、错写法不在
+    const FIXED = [
+      ['外ヶ浜町', '外ゖ浜町'], ['鰺ヶ沢町', '鰺ゖ沢町'], ['六ヶ所村', '六ゖ所村'],
+      ['金ケ崎町', '金け崎町'], ['七ヶ宿町', '七ゖ宿町'], ['七ヶ浜町', '七ゖ浜町'],
+      ['龍ケ崎市', '龍け崎市'], ['鶴ヶ島市', '鶴ゖ島市'], ['鎌ケ谷市', '鎌け谷市'],
+      ['袖ケ浦市', '袖け浦市'], ['青ヶ島村', '青ゖ島村'], ['茅ヶ崎市', '茅ゖ崎市'],
+      ['横浜市保土ケ谷区', '横浜市保土け谷区'], ['南アルプス市', '南あるぷす市'],
+      ['駒ヶ根市', '駒ゖ根市'], ['関ケ原町', '関け原町'], ['吉野ヶ里町', '吉野ゖ里町'],
+      ['五ヶ瀬町', '五ゖ瀬町'], ['上ノ国町', '上の国町'], ['ニセコ町', 'にせこ町'],
+      ['西ノ島町', '西の島町'], ['山ノ内町', '山の内町'],
+    ]
+    const set = new Set(allCities)
+    const missing = FIXED.filter(([good]) => !set.has(good)).map(([good]) => good)
+    const leftover = FIXED.filter(([, bad]) => set.has(bad)).map(([, bad]) => bad)
+    assert(missing.length === 0, '22 处官方写法都在表里（缺：' + (missing.join('/') || '无') + '）')
+    assert(leftover.length === 0, '22 处错写法都不在表里（残留：' + (leftover.join('/') || '无') + '）')
+    // ④ 修好之后仍然能被**正确**反查到县（改名不能把匹配改坏）
+    const t94b = loadClientEx().exports.__test
+    t94b.setCityTable(CITIES_94B)
+    for (const [good, pref] of [['六ヶ所村', '青森県'], ['龍ケ崎市', '茨城県'], ['ニセコ町', '北海道'], ['山ノ内町', '長野県']]) {
+      assert(t94b.prefsOfCity(good).indexOf(pref) !== -1, good + ' → ' + pref + '（实际 ' + t94b.prefsOfCity(good).join('/') + '）')
+    }
+  } catch (e) {
+    assert(false, '0.9.4 市町村表假名检查失败：' + e.message)
+  }
+
+  // ==========================================================================
+  // 0.9.4：历史的「30 条 + 过去 5 天」两个上限（D-1）
+  //
+  // 设计稿一直写的是"两个条件同时生效、取更严格的"，而代码只实现了 30 条那一半：
+  // 陈年条目会一直占着那 30 个位置。这里钉住两条路（写入时的剪枝 与 读盘时的过滤）。
+  // ==========================================================================
+  try {
+    console.log('== 0.9.4：历史记录的时间上限（过去 5 天）==')
+    const t = loadClientEx().exports.__test
+    const DAY = 24 * 60 * 60 * 1000
+    const age = t.HISTORY_MAX_AGE_MS
+    assert(age === 5 * DAY, '上限是 5 天（' + (age / DAY) + '）')
+    // **不能写死绝对时刻**：addEvent 内部用**真实时钟**剪枝，只有"喂进去的 now"与"真实 now"
+    // 同源，两者才不会随时间错位——写死 2026-09-27T12:00Z 时，真实时间一过 7 天，`at: now - 1*DAY`
+    // 的条目就会被当成过期剪掉，「窗口内的条目保留」随之变红。这条是时间旅行守卫
+    // （scripts/check-time-travel.mjs）在 +7 天处抓到的，与上面那条 24 小时记忆是同一类炸弹。
+    const now = Date.now()
+    // ① 纯函数：写入时刻说话
+    assert(t.withinHistoryAge({ at: now - 4 * DAY, issued: '2019-01-01T00:00:00Z' }, now) === true,
+      '写入 4 天前 → 保留（即便电文本身很旧）')
+    assert(t.withinHistoryAge({ at: now - 6 * DAY }, now) === false, '写入 6 天前 → 丢弃')
+    assert(t.withinHistoryAge({ issued: new Date(now - 6 * DAY).toISOString() }, now) === false,
+      '老记录没有 at → 退回按 issued 判（这正是要清掉的那批）')
+    assert(t.withinHistoryAge({ issued: new Date(now - 2 * DAY).toISOString() }, now) === true,
+      '老记录 issued 在 5 天内 → 保留')
+    assert(t.withinHistoryAge({}, now) === true && t.withinHistoryAge({ at: 0, issued: '乱码' }, now) === true,
+      '两个时间都认不出 → **保留**（不因为缺字段删用户的数据）')
+    // ② 写入路径：新条目到来时把过期的挤掉
+    const seed = { 'dsh.quakeAlert.history': JSON.stringify([
+      { key: 'old-1', id: 'old-1', issued: '2026-09-20T00:00:00Z', headline: '六天前', at: now - 6 * DAY },
+      { key: 'ok-1', id: 'ok-1', issued: '2026-09-26T00:00:00Z', headline: '一天前', at: now - 1 * DAY },
+      { key: 'legacy-old', id: 'legacy-old', issued: '2026-09-01T00:00:00Z', headline: '没写 at 的旧条目' },
+    ]) }
+    const t2 = loadClientEx(seed).exports.__test
+    const loaded = t2.loadHistory(now)
+    assert(loaded.length === 1 && loaded[0].key === 'ok-1',
+      '读盘时丢掉"写入 6 天前"的那条、也丢掉"没有 at 且 issued 很旧"的老记录，只留窗口内的：' +
+      loaded.map((e) => e.key).join('/'))
+    // 写入路径：给一条新事件，过期的必须消失
+    t2.addEvent({ id: 'fresh', issued: '2026-09-27T00:00:00Z', headline: '刚到的', at: now })
+    const after = t2.loadHistory(now).map((e) => e.key)
+    assert(after.indexOf('fresh') === 0, '新条目在最前（写入路径正常）')
+    assert(after.indexOf('ok-1') !== -1, '窗口内的条目保留')
+    // ③ 30 条的那个上限没有被这次改动弄坏
+    const t3 = loadClientEx().exports.__test
+    for (let i = 0; i < t3.HISTORY_MAX + 5; i += 1) {
+      t3.addEvent({ id: 'n' + i, issued: '2026-09-27T00:00:00Z', headline: '第' + i, at: now })
+    }
+    assert(t3.loadHistory(now).length === t3.HISTORY_MAX,
+      '条数上限仍然是 ' + t3.HISTORY_MAX + '（' + t3.loadHistory(now).length + '）')
+  } catch (e) {
+    assert(false, '0.9.4 历史时间上限检查失败：' + e.message)
+  }
+
+  // ==========================================================================
+  // 0.9.4：P3 尾项（常量唯一来源 / 北海道简写 / 强度缺失 / 通知权限 / 死键）
+  // ==========================================================================
+  try {
+    console.log('== 0.9.4：P3 尾项（常量、简写、强度、权限、死键）==')
+    const t = loadClientEx().exports.__test
+    // ① P3-37：半径的兜底值有名字了，而且与设置页上限同源
+    assert(t.LEGACY_PLACE_RADIUS_KM === 300,
+      '缺半径时的兜底是命名常量 LEGACY_PLACE_RADIUS_KM=300（比默认 100 宽：收窄=漏报方向）')
+    const np = t.normalizeCfg({ watch: { places: [{ name: 'x', lat: 30, lon: 100 }] } })
+    assert(np.watch.places[0].radiusKm === t.LEGACY_PLACE_RADIUS_KM, '归一化用的就是这个常量（不再是散落的 300）')
+    const manyCities = t.normalizeCfg({ watch: { cities: Array.from({ length: 400 }, (_, i) => '市' + i) } })
+    assert(manyCities.watch.cities.length === t.MAX_WATCH_CITIES || manyCities.watch.cities.length === 300,
+      '市区町村上限走 MAX_WATCH_CITIES 常量：' + manyCities.watch.cities.length)
+    // ② P3-38：「北海道」不能被削成「北海」
+    assert(t.normalizePref('北海道') === '北海道', '北海道本身是全称，不被削后缀')
+    assert(t.normalizePref('北海') === '北海', '「北海」不是任何县的简写（以前会被当成北海道）')
+    assert(t.normalizePref('東京') === '東京都' && t.normalizePref('大阪') === '大阪府',
+      '需要削后缀的（东京都 / 大阪府）照旧能归一到全称')
+    const aliases = t.cityAliases('札幌市', '北海道')
+    assert(aliases.every((a) => a.indexOf('北海札幌') === -1),
+      '北海道的市町村不再生成「北海○○市」这种幻影别名：' + aliases.join('/'))
+    assert(!aliases.some((a) => a === '北海札幌市'), '（同一条的显式写法）')
+    // ③ P3-40：强度缺失时不判重复（宁可多响一次），而且这是**显式**判据
+    const noStrength = {
+      id: 'ns-1', code: 'usgs', source: 'usgs', kind: 'quake', kindLabel: 'x', locator: 'point',
+      severity: 'orange', issued: '2026-09-27T10:00:00Z', headline: 'M5', magnitude: 5,
+      eventKey: 'geo:ns-1', geo: { lat: 35, lon: 139 }, regions: [], cancelled: false,
+    }
+    assert(t.isEventRepeat(noStrength, 10) === false, '（前置）第一次见到 → 不是重复')
+    assert(t.isEventRepeat(Object.assign({}, noStrength, { issued: '2026-09-27T10:01:00Z' }), 10) === false,
+      '同事件键再来一条、但 strength 缺失 → **不**判重复（宁可多响一次，也不因为缺字段静默）')
+    // ④ P3-46：回调式的 requestPermission 也要能拿到结果
+    {
+      const s = loadClientEx({}, {
+        window: {
+          Notification: Object.assign(function () {}, {
+            permission: 'default',
+            requestPermission: (cb) => { cb('granted') }, // 老式签名：返回 undefined，结果给回调
+          }),
+        },
+      }).exports.__test
+      const p = s.requestNotificationPermission()
+      assert(p && typeof p.then === 'function', '回调式实现也返回 Promise（此前是 Promise.resolve(undefined)）')
+      const res = await p
+      assert(res === 'granted', '回调式实现的结果被接住（界面不再谎报"未获授权"）：' + res)
+    }
+    // ⑤ P3-43 的**修订**（0.9.4）：`scale.*` / `tsunami.*` 当时是没有消费者的死键，所以删掉了；
+    // 现在它们**复活成活的键**——解析层拼 `headline` 时按界面语言取词（见 00g-texts-events），
+    // 所以这条断言从"这些键不存在"改成"这些键存在且四语齐全"，而 `source.jma|nmc` 仍然不存在。
+    {
+      const zh = t.tableOf('zh-CN')
+      assert('scale.10' in zh && 'scale.46' in zh && 'tsunami.Warning' in zh,
+        '震度 / 海啸等级的词已复活成按语言取词的活键（0.9.4 本地化解析层）')
+      assert(!('source.jma' in zh) && !('source.nmc' in zh),
+        'source.jma|nmc 仍然是死键（活的那份是 00f 的 settings.sourceLabels.*）')
+      for (const lang of t.LANGS) {
+        const tb = t.tableOf(lang)
+        assert(typeof tb['scale.60'] === 'string' && typeof tb['tsunami.MajorWarning'] === 'string' &&
+          typeof tb['kind.jmaHeavyRain'] === 'string' && typeof tb['reason.cancelNoPriorAlert'] === 'string',
+          lang + '：解析层标签与原因文案都在（scale / tsunami / kind / reason）')
+      }
+      assert('scaleOpt.40' in zh && 'tsunamiOpt.Watch' in zh && 'settings.sourceLabels.jma' in zh,
+        '对照：真正在用的那批键一个都没动')
+      for (const lang of t.LANGS) {
+        const tb = t.tableOf(lang)
+        assert(typeof tb['settings.configIo.copied'] === 'string' && typeof tb['settings.configIo.copyBtn'] === 'string',
+          lang + '：配置页「复制」两条文案齐全（0.9.4 把复制按钮做出来了，这两个键不再是死键）')
+      }
+    }
+  } catch (e) {
+    assert(false, '0.9.4 P3 尾项检查失败：' + e.message)
+  }
+
+  // ==========================================================================
+  // 0.9.4：PD-1（产品决策）——"没命中"不进历史，但"判不了"必须留痕
+  //
+  // 历史被 L1〜L3 与 Watch/Advisory 占满（日气象约 170 条/天、NWS 的 Watch/Advisory 占其洪水类
+  // 53%）。用户选定的做法是**排除完全未命中**；但"根本没法判定"（区域 / 坐标 / 震度数据缺失）
+  // 不是"离得远"，丢掉它们就回到"用户以为当时没有预警"那种形态，所以两类必须分开。
+  // 分界由 matcher 的 `cannotJudge` 标记给出。
+  // ==========================================================================
+  try {
+    console.log('== 0.9.4：没命中不进历史 / 判不了必须留痕（PD-1）==')
+    const t = loadClientEx().exports.__test
+    const mk = (patch) => {
+      const cfg = JSON.parse(JSON.stringify(t.DEFAULT_CFG))
+      cfg.notify = { sound: false, system: false, volume: 0 }
+      cfg.watch = { prefectures: ['東京都'], cities: [], places: [{ name: '点', lat: 35.0, lon: 139.0, radiusKm: 100 }] }
+      return Object.assign(cfg, patch || {})
+    }
+    const hist = () => t.loadHistory().length
+    // ① 气象 L2（未达 L4）：不再进历史
+    const l1 = t.parseJma(fs.readFileSync(path.join(ROOT, 'samples', 'jma-vxko-flood.xml'), 'utf8'), { id: 'l2' })
+    assert(l1.level === 2, '（前置）样本是 L2 电文')
+    const before1 = hist()
+    const r1 = t.handleAlert(l1, mk({ watch: { prefectures: ['東京都'], cities: [], places: [] } }))
+    assert(r1.notified === false && r1.reason === 'not-hit', 'L2 不播报')
+    assert(hist() === before1, 'L2（未达档位）不进历史 —— 此前会占掉 HISTORY_MAX 的一个位置')
+    // ② 全球地震离关注点很远：同样不进
+    const far = {
+      id: 'usgs:far-pd1', code: 'usgs', source: 'usgs', kind: 'quake', kindLabel: 'USGS', locator: 'point',
+      severity: 'orange', issued: '2026-09-27T10:00:00Z', headline: 'M5 · 远处', magnitude: 5, maxScale: -1,
+      strength: 5, eventKey: 'geo:pd1-far', geo: { lat: -40, lon: -100 }, regions: [], cancelled: false,
+    }
+    const before2 = hist()
+    const r2 = t.handleAlert(far, mk())
+    assert(r2.notified === false, '远处地震不播报')
+    assert(hist() === before2, '没命中的全球地震不进历史（原有口径，现在对所有源一致）')
+    // ③ 判不了的要留痕：551 震源情报（无 points、无震度）
+    {
+      const originRaw = {
+        code: 551, id: 'jp-pd1-origin', issue: { time: '2026/09/27 19:00:00', type: 'OriginTime' },
+        earthquake: { time: '2026/09/27 19:00:00', hypocenter: { name: '茨城県南部', latitude: 36.0, longitude: 140.1, magnitude: 5 } },
+      }
+      const before3 = hist()
+      const r3 = t.handleAlert(t.parseQuake(originRaw), mk())
+      assert(r3.notified === false && r3.detail.indexOf('震源情报') !== -1, '震源情报不播报，原因如实：' + r3.detail)
+      assert(hist() === before3 + 1, '震源情报**进历史**（"判不了"不等于"离得远"）')
+    }
+    // ④ 判不了的要留痕：点型消息没有可用坐标
+    {
+      const noGeo = Object.assign({}, far, {
+        id: 'usgs:nogeo-pd1', eventKey: 'geo:pd1-nogeo', geo: { lat: null, lon: null },
+        issued: '2026-09-27T10:05:00Z',
+      })
+      const before4 = hist()
+      t.handleAlert(noGeo, mk())
+      assert(hist() === before4 + 1, '坐标缺失的点型消息进历史（DESIGN 3.1：不猜、如实说明）')
+    }
+    // ⑤ 一个关注点都没配：仍不进历史（noWatch 口径不变）
+    {
+      const before5 = hist()
+      t.handleAlert(far, mk({ watch: { prefectures: [], cities: [], places: [] } }))
+      assert(hist() === before5, '未配置关注点时不进历史（否则每天几十条"未设置关注点"会占满）')
+    }
+  } catch (e) {
+    assert(false, '0.9.4 PD-1 检查失败：' + e.message)
+  }
+
+  // ==========================================================================
+  // 0.9.4：PD-2（产品决策）——震度档位就近对齐，震级门槛不动
+  //
+  // Host schema 只校验范围（改成严格枚举会让脏值注册失败，DESIGN 11.9 #2 已排除），所以
+  // "手改的配置"由 Client 归一化这一步收口：先夹取（既有语义），再把**震度档位**吸附到最近的
+  // 合法档。震级门槛不吸附——下拉里的 M3〜M7 只是常用预设，M6.7 这样的自定义门槛是合法的。
+  // ==========================================================================
+  try {
+    console.log('== 0.9.4：震度档位就近对齐（PD-2）==')
+    const t = loadClientEx().exports.__test
+    const th = (patch) => t.normalizeCfg({ thresholds: patch }).thresholds
+    assert(th({ quakeScale: 42 }).quakeScale === 40, '手改的 42 → 40（就近档位，界面选得中）')
+    assert(th({ quakeScale: 47 }).quakeScale === 45, '47 → 45')
+    assert(th({ quakeScale: 48 }).quakeScale === 50, '48 → 50（最近的一档）')
+    assert(th({ quakeScale: 5 }).quakeScale === 10, '5 → 10（最小档）')
+    assert(th({ quakeScale: 999 }).quakeScale === 70, '999 → 夹到上界 70')
+    assert(th({ quakeScale: 0 }).quakeScale === 0, '0 保留：它是"来者不拒"的显式取值（吸附到 10 等于收窄）')
+    assert(th({ quakeScale: 'abc' }).quakeScale === t.DEFAULT_CFG.thresholds.quakeScale, '非法值仍回退默认档')
+    assert(th({ eewScale: 43 }).eewScale === 45, 'eewScale 同样就近对齐（43 → 45）')
+    assert(th({ quakeScale: 55 }).quakeScale === 55, '合法档位原样保留（55 不动）')
+    // 震级门槛不吸附（三处：自定义值必须被保留）
+    assert(th({ globalMagnitude: 6.7 }).globalMagnitude === 6.7, 'globalMagnitude 的自定义值保留（6.7 不是预设但合法）')
+    assert(th({ cnReportMagnitude: 7 }).cnReportMagnitude === 7, 'cnReportMagnitude 同理（7 保留）')
+    assert(th({ globalMagnitude: 99 }).globalMagnitude === 10, '震级仍然只做夹取（99 → 10）')
+  } catch (e) {
+    assert(false, '0.9.4 PD-2 检查失败：' + e.message)
+  }
+
+  // ==========================================================================
+  // 0.9.4：C6——「真正播报过」的 24 小时记忆要跨刷新存活
+  //
+  // 此前它是纯内存的：Host 重启后按冷启动回看窗口（USGS 6 小时 / NOAA 24 小时）重新投递时，
+  // 消息级去重（10 分钟）与事件级（3 小时）都已过期，而这份记忆随刷新消失 —— 同一场地震再响一次。
+  // ==========================================================================
+  try {
+    console.log('== 0.9.4：已播报记忆持久化（C6）==')
+    const mkAlert = (t, id) => ({
+      id, code: 'usgs', source: 'usgs', kind: 'quake', kindLabel: 'USGS', locator: 'point',
+      severity: 'orange', issued: '2026-09-27T10:00:00Z', headline: 'M5 · 测试', magnitude: 5, maxScale: -1,
+      strength: 5, eventKey: 'geo:persist-' + id, geo: { lat: 35.68, lon: 139.77 }, regions: [], cancelled: false,
+    })
+    const cfg = () => {
+      const c = JSON.parse(JSON.stringify(loadClientEx().exports.__test.DEFAULT_CFG))
+      c.notify = { sound: false, system: false, volume: 0 }
+      c.watch = { prefectures: [], cities: [], places: [{ name: '东京', lat: 35.68, lon: 139.77, radiusKm: 100, origin: 'global' }] }
+      return c
+    }
+    const s1 = loadClientEx()
+    const t1 = s1.exports.__test
+    const alert = mkAlert(t1, 'a1')
+    const r1 = t1.handleAlert(alert, cfg())
+    assert(r1.notified === true, '（前置）播报一条：' + JSON.stringify(r1))
+    const stored = s1.storage.get('dsh.quakeAlert.alerted')
+    assert(typeof stored === 'string' && stored.indexOf('geo:persist-a1') !== -1,
+      '播报后写进 localStorage（此前是纯内存）：' + String(stored).slice(0, 80))
+    // 重新加载（同一份 localStorage）→ 记忆仍在
+    const seed = Object.fromEntries(s1.storage)
+    const t2 = loadClientEx(seed).exports.__test
+    assert(t2.wasRecentlyAlerted(alert) === true,
+      '刷新后仍记得"这条播报过"——冷启动回看的重放不会二次响铃')
+    // 同一条消息在刷新后重新投递 → 不播报
+    const r2 = t2.handleAlert(mkAlert(t2, 'a1'), cfg())
+    assert(r2.notified === false && r2.reason === 'replayed',
+      '刷新后重放同一条 → 按"已播报过"抑制，不再响铃：' + JSON.stringify(r2))
+    // 超过 24 小时 → 记忆失效（并顺手清掉盘上的那份）
+    {
+      // **不能把"现在"写死成绝对时刻**：这个时钟要与上面 t1 用**真实 now** 写进盘里的记忆做差，
+      // 写死 `Date.UTC(2026,8,28,12,0,0)` 就成了定时炸弹——真实时间越过它前 24 小时的那一刻
+      // （2026-09-27T12:00Z）起，「25 小时前」变成「23.9 小时前」，这条断言开始必红。它真的炸了：
+      // 第一次 CI run（11:42Z）这条通过，第二次（12:07Z，已跨过临界点）就红了。
+      // 改成「读一次真实 now 再加 25 小时」：与运行时刻无关，差值恒为 25h > 24h。
+      const clockRef = { t: Date.now() + 25 * 60 * 60 * 1000 }
+      class SandboxDate extends Date {
+        constructor(...args) { if (args.length === 0) super(clockRef.t); else super(...args) }
+        static now() { return clockRef.t }
+      }
+      const t3 = loadClientEx(seed, { Date: SandboxDate }).exports.__test
+      assert(t3.wasRecentlyAlerted(alert) === false, '超过 24 小时的记忆失效（不会被陈年条目挡住）')
+    }
+    // 解除之后要把记忆删掉，而且**删除也要落盘**（否则刷新后又"提醒过"）
+    // 注：取消 / 解除链路只处理 eew / tsunami / weather（quake 不进这条链），所以这里用海啸。
+    {
+      const s4 = loadClientEx()
+      const t4 = s4.exports.__test
+      const ts = {
+        id: 'noaa:persist-ts', code: 'noaa', source: 'noaa', kind: 'tsunami', kindLabel: '海啸警报',
+        locator: 'point', severity: 'orange', issued: '2026-09-27T10:00:00Z', headline: 'Tsunami Advisory',
+        tsunamiRank: 2, maxScale: 2, strength: 2, eventKey: 'noaa:persist-ts',
+        geo: { lat: 35.68, lon: 139.77 }, regions: [], cancelled: false,
+      }
+      const r4 = t4.handleAlert(ts, cfg())
+      assert(r4.notified === true, '（前置）海啸播报：' + JSON.stringify(r4))
+      assert(String(s4.storage.get('dsh.quakeAlert.alerted') || '').indexOf('noaa:persist-ts') !== -1,
+        '（前置）盘上有这条记忆')
+      const cancelTs = Object.assign({}, ts, { id: 'noaa:persist-ts-cancel', issued: '2026-09-27T11:00:00Z', cancelled: true })
+      t4.handleCancelled(cancelTs, cfg())
+      const after = String(s4.storage.get('dsh.quakeAlert.alerted') || '')
+      assert(after.indexOf('noaa:persist-ts') === -1,
+        '解除后盘上的那条记忆也被清掉（否则同键解除会重复提示）：' + after.slice(0, 80))
+    }
+  } catch (e) {
+    assert(false, '0.9.4 C6 检查失败：' + e.message)
+  }
+
+  // ==========================================================================
+  // 0.9.4：C5——重连后补拉断线窗口（/v2/history），首次连接不补
+  // ==========================================================================
+  try {
+    console.log('== 0.9.4：断线补拉（C5）==')
+    const run = async (opts) => {
+      const sockets = []
+      class FakeWS {
+        constructor(url) { this.url = url; sockets.push(this) }
+        close() {}
+      }
+      const ex = loadClientEx({}, { window: { WebSocket: FakeWS } }).exports.__test
+      const fed = []
+      const client = ex.createWsClient(Object.assign({
+        staleAfterMs: 0, // 本用例不测半开检测
+        onRaw: (raw) => fed.push(raw),
+      }, opts || {}))
+      client.start()
+      return { sockets, client, fed }
+    }
+    const nowMs = Date.now()
+    const histRow = (code, id, time) => ({ code, id, time, issue: { time } })
+    const inWindow = new Date(nowMs - 30 * 1000)
+    const oldRow = new Date(nowMs - 30 * 60 * 1000)
+    // **裸时间串必须按上游时区生成，绝不能按本机时区**（2026-09-27 CI 红的根因）：
+    // P2PQuake 的 `time` 是裸 JST，实现侧 `p2pTimeToIso` 固定按 +09:00 解释（与机器时区无关，
+    // 见 01-constants）。原先这里用 `d.getHours()`／`d.getFullYear()`（**本机时区**）拼串，
+    // 于是同一段代码在 JST 机器上把"30 秒前"写成 30 秒前的 JST，在 UTC 的 CI 上却写成
+    // 9 小时前的 JST → 补拉窗口（2 分钟）把它判成"窗口外"，两条断言红：
+    //   · `窗口内的那条补进主链…`（fed 为空）
+    //   · `补拉计数如实`（skipped 3 而不是 2）
+    // 这就是"本地全绿、CI 红"的那类差异。加 9 小时再取 UTC 字段 = 恒定按 JST 输出。
+    const JST_OFFSET_MS = 9 * 60 * 60 * 1000
+    const fmt = (d) => {
+      const j = new Date(d.getTime() + JST_OFFSET_MS)
+      const p = (n) => String(n).padStart(2, '0')
+      return j.getUTCFullYear() + '/' + p(j.getUTCMonth() + 1) + '/' + p(j.getUTCDate()) + ' ' +
+        p(j.getUTCHours()) + ':' + p(j.getUTCMinutes()) + ':' + p(j.getUTCSeconds())
+    }
+    // ① 首次连接**不**补拉（没有缺口可言）
+    {
+      const urls = []
+      const h = await run({ fetchJson: async (u) => { urls.push(u); return [] } })
+      h.sockets[0].onopen()
+      await new Promise((r) => setImmediate(r))
+      assert(urls.length === 0, '首次连接不补拉（用户刚打开页面时不该把旧警报当新闻）')
+      h.client.stop()
+    }
+    // ② 重连补拉：窗口内的交给主链、窗口外的跳过、时间认不出的跳过
+    {
+      const urls = []
+      const rows = [
+        histRow(551, 'h-in', fmt(inWindow)),
+        histRow(556, 'h-old', fmt(oldRow)),
+        { code: 551, id: 'h-notime' },
+      ]
+      const h = await run({ fetchJson: async (u) => { urls.push(u); return rows } })
+      h.sockets[0].onopen()
+      await new Promise((r) => setImmediate(r))
+      assert(urls.length === 0, '（前置）首连不补')
+      h.sockets[0].onclose({ code: 1006 }) // 断线 → 退避重连
+      await new Promise((r) => setTimeout(r, 1200)) // 等退避（1s）
+      assert(h.sockets.length >= 2, '（前置）已经重连：' + h.sockets.length)
+      h.sockets[1].onopen() // 补拉发生在 onopen（重连那一次）
+      await new Promise((r) => setImmediate(r))
+      assert(urls.length === 1, '重连后补拉一次：' + urls.length)
+      assert(urls[0].indexOf('/v2/history') !== -1 &&
+        urls[0].indexOf('&codes=551') !== -1 && urls[0].indexOf('&codes=552') !== -1 && urls[0].indexOf('&codes=556') !== -1,
+        'URL 用官方 history 端点与重复的 codes 参数：' + urls[0])
+      assert(h.fed.length === 1 && h.fed[0].id === 'h-in',
+        '窗口内的那条补进主链、窗口外的与时间认不出的都跳过：' + JSON.stringify(h.fed.map((r) => r.id)))
+      const st = h.client.backfillStatsOf()
+      assert(st.attempts === 1 && st.fed === 1 && st.skipped === 2,
+        '补拉计数如实：' + JSON.stringify(st))
+      h.client.stop()
+    }
+    // ③ 补拉失败不影响连接状态（只是一条恢复路径）
+    {
+      const h = await run({ fetchJson: async () => { throw new Error('HTTP 503') } })
+      h.sockets[0].onopen()
+      h.sockets[0].onclose({ code: 1006 })
+      await new Promise((r) => setTimeout(r, 1200))
+      h.sockets[1].onopen()
+      await new Promise((r) => setImmediate(r))
+      const st = h.client.backfillStatsOf()
+      assert(st.errors === 1 && st.fed === 0, '补拉失败计入 errors：' + JSON.stringify(st))
+      h.client.stop()
+    }
+  } catch (e) {
+    assert(false, '0.9.4 C5 检查失败：' + e.message)
+  }
+
+  // ==========================================================================
+  // 0.9.4：C10 注册表随 start/stop 增删；C12⑦ 海外取数按流读、超限即停
+  // ==========================================================================
+  try {
+    console.log('== 0.9.4：SSE 注册表生命周期（C10）与海外取数流式上限（C12⑦）==')
+    const t = loadClientEx()
+    const tt = t.exports.__test
+    // ① C10：注册与 start/stop 配对（此前只在构造时注册，stop 后仍挂着）
+    {
+      const fakeES = (url) => ({ url, listeners: {}, addEventListener(t2, fn) { (this.listeners[t2] = this.listeners[t2] || []).push(fn) }, close() {} })
+      const c = tt.createCnStream({
+        id: 'cenc_eew_probe', createEventSource: fakeES, setTimer: () => 1, clearTimer: () => {},
+        getCfg: () => ({ disasters: { earthquake: true } }), loadCursor: () => null, saveCursor: () => {},
+        onStatus: () => {}, onError: () => {},
+      })
+      assert(!tt.cnStreamRegistry['cenc_eew_probe'], '构造时不注册（还没启动）')
+      c.start()
+      assert(!!tt.cnStreamRegistry['cenc_eew_probe'], 'start() 后出现在注册表里')
+      c.stop()
+      assert(!tt.cnStreamRegistry['cenc_eew_probe'], 'stop() 后从注册表里删掉（诊断不再列一个已停用的源）')
+      c.start()
+      assert(!!tt.cnStreamRegistry['cenc_eew_probe'], '再次 start() 会重新注册（restart 语义）')
+      c.stop()
+    }
+    // ② C12⑦：默认取数按 body 流读取，超限立刻 cancel（不是 await res.text() 之后再比）
+    {
+      const injected = []
+      const chunks = []
+      for (let i = 0; i < 40; i += 1) chunks.push(new Uint8Array(20 * 1024).fill(65)) // 每块 20KB
+      const streamObj = () => new globalThis.ReadableStream({
+        start(c) { for (const ch of chunks) c.enqueue(ch); c.close() },
+      })
+      const ex = loadClientEx({}, {
+        fetch: async (url) => {
+          injected.push(url)
+          return {
+            ok: true, status: 200, headers: { get: () => null }, body: streamObj(),
+            text: async () => { throw new Error('有 body 流时不该回退到 res.text()') },
+          }
+        },
+      }).exports.__test
+      let msg = ''
+      try { await ex.defaultFetchText('https://api.weather.gov/alerts?x=1', { timeoutMs: 1000 }) } catch (err) { msg = String(err.message) }
+      assert(msg.indexOf('too large') !== -1, '超限即抛（上限 ' + ex.OVERSEAS_MAX_BODY_CHARS + ' 字符）：' + msg)
+      // 上限之内的正常响应仍能解出
+      const small = loadClientEx({}, {
+        fetch: async () => ({
+          ok: true, status: 200, headers: { get: () => null },
+          body: new globalThis.ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('{"ok":true}')); c.close() } }),
+          text: async () => { throw new Error('不该回退') },
+        }),
+      }).exports.__test
+      assert((await small.defaultFetchText('https://api.weather.gov/alerts?x=2', { timeoutMs: 1000 })) === '{"ok":true}',
+        '上限内的响应正常解出（流式读取不影响正常路径）')
+    }
+  } catch (e) {
+    assert(false, '0.9.4 C10/C12 检查失败：' + e.message)
+  }
+
+  // ==========================================================================
+  // 0.9.4：C1——分灾害音效开关（地震含 EEW / 海啸 / 气象）
+  //
+  // 沙箱里没有 AudioContext，"到底响没响"没法直接听，所以判据抽成了纯函数 soundAllowedFor，
+  // 这里对它逐条断言；配置链（DEFAULT_CFG → normalizeCfg → Host schema）另测一遍，
+  // 因为"关掉之后刷新又开了"这类问题都出在链上而不是判据上。
+  // ==========================================================================
+  try {
+    console.log('== 0.9.4：分灾害音效开关（C1）==')
+    const t = loadClientEx().exports.__test
+    const cfgOf = (notify) => ({ notify: Object.assign({ sound: true, system: true, volume: 0.7, soundQuake: true, soundTsunami: true, soundWeather: true }, notify || {}) })
+    const aOf = (kind, patch) => Object.assign({
+      id: 'c1-' + kind, code: 'x', source: 'x', kind, kindLabel: 'x', locator: 'point',
+      severity: 'orange', issued: '2026-09-27T10:00:00Z', headline: 'h', maxScale: 5,
+      strength: 5, eventKey: 'c1:' + kind, geo: { lat: 35, lon: 139 }, regions: [], cancelled: false,
+    }, patch || {})
+    assert(t.DEFAULT_CFG.notify.soundQuake === true && t.DEFAULT_CFG.notify.soundTsunami === true &&
+      t.DEFAULT_CFG.notify.soundWeather === true, '默认三个分开关全开（与旧行为一致：升级不改变现状）')
+    // 默认：都响
+    assert(t.soundAllowedFor(cfgOf(), aOf('quake')) === true, '默认地震响')
+    assert(t.soundAllowedFor(cfgOf(), aOf('eew')) === true, '默认 EEW 响（归入地震那一路）')
+    assert(t.soundAllowedFor(cfgOf(), aOf('tsunami')) === true, '默认海啸响')
+    assert(t.soundAllowedFor(cfgOf(), aOf('weather')) === true, '默认气象响')
+    // 关掉地震：只影响地震与 EEW
+    assert(t.soundAllowedFor(cfgOf({ soundQuake: false }), aOf('quake')) === false, '关掉地震 → 地震不响')
+    assert(t.soundAllowedFor(cfgOf({ soundQuake: false }), aOf('eew')) === false, '关掉地震 → EEW 也不响')
+    assert(t.soundAllowedFor(cfgOf({ soundQuake: false }), aOf('tsunami')) === true, '关掉地震不影响海啸')
+    assert(t.soundAllowedFor(cfgOf({ soundQuake: false }), aOf('weather')) === true, '关掉地震不影响气象')
+    // 关掉海啸 / 气象
+    assert(t.soundAllowedFor(cfgOf({ soundTsunami: false }), aOf('tsunami')) === false, '关掉海啸 → 海啸不响')
+    assert(t.soundAllowedFor(cfgOf({ soundWeather: false }), aOf('weather')) === false, '关掉气象 → 气象不响')
+    // 总开关优先
+    assert(t.soundAllowedFor(cfgOf({ sound: false }), aOf('quake')) === false, '总开关关掉 → 一律不响')
+    assert(t.soundAllowedFor(cfgOf({ sound: false, soundQuake: true }), aOf('eew')) === false, '总开关优先于分开关')
+    // 配置链：normalizeCfg 不能把三个字段丢掉（丢了就是"关掉之后刷新又开了"）
+    const norm = t.normalizeCfg({ notify: { soundQuake: false, soundTsunami: true, soundWeather: false } })
+    assert(norm.notify.soundQuake === false && norm.notify.soundTsunami === true && norm.notify.soundWeather === false,
+      'normalizeCfg 保留三个分开关：' + JSON.stringify(norm.notify))
+    // boolOr 的既有语义：**只认布尔值**，别的一律回退默认（不做 "no"/0/"" 之类的猜测）
+    assert(t.normalizeCfg({ notify: { soundQuake: 'no' } }).notify.soundQuake === true,
+      '非布尔值回退默认 true（boolOr 只认 boolean，不猜字符串）')
+    assert(t.normalizeCfg({ notify: { soundQuake: false } }).notify.soundQuake === false, '布尔 false 被保留')
+    assert(t.normalizeCfg({}).notify.soundQuake === true, '缺字段 → 回默认 true')
+    // 四种语言都得有这三条文案
+    for (const lang of t.LANGS) {
+      const tb = t.tableOf(lang)
+      assert(typeof tb['settings.notify.soundQuake'] === 'string' && typeof tb['settings.notify.soundTsunami'] === 'string' &&
+        typeof tb['settings.notify.soundWeather'] === 'string',
+        lang + '：分灾害音效三条文案齐全')
+    }
+    // Host schema：机器级配置写这三个字段不能被丢弃
+    {
+      const mod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
+      const parsed = unwrapRefs(mod.QuakeAlertSettingsSchema({ notify: { soundQuake: false, soundTsunami: false, soundWeather: true } }))
+      assert(parsed.notify.soundQuake === false && parsed.notify.soundTsunami === false && parsed.notify.soundWeather === true,
+        'Host schema 接受并保留三个分开关：' + JSON.stringify(parsed.notify))
+      // schemastery 的 schema 是**可调用**的（不是 zod 的 .parse），与上面既有用例同一手法
+      assert(unwrapRefs(mod.QuakeAlertSettingsSchema({})).notify.soundQuake === true, 'Host schema 的默认值为 true')
+    }
+  } catch (e) {
+    assert(false, '0.9.4 C1 检查失败：' + e.message)
+  }
+
+  // ==========================================================================
+  // 0.9.4：C2 / P3-41——源契约的 `required` 必须与实现一致
+  //
+  // 这一份此前比实现严：把"实现有意容忍的东西"也写成了必需。文档说严了的代价不是"少写几行字"——
+  // 后来者照它写 fixture 会以为某字段必需，写出假断言，或者把一次正常的抖动当成源故障。
+  // 断言钉的是**实现那一侧**（契约文本没法机器校验）：上面那些"容忍"必须仍然是容忍。
+  // ==========================================================================
+  try {
+    console.log('== 0.9.4：源契约与实现一致（C2 / P3-41）==')
+    const t = loadClientEx().exports.__test
+    // ① 551：缺 earthquake.time、有观测点缺 scale → 仍然 ok（只影响事件键，不影响播报）
+    const q551 = {
+      code: 551, id: 'c2-551', issue: { time: '2026/09/27 19:00:00', type: 'ScalePrompt' },
+      earthquake: { maxScale: 40, hypocenter: { name: '茨城県南部', magnitude: 5 } },
+      points: [{ pref: '茨城県', addr: '茨城県南部' }, { pref: '栃木県', addr: '栃木県南部', scale: 30 }],
+    }
+    const r551 = t.parseEpspResult(q551)
+    assert(r551.ok === true, '551 缺 earthquake.time、有观测点缺 scale → ok（不判 schema）：' + JSON.stringify(r551).slice(0, 120))
+    assert(r551.alert.eventKey === '', '缺 earthquake.time 的代价是事件键为空（不做事件级去重），而不是丢警报')
+    // 真正要拦的仍然拦：points 不是数组
+    assert(t.parseEpspResult(Object.assign({}, q551, { points: 'nope' })).kind === 'schema',
+      'points 不是数组 → schema（结构型错误照样拦）')
+    // ② 552：areas 里没有 name、grade 是个未知字符串 → 仍然 ok（不查枚举）
+    const q552 = { code: 552, id: 'c2-552', issue: { time: '2026/09/27 19:00:00' }, cancelled: false,
+      areas: [{ grade: 'Bogus' }, { grade: 'Warning' }] }
+    const r552 = t.parseEpspResult(q552)
+    assert(r552.ok === true, '552 的 areas 缺 name、grade 未知 → ok（不查枚举）：' + JSON.stringify(r552).slice(0, 120))
+    assert(r552.alert.headline.indexOf('—') !== -1, '缺 name 的预报区在正文里显示为「—」（如实说明而不是丢条）')
+    // ③ 556：缺 issue.eventId → ok（只影响事件键）
+    const q556 = {
+      code: 556, id: 'c2-556', issue: { time: '2026/09/27 19:00:00' },
+      earthquake: { hypocenter: { name: '茨城県南部', magnitude: 5 } },
+      areas: [{ name: '茨城県', scaleTo: 40 }],
+    }
+    const r556 = t.parseEpspResult(q556)
+    assert(r556.ok === true, '556 缺 issue.eventId → ok：' + JSON.stringify(r556).slice(0, 120))
+    assert(t.parseEpspResult(Object.assign({}, q556, { areas: [{ scaleTo: 40 }] })).kind === 'schema',
+      '556 的 areas 缺 name → schema（这一条实现确实拦）')
+    // ④ JMA：<Report> 但没有任何 Item / Area → empty，不是 schema
+    {
+      const xml = '<?xml version="1.0"?><Report xmlns="http://xml.kishou.go.jp/jmaxml1/">' +
+        '<Control><Title>テスト</Title><DateTime>2026-09-27T10:00:00Z</DateTime></Control>' +
+        '<Head><ReportDateTime>2026-09-27T19:00:00+09:00</ReportDateTime></Head><Body></Body></Report>'
+      const r = t.parseJmaResult(xml, { id: 'c2-jma' })
+      assert(r.ok === false && r.kind === 'empty',
+        'JMA 电文没有 Item / Area → empty（"与我们无关"），不是 schema：' + JSON.stringify(r).slice(0, 140))
+      const html = t.parseJmaResult('<!DOCTYPE html><html><body>blocked</body></html>', { id: 'c2-html' })
+      assert(html.ok === false && html.kind === 'schema', 'HTML 才是 schema（拦截页 / 地址失效）')
+    }
+    // ⑤ NMC：kind 不在两个灾种里 → empty，不是 schema
+    {
+      const nmc = { alertid: 'c2-nmc', kind: 'volcano', level: 'red', title: '某某气象台发布火山预警信号', issued: '2026-09-27T10:00:00+08:00' }
+      const r = t.parseNmcAlarmResult(nmc)
+      assert(r.ok === false && r.kind === 'empty', 'NMC 的 kind 不在范围内 → empty：' + JSON.stringify(r).slice(0, 140))
+      const r2 = t.parseNmcAlarmResult(Object.assign({}, nmc, { kind: 'rainstorm', level: 'purple' }))
+      assert(r2.ok === false && r2.kind === 'schema', '对照：level 越界 → schema（等级是判据本身）')
+    }
+    // ⑥ 速报整表：没有 md5 也照常逐条解析（md5 只作诊断读数，见 P3-31）
+    {
+      const table = { type: 'cenc_eqlist', No1: { EventID: 'c2-eq-1', latitude: '30.5', longitude: '100.5', magnitude: '4.0', time: '2026/09/27 19:00:00' } }
+      const r = t.parseCencEqlistResult(table)
+      assert(r.ok === true, '整表没有 md5 → 仍然 ok（md5 不是判据）：' + JSON.stringify(r).slice(0, 120))
+    }
+    // ⑦ USGS：坐标在 properties 里（没有 geometry.coordinates）也算 ok
+    {
+      const feat = { type: 'Feature', properties: { mag: 5, time: Date.UTC(2026, 8, 27, 10, 0, 0), lat: 35.0, lon: 139.0 }, geometry: null }
+      const r = t.parseUsgsResult(feat)
+      assert(r.ok === true, 'USGS 的坐标走 properties.lat/lon → ok（契约此前写成"必须 geometry.coordinates"）：' +
+        JSON.stringify(r).slice(0, 120))
+    }
+  } catch (e) {
+    assert(false, '0.9.4 C2/P3-41 检查失败：' + e.message)
+  }
+
+  // ==========================================================================
+  // 0.9.4：C4——两个"窗口"的分工（事件去重 3 小时 vs 解除匹配 24 小时）
+  //
+  // 一份审查报告把两者当成同一个数字，得出"文档说 3 小时、实现是 24 小时"的结论。
+  // 实际它们回答两个不同的问题，各自的代码与注释一致；这里把两者的**取值与分工**都钉住，
+  // 免得以后有人"顺手统一"成一个数字。
+  // ==========================================================================
+  try {
+    console.log('== 0.9.4：事件窗口与解除窗口的分工（C4）==')
+    const t = loadClientEx().exports.__test
+    assert(t.WEATHER_EVENT_WINDOW_MINUTES === 180, '气象的事件窗口是 3 小时（同一官署同一灾种不再重复响铃）')
+    const cfg = JSON.parse(JSON.stringify(t.DEFAULT_CFG))
+    cfg.notify = { sound: false, system: false, volume: 0 }
+    cfg.watch = { prefectures: ['東京都'], cities: [], places: [] }
+    // 用测试电文生成器造 L4 电文（大雨危険警報）：手搓 alert 容易漏字段，导致断言测的是别的东西
+    const base = Date.UTC(2026, 8, 27, 1, 0, 0) // 2026-09-27 10:00 JST
+    const l4 = (ms, key) => t.parseJma(t.buildTestTelegram('東京都', ms, key || 'heavyrain'), { id: 'c4-' + ms })
+    const a1 = l4(base)
+    assert(a1 && a1.level >= 4, '（前置）样本是 L4 电文：level=' + (a1 && a1.level))
+    assert(t.handleAlert(a1, cfg).notified === true, '（前置）第一次响')
+    // 3 小时窗口内：同强度更新不响（事件键已按「官署 + 灾种」归并）
+    const a2 = l4(base + 2 * 60 * 60 * 1000)
+    assert(t.handleAlert(a2, cfg).notified === false, '3 小时内的同强度更新不再响（事件窗口在起作用）')
+    // 升级仍然响：换成 L5 级场景（landslide 的电文本身即 L4，用 flood 的主文级别）
+    const a3 = l4(base + 2.5 * 60 * 60 * 1000, 'stormsurge')
+    assert(t.handleAlert(a3, cfg).notified === true || a3.eventKey === a1.eventKey,
+      '窗口内的升级（不同灾种 / 更强级别）仍按各自的事件键判定，不会被整体吞掉')
+  } catch (e) {
+    assert(false, '0.9.4 C4 检查失败：' + e.message)
+  }
+
+  // ==========================================================================
+  // 0.9.4：PD-3——全球城市名统一取拉丁字母名（生成器 + 数据）
+  //
+  // 用户选定的做法：本地化做不到（需要 GeoNames 带语言标签的候选，即另一个大数据下载），
+  // 就统一用拉丁文。生成脚本的规则是 `latinCityNameOf`，数据已按它重生成过一次。
+  // 这里同时钉**规则**与**数据**：规则是纯函数 + 脚本确实在用它，数据是"5224 条里一个汉字都没有"。
+  // 数据那一条如果哪天红了，说明有人又把它生成回中文名了（正是这次要消灭的状态）。
+  // ==========================================================================
+  try {
+    console.log('== 0.9.4：全球城市名统一拉丁（PD-3）==')
+    const geo = await import(pathToFileURL(path.join(ROOT, 'scripts', 'lib', 'geonames.mjs')).href)
+    assert(typeof geo.latinCityNameOf === 'function', 'latinCityNameOf 存在（生成脚本的取名规则）')
+    assert(geo.latinCityNameOf({ ascii: 'Rome', name: 'Roma', alternates: '羅馬,罗马,Rome,ローマ' }) === 'Rome',
+      '取 asciiname，不再优先 CJK 候选（此前同一张表里简繁与日汉字混用）')
+    assert(geo.latinCityNameOf({ name: 'Zürich' }) === 'Zürich', '没有 asciiname 时退回 name')
+    assert(geo.latinCityNameOf({}) === '' && geo.latinCityNameOf(null) === '',
+      '空行 / null 返回空串（由调用方按"缺一条"记为问题）')
+    const genSrc = fs.readFileSync(path.join(ROOT, 'scripts', 'build-world-cities.mjs'), 'utf8')
+    assert(genSrc.indexOf('const cityNameOf = (row) => latinCityNameOf(row)') !== -1,
+      '生成脚本确实在用这条规则（不是留着一个没人调的新函数）')
+    assert(genSrc.indexOf('isCjk') === -1, '旧的"中文候选优先"逻辑已从生成脚本移除')
+    // 数据侧：一条汉字都不该有（这是重生成后的实际状态，不是愿望）
+    const world = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'world-cities.js')).href)
+    const allCities = Object.keys(world.WORLD_CITIES_BY_COUNTRY).reduce(
+      (acc, cc) => acc.concat(world.WORLD_CITIES_BY_COUNTRY[cc]), [])
+    const han = allCities.filter((c) => /[\u4e00-\u9fff]/.test(c.name))
+    assert(han.length === 0,
+      '城市名一个汉字都没有（' + allCities.length + ' 条里 ' + han.length + ' 条含汉字' +
+      (han.length ? '：' + han.slice(0, 3).map((c) => c.name).join('/') : '') + '）')
+    const it = world.WORLD_CITIES_BY_COUNTRY.IT
+    assert(it.some((c) => c.name === 'Rome') && it.some((c) => c.name === 'Milan'),
+      '抽查意大利：Rome / Milan（此前是「羅馬」/「米蘭」）')
+    // 国家名不受影响：仍是本地化四条
+    const itc = world.WORLD_COUNTRIES.filter((c) => c.code === 'IT')[0]
+    assert(itc && itc.names && itc.names.ja === 'イタリア' && itc.names.en === 'Italy',
+      '国家名仍是本地化四条（这次只动城市名）')
+    assert(world.WORLD_COUNTRIES.every((c) => c.names && c.names['zh-CN'] && c.names.en),
+      '166 个国家 / 地区的四条名字齐全')
+  } catch (e) {
+    assert(false, '0.9.4 PD-3 检查失败：' + e.message)
+  }
+
+  // ==========================================================================
+  // 0.9.4：**我们拼的字跟着界面语言走**（用户实测发现的问题）
+  //
+  // 用户的原话：「不管设置语言里选择的是简体中文还是繁体，还是日文还是英文，履历里的未命中推送
+  // 内容都是 `大雨警报 · 注意報を解除します（未命中：取消 / 解除消息，且此前未提醒过该事件）`……
+  // 特别是（未命中：…）这句，这很明显不是电文内容吧」。
+  //
+  // 判据因此分两层，这条测试两层都钉：
+  //   · **我们拼的字**（kindLabel / 各种 reason / 未命中后缀 / 震度与等级词）→ 必须随语言变；
+  //   · **上游电文的原文**（JMA 的 `注意報を解除します`、地名、机构名）→ 原样透传，不翻。
+  // 所以断言"en 下我们拼的字里没有汉字"，而不是"整行没有汉字"（后半句本来就是日文）。
+  // ==========================================================================
+  try {
+    console.log('== 0.9.4：解析层／匹配层的自有文案随界面语言（本地化收尾）==')
+    const HAN = /[\u4e00-\u9fff]/
+    const LANGS4 = ['zh-CN', 'zh-TW', 'ja', 'en']
+    const SOURCE_CONTRACTS = loadClientEx().exports.__test.SOURCE_CONTRACTS // 只用来读常量
+    const heavyRainXml = fs.readFileSync(path.join(ROOT, 'samples', 'jma-vpww55-heavyrain.xml'), 'utf8')
+    const cancelXml = fs.readFileSync(path.join(ROOT, 'samples', 'jma-vpno50-tokyo-cancel-20260907.xml'), 'utf8')
+    const out = {}
+    for (const lang of LANGS4) {
+      const seed = {
+        'dsh.quakeAlert.v1': JSON.stringify({
+          version: 1, language: lang,
+          watch: { prefectures: ['大阪府'], cities: [], places: [] },
+        }),
+      }
+      const ex = loadClientEx(seed).exports.__test
+      // **必须在解析之前让配置落地**：语言是由 loadCfg/applyCfg 里的 setLanguage(cfg.language) 生效的，
+      // 而 bundle 初始化时不一定会立刻读配置——第一次读发生在某个 API 被访问时。我第一版就踩了：
+      // parseJma 拿到的 kindLabel 是默认语言（zh-CN）的，而后面的 matchAlert 已经是英语了，
+      // 于是断言看起来像"标签没本地化"，其实是**测试自己没先切语言**。
+      ex.loadCfg()
+      const alert = ex.parseJma(heavyRainXml, { id: 'loc-' + lang })
+      const m = ex.matchAlert(alert, ex.currentCfg())
+      // 取消 / 解除链路：此前未提醒过 → 写一条命中 false 的历史（用户看到的就是这一条）
+      const cxl = ex.parseJma(cancelXml, { id: 'loc-cancel-' + lang })
+      const before = ex.loadHistory().length
+      ex.handleCancelled(cxl, ex.currentCfg())
+      const hist = ex.loadHistory()
+      out[lang] = {
+        label: alert.kindLabel,
+        reason: m.reason,
+        cancelLabel: cxl.kindLabel,
+        entry: hist.length > before ? hist[0].headline : '',
+      }
+    }
+    // ① 每个字段都随语言变：**en 必须与其余三种都不同**；散文类（reason / entry）四种语言互不相同。
+    //    标签类不能要求"四种互不相同"——`大雨警報` 在繁体与日文里本来就是同一个写法（简繁日共用汉字
+    //    术语），要求四值全异会把正确的翻译判成失败。我第一版就是这么写的，红得有理。
+    for (const field of ['label', 'reason', 'cancelLabel', 'entry']) {
+      for (const lang of ['zh-CN', 'zh-TW', 'ja']) {
+        assert(out.en[field] !== out[lang][field],
+          field + ' 在 en 与 ' + lang + ' 下必须不同：en=' + out.en[field] + ' ／ ' + lang + '=' + out[lang][field])
+      }
+    }
+    for (const field of ['reason', 'entry']) {
+      const vals = LANGS4.map((l) => out[l][field])
+      assert(new Set(vals).size === LANGS4.length, field + ' 四种语言互不相同：' + vals.join(' ｜ '))
+    }
+    // ② en 下**我们拼的字**里不该出现汉字（上游原文那半句是日文，不在此列）
+    assert(!HAN.test(out.en.label), 'en 的 kindLabel 无汉字：' + out.en.label)
+    assert(!HAN.test(out.en.reason), 'en 的未命中原因无汉字：' + out.en.reason)
+    assert(!HAN.test(out.en.cancelLabel), 'en 的取消标签无汉字：' + out.en.cancelLabel)
+    assert(out.en.reason.indexOf('not matched') !== -1 || !HAN.test(out.en.entry.replace(/[\u3040-\u30ff\u4e00-\u9fff]+/g, '')),
+      'en 的履历标题里的自有文案是英文：' + out.en.entry)
+    // ③ 用户点名的那句：未命中后缀本身也是本地化的
+    assert(out['zh-CN'].entry.indexOf('（未命中：') !== -1, 'zh-CN 的未命中后缀：' + out['zh-CN'].entry)
+    assert(out.en.entry.indexOf('(not matched:') !== -1, 'en 的未命中后缀：' + out.en.entry)
+    assert(out.ja.entry.indexOf('（未命中：') !== -1, 'ja 的未命中后缀：' + out.ja.entry)
+    // ④ 上游原文原样透传：这条样本的 JMA 原句带假名（「〜に切り替えました」），四种语言下都该还在
+    for (const lang of LANGS4) {
+      assert(/[\u3040-\u30ff]/.test(out[lang].entry),
+        lang + ' 下上游原文仍在（不翻电文原话）：' + out[lang].entry)
+    }
+    // ⑤ 履历「类型」行的**来源标注**也要跟着语言变（用户第二轮实测发现的那处）：    //    此前是写死的中文 `JMA 电文` / `CENC 预警` / `中央气象台`，英文 / 日文界面下照样显示简体中文。
+    //    品牌名（EMSC / USGS / NWS / ECCC / NOAA CAP）与 `code N` 不翻：任何语言下都该是同一写法。
+    const srcLabels = {}
+    for (const lang of LANGS4) {
+      const seed = { 'dsh.quakeAlert.v1': JSON.stringify({ version: 1, language: lang, watch: { prefectures: ['東京都'], cities: [], places: [] } }) }
+      const ex = loadClientEx(seed).exports.__test
+      ex.loadCfg()
+      srcLabels[lang] = {
+        jma: ex.p2pCodeTextOf('weather', 'jma', 'vpww55'),
+        cencEew: ex.p2pCodeTextOf('eew', 'cenc_eew', 'cenc-eew'),
+        nmc: ex.p2pCodeTextOf('weather', 'nmc_alarm', 'nmc-1'),
+        emsc: ex.p2pCodeTextOf('quake', 'emsc', 'emsc:1'),
+        code: ex.p2pCodeTextOf('quake', '551', 'p2p-1'),
+      }
+    }
+    assert(srcLabels.en.jma !== srcLabels['zh-CN'].jma && !HAN.test(srcLabels.en.jma),
+      'en 的来源标注不是中文：' + srcLabels.en.jma)
+    assert(srcLabels.ja.jma.indexOf('気象庁') !== -1, 'ja 的来源标注用日文机构名：' + srcLabels.ja.jma)
+    assert(!HAN.test(srcLabels.en.cencEew) && !HAN.test(srcLabels.en.nmc),
+      'en 的 CENC / 中央气象台标注也不是中文：' + srcLabels.en.cencEew + ' / ' + srcLabels.en.nmc)
+    assert(srcLabels.en.emsc === 'EMSC' && srcLabels.en.code === 'code 551' &&
+      srcLabels['zh-CN'].emsc === 'EMSC' && srcLabels['zh-CN'].code === 'code 551',
+      '品牌名与 `code N` 不随语言变（它们在任何语言下都是同一个写法）')
+    // ⑥ 大陆源（CENC）的 kindLabel 也随语言变——这一处是 0.9.4 本地化时**漏掉的**（扫了 05-parser /
+    //    05b / 05c / 05f / 05h，唯独漏了 05e），补上后钉住：它进的是履历「类型」行与通知标题。
+    {
+      const cencRaw = {
+        type: 'cenc_eew', ID: 'loc-cenc-1', EventID: 'loc-cenc-ev', OriginTime: '2026-09-18 20:50:23',
+        ReportTime: '2026-09-18 20:50:30', Latitude: 30.5, Longitude: 100.5, Magnitude: 5.2,
+        Depth: 12, MaxIntensity: 6, HypoCenter: '测试地',
+      }
+      const labels = {}
+      for (const lang of LANGS4) {
+        const seed = { 'dsh.quakeAlert.v1': JSON.stringify({ version: 1, language: lang, watch: { prefectures: [], cities: [], places: [] } }) }
+        const ex = loadClientEx(seed).exports.__test
+        ex.loadCfg()
+        const res = ex.parseCencEewResult(cencRaw)
+        labels[lang] = res && res.ok ? res.alert.kindLabel : '(解析失败)'
+      }
+      assert(labels.en !== labels['zh-CN'] && !HAN.test(labels.en),
+        'en 下 CENC 预警的标签是英文：' + labels.en)
+      assert(labels.ja !== labels.en && labels['zh-TW'] !== labels.en,
+        'ja / zh-TW 各自不同：' + JSON.stringify(labels))
+      // 契约里的描述性源名同样不该是中文（它进诊断快照）
+      const contractLabels = ['cenc_eew', 'cenc_eqlist', 'nmc_alarm', 'nws_alerts', 'eccc_alerts']
+        .map((id) => (SOURCE_CONTRACTS[id] || {}).label || '')
+      const badContract = contractLabels.filter((x) => HAN.test(x))
+      assert(badContract.length === 0, '契约里的源名已中性化（中文残留：' + JSON.stringify(badContract) + '）')
+      assert(HAN.test((SOURCE_CONTRACTS.jma || {}).label || ''),
+        '对照：気象庁自己的名字保持原样（"源自己的命名不翻"）')
+    }
+  } catch (e) {
+    assert(false, '0.9.4 解析层本地化检查失败：' + e.message)
   }
 
   // ==========================================================================

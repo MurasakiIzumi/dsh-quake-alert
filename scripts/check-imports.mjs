@@ -32,6 +32,55 @@ function stripNoise(code) {
   let out = ''
   let i = 0
   const n = code.length
+  /** 吞掉一段字符串（i 指向引号本身），并把内容换成一对引号占位。 */
+  const skipQuoted = () => {
+    const quote = code[i]
+    i += 1
+    while (i < n) {
+      if (code[i] === '\\') { i += 2; continue }
+      if (code[i] === quote) { i += 1; break }
+      i += 1
+    }
+    out += quote === '`' ? '``' : "''"
+  }
+  /**
+   * 模板串（i 指向开引号之后）。**插值体按普通代码扫描**（0.9.4 / P3-48）。
+   *
+   * 此前整个模板串被清成 ` `` `——包括 `${…}` 里的内容，于是"插值里的漏 import / 裸赋值"
+   * 全部漏检，而那正是这个脚本存在的理由（模板串在本项目的 UI 里到处都在用）。
+   * 现在把插值体原样交给扫描，只把字面部分抹掉。
+   */
+  const scanTemplate = () => {
+    while (i < n) {
+      const c = code[i]
+      if (c === '\\') { i += 2; continue }
+      if (c === '`') { i += 1; return }
+      if (c === '$' && code[i + 1] === '{') {
+        i += 2
+        out += ' + ( '
+        scanBraced(1)
+        out += ' ) + '
+        continue
+      }
+      i += 1
+    }
+  }
+  /** 读到与 depth 匹配的 `}` 为止（i 指向 `}` 之后）。嵌套的模板与字符串照常处理。 */
+  const scanBraced = (depth) => {
+    while (i < n) {
+      const c = code[i]
+      const c2 = code[i + 1]
+      if (c === '\\') { i += 2; continue }
+      if (c === '{') { depth += 1; out += c; i += 1; continue }
+      if (c === '}') { depth -= 1; i += 1; out += ' } '; if (depth === 0) return; continue }
+      if (c === '`') { i += 1; scanTemplate(); continue }
+      if (c === '"' || c === "'") { skipQuoted(); continue }
+      if (c === '/' && c2 === '*') { const end = code.indexOf('*/', i + 2); i = end === -1 ? n : end + 2; out += ' '; continue }
+      if (c === '/' && c2 === '/') { const end = code.indexOf('\n', i + 2); i = end === -1 ? n : end; out += ' '; continue }
+      out += c
+      i += 1
+    }
+  }
   while (i < n) {
     const c = code[i]
     const c2 = code[i + 1]
@@ -47,17 +96,8 @@ function stripNoise(code) {
       out += ' '
       continue
     }
-    if (c === '"' || c === "'" || c === '`') {
-      const quote = c
-      i += 1
-      while (i < n) {
-        if (code[i] === '\\') { i += 2; continue }
-        if (code[i] === quote) { i += 1; break }
-        i += 1
-      }
-      out += quote === '`' ? '``' : "''"
-      continue
-    }
+    if (c === '`') { i += 1; scanTemplate(); out += '``'; continue }
+    if (c === '"' || c === "'") { skipQuoted(); continue }
     out += c
     i += 1
   }
@@ -167,7 +207,44 @@ for (const d of dupes) {
   console.error('✗ 导出重名：' + d)
 }
 
-// ③ i18n key 引用一致性（0.9.0）：正文里 `t('some.key')` 的**字面量** key 必须在文案表里存在。
+// ③ **`t` 被局部变量遮蔽**（0.9.4）：文件里既 `import { t } from './00-i18n.js'`，又在某个函数里
+// 写 `const t = …`，那么该函数里的 `t('some.key')` 会去调用那个局部值——轻则 TypeError、重则
+// 悄悄用错对象。这条在 0.9.4 引入解析层本地化时**真的踩了两次**（05b 的 `const t = String(title)`、
+// 06-matcher 的 `const t = cfg.thresholds`），而且第一次是靠 `check-imports` 报"缺少 import：t"
+// 才发现的——说明现有检查只能碰巧覆盖。这里显式拦下：**同一个文件里 `t` 不许既是 import 又是局部声明**。
+for (const f of files) {
+  const src = readFileSync(path.join(SRC, f), 'utf8')
+  const body = stripComments(src)
+  const importsT = /import\s*\{[^}]*\bt\b[^}]*\}\s*from\s*'\.\/00-i18n\.js'/.test(body)
+  if (!importsT) continue
+  // 只认"声明式遮蔽"（`const t = …` / `function t(`）：`x.t = …` 之类不算。
+  const declared = /(?:const|let|var)\s+t\s*=/.test(body) || /\bfunction\s+t\s*\(/.test(body)
+  if (declared) {
+    problems += 1
+    console.error('✗ `t` 被局部变量遮蔽：' + f + '（它 import 了 00-i18n 的 t，又声明了同名的局部变量；' +
+      "本文件里的 t('key') 会用到局部值）")
+  }
+}
+
+// ④ **状态 / 诊断层不许再出现中文字面量**（0.9.4 的决定，用户拍板）：
+// 这一层是机器状态（连接、退避、停更、解析失败…），散在六个文件里约 70 条；逐条做四语表要 280 条
+// 条目，而它的读者是"看侧边栏、把诊断快照贴给作者"的人。所以这一层**写死简短英文**，
+// 而**电文与提醒面的文案仍走 i18n 四语**（那是灾难发生时用户真正要读的字）。
+// 这条守卫防的是"下次顺手又写一句中文进去"——那种回归不会有任何别的检查发现。
+const STATUS_LAYER = ['12-websocket.js', '12b-feed-poll.js', '12c-cn-stream.js', '12d-health-probe.js',
+  '12e-overseas-poll.js', '05g-source-health.js']
+for (const f of STATUS_LAYER) {
+  if (files.indexOf(f) === -1) continue
+  const body = stripComments(readFileSync(path.join(SRC, f), 'utf8'))
+  const hit = /[\u4e00-\u9fff]/.test(body)
+  if (hit) {
+    problems += 1
+    console.error('✗ 状态层出现中文字面量：' + f +
+      '（这一层按 0.9.4 的决定写简短英文；提醒面 / 电文文案才走 i18n）')
+  }
+}
+
+// ⑤ i18n key 引用一致性（0.9.0）：正文里 `t('some.key')` 的**字面量** key 必须在文案表里存在。
 //
 // 漏 key 时 t() 会回显 key 本身（设计如此：界面上出现 `settings.watch.title` 是一眼可见的
 // 失败），但那个失败要等到用户打开那一页才看得见。设置页有 300+ 条 key，"引用了不存在的

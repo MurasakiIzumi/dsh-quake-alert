@@ -43,6 +43,13 @@ export const SSE_PROBE_MS = 8000
 export const SSE_MAX_FAILS = 3
 /** 降级/停用期间的重探间隔：用户重新打开灾种开关后要能回来。 */
 export const CN_RECHECK_MS = 5000
+/**
+ * 已连接的流"多久没有任何帧"即判定连接已死（0.9.4 / P2-15）。
+ *
+ * Host 每 15 秒必发一个 status 帧（见 onStatusFrame），所以 45 秒 = 3 倍余量是可靠的判据：
+ * 半开的长连接在浏览器里**不会**触发 onerror，用户看到的是"SSE 已连接"却永远收不到预警。
+ */
+export const SSE_SILENCE_DEAD_MS = 45 * 1000
 
 /** 读回持久化游标；任何脏数据一律当作"没有记录"。 */
 function loadCursorOf(key) {
@@ -67,6 +74,8 @@ function saveCursorOf(key, v) {
  * @param {() => object} [opts.getCfg]
  * @param {() => object} [opts.loadCursor] / @param {(v: number) => void} [opts.saveCursor]
  * @param {number} [opts.probeMs] / @param {number} [opts.maxFails]
+ * @param {number} [opts.silenceDeadMs] 已连接的流"多久没有任何帧"即判死（0.9.4 / P2-15；0 = 不判）
+ * @param {() => number} [opts.now] 注入点（与 silenceDeadMs 配套，测试用假时钟）
  */
 export function createCnStream(opts = {}) {
   const id = opts.id
@@ -74,6 +83,8 @@ export function createCnStream(opts = {}) {
   const path = opts.path || (STREAM_PATH + '?source=' + id)
   const cursorKey = opts.cursorKey || (CN_CURSOR_KEY + '.' + id)
   const getCfg = opts.getCfg || currentCfg
+const now = opts.now || (() => Date.now())
+const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : opts.silenceDeadMs
   const onError = opts.onError || (() => {})
   const onStatus = opts.onStatus || (() => {})
   const apply = opts.apply || (() => false)
@@ -124,9 +135,17 @@ export function createCnStream(opts = {}) {
   let inFallback = false
   /** 当前的轮询是"用户选的"还是"自动降级来的"——只有前者能自动升回 SSE。 */
   let fallbackManual = false
+  // 0.9.4（P2-15）：最近一次收到**任何**帧（sync / entry / status）的时刻。Host 每 15 秒必发
+  // 一个 status 帧，所以"长时间一个帧都没有"是可靠的死连接判据——此前的降级判定只覆盖
+  // "首帧之前"（sawSyncThisConn 一旦为 true 就再没有降级路径），于是一条曾经成功、之后被
+  // 中间设备静默掐断的长连接永不被判死，界面停在"SSE 已连接"。
+  let lastFrameAt = 0
   const stats = {
     mode: 'idle', connections: 0, syncs: 0, received: 0, applied: 0, errors: 0,
     sseErrors: 0, probeTimeouts: 0, fallbacks: 0, fallbackManual: false, truncated: 0, resets: 0,
+    // 已连接的流被判"静默死亡"的次数（0.9.4 / P2-15）：与 probeTimeouts（首帧之前超时）分开，
+    // 两者成因不同（前者是连接被掐断，后者是代理把流缓冲住了）。
+    silentDeaths: 0,
     // stale（源可达但数据是旧的）：由 Host 的 sync / status 帧告知，Client 自己判不出来
     // ——"没有新 entry"与"这几天确实没有地震"在本地长得一模一样。
     stale: false, dataTime: 0,
@@ -137,10 +156,22 @@ export function createCnStream(opts = {}) {
   const wantPoll = (cfg) => String((cfg && cfg.cnTransport) || 'auto') === 'poll'
 
   const cursorNow = () => (since === null ? 0 : since)
-  // 注册到表里（实时读取，见 cnStreamRegistry 的说明）
-  cnStreamRegistry[id] = {
-    stats: () => Object.assign({}, stats, { running, hasCursor: since !== null, fallbackActive: inFallback }),
-    mode: () => mode,
+  /**
+   * 注册到表里（实时读取，见 cnStreamRegistry 的说明）。
+   *
+   * 0.9.4（C10）：**注册/注销与 start/stop 对齐**。此前只在构造时写一次、`stop()` 后不清理，
+   * 于是停用之后表里仍列着该源（`running=false, mode='idle'`）——设置页那个"尚未启动"分支
+   * 因此永远不可达，诊断也把一个已停用的源当成"在跑但空闲"。改在 start 里注册、stop 里删除，
+   * 重启（restart）时又会重新注册，不留悬挂条目。
+   */
+  function registerSelf() {
+    cnStreamRegistry[id] = {
+      stats: () => Object.assign({}, stats, { running, hasCursor: since !== null, fallbackActive: inFallback }),
+      mode: () => mode,
+    }
+  }
+  function unregisterSelf() {
+    if (cnStreamRegistry[id]) delete cnStreamRegistry[id]
   }
   /**
    * @param {number} next
@@ -235,7 +266,7 @@ export function createCnStream(opts = {}) {
       fallbackManual = false
       mode = 'idle'
       stats.mode = mode
-      reportStatus({ status: 'unreachable', detail: '降级到轮询时建立客户端失败：' + String((err && err.message) || err) })
+      reportStatus({ status: 'unreachable', detail: 'fallback client failed: ' + String((err && err.message) || err) })
       return
     }
     inFallback = true
@@ -266,6 +297,14 @@ export function createCnStream(opts = {}) {
     fallbackClient = null
     mode = 'idle'
     stats.mode = mode
+    // 0.9.4（P2-14）：降级期间推进游标的是**轮询客户端**（它写的正是同一个存储键，见
+    // createFallback 的 cursorKey），12c 自己的内存 `since` 停在进入降级之前那一刻。
+    // 不重新读盘就升回 SSE，会带着过期游标建连 —— Host 于是把整段环缓冲重放一遍：
+    // 超过 24 小时的旧条目会再次响铃，24 小时内的把历史刷满。
+    try {
+      const stored = loadCursor()
+      if (typeof stored === 'number' && Number.isFinite(stored) && stored >= 0) since = Math.floor(stored)
+    } catch (err) { /* 读盘失败就沿用内存值（退化为旧行为，不至于连不上） */ }
     consecutiveFails = 0
     connectSse()
   }
@@ -296,13 +335,13 @@ export function createCnStream(opts = {}) {
           // 恢复消费时**同样要先看用户的链路选择**：选了「强制轮询」就不该先建一条 SSE
           //（那既白占一条 Wolfx 连接，又会在 8 秒探针超时后谎报一次"连上但不推流"）。
           // 这与 start() 里"一开始就不建 SSE"是同一个不变量。
-          if (wantPoll(cfg)) activateFallback('设置里选择了强制轮询', true)
+          if (wantPoll(cfg)) activateFallback('manual polling selected', true)
           else connectSse()
         } else if (wantPoll(cfg)) {
           // 用户选了「强制轮询」。**已经在轮询（自动降级来的）时也要认下这个选择**：
           // 否则 fallbackManual 永远是 false，用户之后改回「自动」时下面那条 leaveFallback
           // 分支不成立 → 永久停在轮询，只能刷新页面才回得去。
-          if (!inFallback) activateFallback('设置里选择了强制轮询', true)
+          if (!inFallback) activateFallback('manual polling selected', true)
           else if (!fallbackManual) {
             fallbackManual = true
             stats.fallbackManual = true
@@ -311,6 +350,21 @@ export function createCnStream(opts = {}) {
         } else if (inFallback && fallbackManual) {
           // 用户改回「自动」：手动选的轮询要能撤销。自动降级的不升回——那条链路已经证明过不通。
           leaveFallback()
+        }
+        // 0.9.4（P2-15）：**持续静默**的存活判据（放在链路选择之后：用户刚改回自动时应该先建连）。
+        // 此前的降级判定只覆盖"首帧之前"。Host 每 15 秒发一个 status 帧，超时没有帧即判死：
+        // 关掉这条流重连，连续 maxFails 次就降级——否则界面会永远停在"SSE 已连接"。
+        if (silenceDeadMs > 0 && mode === 'sse' && source && lastFrameAt &&
+            (now() - lastFrameAt) > silenceDeadMs) {
+          stats.silentDeaths += 1
+          consecutiveFails += 1
+          closeSource()
+          reportStatus({
+            status: 'degraded',
+            detail: 'SSE silent ' + Math.round(silenceDeadMs / 1000) + 's → dead',
+          })
+          if (consecutiveFails >= maxFails) activateFallback('silent disconnect')
+          else connectSse()
         }
       } catch (err) { onError(err) }
       scheduleTick()
@@ -332,17 +386,19 @@ export function createCnStream(opts = {}) {
     } catch (err) {
       onError(err)
       consecutiveFails += 1
-      reportStatus({ status: 'unreachable', detail: 'EventSource 建立失败：' + String((err && err.message) || err) })
-      return activateFallback('EventSource 建立失败')
+      reportStatus({ status: 'unreachable', detail: 'EventSource failed: ' + String((err && err.message) || err) })
+      return activateFallback('EventSource failed')
     }
     if (!es || typeof es.addEventListener !== 'function') {
       consecutiveFails += 1
-      reportStatus({ status: 'unreachable', detail: '当前环境没有可用的 EventSource' })
-      return activateFallback('当前环境不支持 EventSource')
+      reportStatus({ status: 'unreachable', detail: 'no EventSource available' })
+      return activateFallback('EventSource unsupported')
     }
     source = es
     mode = 'sse'
     stats.mode = mode
+    // 静默判据的起点：建连那一刻起算，首帧之前的判定仍由下面的 8 秒探针负责（更精确）。
+    lastFrameAt = now()
     /**
      * sync 帧算出的告警（增量缺口 / 游标重置 / Host 侧未在运行）。
      *
@@ -354,6 +410,7 @@ export function createCnStream(opts = {}) {
     const onSync = (ev) => {
       if (source !== es) return
       sawSyncThisConn = true
+      lastFrameAt = now()
       consecutiveFails = 0
       stats.syncs += 1
       stats.lastAt = Date.now()
@@ -375,17 +432,17 @@ export function createCnStream(opts = {}) {
       if (d && d.reset && Number.isFinite(d.cursor)) setCursor(d.cursor, true)
       else if (d && Number.isFinite(d.cursor) && (!d.replayed || d.replayed === 0)) setCursor(d.cursor)
       const warn = []
-      if (d && d.truncated) warn.push('有增量缺口（Host 环缓冲已淘汰旧条目）')
-      if (d && d.reset) warn.push('Host 游标重置过')
-      if (d && d.frozen) warn.push('Host 侧该源未在运行')
+      if (d && d.truncated) warn.push('gap: host ring buffer evicted entries')
+      if (d && d.reset) warn.push('host cursor reset')
+      if (d && d.frozen) warn.push('host source not running')
       connWarn = warn
       // stale 有**自己的状态**（中灰「数据已过期」），不折叠进 degraded：它表示"源在响应、
       // 但给的是旧数据"，与"链路有故障"是两类。口径与 12b 的轮询路径一致。
       reportStatus({
         status: stats.stale ? 'stale' : (warn.length ? 'degraded' : 'open'),
-        detail: 'SSE 已连接' + (d ? '（补发 ' + (d.replayed || 0) + ' 条）' : '') +
-          ' · 已收到 ' + stats.received + ' 条' +
-          (stats.stale ? ' · 上游数据已过期（中继停更）' : '') +
+        detail: 'SSE connected' + (d ? ' · replayed ' + (d.replayed || 0) : '') +
+          ' · received ' + stats.received + '' +
+          (stats.stale ? ' · relay stale' : '') +
           (warn.length ? ' · ' + warn.join('；') : ''),
       })
     }
@@ -399,6 +456,8 @@ export function createCnStream(opts = {}) {
      */
     const onStatusFrame = (ev) => {
       if (source !== es) return
+      // 状态帧同样是"这条连接还活着"的证据——Host 每 15 秒必发一个，静默判据正是靠它。
+      lastFrameAt = now()
       let d = null
       try { d = JSON.parse(String(ev && ev.data)) } catch (err) { d = null }
       if (!d || typeof d !== 'object') return
@@ -411,8 +470,8 @@ export function createCnStream(opts = {}) {
       // 增量缺口 / 游标重置 / Host 未运行这三条在 15 秒后抹掉，而它们的条件仍然成立。
       reportStatus({
         status: stats.stale ? 'stale' : (connWarn.length ? 'degraded' : 'open'),
-        detail: 'SSE 已连接 · 已收到 ' + stats.received + ' 条' +
-          (stats.stale ? ' · 上游数据已过期（中继停更）' : '') +
+        detail: 'SSE connected · received ' + stats.received + '' +
+          (stats.stale ? ' · relay stale' : '') +
           (connWarn.length ? ' · ' + connWarn.join('；') : ''),
       })
     }
@@ -425,15 +484,15 @@ export function createCnStream(opts = {}) {
       consecutiveFails = 0
       stats.lastAt = Date.now()
       stats.lastEventAt = Date.now()
+      lastFrameAt = now()
       let entry = null
       try { entry = JSON.parse(String(ev && ev.data)) } catch (err) { entry = null }
       if (!entry || typeof entry !== 'object') {
         stats.errors += 1
-        noteParseResult(id, failResult('schema', 'SSE 帧不是合法 JSON'))
+        noteParseResult(id, failResult('schema', 'SSE frame is not valid JSON'))
         return
       }
       stats.received += 1
-      if (Number.isFinite(entry.seq)) setCursor(entry.seq)
       try {
         if (apply(entry, getCfg())) stats.applied += 1
       } catch (err) {
@@ -441,6 +500,10 @@ export function createCnStream(opts = {}) {
         stats.errors += 1
         onError(err)
       }
+      // 0.9.4（P2-16）：游标在 apply **之后**推进，与 12b 的口径一致（"已处理到的最后一条"）。
+      // 此前先推游标再 apply：apply 抛错时游标已经落盘，那条永久不再投递——而"游标停住"
+      // 也不是解法（那会把后续条目一起卡住），所以这里只在投递**之后**推进。
+      if (Number.isFinite(entry.seq)) setCursor(entry.seq)
     }
     const onErrorEv = (ev) => {
       if (source !== es) return
@@ -452,9 +515,9 @@ export function createCnStream(opts = {}) {
       // 一次 sync 都没收到就说明这条流从来没通过。
       reportStatus({
         status: 'degraded',
-        detail: 'SSE 连接中断（第 ' + consecutiveFails + ' 次）' + (sawSyncThisConn ? '，正在自动重连' : ''),
+        detail: 'SSE down (x' + consecutiveFails + ')' + (sawSyncThisConn ? ' · reconnecting' : ''),
       })
-      if (!sawSyncThisConn && consecutiveFails >= maxFails) activateFallback('连续 ' + consecutiveFails + ' 次未收到首帧')
+      if (!sawSyncThisConn && consecutiveFails >= maxFails) activateFallback('no first frame x' + consecutiveFails)
     }
     try {
       es.addEventListener('sync', onSync)
@@ -473,8 +536,8 @@ export function createCnStream(opts = {}) {
         stats.probeTimeouts += 1
         consecutiveFails += 1
         closeSource()
-        reportStatus({ status: 'degraded', detail: 'SSE 连上但 ' + probeMs + 'ms 内没有收到任何数据（可能被代理缓冲）' })
-        if (consecutiveFails >= maxFails) activateFallback('连上但不推流')
+        reportStatus({ status: 'degraded', detail: 'SSE up but silent for ' + probeMs + 'ms (proxy buffering?)' })
+        if (consecutiveFails >= maxFails) activateFallback('connected but silent')
         else connectSse()
       }, probeMs)
       // 与 tickTimer 一致地 unref：这个 8 秒探针不该把 Node 侧的测试进程拖住。
@@ -489,7 +552,7 @@ export function createCnStream(opts = {}) {
     // 停用轮询降级端：它在跑的话也会一直拉
     if (fallbackClient) { try { fallbackClient.stop() } catch (err) { /* 忽略 */ } fallbackClient = null }
     inFallback = false
-    reportStatus(patch || { status: 'disabled', detail: '灾种开关已关闭' })
+    reportStatus(patch || { status: 'disabled', detail: 'disabled · hazard switch off' })
     // 关掉灾种开关 → 不再读 `/feed` 与 `/stream` → Host 侧 10 分钟后自然断开与 Wolfx 的连接
   }
 
@@ -500,12 +563,13 @@ export function createCnStream(opts = {}) {
     start() {
       if (running) return
       running = true
+      registerSelf() // 0.9.4（C10）：与 stop() 里的注销配对
       stats.cursor = cursorNow()
       scheduleTick()
       const cfg = getCfg()
       if (!enabled(cfg)) { enterDisabled(); return }
       // 用户选了「强制轮询」→ 一开始就不建 SSE（也不必先连一次再切，那会白占一条 Wolfx 连接）
-      if (wantPoll(cfg)) { activateFallback('设置里选择了强制轮询', true); return }
+      if (wantPoll(cfg)) { activateFallback('manual polling selected', true); return }
       connectSse()
     },
     stop() {
@@ -518,6 +582,7 @@ export function createCnStream(opts = {}) {
       fallbackManual = false
       mode = 'idle'
       stats.mode = mode
+      unregisterSelf() // 0.9.4（C10）：停用后不再挂在注册表里（见 registerSelf 的说明）
     },
     /** 测试与诊断：当前处于哪条链路。 */
     modeOf() { return mode },

@@ -8,8 +8,8 @@
 // 注意：store.push({}) 是各 UI 的重渲染信号，改变它会影响所有订阅方。
 // ============================================================================
 
-import { HISTORY_MAX, HISTORY_KEY } from './01-constants.js'
-import { loadHistory, saveJSON, isPlainObject, normalizeHistoryEntry } from './02-storage.js'
+import { HISTORY_MAX, HISTORY_MAX_AGE_MS, HISTORY_KEY } from './01-constants.js'
+import { loadHistory, saveJSON, isPlainObject, normalizeHistoryEntry, withinHistoryAge } from './02-storage.js'
 import { t } from './00-i18n.js'
 import { sourceLabelOf, statusTextOf } from './00f-source-labels.js'
 
@@ -92,9 +92,14 @@ let anonSeq = 0 // 兜底：无 id 消息用递增匿名 key，避免空 id 互�
 function addEvent(ev) {
   const hasId = ev && ev.id && ev.id !== ''
   const key = hasId ? ev.id : ('anon-' + (++anonSeq))
+  // 写入时刻（0.9.4 / D-1）：历史保留的"过去 5 天"以它为准（见 withinHistoryAge）。
+  // 显式传入有限值时尊重它（测试要能注入）；否则取当前时刻。
+  const now = (ev && typeof ev.at === 'number' && Number.isFinite(ev.at) && ev.at > 0) ? ev.at : Date.now()
   // 统一过一遍字段规整：写入侧也保证历史里不会出现对象/数组字段
-  const item = normalizeHistoryEntry(Object.assign({}, ev, { key }), 0)
-  store.events = [item].concat(store.events.filter((e) => e.key !== key)).slice(0, HISTORY_MAX)
+  const item = normalizeHistoryEntry(Object.assign({}, ev, { key, at: now }), 0)
+  // 0.9.4（D-1）：条数与**时间**两个上限同时生效（设计稿一直是这么写的，此前只实现了条数）
+  const fresh = store.events.filter((e) => withinHistoryAge(e, now))
+  store.events = [item].concat(fresh.filter((e) => e.key !== key)).slice(0, HISTORY_MAX)
   saveJSON(HISTORY_KEY, store.events.slice(0, HISTORY_MAX))
   store.push({})
 }

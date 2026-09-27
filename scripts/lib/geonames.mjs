@@ -22,6 +22,24 @@ export const GEONAMES_BASE = 'https://download.geonames.org/export/dump/'
 export const isCjk = (s) => /^[\u4e00-\u9fff]+$/.test(s)
 
 /**
+ * 全球城市表用的城市名：**统一取 GeoNames 的拉丁字母名**（`asciiname`）。
+ *
+ * 0.9.4（PD-3，产品决策）：此前是"alternatenames 里的 CJK 候选优先"，于是同一张表里简繁与
+ * 日汉字混用（罗马写作「羅馬」，而它的一级行政区是拉丁文的 Lazio）——既不是本地化的，也不统一。
+ * 按界面语言本地化需要**带语言标签**的候选（GeoNames 的 `alternateNamesV2` 才有），也就是另一个
+ * 大得多的下载；做不到就统一用拉丁文——这是用户选定的备选做法，也是唯一不依赖额外数据源的做法。
+ * （国家 / 地区名不受影响：它们由 ICU 算出四种语言，见 `build-world-cities.mjs` 的 LANGS。）
+ *
+ * **已提交的 `lib/data/world-cities.js` 仍是旧名字**：换成拉丁名需要拿 `cities15000.zip` 重跑
+ * `scripts/build-world-cities.mjs`，而准备 0.9.4 期间 `download.geonames.org` 不可达。
+ * 这个函数就是给那次重跑用的，行为由 tests/sync-test.cjs 的 scripts/lib 一节钉住。
+ */
+export function latinCityNameOf(row) {
+  const r = row || {}
+  return String(r.ascii || r.name || '').trim()
+}
+
+/**
  * GeoNames 的 geoname 表（tab 分隔）→ 行数组。只留用得到的列。
  *
  * 列序（readme.txt）：0 geonameid / 1 name / 2 asciiname / 3 alternatenames / 4 latitude /

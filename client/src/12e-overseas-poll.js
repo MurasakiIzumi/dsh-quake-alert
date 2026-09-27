@@ -179,6 +179,37 @@ async function defaultFetchText(url, ctx) {
       }
       throw err
     }
+    // 0.9.4（C12⑦ / 同 C7② 的做法）：**按流读取并在超限处立刻停**。
+    // 此前是 `await res.text()` 之后才比长度——那时整个响应体已经在内存里了，上限只保护了
+    // "后续 JSON.parse 的代价"，峰值内存根本没被保护（与 Host 轮询器修过的是同一个形态）。
+    // 单位说明：这里比的是**字符数**（历史原因，`OVERSEAS_MAX_BODY_CHARS` 的名字也这么写），
+    // 而流的每一块用字节数计——对 UTF-8 中文两者差 3 倍，取字节数偏保守（宁可早停）。
+    const stream = res.body
+    const dec = typeof TextDecoder !== 'undefined' ? new TextDecoder('utf-8') : null
+    // 没有 TextDecoder 就不走流式路径：那样只能 `String(chunk)`（字节数组的逗号串），
+    // 解出来的 JSON 一定是坏的——退化成"读全文再比长度"比产出垃圾要好（老环境罕见但真实）。
+    if (dec && stream && typeof stream.getReader === 'function') {
+      const reader = stream.getReader()
+      let out = ''
+      let total = 0
+      try {
+        for (;;) {
+          const step = await reader.read()
+          if (!step || step.done) break
+          const chunk = step.value
+          total += chunk && typeof chunk.byteLength === 'number' ? chunk.byteLength : 0
+          if (total > OVERSEAS_MAX_BODY_CHARS) {
+            try { await reader.cancel() } catch (e) { /* 取消失败不影响判定 */ }
+            throw new Error('body too large (' + total + ' > ' + OVERSEAS_MAX_BODY_CHARS + ' bytes)')
+          }
+          out += dec.decode(chunk, { stream: true })
+        }
+        out += dec.decode()
+      } finally {
+        try { reader.releaseLock() } catch (e) { /* 已释放 */ }
+      }
+      return out
+    }
     return await res.text()
   })()
   if (signal) return await work
@@ -219,7 +250,7 @@ export function createOverseasSource(opts = {}) {
   const enabled = opts.enabled || ((cfg) => (cfg.disasters || {}).overseasWeather !== false)
   const placesFor = opts.placesFor || (() => [])
   const urlsFor = opts.urlsFor || (() => [])
-  const parseOne = opts.parseOne || (() => ({ ok: false, kind: 'schema', detail: '未配置解析器' }))
+  const parseOne = opts.parseOne || (() => ({ ok: false, kind: 'schema', detail: 'no parser configured' }))
   // 单次请求的超时可注入（0.6.1）：好让回归测试能在毫秒级验"超时"这条路径的文案与分类
   // ——否则它得真的等 10 秒（默认沙箱此前连 AbortController 都没有，这条路径从未被跑过）。
   // 用 Number.isFinite 而不是 typeof：`NaN` 也是 number，而 `setTimeout(fn, NaN)` 会**立即**触发
@@ -376,9 +407,9 @@ export function createOverseasSource(opts = {}) {
           signal: abortCtl ? abortCtl.signal : undefined,
           timeoutMs,
         })
-        if (typeof text !== 'string') throw new Error('取数器没有返回文本')
+        if (typeof text !== 'string') throw new Error('fetcher returned non-text')
         if (text.length > OVERSEAS_MAX_BODY_CHARS) {
-          throw new Error('响应体过大（' + text.length + ' 字符 > 上限 ' + OVERSEAS_MAX_BODY_CHARS + '）')
+          throw new Error('body too large (' + text.length + ' > ' + OVERSEAS_MAX_BODY_CHARS + ' chars)')
         }
         let json = null
         try {
@@ -387,8 +418,8 @@ export function createOverseasSource(opts = {}) {
           // 与下面"缺 features"同一类（0.6.1 review）：HTTP 200 却不是 JSON，最常见的原因是
           // 拦截页 / 上游改版。此前它按**链路故障**上报，于是同一份证据在同一个函数里得出两个
           // 相反的六态（蓝点 vs 红点）——而 JMA / NOAA 对"返回 HTML 而不是电文"一律判 schema。
-          noteParseResult(id, failResult('schema', '响应不是合法 JSON（可能是拦截页或上游改版）'))
-          throw new Error('响应不是合法 JSON（可能是拦截页或上游改版）')
+          noteParseResult(id, failResult('schema', 'response is not JSON (blocked page or upstream change?)'))
+          throw new Error('response is not JSON (blocked page or upstream change?)')
         }
         const feats = json && Array.isArray(json.features) ? json.features : null
         if (!feats) {
@@ -396,8 +427,8 @@ export function createOverseasSource(opts = {}) {
           // 语义它该点亮**蓝点**（用户处理不了、等插件更新），而不是红点（让用户去折腾自己的网络）。
           // 此前这里只抛普通 Error，于是整轮被归成 unreachable —— 与 check-contracts 把同一个
           // 条件判成"结构变了"的结论自相矛盾。
-          noteParseResult(id, failResult('schema', '响应缺少 features 数组（结构不符，可能是上游改版或拦截页）'))
-          throw new Error('响应缺少 features 数组（结构不符）')
+          noteParseResult(id, failResult('schema', 'response lacks features[]'))
+          throw new Error('response lacks features[]')
         }
         // 结构正确但**空数组**（NWS 按点查询的常态）交给**轮末**统一判定（0.6.2 修正，见下）。
         // 0.6.1 曾在这里逐响应上报 `empty`，而 05g 的 empty 会 `clearData`（清蓝点 + 归零连续
@@ -416,7 +447,7 @@ export function createOverseasSource(opts = {}) {
             res = parseOne(feature, item.place)
           } catch (parseErr) {
             stats.errors += 1
-            lastError = '单条解析抛错：' + String((parseErr && parseErr.message) || parseErr)
+            lastError = 'item parse threw: ' + String((parseErr && parseErr.message) || parseErr)
             continue
           }
           // 契约分类：empty（不在本插件范围 / 该点无预警）不计失败，schema / value 计入健康。
@@ -443,7 +474,7 @@ export function createOverseasSource(opts = {}) {
             onAlert(alert, cfg, stale ? { staleOnArrival: Math.round((now - issued) / 3600000) } : undefined)
           } catch (alertErr) {
             stats.errors += 1
-            lastError = '主链处理抛错：' + String((alertErr && alertErr.message) || alertErr)
+            lastError = 'pipeline threw: ' + String((alertErr && alertErr.message) || alertErr)
             continue
           }
           applied += 1
@@ -480,7 +511,7 @@ export function createOverseasSource(opts = {}) {
         // 超时自己标记过 → 给一条能读懂的原因（否则诊断里会写 "The user aborted a request."）。
         const timedOutNow = timedOut && !(err && err.status)
         lastError = timedOutNow
-          ? '请求超时（' + Math.round(timeoutMs / 1000) + ' 秒未响应）'
+          ? 'timeout (' + Math.round(timeoutMs / 1000) + 's)'
           : String((err && err.message) || err)
         onError(timedOutNow ? new Error(lastError) : err)
       } finally {
@@ -504,7 +535,7 @@ export function createOverseasSource(opts = {}) {
     //    `applied === 0` 时才需要它——有成功解析的条目时 `noteSourceSuccess` 已经清过蓝点。
     if (okCount > 0 && failCount === 0 && applied === 0) {
       // 轮级判定：整轮无失败、只是没有本插件范围内的条目 → 结构正常，照旧清蓝点（不传 perItem）。
-      noteParseResult(id, failResult('empty', '本轮响应结构正常，但没有本插件范围内的条目'))
+      noteParseResult(id, failResult('empty', 'ok structure, nothing in scope'))
     }
     // 停用之后不再写状态（0.6.0 review A-1）：否则"用户主动关掉插件"会在侧边栏留下红点，
     // 诊断里也会多一条 "The user aborted a request."
@@ -524,22 +555,22 @@ export function createOverseasSource(opts = {}) {
       // 查询"里的 N 只在用户改配置时变，正是想推出去的语义变化；计数由设置页的
       // OVERSEAS_STAT_ORDER 从 stats 直接读。
       const notes = []
-      if (skippedPlaces) notes.push('关注点过多，本轮只查了 ' + capped.length + ' 个')
-      else if (skippedSamples) notes.push('采样点超出每轮上限，本轮只查了部分方位点')
-      if (rejectedNow) notes.push(rejectedNow + ' 个请求被上游拒绝（HTTP 400）')
-      if (notes.length === 0) notes.push('已按 ' + places.length + ' 个关注点查询')
+      if (skippedPlaces) notes.push('too many watch points · queried ' + capped.length)
+      else if (skippedSamples) notes.push('sample points capped')
+      if (rejectedNow) notes.push('rejected x' + rejectedNow + ' (HTTP 400)')
+      if (notes.length === 0) notes.push('queried ' + places.length + ' watch points')
       reportStatus({ status: 'open', detail: notes.join(' · ') })
     } else if (okCount > 0) {
       lastSuccessAt = Date.now()
-      reportStatus({ status: 'degraded', detail: failCount + '/' + capped.length + ' 个请求失败：' + lastError })
+      reportStatus({ status: 'degraded', detail: failCount + '/' + capped.length + ' requests failed: ' + lastError })
     } else if (failCount > 0) {
-      reportStatus({ status: 'unreachable', detail: '全部请求失败：' + lastError })
+      reportStatus({ status: 'unreachable', detail: 'all requests failed: ' + lastError })
     } else if (rejectedNow > 0) {
       // 不替上游断言原因（0.6.0 review A-2）：400 也可能是"我们的参数被拒"，
       // 文案只说被拒绝 + 多久后重试，响应体前 160 字在诊断里。
       reportStatus({
         status: 'open',
-        detail: rejectedNow + ' 个请求被上游拒绝（HTTP 400，' + Math.round(uncoveredTtlMs / 60000) + ' 分钟后重试）',
+        detail: 'rejected x' + rejectedNow + ' (HTTP 400) · retry in ' + Math.round(uncoveredTtlMs / 60000) + 'm',
       })
     }
     stats.applied += applied
@@ -618,7 +649,7 @@ export function createNwsSource(opts = {}) {
   return createOverseasSource(Object.assign({
     id: 'nws_alerts',
     label: 'NWS',
-    regionText: '美国',
+    regionText: 'United States',
     intervalMs: NWS_POLL_MS,
     placesFor: (cfg) => placesInBoxes(cfg, US_BOXES),
     urlsFor: (place) => nwsSamplePoints(place).map((pt) =>
@@ -632,7 +663,7 @@ export function createEcccSource(opts = {}) {
   return createOverseasSource(Object.assign({
     id: 'eccc_alerts',
     label: 'ECCC',
-    regionText: '加拿大',
+    regionText: 'Canada',
     intervalMs: ECCC_POLL_MS,
     placesFor: (cfg) => placesInBoxes(cfg, [CA_BOX]),
     urlsFor: (place) => [urlOfLocal(ECCC_ALERTS_BASE, { f: 'json', limit: '200', bbox: ecccBboxOf(place) })],

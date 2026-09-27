@@ -13,11 +13,11 @@
 // ============================================================================
 
 import { h, useState, useEffect, useRef, PREFECTURES, prefLabelOf, SCALE_OPTIONS, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, CN_REPORT_MAG_OPTIONS, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, HISTORY_MAX, HISTORY_KEY, MAX_WATCH_CITIES, MAX_WATCH_PLACES, LANGUAGE_OPTIONS, formatIssuedLocal } from './01-constants.js'
-import { t } from './00-i18n.js'
+import { t, getLanguage } from './00-i18n.js'
 import { sourceLabelOf } from './00f-source-labels.js'
 import { saveJSON, own } from './02-storage.js'
 import { currentCfg, applyCfg, settingsSync } from './03-settings-bridge.js'
-import { citiesOfPref, cityTableState, cnProvinces, cnCitiesOf, cnPlaceOf, worldCountriesOf, countryPackOf, loadCountryCities } from './04-city-table.js'
+import { citiesOfPref, cityTableState, cnAreasStateOf, retryCityTable, cnProvinces, cnCitiesOf, cnPlaceOf, worldCountriesOf, countryNameOf, countryPackOf, loadCountryCities } from './04-city-table.js'
 import { cnStreamRegistry } from './12c-cn-stream.js'
 import { copyDiagSnapshot } from './16-diag.js'
 import { buildConfigExport, configFileName, downloadConfigFile, readConfigFile, importConfig, undoConfigImport, loadConfigBackup } from './17-config-io.js'
@@ -63,16 +63,29 @@ function settingsSyncLabel() {
 // 历史条目「类型」行显示的 P2PQuake code。气象电文不在此表里（它不是 P2PQuake 来源），
 // 索引一律经 own()，避免外部数据里的 'constructor' 之类的键命中原型链。
 const P2P_KIND_CODE = { quake: 551, eew: 556, tsunami: 552 }
-/** alert.code → 来源标注（全球源、JMA 电文与大陆源没有 P2PQuake 的 code）。 */
+/**
+ * alert.code → 来源标注的**文案 key**（全球源、JMA 电文与大陆源没有 P2PQuake 的 code）。
+ *
+ * 0.9.4：值是 key，取词在 `p2pCodeTextOf` 里做。此前这里是**写死的中文**（`JMA 电文` /
+ * `CENC 预警` / `中央气象台`），而它进的正是**履历条目的「类型」行**——用户实测在英文 / 日文
+ * 界面下看到「JMA 电文」，那是简体中文。机构品牌名（EMSC / USGS / NOAA CAP / NWS / ECCC）与
+ * `code N` 这种规范标识不翻：它们在任何语言下都该是同一个写法。
+ */
 const SOURCE_CODE_TEXT = {
-  emsc: 'EMSC', usgs: 'USGS', noaa: 'NOAA CAP', jma: 'JMA 电文',
-  cenc_eew: 'CENC 预警', cenc_eqlist: 'CENC 速报',
+  emsc: 'EMSC', usgs: 'USGS', noaa: 'NOAA CAP', jma: 'sourceCode.jma',
+  cenc_eew: 'sourceCode.cencEew', cenc_eqlist: 'sourceCode.cencEqlist',
   // 0.5.2：大陆气象预警的发布主体是各级气象台、由中央气象台汇总。标成「JMA 电文」会让
   // 一条云南暴雨预警看起来来自日本气象厅（同 SOURCE_CODE_TEXT 存在的理由）。
-  nmc_alarm: '中央气象台',
+  nmc_alarm: 'sourceCode.nmc',
   // 0.6.0：海外气象源。机构名不能省——一条多伦多的降雨预警被标成「JMA 电文」是同一类错误，
   // 而 ECCC 的许可（End-use Licence v2.1.1）本身就要求署名。
   nws_alerts: 'NWS', eccc_alerts: 'ECCC',
+}
+/** 表里的值可能是 key（要取词），也可能已经是品牌名（原样返回）。 */
+const sourceCodeLabelOf = (value) => {
+  const s = String(value === undefined || value === null ? '' : value)
+  const got = t(s)
+  return got === s ? s : got
 }
 /**
  * 历史条目「类型」行的来源标注。
@@ -86,15 +99,15 @@ const SOURCE_CODE_TEXT = {
 function p2pCodeTextOf(kind, code, id) {
   const codeStr = String(code === undefined || code === null ? '' : code)
   const byCode = own(SOURCE_CODE_TEXT, codeStr)
-  if (byCode) return byCode
+  if (byCode) return sourceCodeLabelOf(byCode)
   if (/^\d{3}$/.test(codeStr)) return 'code ' + codeStr
   const idStr = String(id === undefined || id === null ? '' : id)
   if (idStr.indexOf('emsc:') === 0) return 'EMSC'
   if (idStr.indexOf('usgs:') === 0) return 'USGS'
   if (idStr.indexOf('noaa:') === 0) return 'NOAA CAP'
-  if (idStr.indexOf('cenc:') === 0) return 'CENC 大陆'
+  if (idStr.indexOf('cenc:') === 0) return t('sourceCode.cencMainland')
   // 0.5.2：大陆气象源（新的历史条目走 code，这里兜住"更早写入的"这条路径）
-  if (idStr.indexOf('nmc:') === 0) return '中央气象台'
+  if (idStr.indexOf('nmc:') === 0) return t('sourceCode.nmc')
   // 0.6.0：海外气象源同理（`code` 缺失的历史条目靠 id 前缀认出来源）
   if (idStr.indexOf('nws:') === 0) return 'NWS'
   if (idStr.indexOf('eccc:') === 0) return 'ECCC'
@@ -102,7 +115,7 @@ function p2pCodeTextOf(kind, code, id) {
   if (c) return 'code ' + c
   // 兜底：气象（kind='weather'）在 0.5.2 之前只有日本这一个来源。现在有了大陆气象源，
   // 所以这里的兜底必须注明它是**日方**的，而不是把两者混起来（大陆那条在上面的 id / code 分支已拦下）。
-  return kind === 'weather' ? 'JMA 电文' : '—'
+  return kind === 'weather' ? t('sourceCode.jma') : '—'
 }
 // 灾种配色：气象灾害此前没有键，历史条目一律落到灰色兜底，与另外三类不一致
 const KIND_COLORS = { eew: '#e5484d', quake: '#3b82f6', tsunami: '#f76b15', weather: '#8b5cf6' }
@@ -417,7 +430,17 @@ function SettingsPanel(props) {
   useEffect(() => store.subscribe(() => { setTick((t) => t + 1); setCfgState(currentCfg()) }), [])
   useEffect(() => () => {
     if (volTimer.current) { clearTimeout(volTimer.current); volTimer.current = null }
-    if (restartTimer.current) { clearTimeout(restartTimer.current); restartTimer.current = null }
+    // 0.9.4（C11②）：挂起的"切换数据源后重启"要**执行**，而不是丢弃。
+    // 此前直接 clearTimeout：用户切完数据源后 80ms 内关掉设置页 / 停用插件，那次 restart() 就
+    // 永远不会发生，连接要等下一次强制断线（约 10 分钟）才切到新地址。
+    // 清定时器仍然必要（不能让一个已无 fiber 归属的回调复活 socket），所以顺序是
+    // "清掉定时器 → 立刻执行同一动作"，`activeClient` 的复查照旧（插件停用时它是 null）。
+    if (restartTimer.current) {
+      clearTimeout(restartTimer.current)
+      restartTimer.current = null
+      const c = activeClient // 模块级 live binding：插件停用时已被置为 null
+      if (c) { try { c.restart() } catch (err) { /* 与延时路径同一处置 */ } }
+    }
     const v = volPending.current
     if (v !== null) {
       volPending.current = null
@@ -594,13 +617,24 @@ function SettingsPanel(props) {
     setCfg((c) => ({ ...c, watch: { ...c.watch, places: (c.watch.places || []).concat([p]) } }))
     setCnMsg(t('settings.cn.added', { name: p.name, lat: p.lat, lon: p.lon, radius: p.radiusKm }))
   }
+  /** 数据表加载失败时的重试（0.9.4 / P2-18、P2-19）。表到位后 store.push 会触发重渲。 */
+  const onRetryCityTable = () => {
+    try {
+      const p = retryCityTable()
+      if (p && typeof p.catch === 'function') p.catch(() => {})
+    } catch (err) { /* 重试失败由界面上的失败文案继续表示 */ }
+  }
   /** 国家 / 地区级联的第一级（中国）——省的选项。 */
   const cnCascade = () => {
     if (provinces.length === 0) {
-      return h('div', { style: { fontSize: 11, color: cityTableState === 'failed' ? '#d9a406' : '#9aa0a6', marginTop: 6 } },
-        cityTableState === 'failed'
-          ? t('settings.cn.tableFailed')
-          : t('settings.cn.loading'))
+      // 0.9.4（P2-19）：此前这里只看 cityTableState（它只反映**市町村表**），于是大陆表失败时
+      // 状态仍是 ready → 永远落在"正在加载…"那一支，用户等多久都不会知道是失败了。
+      // 现在按大陆表自己的状态区分"加载中"与"失败"，失败时给一个重试入口。
+      const failed = cnAreasStateOf() === 'failed'
+      return h('div', { style: { fontSize: 11, color: failed ? '#d9a406' : '#9aa0a6', marginTop: 6 } },
+        failed ? t('settings.cn.tableFailed') : t('settings.cn.loading'),
+        failed ? h('span', { style: { marginLeft: 8 } },
+          s.btn(t('settings.retry'), onRetryCityTable, { fontSize: 11 })) : null)
     }
     const cities = cnCitiesOf(cnPick.province)
     const provOptions = [{ v: '', label: t('settings.cn.provinceAll') }]
@@ -626,8 +660,13 @@ function SettingsPanel(props) {
   // 市区町村选择器：数据表到位后，为每个已关注的县提供「搜索 + 多选」
   const cityPicker = () => {
     if (cityTableState === 'failed') {
+      // 0.9.4（P2-18）：失败要能重试。此前 loadCityTable 的唯一调用点是插件装载时那个
+      // ctx.effect，一次瞬时失败（Host 刚起来、一次 500、一次抖动）就让整场会话失去市町村表：
+      // 市级收窄失效（多报）、选不出市町村、pruneUnknownCities 不再运行，而用户只能刷新页面。
       return h('div', { style: { fontSize: 11, color: '#d9a406', marginTop: 10 } },
-        t('settings.cities.failed'))
+        t('settings.cities.failed'),
+        h('span', { style: { marginLeft: 8 } },
+          s.btn(t('settings.retry'), onRetryCityTable, { fontSize: 11 })))
     }
     if (cfg.watch.prefectures.length === 0) {
       return h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 10 } }, t('settings.cities.pickPrefFirst'))
@@ -658,6 +697,9 @@ function SettingsPanel(props) {
               const on = cfg.watch.cities.indexOf(city) !== -1
               return h('button', {
                 key: city, onClick: () => toggleCity(city),
+                // 0.9.4（P2-28）：选中态此前只靠颜色 / 边框表达（WCAG 4.1.2）。同文件的县按钮
+                // 与页签都有 aria-pressed，市町村这一层漏了——读屏用户无法知道选了哪些市町村。
+                'aria-pressed': on ? 'true' : 'false',
                 style: {
                   fontSize: 11, padding: '2px 8px', borderRadius: 11, cursor: 'pointer',
                   border: '1px solid ' + (on ? '#3b82f6' : 'rgba(148,163,184,0.3)'),
@@ -740,7 +782,7 @@ function SettingsPanel(props) {
     })
     const group = (title, rows, empty) => h('div', { style: { marginTop: 8 } },
       h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 2 } }, title),
-      rows.length ? rows : h('div', { style: { fontSize: 11, color: '#6b7280' } }, empty))
+      rows.length ? rows : h('div', { style: { fontSize: 11, color: '#9aa0a6' } }, empty))
     const total = (w.prefectures || []).length + places.length
     return h('div', { style: { marginTop: 12, borderTop: '1px solid rgba(148,163,184,0.18)', paddingTop: 8 } },
       h('div', { style: { fontSize: 12, fontWeight: 700, color: '#dfe3e8' } }, t('settings.watch.title', { n: total })),
@@ -812,6 +854,8 @@ function SettingsPanel(props) {
   const globalBranch = () => {
     const hint = { fontSize: 11, color: '#9aa0a6', lineHeight: 1.6 }
     const countries = worldCountriesOf()
+    // 国家名的取词与排序都跟着**当前界面语言**（0.9.4 / PD-3，见 countryNameOf）
+    const lang = getLanguage()
     const pack = country ? countryPackOf(country) : null
     const cityList = (pack && pack.state === 'ready') ? pack.cities : []
     const q = worldCityQuery.trim()
@@ -869,7 +913,21 @@ function SettingsPanel(props) {
       s.label(t('settings.global.countryLabel')),
       s.row(s.select(country,
         [{ v: '', label: countries.length ? t('settings.global.countryAll') : t('settings.global.countryLoading') }]
-          .concat(countries.map((c) => ({ v: c.code, label: t('settings.global.countryOption', { name: c.name, n: c.count }) }))),
+          .concat(countries
+            // 0.9.4（PD-3）：国家名按**当前界面语言**取（数据里带四种语言的写法），并按该语言的
+            // 排序规则排——中文按拼音、日文按假名、英文按字母，跟着语言换。
+            //
+            // 0.9.4 修订：这里**只映射一次**。此前写成 map→sort→map，而第二次 map 的参数已经不是
+            // 国家条目、而是上一步造的 `{v, name, count}`，于是 `v: c.code` 全是 undefined——
+            // 浏览器里所有 option 的 value 相同，就只能停在第 1 个；onChange 收到字符串 "undefined"，
+            // 拉城市 404、城市列表永远空。排序改为排**原始条目**（按解析出的本地化名字），
+            // 从结构上避开这类"链到第二段时字段名变了"的错误。
+            .slice()
+            .sort((a, b) => countryNameOf(a, lang).localeCompare(countryNameOf(b, lang), lang))
+            .map((c) => ({
+              v: c.code,
+              label: t('settings.global.countryOption', { name: countryNameOf(c, lang), n: c.count }),
+            }))),
         (v) => { setCountry(v); setWorldCityQuery(''); if (v) loadCountryCities(v) },
         (o) => o.label, t('settings.global.countryLabel'))),
       // 半径是**共用**的一个旋钮：城市点选与手填坐标都按它新建关注点。
@@ -1133,6 +1191,15 @@ function SettingsPanel(props) {
       s.checkbox(cfg.notify.sound !== false, (v) => setCfg((c) => ({ ...c, notify: { ...c.notify, sound: v } })), t('settings.notify.sound')),
       s.checkbox(cfg.notify.system !== false, (v) => setCfg((c) => ({ ...c, notify: { ...c.notify, system: v } })), t('settings.notify.system')),
     ),
+    // 0.9.4（C1）：分灾害音效开关。总开关关掉时这三个没有意义，所以**只在总开关打开时显示**
+    // （灰着不禁用更省事，但"显示却无效"正是要避免的那种界面）。默认全开 = 与旧行为一致。
+    cfg.notify.sound !== false
+      ? s.row(
+        s.checkbox(cfg.notify.soundQuake !== false, (v) => setCfg((c) => ({ ...c, notify: { ...c.notify, soundQuake: v } })), t('settings.notify.soundQuake')),
+        s.checkbox(cfg.notify.soundTsunami !== false, (v) => setCfg((c) => ({ ...c, notify: { ...c.notify, soundTsunami: v } })), t('settings.notify.soundTsunami')),
+        s.checkbox(cfg.notify.soundWeather !== false, (v) => setCfg((c) => ({ ...c, notify: { ...c.notify, soundWeather: v } })), t('settings.notify.soundWeather')),
+      )
+      : null,
     s.row(s.label(t('settings.notify.volume')), h('input', {
       type: 'range', min: 0, max: 100,
       value: Math.round(volShown * 100),
@@ -1274,7 +1341,9 @@ function SettingsPanel(props) {
     s.row(s.btn(t('settings.diag.snapshotButton'), () => {
       copyDiagSnapshot().then((r) => setDiag({
         text: r.text,
-        msg: r.ok ? t('settings.diag.copied') : (t('settings.diag.clipboardUnavailable') + (r.error ? t('settings.diag.clipboardError', { error: r.error }) : '') + t('settings.diag.copyManual')),
+        msg: r.ok
+          ? (r.warning ? t('settings.diag.copiedWithWarning', { warning: r.warning }) : t('settings.diag.copied'))
+          : (t('settings.diag.clipboardUnavailable') + (r.error ? t('settings.diag.clipboardError', { error: r.error }) : '') + t('settings.diag.copyManual')),
       })).catch((err) => setDiag({ text: '', msg: t('settings.diag.generatingFailed', { error: String((err && err.message) || err) }) }))
     })),
     h('div', { style: { fontSize: 11, color: '#d9a406', marginTop: 4 } },
@@ -1336,7 +1405,16 @@ function SettingsPanel(props) {
       // 一级选择器仍高亮旧的日本分支，用户会以为关注点没导进来。
       setRegionTab(inferRegionTab(currentCfg()))
       setCfgIoBackupAt(res.backupAt)
-      setCfgIoMsg(t('settings.configIo.imported'))
+      // 0.9.4（P1-6）：导入成功不等于"原样导入"。归一化会丢弃坐标非法的关注点、把非数值的
+      // 半径退回 300km，而此前这里无条件报"已导入配置。"——用户看不出少了几个点，
+      // 配置里、界面里、诊断里都没有痕迹。有账就如实补一句。
+      const w = res.warnings || {}
+      const parts = []
+      if (w.dropped > 0) parts.push(t('settings.configIo.importedSkipped', { n: w.dropped }))
+      if (w.radiusFixed > 0) parts.push(t('settings.configIo.importedRadius', { n: w.radiusFixed }))
+      setCfgIoMsg(parts.length
+        ? t('settings.configIo.imported') + ' ' + parts.join(' ')
+        : t('settings.configIo.imported'))
     }).catch((err) => {
       // 兜底：解析层的异常已经在 17-config-io 里转成错误码，但读文件（`file.text()` /
       // FileReader）以及将来新增的任何一步仍可能抛。少了这个 catch，用户看到的是
@@ -1348,13 +1426,30 @@ function SettingsPanel(props) {
     const res = undoConfigImport()
     if (!res.ok) { setCfgIoMsg(t('settings.configIo.noBackup')); return }
     setCfgState(currentCfg())
+    // 0.9.4（P3-45）：撤销与导入一样是**整体替换**，地区页签必须跟着新配置重算。
+    // 此前只 setCfgState —— 导入这条路径 0.9.2 已经补了重算，撤销这条漏了：用户导入一份
+    // "只有全球关注点"的配置、再撤销回来，一级选择器仍高亮着导入后的分支，看起来像没恢复。
+    setRegionTab(inferRegionTab(currentCfg()))
     // 撤销是一次性的：备份已被清掉（0.9.2），界面上的按钮与备份时间要跟着消失——否则按钮还挂着，
     // 再点一次只会得到"没有可撤销的导入记录"。
     setCfgIoBackupAt('')
     setCfgIoMsg(t('settings.configIo.undone'))
   }
-  const sectionConfigIo = () => s.section(t('settings.configIo.title'),
-    h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 6 } }, t('settings.configIo.hint')),
+  /** 复制当前导出文本（0.9.4 / P3-43）：导出回退路径上的那一步。剪贴板不可用时如实说。 */
+  const onCopyCfg = () => {
+    const text = cfgIoText || buildConfigExport(cfg)
+    const ok = () => setCfgIoMsg(t('settings.configIo.copied'))
+    const fail = () => setCfgIoMsg(t('settings.configIo.copyFailed'))
+    try {
+      const clip = (typeof navigator !== 'undefined' && navigator) ? navigator.clipboard : null
+      if (clip && typeof clip.writeText === 'function') {
+        clip.writeText(text).then(ok).catch(fail)
+        return
+      }
+    } catch (err) { /* 落到失败分支（沙箱 iframe / 权限被拒） */ }
+    fail()
+  }
+  const sectionConfigIo = () => s.section(t('settings.configIo.title'),    h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 6 } }, t('settings.configIo.hint')),
     s.row(
       s.btn(t('settings.configIo.exportBtn'), onExportCfg),
       s.btn(t('settings.configIo.importBtn'), () => { if (cfgIoFileRef.current) cfgIoFileRef.current.click() }),
@@ -1382,7 +1477,13 @@ function SettingsPanel(props) {
     }),
     cfgIoMsg ? h('div', { role: 'status', style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, cfgIoMsg) : null,
     cfgIoText
-      ? h('textarea', {
+      ? h('div', null,
+        h('div', { style: { fontSize: 11, color: '#d9a406', marginTop: 6 } }, t('settings.configIo.exportFallback')),
+        // 0.9.4（P3-43）：**把"复制"真的做出来**。此前文案说"请手动复制下面的文本"，却只有一个
+        // 只读文本框——而 `configIo.copied` / `copyFailed` 两条文案早就写在表里、没有任何消费者
+        // （诊断那一面有复制按钮，配置这一面只有回退）。现在两个键都用上了，用户少一步全选手抄。
+        s.row(s.btn(t('settings.configIo.copyBtn'), onCopyCfg, { fontSize: 11 })),
+        h('textarea', {
           readOnly: true, value: cfgIoText, rows: 8,
           onFocus: (e) => { try { e.target.select() } catch (err) { /* 忽略 */ } },
           style: {
@@ -1390,7 +1491,7 @@ function SettingsPanel(props) {
             fontFamily: 'ui-monospace, monospace', background: '#ffffff', color: '#1a1a1a',
             border: '1px solid #6b7280', borderRadius: 6, padding: 8,
           },
-        })
+        }))
       : null,
   )
 

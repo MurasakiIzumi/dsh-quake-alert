@@ -19,12 +19,30 @@
 // 退出码为上界：它只能说"这台机器此刻能不能用"，不能替代运行时链路自身的健康状态。
 
 import { createWolfxSource, CENC_EEW_ID, CENC_EQLIST_ID, WOLFX_WS_BASE, WOLFX_REST_BASE } from '../lib/wolfx-source.js'
+import { createFetchText } from '../lib/poller.js'
 
 const argv = process.argv.slice(2)
 const waitArg = argv.find((a) => a.startsWith('--wait='))
 const waitMs = (waitArg ? Number(waitArg.split('=')[1]) : 8) * 1000
 const onlyArg = argv.find((a) => a.startsWith('--source='))
 const wanted = onlyArg ? [onlyArg.split('=')[1]] : [CENC_EEW_ID, CENC_EQLIST_ID]
+
+// 0.9.4：REST 兜底不再只是"建议用户自己 curl"——这里真的请求一次，把两条通道的结论分开报。
+// WS 不通而 REST 通 ≠ 网络层不通：前者是中间设备掐 wss://，后者才是 DNS / 出网策略。
+const restFetch = createFetchText({ timeoutMs: 15 * 1000 })
+async function probeRest(id) {
+  const url = WOLFX_REST_BASE + id + '.json'
+  try {
+    const text = await restFetch(url)
+    let ok = false
+    try { const j = JSON.parse(text); ok = !!j && typeof j === 'object' } catch (err) { ok = false }
+    return ok
+      ? { url, ok: true, note: 'HTTP 200，JSON 可解析（' + text.length + ' 字符）→ 能到 api.wolfx.jp，只有 wss:// 这条路不通' }
+      : { url, ok: false, note: 'HTTP 200 但不是 JSON（被拦截页 / 上游改版）' }
+  } catch (err) {
+    return { url, ok: false, note: '失败：' + String((err && err.message) || err) }
+  }
+}
 
 const errors = []
 const sources = wanted.map((id) => {
@@ -43,7 +61,7 @@ console.log('Wolfx 端点：' + WOLFX_WS_BASE + '<id>   （REST 降级通道：'
 console.log('等待 ' + (waitMs / 1000) + ' 秒…\n')
 for (const s of sources) s.start()
 
-setTimeout(() => {
+setTimeout(async () => {
   let failed = 0
   for (const src of sources) {
     const st = src.stats()
@@ -52,6 +70,8 @@ setTimeout(() => {
     console.log('=== ' + src.id + ' ===')
     console.log('  WebSocket 建连：' + (st.connected ? '成功（第 ' + st.connects + ' 次）' : '**未建立**'))
     console.log('  收到帧：' + st.frames + ' 条数据帧 / ' + st.messages + ' 条消息（含心跳）')
+    console.log('  REST 兜底：尝试 ' + st.restPolls + ' 次 / 成功 ' + st.restFetched + ' 次' +
+      (st.restLastError ? '（最后一条：' + st.restLastError + '）' : ''))
     console.log('  错误：' + st.errors + (st.lastError ? '（最后一条：' + st.lastError + '）' : ''))
     console.log('  最新事件时刻：' + (newest || '（没拿到任何事件）'))
     console.log('  环缓冲：' + snap.entries.length + ' 条')
@@ -60,10 +80,18 @@ setTimeout(() => {
     if (!st.connected) {
       failed += 1
       console.log('  → 归类：unreachable。这台机器连不上 ws-api.wolfx.jp。')
-      console.log('    可先用 REST 通道对照：curl -s ' + WOLFX_REST_BASE + src.id + '.json')
-      console.log('    两条都不通就是网络层（DNS / 中间设备 / 出网策略），AI 修不了，' +
-        '如实告诉用户"该源在当前网络不可达"，并说明日本与全球源走别的域名、不受影响。')
-    } else if (st.frames === 0) {
+      if (st.restFetched > 0) {
+        // 0.9.4：运行时已经自己走过 REST 兜底并拿到了数据 —— 这不是"没有预警"，而是"走的另一条通道"。
+        console.log('    REST 兜底已成功 ' + st.restFetched + ' 次，数据是从 api.wolfx.jp 拿到的（环缓冲非空即说明这一点）。')
+        console.log('    → 结论：wss:// 这条路不通，REST 这条路通；插件仍会收到数据，只是延迟按轮询算。')
+      } else {
+        const probe = await probeRest(src.id)
+        console.log('    REST 兜底也没拿到数据。直接请求一次以区分"两条都不通"与"只是没数据"：')
+        console.log('      ' + probe.url + ' → ' + probe.note)
+        console.log('    两条都不通就是网络层（DNS / 中间设备 / 出网策略），AI 修不了，' +
+          '如实告诉用户"该源在当前网络不可达"，并说明日本与全球源走别的域名、不受影响。')
+      }
+    } else if (st.frames === 0 && st.restFetched === 0) {
       failed += 1
       console.log('  → 归类：connected-but-silent。连上了但一个数据帧都没有。')
       console.log('    最常见的原因是 query 指令形态变了（实测必须是纯文本 query_cenceew / query_cenceqlist，' +

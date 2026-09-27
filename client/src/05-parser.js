@@ -10,6 +10,7 @@
 
 import { PREFECTURES, SCALE_TEXT, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, normalizePref, p2pTimeToIso } from './01-constants.js'
 import { own } from './02-storage.js'
+import { t } from './00-i18n.js'
 
 // ---------- 解析器：P2PQuake code → Alert ----------
 // Alert = { id, code, kind, kindLabel, severity, issued, headline, maxScale, hypo, geo,
@@ -118,10 +119,20 @@ function regionsOfArea(name, forecastPref, value, valueKey) {
     return region
   })
 }
-const scaleText = (v) => own(SCALE_TEXT, v) || (typeof v === 'number' && v > 0 ? '震度' + Math.floor(v / 10) : '未公布')
+// 震度 / 海啸等级的文字：**按当前界面语言取词**（0.9.4 起，见 00g-texts-events）。
+// 取不到该档位的键时退回数字形态（`震度N` 也走文案，别在这里写死中文）。
+const scaleText = (v) => {
+  const key = 'scale.' + v
+  const own1 = (typeof v === 'number') ? t(key) : ''
+  if (own1 && own1 !== key) return own1
+  if (typeof v === 'number' && v > 0) return t('scale.number', { n: Math.floor(v / 10) })
+  return t('scale.unknown')
+}
 // 震度后缀：只在有效震度时追加，避免「最大震度未公布」这类噪音。
 // 震度是用户判断严重性的关键信息（阈值也是按震度设的），必须出现在 headline 里。
 // prefix 例：'最大' → 「最大震度3」；'预测最大' → 「预测最大震度5强」。
+// 注意：prefix 与 scaleText 之间**不留空格**——日语与中文都不该有，英文靠 scaleText 自带
+// （`Intensity 3`）读得通，所以这里保持原样拼接。
 const scaleSuffix = (v, prefix) => (typeof v === 'number' && v > 0 ? ' · ' + prefix + scaleText(v) : '')
 // severity → 颜色。'yellow' 必须显式处理：默认阈值 40 下最常见的命中（震度4）就是它，
 // 落到默认分支会显示成"信息蓝"，与「中等严重度」的语义不符。
@@ -140,21 +151,24 @@ const severityOfScale = (v) => {
 
 function parseQuake(raw) {
   const type = (raw.issue && raw.issue.type) || ''
+  // 分类名是**我们给起的**（不是电文原文）→ 取词按界面语言（0.9.4 起，见 00g-texts-events）
   const labelMap = {
-    ScalePrompt: '地震速报·震度速报', Destination: '地震情报·震源', ScaleAndDestination: '地震情报·震源与震度',
-    DetailScale: '地震情报·各地震度', Foreign: '地震情报·远地地震', Other: '地震情报',
+    ScalePrompt: 'kind.quakeScale', Destination: 'kind.quakeHypo', ScaleAndDestination: 'kind.quakeScaleHypo',
+    DetailScale: 'kind.quakeDetail', Foreign: 'kind.quakeForeign', Other: 'kind.quakeInfo',
   }
+  const labelKeyOf = () => own(labelMap, type) || 'kind.quakeInfo'
   const eq = raw.earthquake || {}
   const hypo = eq.hypocenter || {}
   const pts = raw.points || []
   const hasHypo = typeof hypo.name === 'string' && hypo.name !== ''
+  // 有震源名时用模板拼（`震源 {name} · M{mag}`）；**震源名与机构名是上游原文，原样透传**。
   const headBase = hasHypo
-    ? '震源 ' + hypo.name + ' · M' + (typeof hypo.magnitude === 'number' ? hypo.magnitude : '—')
-    : (own(labelMap, type) || '地震情报')
-  const headline = headBase + scaleSuffix(eq.maxScale, '最大')
+    ? t('kind.quakeHeadline', { name: hypo.name, mag: (typeof hypo.magnitude === 'number' ? hypo.magnitude : '—') })
+    : t(labelKeyOf())
+  const headline = headBase + scaleSuffix(eq.maxScale, t('scale.prefixMax'))
   return {
     id: String(raw.id || raw._id || ''), code: 551, kind: 'quake',
-    kindLabel: own(labelMap, type) || '地震情报',
+    kindLabel: t(labelKeyOf()),
     severity: severityOfScale(eq.maxScale),
     // 时间统一转成**带偏移**的 ISO 8601（源时区见 DESIGN 第 4 节 / 05d 的 SOURCE_CONTRACTS）。
     // P2PQuake 的时间是裸 JST（"2026/09/07 23:25:14"），不补偏移的话大陆浏览器上会显示成
@@ -189,10 +203,13 @@ function parseEew(raw) {
   const maxTo = areas.reduce((m, a) => (typeof a.scaleTo === 'number' && a.scaleTo > m ? a.scaleTo : m), -1)
   return {
     id: String(raw.id || raw._id || ''), code: 556, kind: 'eew',
-    kindLabel: cancelled ? 'EEW·已取消' : '紧急地震速报（警报）',
+    kindLabel: cancelled ? t('kind.eewCancelled') : t('kind.eewWarning'),
     severity: cancelled ? 'info' : 'red',
     issued: p2pTimeToIso((raw.issue && raw.issue.time) || raw.time || ''),
-    headline: cancelled ? '本警报已取消' : '震源 ' + (hypo.name || '—') + ' · M' + (typeof hypo.magnitude === 'number' ? hypo.magnitude : '—') + scaleSuffix(maxTo, '预测最大'),
+    headline: cancelled
+      ? t('kind.eewCancelledHeadline')
+      : t('kind.quakeHeadline', { name: (hypo.name || t('kind.areaUnknown')), mag: (typeof hypo.magnitude === 'number' ? hypo.magnitude : '—') }) +
+        scaleSuffix(maxTo, t('scale.prefixEewMax')),
     maxScale: maxTo,
     // EEW 的多报共享 issue.eventId（serial 递增），用它做事件级去重
     eventKey: (raw.issue && raw.issue.eventId) ? 'eew:' + raw.issue.eventId : '',
@@ -210,18 +227,28 @@ function parseEew(raw) {
 function parseTsunami(raw) {
   const cancelled = raw.cancelled === true
   const areas = raw.areas || []
-  const lines = areas.map((a) => {
-    const hgt = a.maxHeight && a.maxHeight.description ? ' 高' + a.maxHeight.description : ''
-    return (a.name || '—') + '：' + (own(TSUNAMI_GRADE_TEXT, a.grade) || a.grade || '—') + hgt
-  })
+  // 两侧的分隔符与「高さ」前缀都是**我们拼的** → 模板化（`{area}：{grade}{height}`）。
+  // 预报区名与浪高描述是电文原文，原样透传。
+  const gradeKeyOf = (grade) => {
+    const k = 'tsunami.' + grade
+    const got = grade ? t(k) : ''
+    return (got && got !== k) ? got : (grade || t('kind.areaUnknown'))
+  }
+  const lines = areas.map((a) => t('kind.tsunamiLine', {
+    area: a.name || t('kind.areaUnknown'),
+    grade: gradeKeyOf(a.grade),
+    height: (a.maxHeight && a.maxHeight.description) ? t('kind.tsunamiHeight', { height: a.maxHeight.description }) : '',
+  }))
   const worst = areas.reduce((m, a) => Math.max(m, own(TSUNAMI_RANK, a.grade) || 0), 0)
   const anyWarning = worst >= 2
   return {
     id: String(raw.id || raw._id || ''), code: 552, kind: 'tsunami',
-    kindLabel: cancelled ? '海啸·已解除' : (worst >= 3 ? '大海啸警报' : (anyWarning ? '海啸警报' : '海啸注意报')),
+    kindLabel: cancelled
+      ? t('kind.tsunamiCancelled')
+      : (worst >= 3 ? t('kind.tsunamiMajor') : (anyWarning ? t('kind.tsunamiWarning') : t('kind.tsunamiAdvisory'))),
     severity: cancelled ? 'info' : (worst >= 2 ? 'red' : 'orange'),
     issued: p2pTimeToIso((raw.issue && raw.issue.time) || raw.time || ''),
-    headline: cancelled ? '海啸预报已解除' : lines.join('；'),
+    headline: cancelled ? t('kind.tsunamiCleared') : lines.join('；'),
     maxScale: worst,
     // 海啸预报没有可归并的事件 id（issue 只有 source/time/type），但**绝不能留空**：
     // cancelKeyOf 会退回 kind（'tsunami'），于是任意海域的解除都被当成"此前提醒过的事件"，

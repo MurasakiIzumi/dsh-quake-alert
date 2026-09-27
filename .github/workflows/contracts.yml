@@ -16,24 +16,40 @@
 #     - cron: '0 22 * * *'    # 每天 07:00 JST 一次
 #
 # ---------------------------------------------------------------------------
-# 为什么不跑 pnpm install
+# 为什么不跑 pnpm install（本 job）
 #
 # 这个脚本零依赖：只用 Node 内置的 vm / fs / path / fetch / WebSocket。
 # 它读的是**已提交的** client/client.js（构建产物），所以不需要 rollup、不需要装包。
-# 「提交的 bundle 与 client/src/ 不同步」是另一件事，由 `node scripts/build-client.mjs --check`
-# 负责（那一步才需要依赖）——两件事分开，CI 红的时候失败原因才不会混在一起。
+#
+# 「提交的 bundle 与 client/src/ 不同步」是另一件事，由下面**单独的 bundle-sync job**
+# 负责（那一步才需要依赖）。0.9.4 之前这里只写了一句话把它"委托"给
+# `node scripts/build-client.mjs --check`，但那个命令**从来没进过 CI**：
+# 只改 client/src 忘记重建的 PR 全绿，而用户实际运行的是旧逻辑。
+# 分成两个 job 是为了让 CI 红的时候失败原因不混在一起（原来的理由保留）。
 
 name: contracts
+
+permissions:
+  contents: read
 
 on:
   # 手动触发：**唯一**会跑真实网络的场景（见下面的 if 判断）
   workflow_dispatch:
   # PR：只跑离线自检，不联网
   pull_request:
+  # 直推主分支也要过一遍（0.9.4 补）：在此之前直推是零守卫的
+  push:
+    branches: [main]
+
+# 同一分支的旧跑批自动让位，避免连续推送时排队堆积
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   contracts:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -46,13 +62,11 @@ jobs:
       - name: 跨模块引用检查
         run: node scripts/check-imports.mjs
 
-      # 核心回归套件（0.5.4 补）。它是**零依赖**的：自己用 vm 加载已提交的 client/client.js，
-      # 只需要 Node 内置模块与仓库里的 area-tables.cjs——所以不必 pnpm install。
-      # 此前 CI 只有契约自检，1070 条断言（0.6.0 起 1242、0.6.1 起 1315、0.6.2 起 1346；去重 / 匹配 /
-      # 解析 / 健康机制）全在本地跑：PR 破坏了这些逻辑，CI 不会红。实测在 UTC 时区下也全绿
-      # （脚本里没有依赖本机时区与**当天日期**的断言——0.6.1 修掉了一条依赖 fixture 绝对日期的）。
-      - name: 核心回归套件
-        run: node tests/sync-test.cjs
+      # 回归套件与时间旅行守卫**不在这里**：它们会 `await import('lib/index.js')`（Host 侧断言），
+      # 而那个文件顶层 import 了运行时依赖 @deepseek-ai/schemastery。本 job 是**零依赖**的
+      # （只读已提交的 client/client.js 与 Node 内置模块），装不下它们——0.9.4 曾把它们放在这里，
+      # 于是 CI 长期只有一句 "Cannot find package '@deepseek-ai/schemastery'"。见下面 regression job。
+
 
       # 离线自检：只用 samples/ 的快照。样本是刻意挑的**有效数据**，所以这里**必须全通过**
       # ——它验的是"脚本与解析器还接得上"，而不是上游。任何一条解析不出 Alert 都说明
@@ -67,3 +81,68 @@ jobs:
       - name: 在线契约检查（真实拉取 10 个源）
         if: github.event_name == 'workflow_dispatch'
         run: node scripts/check-contracts.mjs
+
+  # 回归套件 + 时间旅行守卫 + bundle 同步检查（0.9.4 从零依赖的 contracts job 移过来）。
+  #
+  # 为什么需要依赖：`tests/sync-test.cjs` 里有 Host 侧断言，会
+  # `await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)`；而 `lib/index.js` 顶层
+  # `import z from '@deepseek-ai/schemastery'`（package.json 的 dependencies——DSH 的 settings
+  # schema）。零依赖的 job 里没有 node_modules，那句 import 直接抛 `Cannot find package
+  # '@deepseek-ai/schemastery'`，整个套件在 6 秒内崩掉——在 CI 上只表现成一句
+  # "Process completed with exit code 1"，看起来像断言失败。注释里原先那句「核心回归套件是
+  # 零依赖的（只需 Node 内置模块与 area-tables.cjs）」是**错的**：它只看到了 vm 里的 client bundle，
+  # 没看到同一份测试还会同步加载 Host 入口。已订正。
+  #
+  # 分成两个 job 仍然有意义：这里的红灯只可能是「回归断言 / 时间旅行 / bundle 不同步」，
+  # 而上面 contracts job 的红灯只可能是「引用漂移 / 契约漂移 / 上游改版」。
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: 'pnpm'
+
+      - name: 安装依赖（runtime + rollup）
+        run: pnpm install --frozen-lockfile
+
+      # 核心回归套件（0.5.4 补；0.9.4 挪到有依赖的 job）。
+      # **不要把 TZ 固定成 Asia/Tokyo**：runner 的默认 UTC 是「测试依赖本机时区」这类问题的
+      # 守卫——0.9.4 有一条 fixture 用本机时区拼 P2PQuake 的裸 JST 时间串，正是被它抓到的。
+      - name: 核心回归套件
+        # 失败行同时写进 **job summary**：Actions 的完整日志要登录才能看（未登录时页面只显示
+        # "Sign in to view logs"，API 的 /logs 也要求 admin），而 check-run 的 summary 匿名可读。
+        run: |
+          node tests/sync-test.cjs > regression.log 2>&1
+          status=$?
+          cat regression.log
+          if [ "$status" -ne 0 ]; then
+            {
+              echo '### 核心回归套件：失败行与结论'
+              echo '```'
+              grep -a -F '✗' regression.log | head -40 || true
+              echo '--- 结论 ---'
+              tail -3 regression.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
+
+      # 时间旅行守卫（0.9.4 补）：把宿主时钟整体前移 180 天，再跑一遍上面那套回归。
+      # 抓的是**定时炸弹**型断言——把某个绝对时刻当成"现在"写死，却与真实时钟做差。
+      # 这类断言写下的当天全绿，然后在某一天突然开始红：0.9.4 找到两颗这样的炸弹。
+      # 只前移宿主 Date 就够：沙箱里的 Date 由测试自己注入，而那些冻结时钟正是安全写法。
+      - name: 时间旅行守卫（宿主时钟 +180 天）
+        run: node scripts/check-time-travel.cjs 180
+
+      # --check 会比较 src 的构建结果与已提交的 client/client.js；不一致即失败。
+      # 注意它在 CRLF 检出上会假报"陈旧"（仓库根的 .gitattributes 正是为此而加）。
+      - name: bundle 与 client/src 是否同步
+        run: node scripts/build-client.mjs --check

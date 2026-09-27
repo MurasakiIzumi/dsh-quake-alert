@@ -19,6 +19,7 @@
 // ============================================================================
 
 import { prefOfCode, prefCodeOf } from './01-constants.js'
+import { t } from './00-i18n.js'
 import { own } from './02-storage.js'
 import { prefsOfCity, canonicalCityOf, riverAreaCities, normKana } from './04-city-table.js'
 import { prefsOfArea } from './05-parser.js'
@@ -86,21 +87,22 @@ function itemLevelOf(it) {
     regionKindLevel(it.kindName),
   )
 }
-// 电文标题 → 中文标签（M3 才做 i18n，这里与既有 kindLabel 一样先硬编码中文）。
+// 电文标题 → **我们给起的标签 key**（0.9.4 起按界面语言取词，见 00g-texts-events）。
+// 左边是拿去匹配上游日文电文的正则——**永远保持日文原样**（翻译了就再也匹配不上）。
 // **特别警报不在这个表里**：它不能只看标题，理由见 kindLabelOf（那是一个真实的文案缺陷）。
 const KIND_LABELS = [
-  [/土砂災害警戒情報/, '泥石流警戒情报'],
-  [/指定河川洪水予報/, '洪水预报'],
-  [/（大雨）|[（(]浸水/, '大雨警报'],
-  [/（土砂）/, '泥石流警报'],
-  [/（洪水）/, '洪水警报'],
-  [/（高潮）/, '风暴潮警报'],
-  [/（暴風）/, '暴风警报'],
-  [/（波浪）/, '海浪警报'],
-  [/（雷）/, '雷击警报'],
-  [/（濃霧）/, '浓雾警报'],
-  [/（乾燥）/, '干燥警报'],
-  [/（なだれ）/, '雪崩警报'],
+  [/土砂災害警戒情報/, 'kind.jmaLandslideInfo'],
+  [/指定河川洪水予報/, 'kind.jmaFloodForecast'],
+  [/（大雨）|[（(]浸水/, 'kind.jmaHeavyRain'],
+  [/（土砂）/, 'kind.jmaLandslide'],
+  [/（洪水）/, 'kind.jmaFlood'],
+  [/（高潮）/, 'kind.jmaStormSurge'],
+  [/（暴風）/, 'kind.jmaStorm'],
+  [/（波浪）/, 'kind.jmaWave'],
+  [/（雷）/, 'kind.jmaThunder'],
+  [/（濃霧）/, 'kind.jmaFog'],
+  [/（乾燥）/, 'kind.jmaDry'],
+  [/（なだれ）/, 'kind.jmaAvalanche'],
 ]
 
 // ---------- 最小 XML 取值工具（与 05-parser 的正则风格一致，不引依赖） ----------
@@ -322,7 +324,8 @@ function applyNoticeLevels(regions, notice) {
  * 市町村名来自市区町村表，而电文与河川区域表给的是外部写法（「南アルプス市」vs 本表
  * 「南あるぷす市」、「金ケ崎町」vs「金け崎町」），直接比对会漏报。取不到规范名时回退原写法。
  */
-function regionsOf(items, notice) {
+function regionsOf(items, notice, opts) {
+  const includeInactive = !!(opts && opts.includeInactive)
   const out = []
   const at = new Map() // 区域键 → out 下标：同一区域重复出现时保留更高的级别
   const push = (region, level) => {
@@ -336,7 +339,7 @@ function regionsOf(items, notice) {
     out.push(level > 0 ? Object.assign({ level }, region) : region)
   }
   for (const it of items) {
-    if (isInactiveItem(it)) continue
+    if (!includeInactive && isInactiveItem(it)) continue
     // 逐区级别：由这条 Item 自己的 Kind 决定。**不能用电文最大值**——同一次发布里
     // 姫路市可以是 L4 危険警報、相生市 L3 大雨警報、西脇市 L2 大雨注意報（2026-09-14 兵庫県）。
     const lv = itemLevelOf(it)
@@ -386,15 +389,18 @@ function regionsOf(items, notice) {
  *（（大雨）／（土砂）…）仍按标题。
  */
 function kindLabelOf(title, level) {
-  const t = String(title || '')
+  // 局部变量**不能叫 `t`**：那是 00-i18n 的取词函数，遮蔽之后本函数里的 t('…') 会变成调用字符串
+  // （0.9.4 踩过这个坑，check-imports 也会报「缺少 import：t」）。
+  const src = String(title || '')
   // ① 先按**灾种**匹配：带灾种名的副本（（大雨）／（土砂）／指定河川洪水予報…）给出的是具体
   // 灾种，比"气象警报"这种概括标签有信息量，所以它们的优先级高于下面的汇总族。
-  for (const [re, label] of KIND_LABELS) if (re.test(t)) return label
+  for (const [re, labelKey] of KIND_LABELS) if (re.test(src)) return t(labelKey)
   // ② 汇总族（SUMMARY_TITLE 的四种产品名）与概括名「気象警報・注意報」本身不含灾种 → 按级别取。
-  if (SUMMARY_TITLE.test(t) || /気象警報・注意報/.test(t)) {
-    return (typeof level === 'number' && level >= 5) ? '气象特别警报' : '气象警报'
+  if (SUMMARY_TITLE.test(src) || /気象警報・注意報/.test(src)) {
+    return (typeof level === 'number' && level >= 5) ? t('kind.jmaWeatherEmergency') : t('kind.jmaWeather')
   }
-  return t || '气象警报'
+  // ③ 认不出的标题：**原样返回电文标题**（上游原文，不翻），没有标题时才用概括标签。
+  return src || t('kind.jmaWeather')
 }
 
 /**
@@ -411,6 +417,12 @@ const HAZARD_KEYS = [
   [/暴風/, '暴風'], [/波浪/, '波浪'], [/雷/, '雷'], [/濃霧/, '濃霧'],
   [/乾燥/, '乾燥'], [/なだれ/, 'なだれ'], [/大雪|着雪/, '大雪'],
 ]
+/** 从一条 Kind 名称里取灾种关键词（取不到返回空串）。 */
+function hazardWordOf(name) {
+  const s = String(name || '')
+  for (const [re, key] of HAZARD_KEYS) if (re.test(s)) return key
+  return ''
+}
 /** 取级别最高的那条 Kind 名称，再从中提取灾种——副本之间只要最高级条目相同就会得到同一个键。 */
 function hazardKeyOf(items, fallbackText) {
   let name = ''
@@ -420,12 +432,23 @@ function hazardKeyOf(items, fallbackText) {
     const lv = itemLevelOf(it)
     if (lv > best) { best = lv; name = it.kindName }
   }
-  for (const [re, key] of HAZARD_KEYS) if (re.test(name)) return key
-  if (name) return name
-  // Kind 里没有任何灾种信息（解除报知只写「解除」）→ 退回主文里认灾种。
-  // 这是解除电文能与发布电文算出同一个键的前提之一（另一个是键里不含发布时刻）。
+  // 活跃条目：先用灾种关键词；没有关键词的灾种（「竜巻注意報」这类）**直接用 Kind 名称当键**
+  // ——把它们归一到未知标记会让两个不同灾种共用一把钥匙，一次发布被当成另一次的重复而静默。
+  const activeKey = hazardWordOf(name) || String(name || '')
+  if (activeKey) return activeKey
+  // 0.9.4：解除电文里"被解除的那一项"本身往往就写着灾种（「大雨警報」+ Status=解除）。
+  // 此前无条件跳过 inactive 条目，灾种于是从唯一的来源里被丢掉，键退化成中性值——
+  // 而发布电文算出的键是 `jma:summary:大雨:<office>`，两边永远不相等：handleCancelled 里
+  // `wasRecentlyAlerted` 恒为 false，**解除提示从未生效**（DESIGN 11.9 #5 记的正是这条）。
+  for (const it of items) {
+    const hit = hazardWordOf(it.kindName)
+    if (hit) return hit
+  }
   for (const [re, key] of HAZARD_KEYS) if (re.test(String(fallbackText || ''))) return key
-  return '气象'
+  // 认不出灾种（实测 VPNO50「東京都の特別警報を警報に切り替えました」这类报知电文通篇不带灾种）
+  // → 用**显式未知标记**。旧写法退回「气象」：那看起来像一个具体灾种，既不表达"认不出"，
+  // 又会与将来真叫「气象」的键撞车。`?` 不可能与任何真实灾种相等。
+  return '?'
 }
 
 /**
@@ -466,14 +489,29 @@ function parseJma(xml, entry) {
 
   const level = levelOf({ title, headTitle, headlineText, notice, items, inactiveScope })
   const cancelled = inactiveScope.length > 0 && inactiveScope.every(isInactiveItem)
-  // 没有级别又不是解除 → 与预警无关（天气预报、观测资料等），交给调用方丢弃
-  if (level === 0 && !cancelled) return null
+  // 0.9.4（DESIGN 11.9 #5）：把「特別警報 → 警報」的**降级**从"解除"里分出来。
+  // 「…を警報に切り替えました」既不是解除也不是新发布：特別警報结束了，但**警報仍然有效**。
+  // 按解除处理会让历史里写下「气象警报（已解除）」——事实相反，用户以为危险过去了，
+  // 而警報还在（假安全方向）。降级成一个正常的 L4 警报（由关注地区 / 阈值 / 静默时段照常裁决），
+  // 它的键与随后的真解除是同一个，所以"降级之后再解除"这条链也能走通。
+  const downgradeTo = cancelled
+    ? (/注意報に切り替え/.test(headlineText || '') ? 2 : (/警報に切り替え/.test(headlineText || '') ? 4 : 0))
+    : 0
+  const downgraded = downgradeTo > 0
+  const cancels = cancelled && !downgraded
+  // 没有级别又不取消（也不是降级）→ 与预警无关（天气预报、观测资料等），交给调用方丢弃
+  if (level === 0 && !cancels && !downgraded) return null
 
-  const regions = cancelled ? [] : regionsOf(items, notice)
+  const effLevel = downgraded ? downgradeTo : level
+  // 降级电文要**保留区域**（解除才清空）：regionsOf 默认跳过 inactive 条目，而降级电文里
+  // 唯一的条目就是「解除」那一项——不放开这个开关，降级就连"哪个地区降级了"都说不出来，
+  // 只能进历史。区域级别由降级后的档位补上（0.9.4）。
+  const regions = cancels ? [] : regionsOf(items, notice, { includeInactive: downgraded })
+  if (downgraded) for (const r of regions) if (typeof r.level !== 'number') r.level = effLevel
   // 解除电文若展开不出区域，至少保留一个空区域条目，让事件键与提示仍可工作
-  const kindLabel = kindLabelOf(title, level)
+  const kindLabel = kindLabelOf(title, effLevel)
   const first = String(headlineText || '').split(/[。\n]/)[0].trim()
-  const levelText = level > 0 ? '（警戒レベル' + level + '）' : ''
+  const levelText = effLevel > 0 ? t('kind.levelSuffix', { level: effLevel }) : ''
   const headline = (kindLabel + levelText + (first ? ' · ' + first : '')).slice(0, 180)
   // 事件键：优先 EventID，其次 Head 标题。汇总型电文（同时存在多份格式副本）改用**内容指纹**
   // ——「灾种 + 編集官署名コード」——否则同一条警报会因副本标题不同而被当成三个事件、连响三次。
@@ -504,17 +542,21 @@ function parseJma(xml, entry) {
     id: (entry && entry.id) || eventId || title,
     code: 'jma',
     kind: 'weather',
-    kindLabel: cancelled ? kindLabel + '（已解除）' : kindLabel,
-    severity: level >= 4 ? 'red' : (level === 3 ? 'orange' : (level === 2 ? 'yellow' : 'info')),
+    kindLabel: cancels
+      ? kindLabel + t('kind.cancelledSuffix')
+      : (downgraded ? kindLabel + t('kind.downgradedSuffix') : kindLabel),
+    severity: effLevel >= 4 ? 'red' : (effLevel === 3 ? 'orange' : (effLevel === 2 ? 'yellow' : 'info')),
     issued: reportTime,
     headline,
-    level,
-    maxScale: level,
+    level: effLevel,
+    maxScale: effLevel,
     hypo: { name: '', magnitude: null },
     regions: regions.length ? regions : [],
     eventKey,
-    strength: level,
-    cancelled,
+    strength: effLevel,
+    cancelled: cancels,
+    // 降级为警报 / 注意报（0.9.4）。cancelled 为 false 是**有意的**：警報仍然有效。
+    downgraded,
     raw: { title, headTitle, eventId, infoType: tag(head, 'InfoType'), serial: tag(head, 'Serial') },
   }
 }
@@ -527,11 +569,11 @@ function parseJma(xml, entry) {
  *   · 边界两侧：L4（播报）与 L3（不播报，只记历史与侧边栏提示）
  */
 export const TEST_SCENARIOS = [
-  { key: 'landslide', label: '泥石流警戒情报', note: '市町村级 / 电文本身即 L4' },
-  { key: 'flood', label: '指定河川洪水予報（氾濫危険情報）', note: '级别写在主文里' },
-  { key: 'heavyrain', label: '大雨危険警報', note: '级别写在 Kind 名称里' },
-  { key: 'stormsurge', label: '高潮危険警報', note: '级别写在 Kind 名称里' },
-  { key: 'landslide-l3', label: '泥石流警報（警戒レベル3）', note: '未达 L4：不播报' },
+  { key: 'landslide' },
+  { key: 'flood' },
+  { key: 'heavyrain' },
+  { key: 'stormsurge' },
+  { key: 'landslide-l3' },
 ]
 
 function testXml(o) {
@@ -580,7 +622,7 @@ function buildTestTelegram(pref, nowMs, key, cityName) {
       controlTitle: '指定河川洪水予報',
       headTitle: p + '指定河川洪水予報（テスト）',
       headlineText: '【警戒レベル４相当情報［洪水］】' + p + 'のテスト川では、氾濫危険水位に到達しています' +
-        '（这是一条测试警报，不是真实灾情）。',
+        '（これはテスト配信です。実際の災害ではありません。）。',
       infoType: '指定河川洪水予報',
       kindName: '氾濫危険情報', kindCode: '40',
       codeType: '気象情報／府県予報区・細分区域等',
@@ -594,7 +636,7 @@ function buildTestTelegram(pref, nowMs, key, cityName) {
     return testXml(Object.assign(base, {
       controlTitle: '気象警報・注意報（Ｒ０６）（' + field + '）',
       headTitle: p + field + '警報・注意報（テスト）',
-      headlineText: p + 'にレベル４' + kind + 'を発表しています（这是一条测试警报，不是真实灾情）。',
+      headlineText: p + 'にレベル４' + kind + 'を発表しています（これはテスト配信です。実際の災害ではありません。）。',
       infoType: '気象警報・注意報（府県予報区等）',
       kindName: 'レベル４' + kind, kindCode: isSurge ? '48' : '43',
       codeType: '気象情報／府県予報区・細分区域等',
@@ -605,7 +647,7 @@ function buildTestTelegram(pref, nowMs, key, cityName) {
     return testXml(Object.assign(base, {
       controlTitle: '気象警報・注意報（Ｒ０６）（土砂）',
       headTitle: p + '土砂災害警報・注意報（テスト）',
-      headlineText: p + 'にレベル３土砂災害警報を発表しています（这是一条测试警报，不是真实灾情）。',
+      headlineText: p + 'にレベル３土砂災害警報を発表しています（これはテスト配信です。実際の災害ではありません。）。',
       infoType: '気象警報・注意報（府県予報区等）',
       kindName: 'レベル３土砂災害警報', kindCode: '03',
       codeType: '気象情報／府県予報区・細分区域等',
@@ -617,7 +659,7 @@ function buildTestTelegram(pref, nowMs, key, cityName) {
     controlTitle: '土砂災害警戒情報',
     headTitle: p + '土砂災害警戒情報（テスト）',
     headlineText: '【警戒レベル４相当情報［土砂災害］】' + p + city +
-      'では、土砂災害が発生するおそれが高まっています（这是一条测试警报，不是真实灾情）。',
+      'では、土砂災害が発生するおそれが高まっています（これはテスト配信です。実際の災害ではありません。）。',
     infoType: '土砂災害警戒情報',
     kindName: '警戒', kindCode: '3',
     codeType: '気象・地震・火山情報／市町村等',

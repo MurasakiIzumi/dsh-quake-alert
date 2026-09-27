@@ -23,6 +23,8 @@ import { CORE } from './00a-texts-core.js'
 import { SETTINGS } from './00b-texts-settings.js'
 import { CONFIG_IO } from './00c-texts-configio.js'
 import { UNITS } from './00e-texts-units.js'
+import { EVENTS } from './00g-texts-events.js'
+import { REASONS } from './00h-texts-reasons.js'
 
 // ---------- 语言清单（顺序即设置页下拉顺序） ----------
 /** 支持的语言，BCP 47 完整标识。加语言只改这一行 + 补一份表。 */
@@ -44,7 +46,7 @@ const HANT_REGIONS = ['tw', 'hk', 'mo']
 
 // ---------- 文案表汇总 ----------
 /** 全部面文件。新增一个面（如设置页）时加进来即可。 */
-const PARTS = [CORE, SETTINGS, CONFIG_IO, UNITS]
+const PARTS = [CORE, SETTINGS, CONFIG_IO, UNITS, EVENTS, REASONS]
 
 /**
  * 把面文件按语言合并成 `{ lang: { key: text } }`，并当场校验：

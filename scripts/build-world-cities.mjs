@@ -15,9 +15,11 @@
 // 是明显浪费，所以复用同一条只读路由（/areas?country=XX），展开某国时才拉那一包。
 //
 // 挑选规则（与 build-cn-areas 的中文建制名规则**不同**，所以两边没有共用挑选函数）：
-//   · 城市名：alternatenames 里的纯汉字候选优先，没有就用 asciiname。不同于中国行政区表
-//     （那里"没有中文名"要记为问题）——世界城市绝大多数没有中文名，用罗马字名可接受，
-//     **缺一条才不可接受**（用户会以为那个城市没被收录）。
+//   · 城市名：**统一取 asciiname（拉丁字母名）**。0.9.4（PD-3）之前是"alternatenames 里的纯汉字
+//     候选优先（取最短的一个）"，结果同一张表里简繁与日汉字混用；按界面语言本地化需要带语言
+//     标签的候选（GeoNames 的 alternateNamesV2，另一个大得多的下载），做不到就统一用拉丁文
+//     ——用户选定的备选做法，也是唯一不依赖额外数据源的做法。数据已按此重生成（见 cityNameOf）。
+//     与中国行政区表的差别也在这里：那边"没有中文名"要记为问题（必须用中文建制名）。
 //   · admin1（一级行政区）名取自 admin1CodesASCII.txt，唯一用途是**区分同国内的同名城市**
 //     （美国有多个同名城市），列表里显示成「城市（州）」。
 //
@@ -36,7 +38,7 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
-import { createGeoReader, isCjk, parseGeonames } from './lib/geonames.mjs'
+import { createGeoReader, latinCityNameOf, parseGeonames } from './lib/geonames.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const OUT = path.join(ROOT, 'lib', 'data', 'world-cities.js')
@@ -51,33 +53,48 @@ const OWN_BRANCH = new Set(['JP', 'CN', 'TW', 'HK', 'MO'])
 /** 城市名长度上限：GeoNames 里有个别超长名（含括号注释），截断以免撑坏列表布局。 */
 const NAME_MAX = 20
 
-/** 国家 / 地区的中文名交给 ICU（Node 自带 full-icu 数据），不手抄两百多个国家对照表。 */
-const regionNames = (() => {
-  try { return new Intl.DisplayNames(['zh-CN'], { type: 'region' }) } catch (err) { return null }
-})()
-function countryZhOf(cc) {
-  if (regionNames) {
-    try {
-      const n = regionNames.of(cc)
-      if (n && n !== cc) return n
-    } catch (err) { /* 非标准码（如 XK）：退回代码本身 */ }
+/** 界面语言的四种（与 client/src/00-i18n.js 的 LANGS 同一批）。 */
+const LANGS = ['zh-CN', 'zh-TW', 'ja', 'en']
+/**
+ * 国家 / 地区名交给 ICU（Node 自带 full-icu 数据），**四种语言各一份**，不手抄对照表。
+ *
+ * 0.9.4（PD-3）：此前只算 `zh-CN` 一份并写死进数据，于是把界面语言切成日本語 / English 时，
+ * 国家下拉仍然是简体中文——设置页其他部分都本地化了，只有这一块没有。
+ */
+const regionNames = {}
+for (const lang of LANGS) {
+  try { regionNames[lang] = new Intl.DisplayNames([lang], { type: 'region' }) } catch (err) { regionNames[lang] = null }
+}
+function countryNamesOf(cc, fallback) {
+  const out = {}
+  for (const lang of LANGS) {
+    let n = ''
+    const dn = regionNames[lang]
+    if (dn) {
+      try {
+        const got = dn.of(cc)
+        if (got && got !== cc) n = got
+      } catch (err) { /* 非标准码（如 XK）：退回已有名字 */ }
+    }
+    out[lang] = n || fallback || String(cc)
   }
-  return String(cc)
+  return out
 }
 
 /**
- * 城市名：中文候选优先，否则 asciiname。
- * 中文候选里取**最短**的一个（「东京」优于「东京都」——这是城市列表，不是行政区表）；
- * 同长度时按字典序，保证多次构建结果稳定（`sort` 的稳定性不依赖输入顺序）。
+ * 城市名：**统一取拉丁字母名**（`latinCityNameOf`，见 scripts/lib/geonames.mjs 的说明）。
+ *
+ * 0.9.4（PD-3，产品决策）：此前是"alternatenames 里的 CJK 候选优先（取最短的一个）"，
+ * 结果是同一张表里简繁与日汉字混用。按界面语言本地化需要带语言标签的候选（`alternateNamesV2`，
+ * 另一个大得多的下载），做不到就统一用拉丁文——这是用户选定的备选做法，也是唯一不依赖额外
+ * 数据源的做法。
+ *
+ * 数据已经按这条规则重生成过：`lib/data/world-cities.js` 现在 5224 条城市名里**一个汉字都没有**
+ * （Rome / Milan / New York City …），国家名仍是本地化四条。命令：
+ * `node scripts/build-world-cities.mjs --from <放着 cities15000.zip 与 admin1CodesASCII.txt 的目录>`
+ * （联网时省略 `--from`，脚本自己下载）。
  */
-function cityNameOf(row) {
-  const zh = String(row.alternates || '').split(',').filter(isCjk)
-  if (zh.length) {
-    zh.sort((a, b) => (a.length - b.length) || (a < b ? -1 : a > b ? 1 : 0))
-    return zh[0]
-  }
-  return String(row.ascii || row.name || '').trim()
-}
+const cityNameOf = (row) => latinCityNameOf(row)
 
 /** admin1CodesASCII.txt（`US.CA\tCalifornia\tCalifornia\t5332921`）→ { 'US.CA': 'California' } */
 function parseAdmin1(text) {
@@ -133,9 +150,14 @@ async function build() {
       delete c.pop // 人口只用于排序，不下发
     }
     packs[cc] = list
-    countries.push({ code: cc, name: countryZhOf(cc), count: list.length })
+    countries.push({ code: cc, names: countryNamesOf(cc), count: list.length })
   }
-  countries.sort((a, b) => a.name.localeCompare(b.name, 'zh') || a.code.localeCompare(b.code))
+  // 排序按**默认语言那一份**名字（数据里是本地化四条 `names`，没有单数的 `name` 字段）。
+  // 0.9.4 修订：改成本地化四条时漏改了这里（`a.name` 变成 undefined），而这个脚本当时因为
+  // 网络不可达一直没跑过——所以运行时才炸。设置页会按当前语言重排（见 countryNameOf 的用法），
+  // 这里的顺序只决定数据文件里各国的排列，取 zh-CN 是为了与既有审阅习惯一致。
+  const sortName = (c) => String((c.names && c.names['zh-CN']) || c.code)
+  countries.sort((a, b) => sortName(a).localeCompare(sortName(b), 'zh') || a.code.localeCompare(b.code))
   return { countries, packs, problems, stats: { belowMin, ownBranch, noName } }
 }
 
@@ -160,7 +182,7 @@ function render(countries, packs) {
   lines.push('/** 国家 / 地区清单（供设置页的国家选择器；count = 该国城市数）。 */')
   lines.push('export const WORLD_COUNTRIES = [')
   for (const c of countries) {
-    lines.push('  { code: ' + JSON.stringify(c.code) + ', name: ' + JSON.stringify(c.name) + ', count: ' + c.count + ' },')
+    lines.push('  { code: ' + JSON.stringify(c.code) + ', count: ' + c.count + ', names: ' + JSON.stringify(c.names) + ' },')
   }
   lines.push(']')
   lines.push('')

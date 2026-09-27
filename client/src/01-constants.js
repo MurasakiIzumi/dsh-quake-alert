@@ -27,7 +27,26 @@ const HISTORY_KEY = 'dsh.quakeAlert.history'
 // 因为什么失败了"——蓝点是"用户处理不了、等插件更新"的信号，刷新页面就消失会让它没人看见
 // （DESIGN 11.9 A）。连接状态不在这里：重启即重新建连，旧值没有意义。
 const HEALTH_KEY = 'dsh.quakeAlert.health'
+/**
+ * 「真正播报过的事件」记忆的落盘位置（0.9.4 / C6）。
+ *
+ * 这份记忆（eventKey → 时间戳，保留 24 小时）此前只在内存里，于是**刷新页面 / 重开标签页**就被
+ * 清空：Host 重启后的冷启动回看（USGS 6 小时 / NOAA 24 小时）会把同一场地震重新投递一遍，而
+ * 消息级去重（10 分钟）与事件级去重（3 小时）早已过期——同一场地震因此再响一次。同一份记忆
+ * 也是"解除能找到此前提醒过的事件"的依据，清空还会让解除退化成无上下文的"某处已解除"。
+ */
+const ALERTED_KEY = 'dsh.quakeAlert.alerted'
 const HISTORY_MAX = 30 // 「最近预警」保留条数（内存与设置页展示）
+/**
+ * 「最近预警」的时间上限（0.9.4 / D-1）。
+ *
+ * 设计稿一直写的是「**上限：30 条 + 过去 5 天**，两个条件同时生效、取更严格的」，而代码只实现了
+ * 30 条这一半：陈年条目会一直占着那 30 个位置，把它们挤掉的是"更久以前的事"而不是"更新的事"。
+ * 5 天的取法：一场灾害的完整过程（预警 → 升级 → 解除）通常在一两天内结束，5 天足够回看；
+ * 再久之前的记录对"我现在要不要担心"没有参考价值。时间认不出的条目**不据此丢弃**
+ * （宁可留着，也不因为缺字段把用户的数据删掉）。
+ */
+const HISTORY_MAX_AGE_MS = 5 * 24 * 60 * 60 * 1000
 const MAX_WATCH_CITIES = 300 // 关注市区町村上限（防止配置与 UI 被撑爆）
 // 全球关注点上限：每个点带名字、经纬度与半径，几十个点就足够覆盖"我住哪、家人在哪"，
 // 再多说明用法不对（那是一张地图，不是一份关注列表）。
@@ -83,6 +102,15 @@ const RADIUS_PRESETS = [
 ]
 /** 新建关注点的默认半径（既有配置不动，见上）。 */
 const DEFAULT_PLACE_RADIUS_KM = 100
+/**
+ * 缺半径时的兜底半径（0.9.4 / P3-37）：**比默认值宽**，而且是刻意的。
+ *
+ * 关注点来自旧配置 / 手工改过的 JSON 时可能没有 `radiusKm`。兜底取 100（界面上的默认值）看着
+ * 更整齐，但那会把用户已经配好的监控范围**收窄**——收窄的直接后果是漏报，而本项目的取向一贯是
+ * "宁可多响一次也不漏报"。所以这个值单独命名（`numOr` 的兜底不再是魔法数字 300），
+ * 语义上它是"旧条目的兜底"，不是"新条目的默认"。
+ */
+const LEGACY_PLACE_RADIUS_KM = 300
 /** 半径上下限，与 Host schema / normalizeCfg 的 1–2000 保持一致。 */
 const MIN_PLACE_RADIUS_KM = 1
 const MAX_PLACE_RADIUS_KM = 2000
@@ -123,9 +151,14 @@ function prefCodeOf(pref) {
 }
 // 都道府県简写 → 全称：551 的 points[].pref 通常是全称，但实测直播数据里出现过「京都」
 // 这类简写，不归一就会与用户勾选的「京都府」永不相等（静默漏报）。
+//
+// 0.9.4（P3-38）：**北海道不能这样削后缀**。`/[都道府県]$/` 会把「北海道」削成「北海」——
+// 那不是一个地名，却成了一条简写映射；更糟的是 04-city-table 会用它给北海道的**每个**市町村
+// 造一个「北海○○市」的别名（"北海札幌市"这种根本不存在的写法），alias 索引里塞进上百条
+// 幻影条目。真正需要削后缀的只有 県 / 都 / 府（「北海道」是唯一的 道，本身就是全称）。
 const PREF_SHORT = {}
 for (const p of PREFECTURES) {
-  const short = p.jp.replace(/[都道府県]$/, '')
+  const short = p.jp.replace(/[都府県]$/, '')
   if (short !== p.jp && !Object.prototype.hasOwnProperty.call(PREF_SHORT, short)) PREF_SHORT[short] = p.jp
 }
 function normalizePref(raw) {
@@ -245,7 +278,7 @@ const DEFAULT_CFG = {
     quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch',
     globalMagnitude: 4.5, cnReportMagnitude: 4.5,
   },
-  notify: { sound: true, system: true, volume: 0.7 },
+  notify: { sound: true, system: true, volume: 0.7, soundQuake: true, soundTsunami: true, soundWeather: true },
   dedupe: { windowMinutes: 10 },
   // 静默时段（0.2.0）：按浏览器本地时间判定；跨午夜用 start > end 表示（如 23:00–07:00）
   quietHours: { enabled: false, start: '23:00', end: '07:00', breakForSevere: true },
@@ -256,4 +289,4 @@ const DEFAULT_CFG = {
 }
 
 
-export { React, h, useState, useEffect, useRef, WS_URL, SANDBOX_URL, EMSC_WS_URL, STORAGE_KEY, HISTORY_KEY, HEALTH_KEY, HISTORY_MAX, MAX_WATCH_CITIES, MAX_WATCH_PLACES, RECONNECT_BASE, RECONNECT_MAX, SCALE_TEXT, SCALE_OPTIONS, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, CN_REPORT_MAG_OPTIONS, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, LANGUAGE_OPTIONS, PREFECTURES, PREF_SET, PREF_SHORT, PREF_BY_CODE, prefOfCode, prefCodeOf, normalizePref, prefLabelOf, P2P_TZ_OFFSET, P2P_TIME_RE, p2pTimeToIso, CN_TZ_OFFSET, CN_TIME_RE, cnTimeToIso, issuedToDate, formatIssuedLocal, DEFAULT_CFG }
+export { React, h, useState, useEffect, useRef, WS_URL, SANDBOX_URL, EMSC_WS_URL, STORAGE_KEY, HISTORY_KEY, HEALTH_KEY, ALERTED_KEY, HISTORY_MAX, HISTORY_MAX_AGE_MS, MAX_WATCH_CITIES, MAX_WATCH_PLACES, RECONNECT_BASE, RECONNECT_MAX, SCALE_TEXT, SCALE_OPTIONS, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, CN_REPORT_MAG_OPTIONS, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, LEGACY_PLACE_RADIUS_KM, LANGUAGE_OPTIONS, PREFECTURES, PREF_SET, PREF_SHORT, PREF_BY_CODE, prefOfCode, prefCodeOf, normalizePref, prefLabelOf, P2P_TZ_OFFSET, P2P_TIME_RE, p2pTimeToIso, CN_TZ_OFFSET, CN_TIME_RE, cnTimeToIso, issuedToDate, formatIssuedLocal, DEFAULT_CFG }
