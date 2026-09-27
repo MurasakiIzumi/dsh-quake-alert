@@ -53,7 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           # 与 package.json 的 engines（>=22.19.0）对齐：全局 WebSocket 与 fetch 都要它
           node-version: '22.19.0'
@@ -105,7 +105,7 @@ jobs:
         with:
           version: 9
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22.19.0'
           cache: 'pnpm'
