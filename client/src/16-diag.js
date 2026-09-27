@@ -261,8 +261,8 @@ export function buildDiagSnapshot(now) {
         breakForSevere: cfgQuiet.breakForSevere !== false,
       },
       cnTransport: str(cfg.cnTransport) || 'auto', // 'auto'（默认，SSE 可自动降级）| 'poll'（用户强制轮询）
-      // 界面语言（0.8.1 先立字段）。现在只有 zh-CN；0.9.0 落地本地化后，
-      // "界面没跟着切"这类问题第一个要核的就是这一项。
+      // 界面语言（0.8.1 先立字段，0.9.0 落地本地化，0.9.3 加上繁体）。"界面没跟着切"
+      // 这类问题第一个要核的就是这一项。
       // **它是归一后的生效值，不是持久层原值**（0.8.2 review 订正）：`cfg` 来自 `currentCfg()`，
       // 而那条路一定过 `normalizeCfg`，所以手改配置写进去的、或将来降级留下的非法值在这里
       // 已经被换成默认值——这一项能回答"界面现在按哪个语言渲染"，回答不了"配置里原本写了什么"。

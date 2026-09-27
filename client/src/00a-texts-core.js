@@ -1,7 +1,7 @@
 // ============================================================================
 // dsh-quake-alert · client/src/00a-texts-core.js
 //
-// 作用：核心文案表（三语言并列）——通知、行动提示、免责行、机构名、状态条。
+// 作用：核心文案表（各语言并列）——通知、行动提示、免责行、机构名、状态条。
 // 内容：纯数据对象，**不 import 任何模块**（依赖方向：面文件 ← 00-i18n.js ← 其它）。
 // 依赖：无。
 //
@@ -68,6 +68,8 @@ const CORE = {
 
     // 取数层写给用户的**状态说明**（进 store.sources[id].detail：设置页的源状态区块、侧边栏
     // 悬停提示、诊断快照）。它们不是源侧文本，而是我们自己写的降级 / 关闭 / 覆盖范围说明。
+    'source.p2pConnected': '已连接 P2PQuake（约每 10 分钟自动重连）',
+    'source.p2pSandbox': '沙箱源：回放 2023 年历史（约30秒/条）',
     'source.cnPollManual': '已按设置选择轮询',
     'source.cnFallback': 'SSE 推送不可用 → 已降级为轮询',
     'source.cnFallbackReason': 'SSE 推送不可用（{reason}）→ 已降级为轮询',
@@ -81,6 +83,65 @@ const CORE = {
 
     // 状态圆点的提示后缀（气象警报的静默提示，只在该源未达播报门槛时出现）。
     'status.weatherHint': ' · 气象警报 L{level}',
+    'status.weatherHintLabel': '（{label}）',
+  },
+
+  'zh-TW': {
+    'app.name': '災害預警',
+    'app.statusPrefix': '災害預警：',
+
+    'product.cnEew': '大陸地震預警',
+    'product.cnEqlist': '大陸地震速報',
+    'product.jpEew': '緊急地震速報（警報）',
+    'product.jpEewShort': '緊急地震速報',
+
+    'authority.emsc': '歐洲-地中海地震中心（EMSC）',
+    'authority.usgs': '美國地質調查局（USGS）',
+    'authority.noaa': '太平洋海嘯警報中心（NOAA）',
+    'authority.cenc': '中國地震台網（CENC）',
+    'authority.cma': '中央氣象台（中國氣象局）',
+    'authority.nws': '美國國家氣象局（NWS）',
+    'authority.eccc': '加拿大環境與氣候變遷部（ECCC）',
+    'authority.jma': '気象庁',
+
+    'disclaimer.named': '僅供參考，請以{authority}的官方發布為準',
+    'disclaimer.generic': '僅供參考，請以官方發布為準',
+
+    'notify.cancelTitle': '{product}已取消',
+    'notify.cancelBody': '先前發出的警報已作廢。',
+    'notify.tsunamiLifted': '✅ 海嘯預報已解除',
+
+    'action.generic': '請關注當地官方發布的指引',
+    'action.overseas': '請關注當地官方發布的避難與撤離指引',
+    'action.cnArea': '請關注當地氣象台發布的防禦指引',
+    'action.jp': '請確認所在市町村的避難資訊',
+
+    'notify.hitPref': '命中地區：{pref}',
+    'notify.hitPrefNamed': '命中地區：{pref}（{jp}）',
+    'notify.hitPlaceDistance': '命中位置：{place}（距震央約 {km} km）',
+    'notify.hitPlaceOfficial': '命中位置：{place}（依該點所在地的官方預警判定）',
+    'action.tsunami': '請立即遠離海岸與河口',
+
+    'source.jma': '気象庁',
+    'source.nmc': '中央氣象台',
+    'status.emscConnected': '已連線 EMSC（全球地震即時推送）',
+    'status.sourceDisabled': '{name}：已關閉',
+    'status.sourceDetail': '{name}：{detail}',
+
+    'source.p2pConnected': '已連線 P2PQuake（約每 10 分鐘自動重新連線）',
+    'source.p2pSandbox': '沙箱源：回放 2023 年歷史（約 30 秒 / 筆）',
+    'source.cnPollManual': '已依設定選擇輪詢',
+    'source.cnFallback': 'SSE 推送無法使用 → 已降級為輪詢',
+    'source.cnFallbackReason': 'SSE 推送無法使用（{reason}）→ 已降級為輪詢',
+    'source.cnPollDelay': '（延遲最長 15 秒）',
+    'source.cnFallbackDelay': '（延遲從秒級變為最長 15 秒）',
+    'source.overseasDisabled': '海外氣象提醒已關閉',
+    'source.overseasNoneInCoverage': '關注點都不在{region}源的涵蓋範圍內',
+    'source.overseasNoPlaces': '未設定{region}關注點',
+    'source.settingsHint': '（設定 → 災害預警 → 關注地區 → 其他國家 / 地區）',
+    'source.noAbortController': '請求逾時（本環境沒有 AbortController）',
+
+    'status.weatherHint': ' · 氣象警報 L{level}',
     'status.weatherHintLabel': '（{label}）',
   },
 
@@ -126,6 +187,8 @@ const CORE = {
     'status.sourceDisabled': '{name}：停止中',
     'status.sourceDetail': '{name}：{detail}',
 
+    'source.p2pConnected': 'P2PQuake に接続しました（約 10 分ごとに自動再接続）',
+    'source.p2pSandbox': 'サンドボックス源：2023 年の履歴を再生（約 30 秒 / 件）',
     'source.cnPollManual': '設定によりポーリングを選択',
     'source.cnFallback': 'SSE 配信が使えないためポーリングに降格',
     'source.cnFallbackReason': 'SSE 配信が使えないため（{reason}）ポーリングに降格',
@@ -185,6 +248,8 @@ const CORE = {
     'status.sourceDisabled': '{name}: disabled',
     'status.sourceDetail': '{name}: {detail}',
 
+    'source.p2pConnected': 'Connected to P2PQuake (auto-reconnects about every 10 minutes)',
+    'source.p2pSandbox': 'Sandbox feed: replaying 2023 history (~30 s per message)',
     'source.cnPollManual': 'Polling chosen in settings',
     'source.cnFallback': 'SSE unavailable — fell back to polling',
     'source.cnFallbackReason': 'SSE unavailable ({reason}) — fell back to polling',

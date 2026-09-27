@@ -240,10 +240,11 @@ function normalizeCfg(input) {
       end: timeOr(qh.end, DEFAULT_CFG.quietHours.end),
       breakForSevere: boolOr(qh.breakForSevere, DEFAULT_CFG.quietHours.breakForSevere),
     },
-    // 界面语言（0.8.1 立字段 / 0.9.0 真正生效）：走 BCP 47 惯例的逐级回退，认不出的一律落到
-    // 默认语言（不是"原样放行"——手改配置写进一个没有语言包的代码，界面会进入一个谁也说不清
-    // 的半本地化状态）。回退顺序：精确匹配 → 主语言（zh-HK / zh-TW → zh → zh-CN、ja-JP → ja）
-    // → 默认语言。
+    // 界面语言（0.8.1 立字段 / 0.9.0 真正生效 / 0.9.3 加繁体）：走 BCP 47 惯例的逐级回退，
+    // 认不出的一律落到默认语言（不是"原样放行"——手改配置写进一个没有语言包的代码，界面会进入
+    // 一个谁也说不清的半本地化状态）。回退顺序：精确匹配 → 中文按脚本 / 地区分流
+    // （zh-TW / zh-HK / zh-MO / zh-Hant → zh-TW；zh / zh-CN / zh-SG / zh-Hans → zh-CN）
+    // → 其它主语言（ja-JP → ja）→ 默认语言。
     language: resolveLang(stored.language),
   }
 }

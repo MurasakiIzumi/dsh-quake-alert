@@ -23,7 +23,7 @@ var React = require('react');
 // ============================================================================
 // dsh-quake-alert · client/src/00a-texts-core.js
 //
-// 作用：核心文案表（三语言并列）——通知、行动提示、免责行、机构名、状态条。
+// 作用：核心文案表（各语言并列）——通知、行动提示、免责行、机构名、状态条。
 // 内容：纯数据对象，**不 import 任何模块**（依赖方向：面文件 ← 00-i18n.js ← 其它）。
 // 依赖：无。
 //
@@ -90,6 +90,8 @@ const CORE = {
 
     // 取数层写给用户的**状态说明**（进 store.sources[id].detail：设置页的源状态区块、侧边栏
     // 悬停提示、诊断快照）。它们不是源侧文本，而是我们自己写的降级 / 关闭 / 覆盖范围说明。
+    'source.p2pConnected': '已连接 P2PQuake（约每 10 分钟自动重连）',
+    'source.p2pSandbox': '沙箱源：回放 2023 年历史（约30秒/条）',
     'source.cnPollManual': '已按设置选择轮询',
     'source.cnFallback': 'SSE 推送不可用 → 已降级为轮询',
     'source.cnFallbackReason': 'SSE 推送不可用（{reason}）→ 已降级为轮询',
@@ -103,6 +105,65 @@ const CORE = {
 
     // 状态圆点的提示后缀（气象警报的静默提示，只在该源未达播报门槛时出现）。
     'status.weatherHint': ' · 气象警报 L{level}',
+    'status.weatherHintLabel': '（{label}）',
+  },
+
+  'zh-TW': {
+    'app.name': '災害預警',
+    'app.statusPrefix': '災害預警：',
+
+    'product.cnEew': '大陸地震預警',
+    'product.cnEqlist': '大陸地震速報',
+    'product.jpEew': '緊急地震速報（警報）',
+    'product.jpEewShort': '緊急地震速報',
+
+    'authority.emsc': '歐洲-地中海地震中心（EMSC）',
+    'authority.usgs': '美國地質調查局（USGS）',
+    'authority.noaa': '太平洋海嘯警報中心（NOAA）',
+    'authority.cenc': '中國地震台網（CENC）',
+    'authority.cma': '中央氣象台（中國氣象局）',
+    'authority.nws': '美國國家氣象局（NWS）',
+    'authority.eccc': '加拿大環境與氣候變遷部（ECCC）',
+    'authority.jma': '気象庁',
+
+    'disclaimer.named': '僅供參考，請以{authority}的官方發布為準',
+    'disclaimer.generic': '僅供參考，請以官方發布為準',
+
+    'notify.cancelTitle': '{product}已取消',
+    'notify.cancelBody': '先前發出的警報已作廢。',
+    'notify.tsunamiLifted': '✅ 海嘯預報已解除',
+
+    'action.generic': '請關注當地官方發布的指引',
+    'action.overseas': '請關注當地官方發布的避難與撤離指引',
+    'action.cnArea': '請關注當地氣象台發布的防禦指引',
+    'action.jp': '請確認所在市町村的避難資訊',
+
+    'notify.hitPref': '命中地區：{pref}',
+    'notify.hitPrefNamed': '命中地區：{pref}（{jp}）',
+    'notify.hitPlaceDistance': '命中位置：{place}（距震央約 {km} km）',
+    'notify.hitPlaceOfficial': '命中位置：{place}（依該點所在地的官方預警判定）',
+    'action.tsunami': '請立即遠離海岸與河口',
+
+    'source.jma': '気象庁',
+    'source.nmc': '中央氣象台',
+    'status.emscConnected': '已連線 EMSC（全球地震即時推送）',
+    'status.sourceDisabled': '{name}：已關閉',
+    'status.sourceDetail': '{name}：{detail}',
+
+    'source.p2pConnected': '已連線 P2PQuake（約每 10 分鐘自動重新連線）',
+    'source.p2pSandbox': '沙箱源：回放 2023 年歷史（約 30 秒 / 筆）',
+    'source.cnPollManual': '已依設定選擇輪詢',
+    'source.cnFallback': 'SSE 推送無法使用 → 已降級為輪詢',
+    'source.cnFallbackReason': 'SSE 推送無法使用（{reason}）→ 已降級為輪詢',
+    'source.cnPollDelay': '（延遲最長 15 秒）',
+    'source.cnFallbackDelay': '（延遲從秒級變為最長 15 秒）',
+    'source.overseasDisabled': '海外氣象提醒已關閉',
+    'source.overseasNoneInCoverage': '關注點都不在{region}源的涵蓋範圍內',
+    'source.overseasNoPlaces': '未設定{region}關注點',
+    'source.settingsHint': '（設定 → 災害預警 → 關注地區 → 其他國家 / 地區）',
+    'source.noAbortController': '請求逾時（本環境沒有 AbortController）',
+
+    'status.weatherHint': ' · 氣象警報 L{level}',
     'status.weatherHintLabel': '（{label}）',
   },
 
@@ -148,6 +209,8 @@ const CORE = {
     'status.sourceDisabled': '{name}：停止中',
     'status.sourceDetail': '{name}：{detail}',
 
+    'source.p2pConnected': 'P2PQuake に接続しました（約 10 分ごとに自動再接続）',
+    'source.p2pSandbox': 'サンドボックス源：2023 年の履歴を再生（約 30 秒 / 件）',
     'source.cnPollManual': '設定によりポーリングを選択',
     'source.cnFallback': 'SSE 配信が使えないためポーリングに降格',
     'source.cnFallbackReason': 'SSE 配信が使えないため（{reason}）ポーリングに降格',
@@ -207,6 +270,8 @@ const CORE = {
     'status.sourceDisabled': '{name}: disabled',
     'status.sourceDetail': '{name}: {detail}',
 
+    'source.p2pConnected': 'Connected to P2PQuake (auto-reconnects about every 10 minutes)',
+    'source.p2pSandbox': 'Sandbox feed: replaying 2023 history (~30 s per message)',
     'source.cnPollManual': 'Polling chosen in settings',
     'source.cnFallback': 'SSE unavailable — fell back to polling',
     'source.cnFallbackReason': 'SSE unavailable ({reason}) — fell back to polling',
@@ -226,7 +291,7 @@ const CORE = {
 // ============================================================================
 // dsh-quake-alert · client/src/00b-texts-settings.js
 //
-// 作用：设置页文案表（三语言并列）——区块标题、选项卡、控件标签、按钮、说明、
+// 作用：设置页文案表（各语言并列）——区块标题、选项卡、控件标签、按钮、说明、
 //       折叠区、状态提示、错误提示、测试结果模板、履历条目的徽标与字段名。
 // 内容：纯数据对象，**不 import 任何模块**（依赖方向：面文件 ← 00-i18n.js ← 其它）。
 // 依赖：无。
@@ -609,6 +674,352 @@ const SETTINGS = {
     'settings.history.fieldDetail': '正文',
     'settings.history.kindValue': '{label}（{code}）',
     'settings.history.clear': '清空记录',
+  },
+
+  'zh-TW': {
+    // ---------- 连接状态（statusMetaOf；侧边栏状态指示与设置页状态条共用） ----------
+    'settings.status.idle': '未啟動',
+    'settings.status.connecting': '連線中…',
+    'settings.status.open': '已連線',
+    'settings.status.reconnecting': '重新連線中（第 {n} 次）',
+    'settings.status.closed': '已停止',
+    'settings.status.unreachable': '無法連線',
+    'settings.status.degraded': '鏈路降級',
+    'settings.status.stale': '資料已過期',
+    'settings.status.schemaError': '資料格式異常',
+    'settings.status.disabled': '已關閉',
+    'settings.status.raw': '{status}',
+
+    // ---------- 配置存储位置的人话说明（settingsSyncLabel） ----------
+    'settings.storage.host': '儲存在本機（settings.yaml）',
+    'settings.storage.memory': '只儲存在這個瀏覽器裡',
+    'settings.storage.local': '瀏覽器本機儲存',
+
+    // ---------- 源状态区块（SourceStatusBlock） ----------
+    // ---------- 源名标签（00f-source-labels 的 SOURCE_LABEL_KEYS 指向这里） ----------
+    'settings.sourceLabels.p2pquake': 'P2PQuake（日本地震 / EEW / 海嘯，即時推送）',
+    'settings.sourceLabels.emsc': 'EMSC（全球地震，即時推送）',
+    'settings.sourceLabels.cencEew': '大陸地震預警（CENC，SSE 推送）',
+    'settings.sourceLabels.cencEqlist': '大陸地震速報（CENC，SSE 推送）',
+    'settings.sourceLabels.jma': '気象庁（氣象災害，Host 輪詢）',
+    'settings.sourceLabels.usgs': 'USGS（全球地震目錄，Host 輪詢）',
+    'settings.sourceLabels.noaa': 'NOAA（海嘯 CAP，Host 輪詢）',
+    'settings.sourceLabels.nmc': '中央氣象台（大陸暴雨 / 地質災害預警，Host 輪詢）',
+    'settings.sourceLabels.nws': 'NWS（美國洪水 / 山洪 / 沿海洪水，Client 直連）',
+    'settings.sourceLabels.eccc': 'ECCC（加拿大降雨 / 風暴潮警報，Client 直連）',
+
+    'settings.source.title': '來源狀態',
+    'settings.source.keyValue': '{k}：{v}',
+    'settings.source.secondsAgo': '{n} 秒前',
+    'settings.source.dash': '—',
+    'settings.source.notFetched': '尚未取得',
+    'settings.source.receivedIncrements': '已收到 {n} 筆增量',
+    'settings.source.localErrors': '，本機失敗 {n} 次',
+    'settings.source.truncated': '，增量缺口 {n} 次',
+    'settings.source.resets': '，游標重設 {n} 次',
+    'settings.source.hostErrors': '，Host 失敗 {n} 次',
+    'settings.source.hostDetailDropped': '，Host 捨棄詳情 {n} 筆',
+    'settings.source.lastFetch': ' · 最近取得 {ago}',
+    'settings.source.notQueried': '尚未查詢',
+    'settings.source.polls': '已查詢 {n} 輪',
+    'settings.source.requests': ' · 請求 {n} 次',
+    'settings.source.respondedItems': ' · 回應項目 {n} 筆',
+    'settings.source.applied': '，交給主流程 {n} 筆',
+    'settings.source.ageSkipped': '，過舊僅記錄 {n} 筆',
+    'settings.source.rejected': '，被上游拒絕 {n} 次',
+    'settings.source.overseasTruncated': '，上游結果被分頁上限截斷 {n} 輪',
+    'settings.source.throttled': '，本輪超過上限略過 {n} 個請求',
+    'settings.source.errors': '，失敗 {n} 次',
+    'settings.source.lastQuery': ' · 最近查詢 {ago}',
+    'settings.source.notStarted': '尚未啟動',
+    'settings.source.modeSse': 'SSE 推送',
+    'settings.source.modePoll': '已降級為輪詢',
+    'settings.source.modeDisabled': '已關閉（「地震」開關關掉了）',
+    'settings.source.modeIdle': '未連線',
+    'settings.source.received': ' · 已收到 {n} 筆',
+    'settings.source.broadcast': '，已播報 {n} 筆',
+    'settings.source.fallbacks': '，降級 {n} 次',
+    'settings.source.probeTimeouts': '，無首幀 {n} 次',
+    'settings.source.lastData': ' · 最近資料 {ago}',
+    'settings.source.retry': '重試 {name} 的資料解析',
+
+    // ---------- 地区分支与选项卡 ----------
+    'settings.region.jp': '日本',
+    'settings.region.cn': '中國大陸',
+    'settings.region.global': '其他國家 / 地區',
+    'settings.tab.region': '地區',
+    'settings.tab.disaster': '災害',
+    'settings.tab.notify': '通知',
+    'settings.tab.history': '紀錄',
+    'settings.tab.misc': '其他',
+
+    // ---------- 关注地区：手填坐标与定位（全球分支 / 大陆分支共用） ----------
+    'settings.place.latInvalid': '緯度需為 -90 ~ 90 之間的數字',
+    'settings.place.lonInvalid': '經度需為 -180 ~ 180 之間的數字',
+    'settings.place.radiusInvalid': '半徑需為 1 ~ 2000 km 之間的數字',
+    'settings.place.max': '最多 {n} 個關注點',
+    'settings.place.addedPrefix': '已新增「{name}」',
+    'settings.place.addedDedupe': '（座標相同的重複點會自動合併）',
+    'settings.place.geoUnsupportedPlace': '目前瀏覽器不支援定位，請手動填寫座標',
+    'settings.place.geoUnsupportedCn': '目前瀏覽器不支援定位，請選擇省份與城市',
+    'settings.place.locating': '正在取得目前位置…',
+    'settings.place.geoNoCoords': '定位失敗：沒有傳回座標',
+    'settings.place.myLocation': '我的位置',
+    'settings.place.fillConfirm': '已填入目前位置，確認半徑後點「新增關注點」',
+    'settings.place.geoFailed': '定位失敗：{reason}',
+    'settings.place.geoDenied': '被拒絕或無法使用',
+    'settings.place.myLocationAdded': '已新增「我的位置」（{lat}, {lon}，半徑 {radius} km）',
+    'settings.place.geoImprecise': '定位可能不精確，請確認座標或改用手動選擇城市。',
+    'settings.place.geoDenied2': '（也可以手動選擇省份與城市）',
+
+    // ---------- 半径控件 ----------
+    'settings.radius.label': '半徑',
+    'settings.radius.custom': '自訂…',
+
+    // ---------- 中国大陆的三级级联 ----------
+    'settings.cn.pickRequired': '請先選擇省份與城市（行政區劃表未載入時請重新啟動 dsh web）',
+    'settings.cn.exists': '「{name}」已經在關注清單裡了',
+    'settings.cn.added': '已新增「{name}」（{lat}, {lon}，半徑 {radius} km）',
+    'settings.cn.tableFailed': '行政區劃資料載入失敗，可以改用「其他國家 / 地區」手動填座標',
+    'settings.cn.loading': '正在載入…',
+    'settings.cn.provinceAll': '請選擇省份 / 直轄市 / 特別行政區',
+    'settings.cn.cityFirstProvince': '（先選省份）',
+    'settings.cn.provinceLabel': '一級行政區（省 / 自治區 / 直轄市）',
+    'settings.cn.cityLabel': '城市',
+    'settings.cn.addButton': '新增這個城市',
+    'settings.cn.useMyLocation': '用我的位置',
+
+    // ---------- 市区町村细化器 ----------
+    'settings.cities.failed': '市區町村清單載入失敗，只能按都道府縣關注',
+    'settings.cities.pickPrefFirst': '先選都道府縣',
+    'settings.cities.hint': '不選就是全縣。EEW 和海嘯只到縣一級。',
+    'settings.cities.prefAll': '全縣',
+    'settings.cities.prefSelected': '已選 {n} 個',
+    'settings.cities.searchPlaceholder': '搜尋 {pref} 的市區町村…',
+    'settings.cities.searchLabel': '搜尋 {pref} 的市區町村',
+    'settings.cities.overLimit': '…共 {n} 個，請輸入關鍵字',
+
+    // ---------- 已关注地区列表 ----------
+    'settings.watch.prefMeta': '（{jp}）',
+    'settings.watch.prefOrFull': ' · 全境',
+    'settings.watch.prefDetail': ' · 已細分 {n} 個市區町村',
+    'settings.watch.remove': '移除',
+    'settings.watch.placeMeta': ' · 半徑 {radius} km',
+    'settings.watch.title': '已關注（{n}）',
+    'settings.watch.empty': '還沒有新增地區',
+    'settings.watch.groupJp': '日本（按行政區）',
+    'settings.watch.groupCn': '中國大陸（按行政區、座標）',
+    'settings.watch.groupGlobal': '其他國家 / 地區（按座標、半徑）',
+    'settings.watch.noneJp': '未選擇：全日本都會提醒',
+    'settings.watch.noneOther': '還沒有新增',
+
+    // ---------- 日本分支 ----------
+    'settings.jp.hintAll': '不選的話，全日本的地震都會提醒',
+    'settings.jp.hintSelected': '已選 {n} 個地區',
+
+    // ---------- 中国大陆分支 ----------
+    'settings.cnBranch.hint': '選城市就會用市中心的座標。面積大的州、市，把半徑調大一些。',
+    'settings.cnBranch.warning': '⚠ 預警被撤銷或修改時不會另行通知。以中國地震台網發布為準。',
+    'settings.cnBranch.foldTitle': '資料來源的局限',
+    'settings.cnBranch.fold1': '沒有取消或最終報標誌：預警被上游撤銷或修改時，不會補一則「已作廢」。日本的地震速報和海嘯有這條流程，大陸源沒有。',
+    'settings.cnBranch.fold2': '表裡的座標是行政區中心點，不是市政府所在地。面積大的州市（例如甘孜州、哈爾濱市）離城區可能差一百多公里。',
+    'settings.cnBranch.fold3': '大陸預警請以中國地震台網（CENC）發布為準。',
+
+    // ---------- 其他国家 / 地区分支 ----------
+    'settings.global.cityFirst': '先選國家，再點城市。',
+    'settings.global.cityFailed': '城市清單載入失敗，可以手動填座標，或重新啟動 dsh web 再試。',
+    'settings.global.cityNotCovered': '沒有這個國家的城市清單（只收人口 10 萬以上的城鎮）。請用下面的座標輸入。',
+    'settings.global.citySearchPlaceholder': '搜尋城市（共 {n} 個）',
+    'settings.global.citySearchLabel': '搜尋城市',
+    'settings.global.cityAddTitle': '新增 {label}',
+    'settings.global.hint': '按位置和半徑匹配。不影響日本的地震、海嘯。',
+    'settings.global.countryLabel': '國家 / 地區',
+    'settings.global.countryAll': '請選擇國家 / 地區',
+    'settings.global.countryLoading': '正在載入國家 / 地區清單…',
+    'settings.global.countryOption': '{name}（{n} 個城市）',
+    'settings.global.manualHint': '也可以直接填座標：',
+    'settings.place.fieldName': '名稱',
+    'settings.place.fieldNamePlaceholder': '例如 東京 / 家',
+    'settings.place.fieldLat': '緯度',
+    'settings.place.fieldLon': '經度',
+    'settings.place.add': '新增關注點',
+    'settings.place.useCurrentShort': '用目前位置',
+
+    // ---------- 灾害类型与阈值 ----------
+    'settings.section.watch': '關注地區',
+    'settings.section.disaster': '災害類型與門檻',
+    'settings.disaster.hint': '關閉後仍會記錄，只是不提示。',
+    'settings.disaster.notifySwitch': '提醒',
+    'settings.disaster.groupQuake': '地震',
+    'settings.disaster.quakeJpLabel': '日本 · 實測震度',
+    'settings.disaster.quakeJpNote': '當地觀測到的震度',
+    'settings.disaster.quakeJpSelect': '日本地震（實測震度最低值）',
+    'settings.disaster.eewLabel': '日本 · 緊急地震速報（EEW）',
+    'settings.disaster.eewNote': '預測的震度',
+    'settings.disaster.eewSelect': '緊急地震速報（預測震度最低值）',
+    'settings.disaster.globalLabel': '全球 / 大陸地震預警',
+    'settings.disaster.globalNote': '震央到關注點的距離',
+    'settings.disaster.globalSelect': '全球與大陸地震預警（最低震級）',
+    'settings.disaster.cnReportLabel': '大陸地震速報（CENC 目錄）',
+    'settings.disaster.cnReportNote': '台網目錄，每天都有',
+    'settings.disaster.cnReportSelect': '大陸地震速報（最低震級）',
+    'settings.disaster.foldScaleTitle': '震度和震級為什麼分開設定',
+    'settings.disaster.foldScale1': '日本給的是震度，全球和大陸給的是震級，兩者不能換算。',
+    'settings.disaster.foldScale2': '大陸速報從 M2.5 起就有資料、每天都很多，所以門檻單獨設定，免得小震一直響。',
+    'settings.disaster.groupTsunami': '海嘯',
+    'settings.disaster.tsunamiJpLabel': '日本 · 全球（NOAA）',
+    'settings.disaster.tsunamiJpNote': '全球源按關注點半徑判定',
+    'settings.disaster.tsunamiSelect': '海嘯等級',
+    'settings.disaster.groupWeatherJp': '氣象 · 日本（気象庁）',
+    'settings.disaster.weatherJpLabel': '土石流 / 洪水 / 大雨 / 暴潮',
+    'settings.disaster.weatherJpNote': '危險級別才播報',
+    'settings.disaster.gateJma4': '警戒4級以上',
+    'settings.disaster.groupWeatherCn': '氣象 · 中國大陸（中央氣象台）',
+    'settings.disaster.cnRainstormSwitch': '暴雨預警',
+    'settings.disaster.cnGeologySwitch': '地質災害預警',
+    'settings.disaster.weatherCnLabel': '暴雨 / 地質災害',
+    'settings.disaster.weatherCnNote': '橙色以上才播報',
+    'settings.disaster.gateOrange': '橙色以上',
+    'settings.disaster.groupWeatherOverseas': '氣象 · 海外（美國 NWS / 加拿大 ECCC）',
+    'settings.disaster.weatherOverseasLabel': '洪水 / 山洪 / 降雨 / 風暴潮',
+    'settings.disaster.weatherOverseasNote': '警告級才播報',
+    'settings.disaster.gateOverseas': '警告級（美）· 黃色以上（加）',
+
+    // ---------- 折叠：各数据源的取舍（安全相关 + 许可署名，一条都不能删） ----------
+    'settings.disaster.foldTradeoffsTitle': '各資料來源的取捨',
+    'settings.disaster.tradeoffCnTitle': '中國大陸氣象',
+    'settings.disaster.tradeoffCn1': '只接暴雨和地質災害兩類。雷電、大風、高溫等不接，否則每天幾十則會洗版。',
+    'settings.disaster.tradeoffCn2': '橙色以上才播報；黃色和藍色會記進「紀錄」，但不響鈴也不彈通知（勿擾時段也不放行橙色，只有紅色能穿透）。',
+    'settings.disaster.tradeoffCn3': '匹配按行政區：只有在中國大陸分支裡選的省、市才算關注點，手填的座標不參與。機構名只到省級時（例如海南省直轄縣）按全省放行，寧可多報也不漏報。',
+    'settings.disaster.tradeoffCn4': '這批資料沒有取消或最終報標誌：預警到期就直接從清單裡消失，所以沒收到取消不代表警報仍然有效。',
+    'settings.disaster.tradeoffOverseasTitle': '海外氣象',
+    'settings.disaster.tradeoffOverseas1': '關注點在「地區」頁的「其他國家 / 地區」裡設定。美國按郡和區劃判定，半徑 25km 以上時會額外查中心點周圍的幾個方向，所以半徑只是近似、不保證涵蓋半徑內的所有郡；加拿大把半徑換算成矩形範圍去查，與之相交的預警都算命中。',
+    'settings.disaster.tradeoffOverseas2': '美國只播報 Flood / Flash Flood / Coastal Flood Warning，Watch、Advisory、Statement 只記錄。',
+    'settings.disaster.tradeoffOverseas3': '加拿大只接 warning 類的降雨、洪水、風暴潮。霜凍和霧屬於 ECCC 的 advisory（官方定義就是「非危險天氣」）；大風、高溫、雷暴雖然是 warning，但不在本插件的災種範圍內。',
+    'settings.disaster.tradeoffOverseas4': '打開頁面時，如果某則預警已經發布超過 6 小時，只記錄不響鈴；頁面休眠超過 30 分鐘再恢復時也按這條處理。',
+    'settings.disaster.tradeoffOverseas5': '資料來源：美國國家氣象局（NWS）；加拿大環境與氣候變遷部（ECCC，Data Source: Environment and Climate Change Canada）。',
+    'settings.disaster.weatherHint': '{label} 有 L{level} 氣象警報（未達播報級別）',
+
+    // ---------- 通知与声音 ----------
+    'settings.perm.granted': '通知權限：已授權',
+    'settings.perm.denied': '通知權限：已被拒絕，請在瀏覽器網站設定裡允許',
+    'settings.perm.default': '通知權限：未授權，點「測試系統通知」授權',
+    'settings.perm.unsupported': '目前瀏覽器不支援系統通知',
+    'settings.strip.received': '已收到 {n} 則推送',
+    'settings.strip.more': '詳情在「其他」裡',
+    'settings.section.language': '語言 / Language',
+    'settings.language.label': '介面語言',
+    'settings.section.source': '資料來源',
+    'settings.source.prod': '正式（即時推送）',
+    'settings.source.sandbox': '沙箱（回放 2023 年資料，測試用）',
+    'settings.source.config': '設定：{value}',
+    'settings.section.cnTransport': '大陸源鏈路',
+    'settings.cnTransport.label': '取得方式',
+    'settings.cnTransport.auto': '自動（優先推送）',
+    'settings.cnTransport.poll': '強制輪詢（每 15 秒一次）',
+    'settings.cnTransport.selectLabel': '大陸源取得方式',
+    'settings.cnTransport.foldTitle': '什麼時候需要改成強制輪詢',
+    'settings.cnTransport.fold1': 'SSE 推送的延遲是秒級，輪詢最壞 15 秒——大陸預警搶的就是這幾秒，所以預設用推送。',
+    'settings.cnTransport.fold2': '只有在推送被網路中間設備反覆中斷、而一般請求仍然正常時，才需要強制輪詢。目前實際走在哪條路上，請看下方「來源狀態」。',
+    'settings.section.notify': '通知與音效',
+    'settings.notify.sound': '提示音',
+    'settings.notify.system': '系統通知',
+    'settings.notify.volume': '音量',
+    'settings.notify.testQuake': '試聽地震音',
+    'settings.notify.testEew': '試聽 EEW 音',
+    'settings.notify.testTsunami': '試聽海嘯音',
+    'settings.notify.testWeather': '試聽氣象音',
+    'settings.notify.testSystem': '測試系統通知',
+    'settings.notify.testTitle': 'QuakeAlert 測試',
+    'settings.notify.testBody': '這是一則測試系統通知。',
+    'settings.notify.testSent': '已送出測試通知，請查看系統通知中心',
+    'settings.notify.testFailed': '測試通知送出失敗',
+    'settings.notify.toastBody': '頁面內彈窗運作正常。',
+    'settings.notify.unsupportedTest': '目前瀏覽器不支援系統通知，無法測試',
+    'settings.notify.deniedRetry': '通知權限已被拒絕 —— 請在瀏覽器網站設定中允許後重試',
+    'settings.notify.notGranted': '未取得通知權限（瀏覽器未授權）',
+    'settings.notify.testToast': '測試 Toast',
+    'settings.notify.audioLocked': '⚠ 提示音還沒解鎖：點一下頁面任意位置就好。',
+    'settings.notify.audioUnavailable': '目前環境不支援 Web Audio，提示音無法使用。',
+
+    // ---------- 静默时段 ----------
+    'settings.section.quiet': '勿擾時段',
+    'settings.quiet.enable': '啟用勿擾時段',
+    'settings.quiet.start': '開始',
+    'settings.quiet.end': '結束',
+    'settings.quiet.startLabel': '勿擾時段開始時間',
+    'settings.quiet.endLabel': '勿擾時段結束時間',
+    'settings.quiet.breakForSevere': '緊急警報仍會提醒（EEW、海嘯警報、震度6弱以上、氣象4級以上）',
+    'settings.quiet.hint': '按瀏覽器本機時間判定。跨夜時段寫成 23:00–07:00。勿擾期間仍會記錄。',
+
+    // ---------- 测试与诊断 ----------
+    'settings.section.diag': '測試與診斷',
+    'settings.diag.hint': '測試訊息不會連網，用來確認提醒是否正常。',
+    'settings.diag.sendWeather': '傳送測試氣象警報',
+    'settings.diag.parseFailed': '測試訊息解析失敗，請把這個情況回報給開發者',
+    'settings.diag.outcomeSent': ' —— 已播報：應會看到提示音與彈窗',
+    'settings.diag.outcomeNotSent': ' —— 未播報（{reason}），只會記入「紀錄」',
+    'settings.diag.outcomeUnknown': '未知原因',
+    'settings.diag.sentWeather': '已傳送：{label}（{pref} / 警戒レベル{level}，{note}）',
+    'settings.diag.scenarios': '每次點擊換一個情境：{list}。',
+    'settings.diag.scenario.landslide': '土石流警戒情報',
+    'settings.diag.scenarioNote.landslide': '市區町村級 / 電文本身即 L4',
+    'settings.diag.scenario.flood': '指定河川洪水予報（氾濫危険情報）',
+    'settings.diag.scenarioNote.flood': '級別寫在主文裡',
+    'settings.diag.scenario.heavyrain': '大雨危険警報',
+    'settings.diag.scenarioNote.heavyrain': '級別寫在 Kind 名稱裡',
+    'settings.diag.scenario.stormsurge': '高潮危険警報',
+    'settings.diag.scenarioNote.stormsurge': '級別寫在 Kind 名稱裡',
+    'settings.diag.scenario.landslide-l3': '土石流警報（警戒レベル3）',
+    'settings.diag.scenarioNote.landslide-l3': '未達 L4：不播報',
+    'settings.diag.scenario.emsc': 'EMSC 地震（震央就在關注點）',
+    'settings.diag.scenarioNote.emsc': 'M6.2',
+    'settings.diag.scenario.usgs': 'USGS 地震（約 80km 外）',
+    'settings.diag.scenarioNote.usgs': 'M5.6 · 近處，小半徑也可能不命中',
+    'settings.diag.scenario.noaa': 'NOAA 海嘯警報',
+    'settings.diag.scenarioNote.noaa': 'Tsunami Advisory',
+    'settings.diag.scenario.emsc-far': 'EMSC 遠地地震（約 550km 外）',
+    'settings.diag.scenarioNote.emsc-far': 'M7.0 · 用於示範半徑：半徑 < 550km 時不命中',
+    'settings.diag.sendGlobal': '傳送測試全球警報',
+    'settings.diag.needPlace': '請先在「地區」裡新增一個位置，測試訊息需要一個震央',
+    'settings.diag.sentGlobal': '已傳送：{label}（{note}）',
+    'settings.diag.globalScenarios': '每次點擊換一個情境：{list}。最後一則在約 550km 外，用來示範半徑的作用。',
+    'settings.diag.snapshotHint': '把快照傳給 AI 助手，配合 TROUBLESHOOTING.zh.md 排查。',
+    'settings.diag.snapshotButton': '產生診斷快照',
+    'settings.diag.copied': '已複製到剪貼簿。',
+    'settings.diag.clipboardUnavailable': '剪貼簿無法使用',
+    'settings.diag.clipboardError': '（{error}）',
+    'settings.diag.copyManual': '，請手動全選下面的文字複製。',
+    'settings.diag.generatingFailed': '產生失敗：{error}',
+    'settings.diag.snapshotWarn': '⚠ 包含你關注的地區和座標，分享前請注意。',
+
+    // ---------- 免责声明 ----------
+    'settings.section.disclaimer': '免責聲明',
+    'settings.disclaimer.short': '僅供參考。避難請以當地官方發布為準。頁面關閉後不會再提醒。',
+    'settings.disclaimer.foldTitle': '資料來源與完整聲明',
+    'settings.disclaimer.source': '預警資料由 P2PQuake 轉播、日本氣象廳公開 XML 電文、EMSC / USGS / NOAA、美國國家氣象局（NWS）與加拿大環境與氣候變遷部（ECCC）的公開介面（瀏覽器直連），以及 Wolfx 轉播的中國地震台網（CENC）資訊提供，均非官方直接推送；緊急地震速報（EEW）與大陸地震預警等內容與配信品質無保證。',
+    'settings.disclaimer.authority': '避難請以當地主管機構（日本氣象廳 気象庁 / 中國地震台網 CENC / 美國 NWS・USGS・NOAA / 加拿大 ECCC 等）官方發布為準。',
+
+    // ---------- 预警记录（履历） ----------
+    'settings.section.history': '預警紀錄（{n} 則）',
+    'settings.history.hint': '沒到門檻、沒有提醒的紀錄也在裡面。點開看詳情。',
+    'settings.history.empty': '暫無紀錄',
+    'settings.history.statusHit': '未觸發提醒',
+    'settings.history.statusSuppressed': '未重複提醒',
+    'settings.history.statusPrefHit': '命中 {pref}',
+    'settings.history.statusAlerted': '已提醒',
+    'settings.history.toggleCollapse': '點擊收合（Enter / 空白鍵同樣可用）',
+    'settings.history.toggleExpand': '點擊展開詳情（Enter / 空白鍵同樣可用）',
+    'settings.history.collapse': '▲ 收合',
+    'settings.history.expand': '▼ 展開',
+    'settings.history.fieldKind': '類型',
+    'settings.history.fieldTime': '時間',
+    'settings.history.fieldPref': '命中',
+    'settings.history.fieldNote': '說明',
+    'settings.history.fieldContent': '內容',
+    'settings.history.fieldDetail': '內文',
+    'settings.history.kindValue': '{label}（{code}）',
+    'settings.history.clear': '清除紀錄',
   },
 
   ja: {
@@ -1267,7 +1678,7 @@ const SETTINGS = {
 // ============================================================================
 // dsh-quake-alert · client/src/00c-texts-configio.js
 //
-// 作用：配置导出 / 导入这一面的文案表（三语言并列）。
+// 作用：配置导出 / 导入这一面的文案表（各语言并列）。
 // 内容：纯数据对象，不 import 任何模块（依赖方向：面文件 ← 00-i18n.js ← 其它）。
 // 依赖：无。
 //
@@ -1300,6 +1711,31 @@ const CONFIG_IO = {
     'settings.configIo.errNoFile': '没有选择文件。',
     'settings.configIo.errBackupFailed': '当前环境无法保存备份（浏览器存储可能已满或被禁用）。为避免无法撤销，导入已取消。',
     'settings.configIo.errUnexpected': '导入过程中出错了：{detail}',
+  },
+
+  'zh-TW': {
+    'settings.configIo.title': '設定匯出與匯入',
+    'settings.configIo.hint': '備份檔只含設定，不含警報紀錄。',
+    'settings.configIo.exportBtn': '匯出設定',
+    'settings.configIo.importBtn': '匯入設定',
+    'settings.configIo.exported': '已匯出設定檔。',
+    'settings.configIo.exportFallback': '目前環境無法自動下載：請手動複製下面的文字。',
+    'settings.configIo.copied': '已複製到剪貼簿。',
+    'settings.configIo.copyFailed': '複製失敗，請手動全選複製。',
+    'settings.configIo.imported': '已匯入設定。',
+    'settings.configIo.undoBtn': '復原上次匯入',
+    'settings.configIo.undoAt': '備份於 {at}',
+    'settings.configIo.undone': '已還原匯入前的設定。',
+    'settings.configIo.noBackup': '沒有可復原的匯入紀錄。',
+    'settings.configIo.errJson': '不是有效的 JSON 檔案。',
+    'settings.configIo.errShape': '這個檔案裡沒有本插件能讀取的設定。',
+    'settings.configIo.errFormat': '這不是災害警報插件的設定檔。',
+    'settings.configIo.errVersion': '檔案缺少格式版本號，或版本號不合法。',
+    'settings.configIo.errNewer': '檔案來自較新版本的插件（格式版本 {v}），目前版本無法讀取。',
+    'settings.configIo.errRead': '讀取檔案失敗。',
+    'settings.configIo.errNoFile': '沒有選擇檔案。',
+    'settings.configIo.errBackupFailed': '目前環境無法儲存備份（瀏覽器儲存空間可能已滿或被停用）。為避免無法復原，匯入已取消。',
+    'settings.configIo.errUnexpected': '匯入過程中發生錯誤：{detail}',
   },
 
   ja: {
@@ -1356,7 +1792,7 @@ const CONFIG_IO = {
 // ============================================================================
 // dsh-quake-alert · client/src/00e-texts-units.js
 //
-// 作用：量纲类展示文案的三语表——震度、海啸等级、震级档位、关注半径档位。
+// 作用：量纲类展示文案表（各语言并列）——震度、海啸等级、震级档位、关注半径档位。
 // 内容：纯数据对象，不 import 任何模块。
 // 依赖：无。
 //
@@ -1398,6 +1834,32 @@ const UNITS = {
     'radius.30': '仅本地（约 30 km）',
     'radius.100': '本市及周边（约 100 km，默认）',
     'radius.300': '较大范围（约 300 km）',
+  },
+
+  'zh-TW': {
+    'scale.10': '震度1', 'scale.20': '震度2', 'scale.30': '震度3', 'scale.40': '震度4',
+    'scale.45': '震度5弱', 'scale.46': '震度5弱以上', 'scale.50': '震度5強',
+    'scale.55': '震度6弱', 'scale.60': '震度6強', 'scale.70': '震度7',
+
+    'scaleOpt.10': '震度1 以上', 'scaleOpt.20': '震度2 以上', 'scaleOpt.30': '震度3 以上',
+    'scaleOpt.40': '震度4 以上', 'scaleOpt.45': '震度5弱 以上', 'scaleOpt.50': '震度5強 以上',
+    'scaleOpt.55': '震度6弱 以上', 'scaleOpt.60': '震度6強 以上', 'scaleOpt.70': '震度7',
+
+    'tsunami.Watch': '津波注意報',
+    'tsunami.Warning': '海嘯警報',
+    'tsunami.MajorWarning': '大海嘯警報',
+
+    'tsunamiOpt.Watch': '注意報以上',
+    'tsunamiOpt.Warning': '警報以上',
+    'tsunamiOpt.MajorWarning': '僅大海嘯警報',
+
+    'magOpt.3': 'M3.0 以上', 'magOpt.3.5': 'M3.5 以上', 'magOpt.4': 'M4.0 以上',
+    'magOpt.4.5': 'M4.5 以上（預設）', 'magOpt.5': 'M5.0 以上', 'magOpt.5.5': 'M5.5 以上',
+    'magOpt.6': 'M6.0 以上', 'magOpt.6.5': 'M6.5 以上', 'magOpt.7': 'M7.0 以上',
+
+    'radius.30': '僅本地（約 30 km）',
+    'radius.100': '本市及周邊（約 100 km，預設）',
+    'radius.300': '較大範圍（約 300 km）',
   },
 
   ja: {
@@ -1461,7 +1923,7 @@ const UNITS = {
 // 依赖：各 `00x-texts-*.js` 面文件（纯数据，不 import 任何模块）。
 //
 // 设计要点（DESIGN 11.9 / 11.10 的定稿）：
-//   · **值域是插件自己的 BCP 47 清单**（zh-CN / ja / en），不对齐宿主的 zh/en——
+//   · **值域是插件自己的 BCP 47 清单**（zh-CN / zh-TW / ja / en），不对齐宿主的 zh/en——
 //     宿主那份是界面语言包清单，且 zh 分不出简繁。Host 只校验 BCP 47 形状，白名单在这里。
 //   · **加一种语言 = 这里加一项 + 补一份文案表**。每份面文件都必须覆盖 LANGS 的全部语言，
 //     漏一份、漏一条 key 都会在**模块加载期**抛错（响亮的失败，而不是静默回退成中文）。
@@ -1477,11 +1939,21 @@ const UNITS = {
 
 // ---------- 语言清单（顺序即设置页下拉顺序） ----------
 /** 支持的语言，BCP 47 完整标识。加语言只改这一行 + 补一份表。 */
-const LANGS = ['zh-CN', 'ja', 'en'];
+const LANGS = ['zh-CN', 'zh-TW', 'ja', 'en'];
 /** 默认语言。也是「配置里的值认不出」时的回退终点。 */
 const DEFAULT_LANGUAGE = 'zh-CN';
 /** 语言显示名：按**该语言自己**的写法（语言选择器不该出现"看不懂自己语言名"的情况）。 */
-const LANGUAGE_LABELS = { 'zh-CN': '简体中文', ja: '日本語', en: 'English' };
+const LANGUAGE_LABELS = { 'zh-CN': '简体中文', 'zh-TW': '繁體中文', ja: '日本語', en: 'English' };
+
+/**
+ * 繁体侧的**地区**子标签（小写比较）。脚本子标签 `hant` / `hans` 在 resolveLang 里单独处理，
+ * 且**优先于地区**——理由见那里的注释。
+ *
+ * 为什么要单独一张：中文的"地区变体"不能像 `ja-JP` 那样按主语言匹配——`zh-HK` / `zh-TW` 的
+ * 用户要的是**繁体**，而按主语言匹配只会落到清单里第一个 `zh-*`（`zh-CN`）。
+ * 那正是"加了繁体却仍然给简体"的静默失败：界面上看不出任何异常，用户只会觉得选错了。
+ */
+const HANT_REGIONS = ['tw', 'hk', 'mo'];
 
 // ---------- 文案表汇总 ----------
 /** 全部面文件。新增一个面（如设置页）时加进来即可。 */
@@ -1537,8 +2009,9 @@ let currentLang = DEFAULT_LANGUAGE;
 
 /**
  * 把任意值解析成清单里的语言（BCP 47 惯例的逐级回退）：
- *   精确匹配（大小写不敏感） → 主语言匹配（`zh-HK` → `zh` → `zh-CN`；`ja-JP` → `ja`） → 默认语言。
- * 逐级回退的意义：`zh-HK` / `zh-TW` 的用户拿到简体中文，而不是掉到英文去。
+ *   精确匹配（大小写不敏感） → 中文按**脚本 / 地区**分流（`zh-TW` / `zh-HK` / `zh-Hant` → `zh-TW`；
+ *   `zh` / `zh-CN` / `zh-SG` / `zh-Hans` → `zh-CN`） → 其它主语言匹配（`ja-JP` → `ja`） → 默认语言。
+ * 逐级回退的意义：`zh-HK` 的用户拿到繁体、`ja-JP` 的用户拿到日文，而不是双双掉到默认语言（简体）去。
  */
 function resolveLang(value) {
   const raw = String(value === undefined || value === null ? '' : value).trim();
@@ -1546,8 +2019,19 @@ function resolveLang(value) {
   const lower = raw.toLowerCase();
   const exact = LANGS.find((l) => l.toLowerCase() === lower);
   if (exact) return exact
-  const base = lower.split('-')[0];
-  const byBase = LANGS.find((l) => l.split('-')[0].toLowerCase() === base);
+  const parts = lower.split('-');
+  // 中文这一支必须先看脚本与地区子标签，再看主语言：清单里有两个 `zh-*`，而主语言匹配只会
+  // 取到第一个（`zh-CN`），繁体用户于是永远拿不到繁体（见 HANT_REGIONS 的说明）。
+  // **脚本优先于地区**（BCP 47）：`zh-Hans-HK` 是"简体字形 + 香港地区"，字形由脚本决定，
+  // 判成繁体是错的（Windows 的「中文(简体, 中国香港特别行政区)」正是这一串）；反过来
+  // `zh-Hant-CN` / `zh-CN-Hant` 也按脚本判成繁体。
+  if (parts[0] === 'zh') {
+    const subs = parts.slice(1);
+    if (subs.indexOf('hant') !== -1) return 'zh-TW'
+    if (subs.indexOf('hans') !== -1) return 'zh-CN'
+    return subs.some((p) => HANT_REGIONS.indexOf(p) !== -1) ? 'zh-TW' : 'zh-CN'
+  }
+  const byBase = LANGS.find((l) => l.split('-')[0].toLowerCase() === parts[0]);
   return byBase || DEFAULT_LANGUAGE
 }
 
@@ -1580,7 +2064,7 @@ function t(key, params) {
   return s
 }
 
-/** 某语言的整张表（回归用：校验三语 key 集合一致、zh-CN 与旧字面量一致）。 */
+/** 某语言的整张表（回归用：校验各语言 key 集合一致、zh-CN 与旧字面量一致）。 */
 function tableOf(lang) {
   return TABLES[resolveLang(lang)] || TABLES[DEFAULT_LANGUAGE]
 }
@@ -1588,20 +2072,26 @@ function tableOf(lang) {
 // ============================================================================
 // dsh-quake-alert · client/src/00d-texts-regions.js
 //
-// 作用：日本 47 都道府县的**显示名**表（英文字幕）。
+// 作用：日本 47 都道府县的**显示名**表（英文罗马字 + 繁体中文）。
 // 内容：纯数据对象，不 import 任何模块。
 // 依赖：无。
 //
 // 为什么要单独一份：`01-constants` 的 `PREFECTURES` 只有两个字段——`jp`（匹配用日文全称，
-// P2PQuake 的 pref 就是这个形状）与 `zh`（中文界面显示名）。**匹配永远用 `jp`**，而显示名
-// 是随界面语言变的：日文界面直接用 `jp` 原文，中文界面用 `zh`，英文界面需要罗马字。
+// P2PQuake 的 pref 就是这个形状）与 `zh`（简体界面显示名）。**匹配永远用 `jp`**，而显示名
+// 是随界面语言变的：日文界面直接用 `jp` 原文，简体用 `zh`，繁体用这里的 `PREF_HANT`，
+// 英文用 `PREF_EN`。
 //
-// 为什么不把英文名塞进 `PREFECTURES`：那个数组的每一项都参与匹配（`PREF_SET` / `PREF_SHORT`
-// 都从它派生），往里加字段等于让"显示"渗进"匹配"的数据结构——0.8.0 把来源分支显式化时
-// 踩过一次同类问题（拿名字形状当判据）。
+// 为什么不把英文 / 繁体名塞进 `PREFECTURES`：那个数组的每一项都参与匹配（`PREF_SET` /
+// `PREF_SHORT` 都从它派生），往里加字段等于让"显示"渗进"匹配"的数据结构——0.8.0 把来源分支
+// 显式化时踩过一次同类问题（拿名字形状当判据）。
 //
 // 罗马字按**平文式**（Hepburn 以外交/地图惯用的通行拼法）：`Gifu` / `Hyogo` / `Kochi`，
 // 不使用 `Gihu` / `Hyôgo` 这类带长音的写法——县名在关注列表里要短、要能一眼认出。
+//
+// 繁体名与简体名同形的一条规则：**去掉「都 / 府 / 県」、保留「道」**（`東京都` → `東京`、
+// `京都府` → `京都`、`北海道` → `北海道`），与 `PREFECTURES[].zh` 的做法一致——名字在关注
+// 列表与命中行里出现，短名才读得顺。用字按繁体通行写法（`静岡` → `靜岡`、`広島` → `廣島`、
+// `沖縄` → `沖繩`），不照抄日文汉字：日文汉字是**匹配用**的那一份，不是给人看的那一份。
 // ============================================================================
 
 /** 都道府县（日文全称）→ 英文显示名。键与 `PREFECTURES[].jp` 一一对应。 */
@@ -1655,6 +2145,60 @@ const PREF_EN = {
   '沖縄県': 'Okinawa',
 };
 
+/**
+ * 都道府县（日文全称）→ 繁体中文显示名。键与 `PREFECTURES[].jp` 一一对应。
+ * 用字规则见文件头：去掉「都 / 府 / 県」、保留「道」，字形按繁体通行写法。
+ */
+const PREF_HANT = {
+  '北海道': '北海道',
+  '青森県': '青森',
+  '岩手県': '岩手',
+  '宮城県': '宮城',
+  '秋田県': '秋田',
+  '山形県': '山形',
+  '福島県': '福島',
+  '茨城県': '茨城',
+  '栃木県': '栃木',
+  '群馬県': '群馬',
+  '埼玉県': '埼玉',
+  '千葉県': '千葉',
+  '東京都': '東京',
+  '神奈川県': '神奈川',
+  '新潟県': '新潟',
+  '富山県': '富山',
+  '石川県': '石川',
+  '福井県': '福井',
+  '山梨県': '山梨',
+  '長野県': '長野',
+  '岐阜県': '岐阜',
+  '静岡県': '靜岡',
+  '愛知県': '愛知',
+  '三重県': '三重',
+  '滋賀県': '滋賀',
+  '京都府': '京都',
+  '大阪府': '大阪',
+  '兵庫県': '兵庫',
+  '奈良県': '奈良',
+  '和歌山県': '和歌山',
+  '鳥取県': '鳥取',
+  '島根県': '島根',
+  '岡山県': '岡山',
+  '広島県': '廣島',
+  '山口県': '山口',
+  '徳島県': '德島',
+  '香川県': '香川',
+  '愛媛県': '愛媛',
+  '高知県': '高知',
+  '福岡県': '福岡',
+  '佐賀県': '佐賀',
+  '長崎県': '長崎',
+  '熊本県': '熊本',
+  '大分県': '大分',
+  '宮崎県': '宮崎',
+  '鹿児島県': '鹿兒島',
+  '沖縄県': '沖繩',
+};
+
 // ============================================================================
 // dsh-quake-alert · client/src/01-constants.js
 //
@@ -1694,7 +2238,7 @@ const SCALE_TEXT = {
   60: '震度6强', 70: '震度7',
 };
 // 用户可选的最低震度档位（值 = P2PQuake scale 数值）。
-// 选项的**文字**搬去了 `00e-texts-units.js`（三语），这里只留「值 → 文案 key」：下拉在渲染时
+// 选项的**文字**搬去了 `00e-texts-units.js`（各语言一套），这里只留「值 → 文案 key」：下拉在渲染时
 // 取词，而模块级常量里的文字会在加载那一刻被固化（切语言就不跟着变）。
 const SCALE_OPTIONS = [
   { v: 10, labelKey: 'scaleOpt.10' }, { v: 20, labelKey: 'scaleOpt.20' }, { v: 30, labelKey: 'scaleOpt.30' },
@@ -1791,9 +2335,9 @@ function normalizePref(raw) {
  * 都道府县的**显示名**（随界面语言变）。
  *
  * `PREFECTURES` 里的 `jp` 是**匹配用的**（P2PQuake 的 `pref` 就是这个形状，`PREF_SET` /
- * `PREF_SHORT` 都从它派生），所以显示不能复用它——`zh` 那一栏只是"中文界面用哪几个字"。
- * 这个函数负责挑出"给人看的那一份"：日文界面用原名，中文界面用中文名，英文界面用罗马字
- * （`PREF_EN`）。三国语言都不缺项时，三种语言下看到的名字是同一份数据的三种写法。
+ * `PREF_SHORT` 都从它派生），所以显示不能复用它——`zh` 那一栏只是"简体界面用哪几个字"。
+ * 这个函数负责挑出"给人看的那一份"：日文界面用原名，简体界面用 `zh`，繁体界面用 `PREF_HANT`，
+ * 英文界面用罗马字（`PREF_EN`）。四种语言都不缺项时，同一条数据在四种语言下各有写法。
  *
  * 认不出的**原样返回**：调用方也会把源里的 `pref` 直接传进来，那里可能是简写或空值，
  * 不该被这里改写（简写归一由 normalizePref 负责，两件事分开）。
@@ -1806,6 +2350,10 @@ function prefLabelOf(pref) {
   const lang = getLanguage();
   if (lang === 'ja') return hit.jp
   if (lang === 'en') return PREF_EN[hit.jp] || hit.jp
+  // 繁体缺项时回退到**日文原名**，与 en 分支同一形态：回退到 `hit.zh` 会在繁体界面里
+  // 静默显示简体县名（同一条列表里两种字形混杂），而原名是"我们没翻译"的显式形态，
+  // 一眼能看出并被抓进断言（0.9.3；当前 47 项齐全，这条只是防"加了县忘补表"）。
+  if (lang === 'zh-TW') return PREF_HANT[hit.jp] || hit.jp
   return hit.zh
 }
 
@@ -1870,7 +2418,7 @@ function formatIssuedLocal(raw) {
 // ---------- 界面语言（0.8.1 立契约，0.9.0 由 00-i18n 提供） ----------
 // 选项**从 00-i18n 的语言清单派生**，不在这里另写一份：加一种语言只改 00-i18n 的 LANGS
 // 与 LANGUAGE_LABELS、再补一份文案表，配置契约（DEFAULT_CFG → normalizeCfg → Host schema）
-// 一行都不用动。值用 BCP 47 的完整标识（zh-CN / ja / en），与三语 README 对齐。
+// 一行都不用动。值用 BCP 47 的完整标识（zh-CN / zh-TW / ja / en）。
 const LANGUAGE_OPTIONS = LANGS.map((v) => ({ v, label: LANGUAGE_LABELS[v] }));
 
 const DEFAULT_CFG = {
@@ -2144,10 +2692,11 @@ function normalizeCfg(input) {
       end: timeOr(qh.end, DEFAULT_CFG.quietHours.end),
       breakForSevere: boolOr(qh.breakForSevere, DEFAULT_CFG.quietHours.breakForSevere),
     },
-    // 界面语言（0.8.1 立字段 / 0.9.0 真正生效）：走 BCP 47 惯例的逐级回退，认不出的一律落到
-    // 默认语言（不是"原样放行"——手改配置写进一个没有语言包的代码，界面会进入一个谁也说不清
-    // 的半本地化状态）。回退顺序：精确匹配 → 主语言（zh-HK / zh-TW → zh → zh-CN、ja-JP → ja）
-    // → 默认语言。
+    // 界面语言（0.8.1 立字段 / 0.9.0 真正生效 / 0.9.3 加繁体）：走 BCP 47 惯例的逐级回退，
+    // 认不出的一律落到默认语言（不是"原样放行"——手改配置写进一个没有语言包的代码，界面会进入
+    // 一个谁也说不清的半本地化状态）。回退顺序：精确匹配 → 中文按脚本 / 地区分流
+    // （zh-TW / zh-HK / zh-MO / zh-Hant → zh-TW；zh / zh-CN / zh-SG / zh-Hans → zh-CN）
+    // → 其它主语言（ja-JP → ja）→ 默认语言。
     language: resolveLang(stored.language),
   }
 }
@@ -2538,6 +3087,16 @@ function bindSettingsScope(scope) {
     }
     const next = sectionToCfg(snap.value);
     runtimeCfg = saveCfg(next); // localStorage 保持为镜像：Host 掉线时仍能工作
+    // **语言也必须在这条路径上落地**（0.9.3 修）。Host 是配置的权威源，而 `loadCfg` 读的是
+    // localStorage 镜像：在"另一个浏览器 / 清过 localStorage / 手改过 settings.yaml"这条路径上，
+    // runtimeCfg（语言下拉显示的值）与诊断快照都已经是 Host 的值，界面却仍停在启动时镜像解析出的
+    // 语言——而且**不会自愈**，因为 sync 是"值没变就不重算"的幂等路径。表现是下拉写着「繁體中文」、
+    // 整页还是简体中文，排查时 `config.language` 恰好给出与界面相反的答案。
+    // 与 applyCfg 同一形态（同值不动，所以两条路径不会互相打架）。
+    if (getLanguage() !== runtimeCfg.language) {
+      setLanguage(runtimeCfg.language);
+      syncDerivedTextAfterLanguageChange();
+    }
     store.push({});
   };
   let disposer = null;
@@ -7483,7 +8042,7 @@ function handleAlert(alert, cfg, opts) {
 // 作用：P2PQuake WebSocket 连接管理。
 // 内容：连接/断开状态机、指数退避重连（1s→60s 封顶）、数据源切换（正式/沙箱）、
 //       建连超时看门狗、「久无数据」的半开连接检测（主动重连）、消息转交主链。
-// 依赖：01-constants、02-storage（读数据源）、11-pipeline（handleRaw）。
+// 依赖：00-i18n（默认的连接说明文案）、01-constants、02-storage（读数据源）、11-pipeline（handleRaw）。
 // 背景：P2PQuake 约每 10 分钟强制断线，重连是常态路径而非异常。
 // ============================================================================
 
@@ -7522,9 +8081,11 @@ function createWsClient(opts) {
   const staleCheckMs = o.staleCheckMs === undefined ? STALE_CHECK_MS : o.staleCheckMs;
   const connectTimeoutMs = o.connectTimeoutMs === undefined ? CONNECT_TIMEOUT_MS : o.connectTimeoutMs;
   const urlOf = o.urlOf || (() => (currentCfg().source === 'sandbox' ? SANDBOX_URL : WS_URL));
+  // 默认连接说明**在调用时取词**（0.9.3）：写死在模块里的中文会让英文 / 繁体界面在「来源状态」
+  // 与侧边栏悬停提示里露出一整句中文。取词放在函数体里，切语言后由 recomputeStatus 重算。
   const openDetailOf = o.openDetail || ((url) => (url.indexOf('sandbox') !== -1
-    ? '沙箱源：回放 2023 年历史（约30秒/条）'
-    : '已连接 P2PQuake（约每 10 分钟自动重连）'));
+    ? t('source.p2pSandbox')
+    : t('source.p2pConnected')));
   const onRaw = o.onRaw || ((raw, cfg) => handleRaw(raw, cfg));
   // 上报经 publishStatus 合成（0.5.4）：本层只知道**连接**状态，而展示状态还要叠加
   // 数据健康（蓝点）与停更。此前直接 pushSource，于是"一次常态断线"（P2PQuake 约每 10 分钟
@@ -9638,8 +10199,8 @@ function buildDiagSnapshot(now) {
         breakForSevere: cfgQuiet.breakForSevere !== false,
       },
       cnTransport: str(cfg.cnTransport) || 'auto', // 'auto'（默认，SSE 可自动降级）| 'poll'（用户强制轮询）
-      // 界面语言（0.8.1 先立字段）。现在只有 zh-CN；0.9.0 落地本地化后，
-      // "界面没跟着切"这类问题第一个要核的就是这一项。
+      // 界面语言（0.8.1 先立字段，0.9.0 落地本地化，0.9.3 加上繁体）。"界面没跟着切"
+      // 这类问题第一个要核的就是这一项。
       // **它是归一后的生效值，不是持久层原值**（0.8.2 review 订正）：`cfg` 来自 `currentCfg()`，
       // 而那条路一定过 `normalizeCfg`，所以手改配置写进去的、或将来降级留下的非法值在这里
       // 已经被换成默认值——这一项能回答"界面现在按哪个语言渲染"，回答不了"配置里原本写了什么"。
@@ -10778,7 +11339,7 @@ function SettingsPanel(props) {
     (v) => setCfg((c) => ({ ...c, disasters: { ...c.disasters, [key]: v } })), text);
   const thSelect = (key, options, asNumber, label) => s.select(cfg.thresholds[key], options,
     (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, [key]: asNumber ? Number(v) : v } })),
-    // 选项文字是 `labelKey`（值的档位表在 01-constants，文字在三语表）：**渲染时取词**，
+    // 选项文字是 `labelKey`（值的档位表在 01-constants，文字在文案表）：**渲染时取词**，
     // 所以切语言后下拉里的话立刻跟着换。
     (o) => t(o.labelKey), label);
   /** 分组的标题行：一个开关管这一组的若干行（共享关系写在标题里，别让人以为漏了开关）。 */
@@ -10941,13 +11502,13 @@ function SettingsPanel(props) {
    * 界面语言（0.8.1 立选项，0.9.0 落地本地化）。
    *
    * 0.9.0 起 zh-CN / ja / en 各有完整文案表（00a / 00b / 00c / 00e 面文件合并而来），
-   * 选中即由 15-entry 写进配置并调 setLanguage —— 界面**当场**跟着换。
+   * 0.9.3 加上 zh-TW；选中即由 15-entry 写进配置并调 setLanguage —— 界面**当场**跟着换。
    * 所以这里不再需要"目前只有简体中文"那种解释性说明（11.10 规则 1：界面不解释自己），
    * 也不该再用文字解释"这个控件是干什么的"。
    */
   const sectionLanguage = () => s.section(t('settings.section.language'),
-    // `flex: 1`：这一行只有标签与一个短下拉（"简体中文"），不撑满的话右半边空着、
-    // 加上箭头的位置，观感就像"控件没对齐"。撑满后箭头正好落在行右边缘。
+    // `flex: 1`：这一行只有标签与一个短下拉（"简体中文" / "繁體中文"），不撑满的话右半边
+    // 空着、加上箭头的位置，观感就像"控件没对齐"。撑满后箭头正好落在行右边缘。
     s.row(s.label(t('settings.language.label')), s.select(cfg.language, LANGUAGE_OPTIONS,
       (v) => setCfg((c) => ({ ...c, language: v })), (o) => o.label, t('settings.language.label'), { flex: 1 })),
   );
@@ -11711,7 +12272,7 @@ function apply(ctx) {
     label: 'EMSC',
     urlOf: () => EMSC_WS_URL,
     staleAfterMs: 3 * 60 * 60 * 1000,
-    openDetail: () => '已连接 EMSC（全球地震实时推送）',
+    openDetail: () => t('status.emscConnected'),
     onRaw: (raw, cfg) => {
       const res = parseEmscResult(raw);
       if (noteParseResult('emsc', res)) return
@@ -11767,7 +12328,7 @@ const __test = {
   MIN_SAMPLE_RADIUS_KM, MAX_REQUESTS_PER_ROUND, OVERSEAS_FRESH_GATE_MS, OVERSEAS_GATE_RESET_MS,
   UNCOVERED_TTL_MS, OVERSEAS_MIN_BACKOFF_MS, OVERSEAS_MAX_BACKOFF_MS,
   overseasStatsOf,
-  parse, parseQuake, parseEew, parseTsunami, parseJma, parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage, feedStatsOf, watchlessPoint, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn: maxLevelIn, jmaItemsOf: itemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf, matchAlert, matchPointAlert, distanceKm, validGeo, normalizePlaces, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, hitSeverityOf, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY, cnProductName, authorityOf, disclaimerOf, weatherActionHintOf, SOURCE_ORDER, sourceLabelOf, SOURCE_CODE_TEXT, SettingsPanel, statusMetaOf, buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION, inQuietHours, placeOriginOf, PLACE_ORIGINS, geoOfHypo, sourceIdOf, crossSourceCopyOf, noteAuthoritySuppressed, authorityStatsOf, SOURCE_RANK, SOURCE_ZH, SOURCE_AGENCY, agencyOf, CROSS_SOURCE_KINDS, rankOfSource, sourceZhOf, isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, ensureAlertChannel, broadcastHistoryCleared, createWsClient, store, HISTORY_MAX, PREFECTURES, prefLabelOf, PREF_EN, SCALE_OPTIONS, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, DEFAULT_CFG, STORAGE_KEY, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, setWorldCountries, worldCountriesOf, countryPackOf, loadCountryCities, resetWorldCities, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, p2pTimeToIso, cnTimeToIso, CN_TIME_RE, CN_REPORT_MAG_OPTIONS, LANGUAGE_OPTIONS, issuedToDate, formatIssuedLocal, audioState, SOURCE_CONTRACTS, parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of, failResult, noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, P2P_TIME_RE, MIGRATED_KEY };
+  parse, parseQuake, parseEew, parseTsunami, parseJma, parseEmsc, parseUsgsFeature, parseUsgsFeed, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage, feedStatsOf, watchlessPoint, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn: maxLevelIn, jmaItemsOf: itemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf, matchAlert, matchPointAlert, distanceKm, validGeo, normalizePlaces, soundKindOf, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, handleRaw, handleCancelled, handleAlert, updateWeatherHint, hitSeverityOf, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY, cnProductName, authorityOf, disclaimerOf, weatherActionHintOf, SOURCE_ORDER, sourceLabelOf, SOURCE_CODE_TEXT, SettingsPanel, statusMetaOf, buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION, inQuietHours, placeOriginOf, PLACE_ORIGINS, geoOfHypo, sourceIdOf, crossSourceCopyOf, noteAuthoritySuppressed, authorityStatsOf, SOURCE_RANK, SOURCE_ZH, SOURCE_AGENCY, agencyOf, CROSS_SOURCE_KINDS, rankOfSource, sourceZhOf, isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, ensureAlertChannel, broadcastHistoryCleared, createWsClient, store, HISTORY_MAX, PREFECTURES, prefLabelOf, PREF_EN, PREF_HANT, SCALE_OPTIONS, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, DEFAULT_CFG, STORAGE_KEY, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, setWorldCountries, worldCountriesOf, countryPackOf, loadCountryCities, resetWorldCities, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, p2pTimeToIso, cnTimeToIso, CN_TIME_RE, CN_REPORT_MAG_OPTIONS, LANGUAGE_OPTIONS, issuedToDate, formatIssuedLocal, audioState, SOURCE_CONTRACTS, parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of, failResult, noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, P2P_TIME_RE, MIGRATED_KEY };
 
 // activeClient 是 12-websocket 的模块级 let：给 12 用的赋值出口（跨模块不能写 imported binding）
 // 由 12-websocket 提供 setter；这里仅保留引用以便阅读

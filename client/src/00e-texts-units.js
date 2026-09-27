@@ -1,7 +1,7 @@
 // ============================================================================
 // dsh-quake-alert · client/src/00e-texts-units.js
 //
-// 作用：量纲类展示文案的三语表——震度、海啸等级、震级档位、关注半径档位。
+// 作用：量纲类展示文案表（各语言并列）——震度、海啸等级、震级档位、关注半径档位。
 // 内容：纯数据对象，不 import 任何模块。
 // 依赖：无。
 //
@@ -43,6 +43,32 @@ const UNITS = {
     'radius.30': '仅本地（约 30 km）',
     'radius.100': '本市及周边（约 100 km，默认）',
     'radius.300': '较大范围（约 300 km）',
+  },
+
+  'zh-TW': {
+    'scale.10': '震度1', 'scale.20': '震度2', 'scale.30': '震度3', 'scale.40': '震度4',
+    'scale.45': '震度5弱', 'scale.46': '震度5弱以上', 'scale.50': '震度5強',
+    'scale.55': '震度6弱', 'scale.60': '震度6強', 'scale.70': '震度7',
+
+    'scaleOpt.10': '震度1 以上', 'scaleOpt.20': '震度2 以上', 'scaleOpt.30': '震度3 以上',
+    'scaleOpt.40': '震度4 以上', 'scaleOpt.45': '震度5弱 以上', 'scaleOpt.50': '震度5強 以上',
+    'scaleOpt.55': '震度6弱 以上', 'scaleOpt.60': '震度6強 以上', 'scaleOpt.70': '震度7',
+
+    'tsunami.Watch': '津波注意報',
+    'tsunami.Warning': '海嘯警報',
+    'tsunami.MajorWarning': '大海嘯警報',
+
+    'tsunamiOpt.Watch': '注意報以上',
+    'tsunamiOpt.Warning': '警報以上',
+    'tsunamiOpt.MajorWarning': '僅大海嘯警報',
+
+    'magOpt.3': 'M3.0 以上', 'magOpt.3.5': 'M3.5 以上', 'magOpt.4': 'M4.0 以上',
+    'magOpt.4.5': 'M4.5 以上（預設）', 'magOpt.5': 'M5.0 以上', 'magOpt.5.5': 'M5.5 以上',
+    'magOpt.6': 'M6.0 以上', 'magOpt.6.5': 'M6.5 以上', 'magOpt.7': 'M7.0 以上',
+
+    'radius.30': '僅本地（約 30 km）',
+    'radius.100': '本市及周邊（約 100 km，預設）',
+    'radius.300': '較大範圍（約 300 km）',
   },
 
   ja: {

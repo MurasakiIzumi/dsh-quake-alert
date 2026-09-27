@@ -4,7 +4,7 @@
 // 作用：P2PQuake WebSocket 连接管理。
 // 内容：连接/断开状态机、指数退避重连（1s→60s 封顶）、数据源切换（正式/沙箱）、
 //       建连超时看门狗、「久无数据」的半开连接检测（主动重连）、消息转交主链。
-// 依赖：01-constants、02-storage（读数据源）、11-pipeline（handleRaw）。
+// 依赖：00-i18n（默认的连接说明文案）、01-constants、02-storage（读数据源）、11-pipeline（handleRaw）。
 // 背景：P2PQuake 约每 10 分钟强制断线，重连是常态路径而非异常。
 // ============================================================================
 
@@ -12,6 +12,7 @@ import { WS_URL, SANDBOX_URL, RECONNECT_BASE, RECONNECT_MAX } from './01-constan
 import { currentCfg } from './03-settings-bridge.js'
 import { publishStatus } from './05g-source-health.js'
 import { handleRaw } from './11-pipeline.js'
+import { t } from './00-i18n.js'
 
 /**
  * 建连看门狗（0.3.3）：浏览器在"连不上又不断开"的半开状态下不会给任何事件——既没有 onopen
@@ -47,9 +48,11 @@ function createWsClient(opts) {
   const staleCheckMs = o.staleCheckMs === undefined ? STALE_CHECK_MS : o.staleCheckMs
   const connectTimeoutMs = o.connectTimeoutMs === undefined ? CONNECT_TIMEOUT_MS : o.connectTimeoutMs
   const urlOf = o.urlOf || (() => (currentCfg().source === 'sandbox' ? SANDBOX_URL : WS_URL))
+  // 默认连接说明**在调用时取词**（0.9.3）：写死在模块里的中文会让英文 / 繁体界面在「来源状态」
+  // 与侧边栏悬停提示里露出一整句中文。取词放在函数体里，切语言后由 recomputeStatus 重算。
   const openDetailOf = o.openDetail || ((url) => (url.indexOf('sandbox') !== -1
-    ? '沙箱源：回放 2023 年历史（约30秒/条）'
-    : '已连接 P2PQuake（约每 10 分钟自动重连）'))
+    ? t('source.p2pSandbox')
+    : t('source.p2pConnected')))
   const onRaw = o.onRaw || ((raw, cfg) => handleRaw(raw, cfg))
   // 上报经 publishStatus 合成（0.5.4）：本层只知道**连接**状态，而展示状态还要叠加
   // 数据健康（蓝点）与停更。此前直接 pushSource，于是"一次常态断线"（P2PQuake 约每 10 分钟

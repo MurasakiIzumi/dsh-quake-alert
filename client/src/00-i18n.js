@@ -6,7 +6,7 @@
 // 依赖：各 `00x-texts-*.js` 面文件（纯数据，不 import 任何模块）。
 //
 // 设计要点（DESIGN 11.9 / 11.10 的定稿）：
-//   · **值域是插件自己的 BCP 47 清单**（zh-CN / ja / en），不对齐宿主的 zh/en——
+//   · **值域是插件自己的 BCP 47 清单**（zh-CN / zh-TW / ja / en），不对齐宿主的 zh/en——
 //     宿主那份是界面语言包清单，且 zh 分不出简繁。Host 只校验 BCP 47 形状，白名单在这里。
 //   · **加一种语言 = 这里加一项 + 补一份文案表**。每份面文件都必须覆盖 LANGS 的全部语言，
 //     漏一份、漏一条 key 都会在**模块加载期**抛错（响亮的失败，而不是静默回退成中文）。
@@ -26,11 +26,21 @@ import { UNITS } from './00e-texts-units.js'
 
 // ---------- 语言清单（顺序即设置页下拉顺序） ----------
 /** 支持的语言，BCP 47 完整标识。加语言只改这一行 + 补一份表。 */
-const LANGS = ['zh-CN', 'ja', 'en']
+const LANGS = ['zh-CN', 'zh-TW', 'ja', 'en']
 /** 默认语言。也是「配置里的值认不出」时的回退终点。 */
 const DEFAULT_LANGUAGE = 'zh-CN'
 /** 语言显示名：按**该语言自己**的写法（语言选择器不该出现"看不懂自己语言名"的情况）。 */
-const LANGUAGE_LABELS = { 'zh-CN': '简体中文', ja: '日本語', en: 'English' }
+const LANGUAGE_LABELS = { 'zh-CN': '简体中文', 'zh-TW': '繁體中文', ja: '日本語', en: 'English' }
+
+/**
+ * 繁体侧的**地区**子标签（小写比较）。脚本子标签 `hant` / `hans` 在 resolveLang 里单独处理，
+ * 且**优先于地区**——理由见那里的注释。
+ *
+ * 为什么要单独一张：中文的"地区变体"不能像 `ja-JP` 那样按主语言匹配——`zh-HK` / `zh-TW` 的
+ * 用户要的是**繁体**，而按主语言匹配只会落到清单里第一个 `zh-*`（`zh-CN`）。
+ * 那正是"加了繁体却仍然给简体"的静默失败：界面上看不出任何异常，用户只会觉得选错了。
+ */
+const HANT_REGIONS = ['tw', 'hk', 'mo']
 
 // ---------- 文案表汇总 ----------
 /** 全部面文件。新增一个面（如设置页）时加进来即可。 */
@@ -86,8 +96,9 @@ let currentLang = DEFAULT_LANGUAGE
 
 /**
  * 把任意值解析成清单里的语言（BCP 47 惯例的逐级回退）：
- *   精确匹配（大小写不敏感） → 主语言匹配（`zh-HK` → `zh` → `zh-CN`；`ja-JP` → `ja`） → 默认语言。
- * 逐级回退的意义：`zh-HK` / `zh-TW` 的用户拿到简体中文，而不是掉到英文去。
+ *   精确匹配（大小写不敏感） → 中文按**脚本 / 地区**分流（`zh-TW` / `zh-HK` / `zh-Hant` → `zh-TW`；
+ *   `zh` / `zh-CN` / `zh-SG` / `zh-Hans` → `zh-CN`） → 其它主语言匹配（`ja-JP` → `ja`） → 默认语言。
+ * 逐级回退的意义：`zh-HK` 的用户拿到繁体、`ja-JP` 的用户拿到日文，而不是双双掉到默认语言（简体）去。
  */
 function resolveLang(value) {
   const raw = String(value === undefined || value === null ? '' : value).trim()
@@ -95,8 +106,19 @@ function resolveLang(value) {
   const lower = raw.toLowerCase()
   const exact = LANGS.find((l) => l.toLowerCase() === lower)
   if (exact) return exact
-  const base = lower.split('-')[0]
-  const byBase = LANGS.find((l) => l.split('-')[0].toLowerCase() === base)
+  const parts = lower.split('-')
+  // 中文这一支必须先看脚本与地区子标签，再看主语言：清单里有两个 `zh-*`，而主语言匹配只会
+  // 取到第一个（`zh-CN`），繁体用户于是永远拿不到繁体（见 HANT_REGIONS 的说明）。
+  // **脚本优先于地区**（BCP 47）：`zh-Hans-HK` 是"简体字形 + 香港地区"，字形由脚本决定，
+  // 判成繁体是错的（Windows 的「中文(简体, 中国香港特别行政区)」正是这一串）；反过来
+  // `zh-Hant-CN` / `zh-CN-Hant` 也按脚本判成繁体。
+  if (parts[0] === 'zh') {
+    const subs = parts.slice(1)
+    if (subs.indexOf('hant') !== -1) return 'zh-TW'
+    if (subs.indexOf('hans') !== -1) return 'zh-CN'
+    return subs.some((p) => HANT_REGIONS.indexOf(p) !== -1) ? 'zh-TW' : 'zh-CN'
+  }
+  const byBase = LANGS.find((l) => l.split('-')[0].toLowerCase() === parts[0])
   return byBase || DEFAULT_LANGUAGE
 }
 
@@ -129,7 +151,7 @@ function t(key, params) {
   return s
 }
 
-/** 某语言的整张表（回归用：校验三语 key 集合一致、zh-CN 与旧字面量一致）。 */
+/** 某语言的整张表（回归用：校验各语言 key 集合一致、zh-CN 与旧字面量一致）。 */
 function tableOf(lang) {
   return TABLES[resolveLang(lang)] || TABLES[DEFAULT_LANGUAGE]
 }

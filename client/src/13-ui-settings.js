@@ -919,7 +919,7 @@ function SettingsPanel(props) {
     (v) => setCfg((c) => ({ ...c, disasters: { ...c.disasters, [key]: v } })), text)
   const thSelect = (key, options, asNumber, label) => s.select(cfg.thresholds[key], options,
     (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, [key]: asNumber ? Number(v) : v } })),
-    // 选项文字是 `labelKey`（值的档位表在 01-constants，文字在三语表）：**渲染时取词**，
+    // 选项文字是 `labelKey`（值的档位表在 01-constants，文字在文案表）：**渲染时取词**，
     // 所以切语言后下拉里的话立刻跟着换。
     (o) => t(o.labelKey), label)
   /** 分组的标题行：一个开关管这一组的若干行（共享关系写在标题里，别让人以为漏了开关）。 */
@@ -1082,13 +1082,13 @@ function SettingsPanel(props) {
    * 界面语言（0.8.1 立选项，0.9.0 落地本地化）。
    *
    * 0.9.0 起 zh-CN / ja / en 各有完整文案表（00a / 00b / 00c / 00e 面文件合并而来），
-   * 选中即由 15-entry 写进配置并调 setLanguage —— 界面**当场**跟着换。
+   * 0.9.3 加上 zh-TW；选中即由 15-entry 写进配置并调 setLanguage —— 界面**当场**跟着换。
    * 所以这里不再需要"目前只有简体中文"那种解释性说明（11.10 规则 1：界面不解释自己），
    * 也不该再用文字解释"这个控件是干什么的"。
    */
   const sectionLanguage = () => s.section(t('settings.section.language'),
-    // `flex: 1`：这一行只有标签与一个短下拉（"简体中文"），不撑满的话右半边空着、
-    // 加上箭头的位置，观感就像"控件没对齐"。撑满后箭头正好落在行右边缘。
+    // `flex: 1`：这一行只有标签与一个短下拉（"简体中文" / "繁體中文"），不撑满的话右半边
+    // 空着、加上箭头的位置，观感就像"控件没对齐"。撑满后箭头正好落在行右边缘。
     s.row(s.label(t('settings.language.label')), s.select(cfg.language, LANGUAGE_OPTIONS,
       (v) => setCfg((c) => ({ ...c, language: v })), (o) => o.label, t('settings.language.label'), { flex: 1 })),
   )

@@ -125,6 +125,22 @@ const textsOfTree = (tree) => {
 }
 const { EEW_AREA_EXPECT, TSUNAMI_AREA_EXPECT } = require('./area-tables.cjs')
 
+// ---- 简体专有字表（0.9.3 review）----
+/**
+ * 「漏翻的简体字形」判据用的**手写冻结**字表：只收 zh-CN 文案里真实出现过的简体专有字
+ * （zh-CN 表共 549 个汉字，这里是其中的简体专有部分）。它不随四张表变化，因此"把繁体值
+ * 本身改成简体"这种改法也照得出来。
+ *
+ * 为什么不"从各语言表派生"：派生集合会被被改坏的那一栏**自己**污染（自指）——实测把
+ * `settings.tab.history` 的 `紀錄` 抄成 `履历`、`settings.status.open` 的 `已連線` 抄成
+ * `已连接`，派生判据一条都报不出来（这两处正是 0.9.1 拓出过的形态）。
+ *
+ * 取舍：宁可保守（漏检某个偏门简体字），也不要误报——简繁同形且繁体里合法的
+ * `只` / `里` / `台` / `制` / `准`（准许义）**故意不收**。
+ */
+const CN_ONLY_CHARS = '灾预陆报紧欧国质调啸网气环与变仅请发为废关难离确认区远连实时闭动历条设选择询级迟长从盖范围无链数据过异这个浏览储录风态败标弃详响应绝结页断开帧试纬经径复会并获后义划载辖别县输键词还话积销来终补尔滨万镇东类阈测观编么两换门槛单独险电则几蓝进铃弹扰红构宁证冻雾属于虽种处达权许统语优强坏抢络备际声听锁静诊联况馈击场贴责转厅暂触车样说导读号满错边较准内当参称点机轮状黄温额钟细'
+const CN_ONLY_RE = new RegExp('[' + CN_ONLY_CHARS + ']')
+
 // ---- 断言工具 ----
 let pass = 0
 let fail = 0
@@ -4438,7 +4454,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.DEFAULT_PLACE_RADIUS_KM === 100, '新建关注点的默认半径是 100km（DESIGN 9.2）')
     assert(t.RADIUS_PRESETS.length === 3 && t.RADIUS_PRESETS.some((o) => o.v === 100),
       '三档语义预设，含默认档')
-    // 档位表只保留 `labelKey`、文字在三语表里（下拉渲染时取词，见 0.9.0 的本地化），
+    // 档位表只保留 `labelKey`、文字在文案表里（下拉渲染时取词，见 0.9.0 的本地化），
     // 所以这条断言查的是**取出来的文案**：每个档位都得有一句话，而且括注了公里数。
     assert(t.RADIUS_PRESETS.every((o) => typeof o.labelKey === 'string' && t.t(o.labelKey).indexOf('km') !== -1),
       '预设用语义标签 + 括注公里数（普通用户不必理解"公里"）')
@@ -6817,20 +6833,27 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const t9 = loadClient().__test
       assert(t9.DEFAULT_CFG.language === 'zh-CN', '默认界面语言是简体中文')
       assert(t9.LANGUAGE_OPTIONS.some((o) => o.v === 'zh-CN'),
-        '清单里有简体中文（0.9.0 起还有 日本語 / English）')
+        '清单里有简体中文（0.9.0 起还有 日本語 / English，0.9.3 起还有繁體中文）')
+      assert(t9.LANGUAGE_OPTIONS.some((o) => o.v === 'zh-TW'),
+        '清单里有繁体中文（0.9.3）：' + t9.LANGUAGE_OPTIONS.map((o) => o.v + '=' + o.label).join(' / '))
       // 「不在清单里的语言码」**从清单派生**，不手抄一个具体值：0.8.2 这里写的是 'ja'
-      // （当时唯一语言是 zh-CN），而 0.9.0 把 ja 加进清单之后，那个样本就变成了"清单内的值"，
-      // 断言随之变红——负样本写死就是这个后果（DESIGN 11.6：负向词表要从白名单派生）。
-      const notInList = ['pt-BR', 'ko', 'zh-TW', 'de', 'fr'].find((v) => t9.LANGS.indexOf(v) === -1)
+      // （当时唯一语言是 zh-CN），0.9.0 把 ja 加进清单、0.9.3 又把 zh-TW 加进来之后，
+      // 样本列表里那些值就变成了"清单内的值"并被自动跳过（这正是派生写法的价值：
+      // 加语言时不需要回来改负样本，改错的余地也就没有了）。
+      // 样本里不能放 `zh-HK` 这类**会被回退链收编**的值：它在白名单外，但 0.9.3 的繁简分流
+      // 会把它解析成 zh-TW，"白名单外回默认"这条断言就不再成立（那不是缺陷，是回退链的本职）。
+      const notInList = ['pt-BR', 'ko', 'de', 'fr'].find((v) => t9.LANGS.indexOf(v) === -1)
       assert(Boolean(notInList), '（前置）找一个不在语言清单里的合法 BCP 47 值：' + notInList)
-      assert(t9.normalizeCfg({ language: notInList }).language === 'zh-CN',
+      // 前置失败时下面几条会退化成"拿 undefined 去测"并**空过**（`language: undefined` 归一后
+      // 恰好就是默认值），所以带上前置条件一起断言——前置一红，这几条跟着红（0.9.3 review）。
+      assert(Boolean(notInList) && t9.normalizeCfg({ language: notInList }).language === 'zh-CN',
         '白名单外的语言码回默认值——手改配置写一个还没有语言包的代码不该被放行（否则界面会进入半本地化状态）：' + notInList)
       assert(t9.normalizeCfg({ language: 'zh-CN' }).language === 'zh-CN', '白名单内的原样保留')
       const mod9 = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
       const parsed9 = unwrapRefs(mod9.QuakeAlertSettingsSchema({ language: 'zh-CN' }))
       assert(parsed9.language === 'zh-CN', 'Host schema 认这个字段（未声明的键会被归一掉）')
       // Host 与 Client 的分工（0.8.2 修正）：Host 只校验 BCP 47 **形状**，白名单在 Client。
-      // 理由是本插件要做十几套文案（含简繁分开的 zh-CN / zh-TW）——Host 枚举会让"加一种语言"
+      // 理由是本插件的中文要分简繁（zh-CN / zh-TW 各一套文案）——Host 枚举会让"加一种语言"
       // 变成一次跨半边的契约改动（改 schema 要重启，旧 Host 还读不了新值）。
       const acceptsUnknown = unwrapRefs(mod9.QuakeAlertSettingsSchema({ language: notInList }))
       assert(acceptsUnknown.language === notInList,
@@ -6841,8 +6864,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       try { mod9.QuakeAlertSettingsSchema({ language: 42 }) } catch (e) { rejectedShape2 = true }
       assert(rejectedShape && rejectedShape2,
         'Host schema 仍拦住形状不合法的值（"日本語"、数字 42）——放松的是枚举，不是类型')
+      // 0.9.3：Host 允许首尾空白。Client 的 resolveLang 会 trim，而不透容的 Host 会让**整段**
+      // section 被 wire 校验拒掉（snap.status 停在 loading，插件静默退回 localStorage 路径，
+      // 用户看到的是"改了没反应"）——手写 settings.yaml 留一个行尾空格就能触发。
+      const blankAccepted = unwrapRefs(mod9.QuakeAlertSettingsSchema({ language: ' zh-TW ' }))
+      assert(blankAccepted.language === ' zh-TW ' && t9.normalizeCfg({ language: blankAccepted.language }).language === 'zh-TW',
+        'Host 接受带首尾空白的语言码，Client 把它归一成 zh-TW（两侧分工：形状 vs 值域）')
       // 两侧分工合起来的效果：Host 收下清单外的值，Client 认不出 → 回默认，界面不会半本地化
-      assert(t9.normalizeCfg(t9.sectionToCfg({ language: notInList })).language === 'zh-CN',
+      assert(Boolean(notInList) && t9.normalizeCfg(t9.sectionToCfg({ language: notInList })).language === 'zh-CN',
         'Host 收下的未知语言到 Client 会被归一成默认（界面仍是完整的一种语言，不会半本地化）：' + notInList)
       // 加语言时最容易犯的错：往 LANGUAGE_OPTIONS 里写一个 Host 收不了的值（下划线、中文名、
       // 或者干脆漏了地区码）。这条断言把"清单"与"Host 能收下的形状"绑在一起。
@@ -6854,32 +6883,52 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         t9.LANGUAGE_OPTIONS.map((o) => o.v).join(', '))
       assert(t9.LANGUAGE_OPTIONS.every((o) => typeof o.label === 'string' && o.label.length > 0),
         '每个选项都带 label（下拉里显示的名字，惯例是用该语言自己的写法：日本語 / 한국어）')
+      // 0.9.3 review：上面那条只查"非空字符串"，于是把简繁两个显示名互换也能全绿；而 ⑬ 的渲染
+      // 冒烟又把语言名从"漏翻"扫描里排除，形成双重盲区。这里把**内容与顺序整体钉住**——下拉的
+      // 顺序是外观契约（0.8.1 起"语言清单顺序即下拉顺序"），加语言时这条要跟着改是刻意的。
+      assert(JSON.stringify(t9.LANGUAGE_OPTIONS) === JSON.stringify([
+        { v: 'zh-CN', label: '简体中文' }, { v: 'zh-TW', label: '繁體中文' },
+        { v: 'ja', label: '日本語' }, { v: 'en', label: 'English' },
+      ]), '语言下拉的选项、显示名与顺序整体钉住：' + JSON.stringify(t9.LANGUAGE_OPTIONS))
       const snap9 = loadClient().__test.buildDiagSnapshot()
       assert(snap9.config.language === 'zh-CN',
         '诊断快照里带界面语言（0.9.0 排查"界面没跟着切"时第一个要核的字段）')
     }
 
     // ⑩ 0.9.0：本地化（文案表 / BCP 47 回退链 / 默认语言下逐字不变）
-    //    本地化"没坏"有三个可验的形态：三语表齐、切语言当场生效、**默认语言下与本地化
+    //    本地化"没坏"有三个可验的形态：各语言表齐、切语言当场生效、**默认语言下与本地化
     //    之前逐字一致**。第三条是关键：0.9.0 只是把既有字符串搬进表里，不是趁机改文案
     //    ——真要改文案得单独走 11.10 那条"改文案必须同步断言"的门。所以下面把当年立下的
     //    中文原文直接写进断言里（它们同时是 0.8.2 那些安全文案的锚点）。
     {
       const t10 = loadClient().__test
-      assert(t10.LANGS.length === 3 && t10.LANGS.indexOf('zh-CN') === 0,
-        '语言清单（顺序即下拉顺序）：' + t10.LANGS.join(' / '))
+      // 长度**从清单派生**（不写死 4）：同文件 ⑨ 已经立过"不再写'只有一项'（那种断言一加语言
+      // 就红）"的约定，这里对齐它——要守的是"每项都有显示名、简繁排在最前"，不是"恰好四种"。
+      // 选项的内容与顺序由 ⑨ 的整体钉住那条守。
+      assert(t10.LANGS.length === Object.keys(t10.LANGUAGE_LABELS).length &&
+        t10.LANGS.indexOf('zh-CN') === 0 && t10.LANGS.indexOf('zh-TW') === 1,
+        '语言清单：每项都有显示名、简繁排在最前（顺序即下拉顺序）：' + t10.LANGS.join(' / '))
       const keysOf = (lang) => Object.keys(t10.tableOf(lang)).sort()
       const baseKeys = keysOf('zh-CN')
       assert(baseKeys.length > 20, 'zh-CN 文案表有 ' + baseKeys.length + ' 条')
-      for (const lang of t10.LANGS) {
+      // 从 LANGS[1] 起：拿 zh-CN 自己与自己比是恒真的，会让"跑了几种语言"的数字虚高一条。
+      for (const lang of t10.LANGS.slice(1)) {
         const cur = keysOf(lang)
         const missing = baseKeys.filter((k) => cur.indexOf(k) === -1)
         assert(cur.length === baseKeys.length && missing.length === 0,
           lang + ' 与 zh-CN 的 key 集合一致（缺：[' + missing.join(', ') + ']）')
       }
-      // 「翻过」而不是「把中文抄了三份」：同一个 key 在三种语言下不能两两相同。
+      // 「翻过」而不是「把中文抄了四份」：同一个 key 在四种语言下不能两两相同。
       assert(new Set(t10.LANGS.map((l) => t10.tableOf(l)['app.name'])).size === t10.LANGS.length,
-        'app.name 在三种语言下互不相同：' + t10.LANGS.map((l) => t10.tableOf(l)['app.name']).join(' / '))
+        'app.name 在四种语言下互不相同：' + t10.LANGS.map((l) => t10.tableOf(l)['app.name']).join(' / '))
+      // 繁体表整栏不得含简体专有字形（0.9.3 review）：覆盖**全部 408 条**、不依赖渲染路径
+      // （渲染冒烟只跑到被 seed 命中的那些键）。判据是文件顶部那份冻结字表——它不随表变化，
+      // 所以"把繁体值本身改成简体"也照得出来（派生判据在这里会失明）。
+      // 只查 zh-TW：日文与简体共用大量同形汉字（国 / 体 / 台…），那份字表对 ja 不适用。
+      const cnOnlyHits = Object.keys(t10.tableOf('zh-TW')).filter((k) => CN_ONLY_RE.test(t10.tableOf('zh-TW')[k]))
+      assert(cnOnlyHits.length === 0,
+        '繁体表里没有简体专有字形（' + CN_ONLY_CHARS.length + ' 字判据）：' +
+        cnOnlyHits.slice(0, 5).map((k) => k + '=' + t10.tableOf('zh-TW')[k]).join(' / '))
 
       // ---- 默认语言（zh-CN）下与本地化之前逐字一致 ----
       assert(t10.alertTitleOf(null) === '灾害预警', '默认语言：无事件时的通知标题')
@@ -6911,10 +6960,34 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(t10.setLanguage('ja') === 'ja' && t10.alertTitleOf(null) === '災害警報', '切到日文后标题跟着换')
       assert(t10.weatherActionHintOf({ locator: 'area' }) === '現地の気象台が発表する防災情報をご確認ください',
         '切到日文后行动提示跟着换')
+      assert(t10.setLanguage('zh-TW') === 'zh-TW' && t10.alertTitleOf(null) === '災害預警', '切到繁体后标题跟着换')
+      assert(t10.weatherActionHintOf({ locator: 'area' }) === '請關注當地氣象台發布的防禦指引',
+        '切到繁体后行动提示跟着换（繁体是独立的一套文案，不是简体的字形替换）')
+      assert(t10.disclaimerOf({ source: 'usgs' }) === '僅供參考，請以美國地質調查局（USGS）的官方發布為準',
+        '切到繁体后免责行跟着换（机构名一并换）')
+      // 安全分级在繁体下也要守住（0.9.3 review）：此前只对 zh-CN 与 en 钉了带「（警报）」的标题，
+      // 把繁体栏的 `product.jpEew` 去掉「（警報）」整套断言仍然全绿——而那正是 0.8.2 从文案瘦身里
+      // 改回来的一处安全分级。`alertTitleOf` / 产品名 / 行动提示各补一条繁体实值。
+      assert(t10.alertTitleOf({ kind: 'eew', source: 'p2pquake' }) === '⚠ 緊急地震速報（警報）',
+        '繁体：EEW 标题带「（警報）」：' + t10.alertTitleOf({ kind: 'eew', source: 'p2pquake' }))
+      assert(t10.cnProductName({ source: 'cenc_eew' }) === '大陸地震預警',
+        '繁体：大陆源的产品名：' + t10.cnProductName({ source: 'cenc_eew' }))
+      assert(t10.weatherActionHintOf({ locator: 'overseas' }) === '請關注當地官方發布的避難與撤離指引',
+        '繁体：海外气象的行动提示含「撤離」：' + t10.weatherActionHintOf({ locator: 'overseas' }))
 
       // ---- BCP 47 回退链：地区变体落到同一语言，认不出的主语言落到默认语言 ----
+      //      0.9.3 的关键一条是**中文不能按主语言匹配**：清单里有两个 `zh-*`，按主语言匹配
+      //      只会取到第一个（zh-CN），繁体用户于是永远拿不到繁体。所以下面把繁体区与繁体脚本
+      //      的写法都列上，它们必须全部落到 zh-TW。
+      //      样本要挑**真正经过繁简分流那一支**的写法：`ZH-tw` 走的是大小写不敏感的精确匹配，
+      //      改坏分流分支它不会红（0.9.3 review 发现的样本错位），所以换成 `zh-Hant-TW`。
       const rb = [
-        ['zh-CN', 'zh-CN'], ['zh-HK', 'zh-CN'], ['zh-TW', 'zh-CN'], ['zh', 'zh-CN'],
+        ['zh-CN', 'zh-CN'], ['zh-TW', 'zh-TW'], ['zh-Hant-TW', 'zh-TW'],
+        ['zh-HK', 'zh-TW'], ['zh-MO', 'zh-TW'], ['zh-Hant', 'zh-TW'], ['zh-Hant-HK', 'zh-TW'],
+        ['zh', 'zh-CN'], ['zh-Hans', 'zh-CN'], ['zh-SG', 'zh-CN'],
+        // 脚本子标签优先于地区（BCP 47）：`zh-Hans-HK` 是"简体字形 + 香港地区"，判成繁体是错的；
+        // 反过来 `zh-Hant-CN` 也按脚本判成繁体。只看"有没有 hk"就会把前两者搞反。
+        ['zh-Hans-HK', 'zh-CN'], ['zh-Hant-CN', 'zh-TW'],
         ['ja', 'ja'], ['ja-JP', 'ja'], ['JA-jp', 'ja'],
         ['en', 'en'], ['en-US', 'en'],
         ['pt-BR', 'zh-CN'], ['', 'zh-CN'], [null, 'zh-CN'], ['日本語', 'zh-CN'],
@@ -6923,8 +6996,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         const got = t10.resolveLang(input)
         assert(got === want, 'resolveLang(' + JSON.stringify(input) + ') → ' + want + '（实际 ' + got + '）')
       }
-      assert(rb.every(([input]) => t10.LANGS.indexOf(t10.resolveLang(input)) !== -1),
-        '回退结果永远是清单里的一种语言（界面不会停在半本地化的中间态）')
+      // 结果必须有一张完整的表：只查"在 LANGS 里"是近似恒真的（resolveLang 每条 return 都取自
+      // 清单成员或字面量），查 LANGUAGE_LABELS 才真的把"清单与显示名两张表同步"绑在一起。
+      assert(rb.every(([input]) => Object.prototype.hasOwnProperty.call(t10.LANGUAGE_LABELS, t10.resolveLang(input))),
+        '回退结果永远是清单里的一种语言、且有显示名（界面不会停在半本地化的中间态）')
       // 缺 key 回显 key 本身：宁可界面上出现一个明显的占位符，也不要空白或悄悄退回中文。
       assert(t10.t('no.such.key') === 'no.such.key', '缺 key 时回显 key 本身')
       assert(t10.t('disclaimer.named', { authority: 'X' }).indexOf('X') !== -1, 't() 会替换 {name} 插值')
@@ -6953,6 +7028,15 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       // ---- 往返 ----
       const round = t11.parseConfigImport(text)
       assert(round.ok, '导出的文件能被自己读回来（往返成立）')
+      // `language` 的往返此前用的是默认配置（实测 zh-CN），繁体值的往返没有断言（0.9.3 review）。
+      {
+        const twCfg = t11.normalizeCfg(Object.assign({}, t11.currentCfg(), { language: 'zh-TW' }))
+        const twRound = t11.parseConfigImport(t11.buildConfigExport(twCfg))
+        assert(twRound.ok && twRound.cfg.language === 'zh-TW',
+          'language=zh-TW 在导出 → 导入里原样保留：' + (twRound.ok ? twRound.cfg.language : twRound.error))
+        assert(JSON.stringify(twCfg.language) === JSON.stringify(t11.normalizeCfg({ language: 'zh-TW' }).language),
+          'normalizeCfg 对 zh-TW 幂等（不会被回退链改写）')
+      }
       assert(JSON.stringify(round.cfg) === JSON.stringify(t11.normalizeCfg(ioParsed.config)),
         '往返后配置等价（两边都过 normalizeCfg）')
 
@@ -7020,10 +7104,13 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     {
       const t12 = loadClient().__test
 
-      // ---- 县名随语言（0.9.0 的 A 类：prefLabelOf 写好了却没被设置页用上）----
-      const wantPref = { 'zh-CN': '东京', ja: '東京都', en: 'Tokyo' }
+      // ---- 县名随语言（0.9.0 的 A 类：prefLabelOf 写好了却没被设置页用上；0.9.3 加繁体分支）----
+      const wantPref = { 'zh-CN': '东京', 'zh-TW': '東京', ja: '東京都', en: 'Tokyo' }
       for (const lang of t12.LANGS) {
         t12.setLanguage(lang)
+        // 期望表是人写的，加了语言它就有洞：先断言它有这一项，否则失败信息会变成
+        // "= undefined（实际 東京）"，指向不明（0.9.3 review）。
+        assert(Object.prototype.hasOwnProperty.call(wantPref, lang), '期望表 wantPref 覆盖了 ' + lang)
         assert(t12.prefLabelOf('東京都') === wantPref[lang],
           lang + ' 下 prefLabelOf(東京都) = ' + wantPref[lang] + '（实际 ' + t12.prefLabelOf('東京都') + '）')
       }
@@ -7031,9 +7118,42 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(t12.prefLabelOf('不存在县') === '不存在县', 'prefLabelOf 认不出时原样返回（不显示空白）')
       assert(t12.prefLabelOf('') === '', 'prefLabelOf 对空值返回空串')
       const jpList = t12.PREFECTURES.map((p) => p.jp)
+      const zhOf = (jp) => (t12.PREFECTURES.find((p) => p.jp === jp) || {}).zh
+      // 最老的那一栏（简体名）此前没有任何完整性断言：把某个县的简体名清空，1725 条全绿，
+      // 而简体界面直接在关注列表里显示空串（0.9.1 拓出过的 A 类形态）。三栏一起守。
+      assert(jpList.every((jp) => typeof zhOf(jp) === 'string' && zhOf(jp)),
+        '47 个都道府县都有简体名（PREFECTURES[].zh）')
       assert(jpList.every((jp) => typeof t12.PREF_EN[jp] === 'string' && t12.PREF_EN[jp]),
         '47 个都道府县都有罗马字（PREF_EN）')
       assert(Object.keys(t12.PREF_EN).length === jpList.length, 'PREF_EN 与 PREFECTURES 一一对应（无缺无多）')
+      assert(jpList.every((jp) => typeof t12.PREF_HANT[jp] === 'string' && t12.PREF_HANT[jp]),
+        '47 个都道府县都有繁体名（PREF_HANT）')
+      assert(Object.keys(t12.PREF_HANT).length === jpList.length,
+        'PREF_HANT 与 PREFECTURES 一一对应（无缺无多）')
+      // 繁体名**不得照抄日文汉字**：只有"日文汉字与繁体不同"的那几个县查得出来，全 47 派生是
+      // 错的——`青森` / `宮城` / `北海道` 这些的日文写法与繁体同形，"等于日文短名"是正确结果。
+      // 差异项恰好是这 5 个（`静岡` / `広島` / `徳島` / `鹿児島` / `沖縄`），所以手写样本 +
+      // 一条下界守卫（防"手写清单被清空后这条退化成没有样本"）。
+      const JP_HANT_DIFF = ['静岡県', '広島県', '徳島県', '鹿児島県', '沖縄県']
+      const jpShort = (jp) => jp.replace(/[都府県]$/, '')
+      assert(JP_HANT_DIFF.length === 5 && JP_HANT_DIFF.every((jp) => jpList.indexOf(jp) !== -1),
+        '（前置）日文汉字与繁体不同的县恰好 5 个，且都在 PREFECTURES 里')
+      const copiedJp = JP_HANT_DIFF.filter((jp) => t12.PREF_HANT[jp] === jpShort(jp))
+      assert(copiedJp.length === 0,
+        '繁体县名不得等于"去掉 都/府/県 的日文原名"（照抄日文汉字 = 没翻）：' +
+        copiedJp.map((jp) => jp + '→' + t12.PREF_HANT[jp]).join(' / '))
+      // 繁体名也不能是空串或简体的逐字抄写：从 47 项**派生**出"繁体与简体不同"的那些（22 个），
+      // 它们都必须真有繁体字形（不能等于日文短名、也不能为空）——手写 5 个样本会漏掉
+      // `東京都` → `東京`、`福島県` → `福島` 这类同样是繁体差异的项。
+      const diffFromZh = jpList.filter((jp) => t12.PREF_HANT[jp] !== zhOf(jp))
+      assert(diffFromZh.length >= 20, '繁体名与简体名有差异的项有 ' + diffFromZh.length + ' 个（下界守卫）')
+      // 这里只查"非空"：**不能**要求它们都不等于日文短名——`東京都` → `東京` 的繁体与日文短名
+      // 本来就同形（日本地名用汉字），真正"用字不同"的只有上面 JP_HANT_DIFF 那 5 个。
+      assert(diffFromZh.every((jp) => t12.PREF_HANT[jp].length > 0),
+        '繁体与简体有差异的每一项都非空（空串会在关注列表里显示成空白）')
+      assert(['静岡県', '広島県', '沖縄県', '鹿児島県', '長野県'].every((jp) => t12.PREF_HANT[jp] !== zhOf(jp)),
+        '繁体县名与简体县名在字形上确有区别：' +
+        ['静岡県', '広島県', '沖縄県', '鹿児島県', '長野県'].map((jp) => jp + '→' + t12.PREF_HANT[jp]).join(' / '))
 
       // ---- t() 不能被原型链键名绕过（0.9.1 修复：改用 hasOwnProperty 取词）----
       assert(t12.t('constructor') === 'constructor', "t('constructor') 回显 key 本身，而不是 Object 构造函数")
@@ -7073,7 +7193,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         'SOURCE_ORDER 里的每个源都有显示名：' + t12.SOURCE_ORDER.map((id) => id + '→' + t12.sourceLabelOf(id)).join(' · '))
     }
 
-    // ⑬ 0.9.1：渲染冒烟——3 语言 × 5 页签，扫【插值残留 / 连续重复 / 漏翻的简体中文】
+    // ⑬ 0.9.1：渲染冒烟——4 语言 × 5 页签，扫【插值残留 / 连续重复 / 漏翻的简体中文】
     //   0.9.0 新增的 70 条断言全是"函数返回值对不对"，而 review 拓出的两条 A 类是"界面拼出来
     //   对不对"（`东京东京（東京都）`、47 个中文县名），整类都没被覆盖。这个检查当初用十几行
     //   临时脚本就拓出了它们，所以固化成断言。
@@ -7093,14 +7213,34 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         if (Array.isArray(node)) { node.forEach((n) => collectTexts(n, out)); return }
         if (node && node.children) collectTexts(node.children, out)
       }
-      // 简体特有的字形（日文用的是另一套：東 / 報 / 発 / 関 / 個 / 時 / 間 …），所以日文界面
-      // 不会命中它。语言自己的显示名（'简体中文' / '日本語' / 'English'）按惯例用各语言的写法，
+      // ---- 「漏翻」判据（0.9.3 review 重做，两轮才定下来）----
+      // 原先是一个**手写的 34 字**正则：实测它结构上覆盖不到 `履历` / `中国大陆` / `已连接` /
+      // `国家 / 地区` / `海啸` / `半径` 这些常见写法，把三条渲染得到的繁体文案整句抄成简体仍然
+      // 全绿。改判据时踩到两个坑，记在这里免得下次再踩：
+      //   · **派生集合会被改坏的那一栏自己污染**：把 zh-TW 的 `紀錄` 改成 `履历` 之后，「历」
+      //     同时出现在"非 zh-CN 语言"里，于是它不再是"简体专有字"——自指，判据失明。
+      //   · **日文与简体共用大量同形汉字**（国 / 体 / 台 / 保…），一份给繁体用的字表拿去查日文
+      //     界面会误报（`中国大陸の地震予警` 里的「国」就被判成漏翻）。
+      // 所以最终是：zh-TW 用**文件顶部那份冻结字表**（不随表变化）+ 整条反查；ja / en 用原先那批
+      // 高置信字（日文里 `报` / `关` / `发` / `时` 这些字形根本不存在，安全）+ 整条反查。
+      const zhCnValues = new Map()
+      for (const [k, v] of Object.entries(t13.tableOf('zh-CN'))) {
+        if (typeof v === 'string' && !/\{[a-zA-Z]\w*\}/.test(v)) zhCnValues.set(v, k)
+      }
+      // 源侧透传的文本（47 个县的日文原名、履历里的日文 label / headline）会含日文汉字，
+      // 它们不是我们生成的文案、不该被判成"漏翻"（日文 `静岡県` 里的「静」是简体专有字）。
+      const SOURCE_TEXTS = [].concat(t13.PREFECTURES.map((p) => p.jp), ['地震情報・各地の震度', '最大震度4'])
+      const isSourceText = (s) => SOURCE_TEXTS.some((x) => s.indexOf(x) !== -1)
+      const HANDPICKED_CN = /[东见报灾发关个时间门问实为这们让还对开动务压页证据线边层简样买卖]/
+      // 语言自己的显示名（'简体中文' / '繁體中文' / '日本語' / 'English'）按惯例用各语言的写法，
       // 不算漏翻，要排除。
-      const SIMPLIFIED_ONLY = /[东见报灾发关个时间门问实为这们让还对开动务压页证据线边层简样买卖]/
       const skipTexts = new Set(t13.LANGS.map((l) => t13.LANGUAGE_LABELS[l]))
+      // 关注地区放**全部 47 个县**（0.9.3 review）：只 seed 两个县时，47 个县名里任何一个
+      // 写坏（清空、抄成简体、抄成日文汉字）都不会进渲染，冒烟就看不见——而"47 个中文县名"
+      // 正是 0.9.1 拓出过 A 类的那条路径。放满之后每个县名都会在 4 种语言下渲染一次。
       const smokeCfg = (lang) => ({
         version: 1, language: lang, source: 'prod', cnTransport: 'auto',
-        watch: { prefectures: ['東京都', '大阪府'], cities: [], places: [{ name: 'SiteA', lat: 35, lon: 139, radiusKm: 100 }] },
+        watch: { prefectures: t13.PREFECTURES.map((p) => p.jp), cities: [], places: [{ name: 'SiteA', lat: 35, lon: 139, radiusKm: 100 }] },
         disasters: { earthquake: true, tsunami: true, weather: true, cnRainstorm: true, cnGeology: true, overseasWeather: true },
         thresholds: { quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch', globalMagnitude: 4.5, cnReportMagnitude: 4.5 },
         notify: { sound: true, system: true, volume: 0.7 }, dedupe: { windowMinutes: 10 },
@@ -7112,9 +7252,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         key: 'smoke-1', id: 'smoke-1', kind: 'quake', label: '地震情報・各地の震度', severity: 'warn',
         issued: '2026-09-26T10:00:00+09:00', headline: '最大震度4', hit: true, pref: '東京都',
       }])
+      // 页签清单提成常量：下面的覆盖次数从它派生，不再手写 20（加语言时数字会自己跟上）。
+      const SMOKE_TABS = ['region', 'disaster', 'notify', 'history', 'misc']
       let rendered = 0
       for (const lang of t13.LANGS) {
-        for (const tab of ['region', 'disaster', 'notify', 'history', 'misc']) {
+        for (const tab of SMOKE_TABS) {
           const react = smokeReact()
           const seed = {}
           seed[t13.STORAGE_KEY] = JSON.stringify(smokeCfg(lang))
@@ -7146,13 +7288,25 @@ console.log('== 机器级持久化：Host settings 桥 ==')
           assert(dup.length === 0, lang + ' / ' + tab + ' 没有重复拼接的文本' +
             (dup.length ? '：' + JSON.stringify(dup[0].slice(0, 50)) : ''))
           if (lang !== 'zh-CN') {
-            const leftover = [...new Set(out.filter((s) => SIMPLIFIED_ONLY.test(s) && !skipTexts.has(s)))]
+            const table = t13.tableOf(lang)
+            // ① 整条照抄 zh-CN 表值（且同 key 在当前语言下另有其文）
+            const copiedWhole = [...new Set(out.filter((s) => {
+              const k = zhCnValues.get(s)
+              return k !== undefined && table[k] !== s
+            }))]
+            assert(copiedWhole.length === 0, lang + ' / ' + tab + ' 没有整条照抄简体表值的文本' +
+              (copiedWhole.length ? '：' + JSON.stringify(copiedWhole[0].slice(0, 40)) : ''))
+            // ② 简体专有字形（zh-TW 用冻结字表；ja / en 用高置信字：日文与简体共形太多，
+            //    那份给繁体用的字表拿去查日文会把「中国」的「国」判成漏翻）
+            const chars = lang === 'zh-TW' ? CN_ONLY_RE : HANDPICKED_CN
+            const leftover = [...new Set(out.filter((s) => chars.test(s) && !skipTexts.has(s) && !isSourceText(s)))]
             assert(leftover.length === 0, lang + ' / ' + tab + ' 没有漏翻的简体中文' +
               (leftover.length ? '：' + leftover.slice(0, 2).map((s) => JSON.stringify(s.slice(0, 40))).join(' ') : ''))
           }
         }
       }
-      assert(rendered === 15, '渲染冒烟覆盖 3 语言 × 5 页签（实际 ' + rendered + ' 次）')
+      assert(rendered === t13.LANGS.length * SMOKE_TABS.length,
+        '渲染冒烟覆盖 ' + t13.LANGS.length + ' 语言 × ' + SMOKE_TABS.length + ' 页签（实际 ' + rendered + ' 次）')
     }
 
     // ⑭ 0.9.1：存储层与 store 通知的守卫
@@ -7193,18 +7347,57 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '带 UTF-8 BOM 的文件能导入')
 
       // ---- 切语言要触发 store 重算 + 通知（0.9.1 修：旧实现 0 次通知、detail 停在旧语言）----
+      //      0.9.3 review：这段只跑 en → zh-CN，**繁体下 store.detail / 状态文字没有任何断言**
+      //      （而 zh-TW 的 '已連線' 被抄成简体时整套 1725 条全绿）。改成按语言循环。
       const exL = loadClient().__test
       let notified = 0
       exL.store.subscribe(() => { notified++ })
       exL.store.pushSource('jma', { status: 'open', retries: 0 })
-      const n0 = notified
-      exL.applyCfg(Object.assign({}, exL.currentCfg(), { language: 'en' }))
-      assert(notified > n0, '切语言会通知 store 订阅者（旧实现 0 次 → 侧边栏状态点不重渲染）')
-      assert(exL.store.detail.indexOf('Connected') !== -1,
-        '切语言后 store.detail 重算成英文：' + exL.store.detail)
+      const wantDetail = {
+        'zh-CN': '已连接', 'zh-TW': '已連線', ja: '接続済み', en: 'Connected',
+      }
+      let switched = 0
+      for (const lang of exL.LANGS) {
+        // 与当前语言相同的迭代不是"切换"（applyCfg 是幂等路径，本来就不该通知），跳过它。
+        if (exL.getLanguage() === lang) continue
+        const n0 = notified
+        exL.applyCfg(Object.assign({}, exL.currentCfg(), { language: lang }))
+        switched++
+        assert(notified > n0, lang + '：切语言会通知 store 订阅者（旧实现 0 次 → 侧边栏状态点不重渲染）')
+        assert(exL.store.detail.indexOf(wantDetail[lang]) !== -1,
+          lang + '：切语言后 store.detail 重算成当前语言（期望含「' + wantDetail[lang] + '」）：' + exL.store.detail)
+      }
+      assert(switched === exL.LANGS.length - 1,
+        '每种"非当前语言"都真跑了一次切换（实际 ' + switched + ' 次 / 语言数 ' + exL.LANGS.length + '）')
       exL.setLanguage('zh-CN')
       exL.store.recomputeStatus()
       assert(exL.store.detail.indexOf('已连接') !== -1, '切回中文后状态文字也回来：' + exL.store.detail)
+
+      // ---- Host 权威配置里的语言必须落到 i18n（0.9.3 修）----
+      // 修的缺陷：`bindSettingsScope` 的 sync() 只更新 runtimeCfg 与 localStorage 镜像、通知订阅者，
+      // 却从不 setLanguage。于是在"另一个浏览器 / 清过 localStorage / 手改过 settings.yaml"这条
+      // 路径上，语言下拉与诊断快照都已是 Host 的值，界面却停在启动镜像解析出的语言，而且**不自愈**
+      // （sync 是"值没变就不重算"的幂等路径）——表现是下拉写「繁體中文」、整页简体中文。
+      {
+        const exH = loadClientEx({})
+        // 自建最小 scope（不依赖别的块里的 fakeScope：它不在本块作用域内，0.9.3 第一版就是这样红的）
+        const scopeH = {
+          getSnapshot: () => ({
+            status: 'ready', value: { language: 'zh-TW' }, user: { language: 'zh-TW' },
+            base: {}, revision: 1, writable: true, mode: 'host',
+          }),
+          subscribe: () => () => {},
+          mutate: () => Promise.resolve(),
+        }
+        exH.exports.__test.bindSettingsScope(scopeH)
+        assert(exH.exports.__test.currentCfg().language === 'zh-TW',
+          'Host 的配置进了内存（前置）：' + exH.exports.__test.currentCfg().language)
+        assert(exH.exports.__test.getLanguage() === 'zh-TW',
+          'Host 里的语言在 bind 后立即生效（此前界面停在镜像语言，且不会自愈）')
+        assert(exH.exports.__test.t('app.name') === '災害預警',
+          'Host 语言选中的文案表就是繁体：' + exH.exports.__test.t('app.name'))
+        assert(exH.exports.__test.prefLabelOf('東京都') === '東京', '派生显示名同样按 Host 语言取词')
+      }
     }
 
     // ⑧ 全球主要城市表（DESIGN 9.4）：数据结构、按国家分包下发、客户端缓存与 UI 入口

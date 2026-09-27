@@ -11,7 +11,7 @@
 // ---------- 依赖 ----------
 import React from 'react'
 import { LANGS, LANGUAGE_LABELS, getLanguage } from './00-i18n.js'
-import { PREF_EN } from './00d-texts-regions.js'
+import { PREF_EN, PREF_HANT } from './00d-texts-regions.js'
 const h = React.createElement
 const { useState, useEffect, useRef } = React
 
@@ -41,7 +41,7 @@ const SCALE_TEXT = {
   60: '震度6强', 70: '震度7',
 }
 // 用户可选的最低震度档位（值 = P2PQuake scale 数值）。
-// 选项的**文字**搬去了 `00e-texts-units.js`（三语），这里只留「值 → 文案 key」：下拉在渲染时
+// 选项的**文字**搬去了 `00e-texts-units.js`（各语言一套），这里只留「值 → 文案 key」：下拉在渲染时
 // 取词，而模块级常量里的文字会在加载那一刻被固化（切语言就不跟着变）。
 const SCALE_OPTIONS = [
   { v: 10, labelKey: 'scaleOpt.10' }, { v: 20, labelKey: 'scaleOpt.20' }, { v: 30, labelKey: 'scaleOpt.30' },
@@ -138,9 +138,9 @@ function normalizePref(raw) {
  * 都道府县的**显示名**（随界面语言变）。
  *
  * `PREFECTURES` 里的 `jp` 是**匹配用的**（P2PQuake 的 `pref` 就是这个形状，`PREF_SET` /
- * `PREF_SHORT` 都从它派生），所以显示不能复用它——`zh` 那一栏只是"中文界面用哪几个字"。
- * 这个函数负责挑出"给人看的那一份"：日文界面用原名，中文界面用中文名，英文界面用罗马字
- * （`PREF_EN`）。三国语言都不缺项时，三种语言下看到的名字是同一份数据的三种写法。
+ * `PREF_SHORT` 都从它派生），所以显示不能复用它——`zh` 那一栏只是"简体界面用哪几个字"。
+ * 这个函数负责挑出"给人看的那一份"：日文界面用原名，简体界面用 `zh`，繁体界面用 `PREF_HANT`，
+ * 英文界面用罗马字（`PREF_EN`）。四种语言都不缺项时，同一条数据在四种语言下各有写法。
  *
  * 认不出的**原样返回**：调用方也会把源里的 `pref` 直接传进来，那里可能是简写或空值，
  * 不该被这里改写（简写归一由 normalizePref 负责，两件事分开）。
@@ -153,6 +153,10 @@ function prefLabelOf(pref) {
   const lang = getLanguage()
   if (lang === 'ja') return hit.jp
   if (lang === 'en') return PREF_EN[hit.jp] || hit.jp
+  // 繁体缺项时回退到**日文原名**，与 en 分支同一形态：回退到 `hit.zh` 会在繁体界面里
+  // 静默显示简体县名（同一条列表里两种字形混杂），而原名是"我们没翻译"的显式形态，
+  // 一眼能看出并被抓进断言（0.9.3；当前 47 项齐全，这条只是防"加了县忘补表"）。
+  if (lang === 'zh-TW') return PREF_HANT[hit.jp] || hit.jp
   return hit.zh
 }
 
@@ -217,7 +221,7 @@ function formatIssuedLocal(raw) {
 // ---------- 界面语言（0.8.1 立契约，0.9.0 由 00-i18n 提供） ----------
 // 选项**从 00-i18n 的语言清单派生**，不在这里另写一份：加一种语言只改 00-i18n 的 LANGS
 // 与 LANGUAGE_LABELS、再补一份文案表，配置契约（DEFAULT_CFG → normalizeCfg → Host schema）
-// 一行都不用动。值用 BCP 47 的完整标识（zh-CN / ja / en），与三语 README 对齐。
+// 一行都不用动。值用 BCP 47 的完整标识（zh-CN / zh-TW / ja / en）。
 const LANGUAGE_OPTIONS = LANGS.map((v) => ({ v, label: LANGUAGE_LABELS[v] }))
 
 const DEFAULT_CFG = {

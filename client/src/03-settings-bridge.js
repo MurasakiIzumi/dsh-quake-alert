@@ -197,6 +197,16 @@ function bindSettingsScope(scope) {
     }
     const next = sectionToCfg(snap.value)
     runtimeCfg = saveCfg(next) // localStorage 保持为镜像：Host 掉线时仍能工作
+    // **语言也必须在这条路径上落地**（0.9.3 修）。Host 是配置的权威源，而 `loadCfg` 读的是
+    // localStorage 镜像：在"另一个浏览器 / 清过 localStorage / 手改过 settings.yaml"这条路径上，
+    // runtimeCfg（语言下拉显示的值）与诊断快照都已经是 Host 的值，界面却仍停在启动时镜像解析出的
+    // 语言——而且**不会自愈**，因为 sync 是"值没变就不重算"的幂等路径。表现是下拉写着「繁體中文」、
+    // 整页还是简体中文，排查时 `config.language` 恰好给出与界面相反的答案。
+    // 与 applyCfg 同一形态（同值不动，所以两条路径不会互相打架）。
+    if (getLanguage() !== runtimeCfg.language) {
+      setLanguage(runtimeCfg.language)
+      syncDerivedTextAfterLanguageChange()
+    }
     store.push({})
   }
   let disposer = null

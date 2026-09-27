@@ -30,7 +30,7 @@
 - **Data source switch**: production (live) or sandbox (replays 2023 history, roughly one message every 30 seconds, for testing).
 - **Smart de-duplication**: multiple releases for the same earthquake (intensity prompt → detailed intensity report, or successive EEW updates) notify you only once, and again only when the intensity is upgraded; when **several sources report the same earthquake** only the one that arrives first announces it (0.8.0). With several DSH pages open, only one tab plays the alert.
 - **History**: the most recent 30 processed messages, including entries that did not reach the threshold; click an entry to expand its details.
-- **Interface language (0.9.0)**: 简体中文 / 日本語 / English, switched in Settings → More → Language, and it takes effect **immediately** (no restart). Only the text **this plugin writes itself** is translated — setting labels, notification titles, action prompts, disclaimers, hit lines and history badges. Everything that comes from a source stays verbatim: headlines, descriptions, place names, the weather agency's own category names. An alert about a Japanese earthquake therefore reads as an English (or Chinese) template wrapped around Japanese place names — that is by design, not a gap.
+- **Interface language (0.9.0; Traditional Chinese added in 0.9.3)**: 简体中文 / 繁體中文 / 日本語 / English, switched in Settings → More → Language, and it takes effect **immediately** (no restart). Simplified and Traditional Chinese are **two separate text sets** — the Traditional one is written in Taiwan wording (設定 / 匯入 / 紀錄 / 載入 …), not converted character by character. Only the text **this plugin writes itself** is translated — setting labels, notification titles, action prompts, disclaimers, hit lines and history badges. Everything that comes from a source stays verbatim: headlines, descriptions, place names, the weather agency's own category names. An alert about a Japanese earthquake therefore reads as an English (or Chinese) template wrapped around Japanese place names — that is by design, not a gap.
 - **Settings export and import (0.9.0)**: write your configuration (watch regions, thresholds, language, data source, quiet hours, notification switches) to a JSON file and load it on another machine or browser. The file carries a **format version and no plugin version**; a file whose format is newer than this build can read is **refused outright** rather than half-parsed. Importing **replaces** the whole configuration, and the previous one is backed up automatically first, so "Undo last import" is always available. Alert history and source health are **not** part of the file.
 
 ## How it works
@@ -206,7 +206,7 @@ node scripts/build-cn-areas.mjs        # regenerate the Chinese administrative-d
 node scripts/build-world-cities.mjs    # regenerate the global city table from the GeoNames dump (needs network)
 node scripts/check-imports.mjs         # cross-module reference check (missing import / undeclared assignment)
 node scripts/build-client.mjs --check  # fail when the committed bundle is stale
-node tests/sync-test.cjs               # regression tests (1693 assertions)
+node tests/sync-test.cjs               # regression tests (1767 assertions)
 node scripts/check-contracts.mjs       # contract check: pull the live sources through the parsers to catch upstream changes (--offline uses samples/, no network)
 ```
 
@@ -226,7 +226,22 @@ node scripts/check-contracts.mjs       # contract check: pull the live sources t
 
 ## Changelog
 
-Current version **0.9.2** (**the first full-project review pass**). Six independent reviews across
+Current version **0.9.3** (**Traditional Chinese added**). The language list now has four entries —
+简体中文 / **繁體中文** / 日本語 / English — and Traditional Chinese is a **complete text set of its own**
+(Taiwan wording: 設定 / 匯入 / 紀錄 / 載入 …), not a character conversion of the Simplified set.
+Simplified and Traditional are now two `zh` entries in the same BCP 47 list, so the fallback chain can no
+longer match Chinese by primary language: `zh-Hant` / `zh-HK` / `zh-MO` / `zh-TW` resolve to `zh-TW`,
+while `zh` / `zh-Hans` / `zh-CN` / `zh-SG` resolve to `zh-CN` (matching by primary language would always
+pick the first `zh-*` and silently hand Simplified to a Traditional reader; among subtags the **script wins
+over the region**, so `zh-Hans-HK` is Simplified). Prefecture names got a Traditional column of
+their own (`PREF_HANT`), the rendering smoke test now covers 4 languages × 5 tabs (and the
+untranslated-text check runs over the **whole** Traditional table, not just the keys that smoke test
+renders), and the interface language selector picks the new entry up with no configuration-contract change.
+A four-way review of this release then fixed a real defect — the interface language stored in Host settings
+never reached the UI (the selector said 繁體中文 while the page stayed Simplified) — plus two hard-coded
+P2PQuake connection strings, an untranslated-text detector that structurally missed more than half of the
+translated entries, and several consistency issues. Regression 1693 → 1767.
+**0.9.2** was **the first full-project review pass**. Six independent reviews across
 the whole project (docs consistency / Host / parsing & matching / pipeline & connections / UI & config /
 tests & scripts) turned up 18 findings (4 real defects + 14 smaller issues), and this release fixes
 them all (plus one documentation discrepancy it verified along the way).
@@ -242,7 +257,8 @@ malformed settings file that made the import silently do nothing, a failed backu
 undoable import, the sidebar status text not following a language switch, and Chinese test-scenario
 names — plus a dozen smaller issues. All are fixed, and the checks the review used became regression
 assertions (1552 → 1671).
-The interface ships three complete text sets, switched in Settings → More → Language and applied
+The interface ships four complete text sets (three at 0.9.0; Traditional Chinese joined in 0.9.3),
+switched in Settings → More → Language and applied
 immediately (no restart), while everything that comes from a data source stays verbatim. Settings can be
 exported to a JSON file and loaded on another machine: importing replaces the whole configuration after
 backing up the previous one, so it can always be undone.
@@ -255,7 +271,7 @@ arrives first announces it, and the rest do not even enter the history, though t
 diagnostic snapshot (the only trace if that call was wrong). "Other countries / regions" finally has a
 city list too (towns of 100,000+ inhabitants, 166 countries / 5224 entries, delivered per country), so
 there is no need to type latitude and longitude by hand.
-The suite is now at **1693** assertions (1363 before 0.8.0).
+The suite is now at **1767** assertions (1363 before 0.8.0).
 See [CHANGELOG.md](./CHANGELOG.md) for the details of each release.
 
 ## Data sources

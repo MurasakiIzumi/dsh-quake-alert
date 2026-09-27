@@ -1,7 +1,7 @@
 // ============================================================================
 // dsh-quake-alert · client/src/00c-texts-configio.js
 //
-// 作用：配置导出 / 导入这一面的文案表（三语言并列）。
+// 作用：配置导出 / 导入这一面的文案表（各语言并列）。
 // 内容：纯数据对象，不 import 任何模块（依赖方向：面文件 ← 00-i18n.js ← 其它）。
 // 依赖：无。
 //
@@ -34,6 +34,31 @@ const CONFIG_IO = {
     'settings.configIo.errNoFile': '没有选择文件。',
     'settings.configIo.errBackupFailed': '当前环境无法保存备份（浏览器存储可能已满或被禁用）。为避免无法撤销，导入已取消。',
     'settings.configIo.errUnexpected': '导入过程中出错了：{detail}',
+  },
+
+  'zh-TW': {
+    'settings.configIo.title': '設定匯出與匯入',
+    'settings.configIo.hint': '備份檔只含設定，不含警報紀錄。',
+    'settings.configIo.exportBtn': '匯出設定',
+    'settings.configIo.importBtn': '匯入設定',
+    'settings.configIo.exported': '已匯出設定檔。',
+    'settings.configIo.exportFallback': '目前環境無法自動下載：請手動複製下面的文字。',
+    'settings.configIo.copied': '已複製到剪貼簿。',
+    'settings.configIo.copyFailed': '複製失敗，請手動全選複製。',
+    'settings.configIo.imported': '已匯入設定。',
+    'settings.configIo.undoBtn': '復原上次匯入',
+    'settings.configIo.undoAt': '備份於 {at}',
+    'settings.configIo.undone': '已還原匯入前的設定。',
+    'settings.configIo.noBackup': '沒有可復原的匯入紀錄。',
+    'settings.configIo.errJson': '不是有效的 JSON 檔案。',
+    'settings.configIo.errShape': '這個檔案裡沒有本插件能讀取的設定。',
+    'settings.configIo.errFormat': '這不是災害警報插件的設定檔。',
+    'settings.configIo.errVersion': '檔案缺少格式版本號，或版本號不合法。',
+    'settings.configIo.errNewer': '檔案來自較新版本的插件（格式版本 {v}），目前版本無法讀取。',
+    'settings.configIo.errRead': '讀取檔案失敗。',
+    'settings.configIo.errNoFile': '沒有選擇檔案。',
+    'settings.configIo.errBackupFailed': '目前環境無法儲存備份（瀏覽器儲存空間可能已滿或被停用）。為避免無法復原，匯入已取消。',
+    'settings.configIo.errUnexpected': '匯入過程中發生錯誤：{detail}',
   },
 
   ja: {
