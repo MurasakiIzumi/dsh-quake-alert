@@ -212,13 +212,19 @@ function parseUsgsFeed(json) {
 // NOAA tsunami.gov 的事件分级。CAP 的 <severity>（Minor/Moderate/…）对海啸不够具体，
 // 真正决定行动的是 <event> 名称，实测样本是 "Tsunami Information"（Minor）。
 // 第三项是**等级**，与日本 552 的 TSUNAMI_RANK（Watch=1/Warning=2/MajorWarning=3）同一把尺，
-// 由 matchPointAlert 用 thresholds.tsunamiGrade 做闸门。
+// 由 matchPointAlert 用 thresholds.tsunamiGrade 做闸门；第四项是颜色。
+//
+// **等级与标签必须同口径**（0.9.2 修）：Advisory / Watch 的等级是 2（对应日本的「海啸警報」档），
+// 而标签曾写作「注意报」——于是把阈值收紧到「警报及以上」的用户，会在**警报档**收到一条显示为
+// **注意报**的提醒，两边互相打脸。NOAA 的官方定义是"对近水的人有危险"而非"可能有事"，归到警报档
+// 是对的，**错的是标签**，所以改标签、不降等级：降等级会让这条在「警报及以上」下静默，而海啸
+// 恰恰是这里最不能漏的一类。
 // 「Tsunami Information」= 0：它在语义上低于日本的「津波注意報」，是"没有破坏性海啸"的信息类
 // 电文——按 1 处理会让它在半径内直接响铃（全球海啸无法用等级收敛）。
 const NOAA_EVENT_RULES = [
   [/Tsunami Warning/i, '大海啸警报（NOAA）', 3, 'red'],
-  [/Tsunami Advisory/i, '海啸注意报（NOAA）', 2, 'orange'],
-  [/Tsunami Watch/i, '海啸注意报（NOAA）', 2, 'orange'],
+  [/Tsunami Advisory/i, '海啸警报（NOAA）', 2, 'orange'],
+  [/Tsunami Watch/i, '海啸警报（NOAA）', 2, 'orange'],
   [/Tsunami Information/i, '海啸信息（NOAA）', 0, 'info'],
 ]
 
@@ -310,7 +316,7 @@ function parseNoaaCap(xml, entry) {
 export const TEST_GEO_SCENARIOS = [
   { key: 'emsc', label: 'EMSC 地震（震中就在关注点）', note: 'M6.2', source: 'emsc' },
   { key: 'usgs', label: 'USGS 地震（约 80km 外）', note: 'M5.6 · 近处，小半径也可能不命中', source: 'usgs' },
-  { key: 'noaa', label: 'NOAA 海啸注意报', note: 'Tsunami Advisory', source: 'noaa' },
+  { key: 'noaa', label: 'NOAA 海啸警报', note: 'Tsunami Advisory', source: 'noaa' },
   // 半径是可配的（1–2000km，新建默认 100km），所以这里**不能承诺"一定不命中"**：
   // 旧的「超出默认 300km 半径，刻意不命中」既是 0.4.0 的旧默认值（0.5.0 起新建默认 100km），
   // 也把半径 ≥556km 的用户引向相反的事实——那条测试会真的响铃（0.5.4 修正文案）。

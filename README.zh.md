@@ -171,7 +171,7 @@ dsh plugin --profile web add github:MurasakiIzumi/dsh-quake-alert
 ## 开发
 
 ```
-client/src/*.js       # 客户端源码：27 个标准 ESM 模块（显式 import/export，各文件头部写职责与依赖）
+client/src/*.js       # 客户端源码：35 个标准 ESM 模块（显式 import/export，各文件头部写职责与依赖）
 client/client.js      # DSH 单文件 bundle —— 由 rollup 打包生成，勿手改
 lib/index.js          # Host 半边：settings 命名空间（schemastery）+ /areas 与 /feed 只读路由
 lib/poller.js         # Host 半边：通用 feed 轮询器（entry 去重、环缓冲、游标；支持单级与两级源）
@@ -182,6 +182,7 @@ lib/data/world-cities.js  # 全球主要城市表（166 国 / 5224 城，按国�
 lib/data/river-areas.js   # 河川予報区域 → 市町村（由 build-areas.mjs 生成）
 scripts/build-client.mjs # 构建：rollup 把 client/src 打包成 client/client.js
 scripts/build-areas.mjs  # 从気象庁公开 zip 重新生成河川区域表
+scripts/build-cn-areas.mjs # 从官方行政区划数据重新生成中国行政区划表（需联网）
 scripts/build-world-cities.mjs # 从 GeoNames dump 重新生成全球城市表（需联网）
 scripts/lib/zip.mjs   # 零依赖 zip 读取器（构建脚本共用）
 scripts/lib/geonames.mjs  # GeoNames dump 的读取与按列解析（两个数据表脚本共用）
@@ -194,10 +195,11 @@ tests/area-tables.cjs # 気象庁 区域名 / 津波予報区 → 都道府县 �
 ```sh
 node scripts/build-client.mjs          # 改完 client/src 后重新打包（必须先跑！见下方注意）
 node scripts/build-areas.mjs           # 从気象庁公开 zip 重新生成河川区域表（需联网）
+node scripts/build-cn-areas.mjs        # 从官方行政区划数据重新生成中国行政区划表（需联网）
 node scripts/build-world-cities.mjs    # 从 GeoNames dump 重新生成全球城市表（需联网）
 node scripts/check-imports.mjs         # 跨模块引用检查（漏 import / 未声明赋值）
 node scripts/build-client.mjs --check  # 校验已提交的 bundle 是否陈旧
-node tests/sync-test.cjs               # 回归测试（1427 项断言）
+node tests/sync-test.cjs               # 回归测试（1693 项断言）
 node scripts/check-contracts.mjs       # 契约检查：拉真实源过一遍解析器，看上游是否改版（--offline 用 samples/ 快照，不联网）
 ```
 
@@ -217,7 +219,12 @@ node scripts/check-contracts.mjs       # 契约检查：拉真实源过一遍解
 
 ## 更新记录
 
-当前版本 **0.9.1**（**对 0.9.0 的一次 review 与修复**）。五路独立审查在 0.9.0 的本地化与配置导入
+当前版本 **0.9.2**（**第一次全项目 review 的修复轮**）。六路独立审查（文档一致性 / Host / 解析匹配 /
+管线连接 / UI 配置 / 测试脚本）合计 18 条发现（4 条真实缺陷 + 14 条较小问题），本版**全部处理**
+（另核实了一条文档口径）。四条缺陷是：一个上游 URL 被拦截、其余只返回范围外事件时，蓝色的
+「数据格式异常」永不点亮；同一个消息 id 上的震级上修（M5.2 → M6.4）被跨标签页认领静默抑制；
+导入备份永不过期，「撤销上次导入」因此跨会话一直可点、且不显示备份时间；三份 README 的断言数
+互相矛盾。**0.9.1** 是**对 0.9.0 的一次 review 与修复**：五路独立审查在 0.9.0 的本地化与配置导入
 上拓出六条用户可见的缺陷——英文 / 日文界面里的县名仍是中文、已关注县显示成「东京东京（東京都）」、
 畸形配置文件让导入静默无反应、备份失败却报成「可撤销的成功导入」、切语言后侧边栏状态文字不跟、
 测试场景名是中文——外加十余条较小的问题。全部修掉，并把 review 用到的检查固化成回归断言
@@ -230,7 +237,7 @@ node scripts/check-contracts.mjs       # 契约检查：拉真实源过一遍解
 也合并成一张按灾种的表（一行一个灾种，开关与阈值并排）。功能上，**同一场地震不再被多个源各报
 一次**——只让先到的源播报，其余连历史都不进，但计数记在诊断快照里（判错时那是唯一的痕迹）；
 「其他国家 / 地区」也终于有了城市列表（人口 10 万以上的城镇，166 国 / 5224 条，按国家分包下发），
-不必再手填经纬度。回归断言 1363 → 1671。各版本的变更明细见 [CHANGELOG.md](./CHANGELOG.md)。
+不必再手填经纬度。回归断言 1363 → 1693。各版本的变更明细见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## 数据来源
 

@@ -189,10 +189,37 @@ function nmcRows(json) {
  * **这里就地写一份**：本脚本刻意不 import client / lib 的任何东西（文件头第 1 条）——
  * 契约检查必须独立于实现，否则实现与契约一起漂移时两边会同时"通过"。
  */
-const NWS_EVENT_FILTER = [
+const NWS_EVENT_FILTER_LIST = [
   'Flood Warning', 'Flash Flood Warning', 'Coastal Flood Warning',
   'Flood Watch', 'Flood Advisory', 'Coastal Flood Watch', 'Coastal Flood Advisory', 'Coastal Flood Statement',
-].join(',')
+]
+const NWS_EVENT_FILTER = NWS_EVENT_FILTER_LIST.join(',')
+
+/**
+ * NWS 白名单自检（0.9.2）：本脚本为了"独立于实现"就地写了**第三份** NWS 白名单（另两份在
+ * client/src/05h 与 capture-overseas-fixtures.mjs，后者已带同样的自检）。加一类洪水产品却忘了
+ * 同步这里时，在线 `?event=` 查询会静默变窄——而在线的 `empty` 也算通过，漏查**没有任何症状**。
+ * 用读源码文本的方式比对（同 capture 脚本的做法），把"漂移"变成一条会红的检查。
+ */
+function assertWhitelistInSync() {
+  const src = readFileSync(path.join(ROOT, 'client', 'src', '05h-overseas-parsers.js'), 'utf8')
+  const inSource = [...src.matchAll(/^\s*'([^']+)':\s*\{\s*kind:/gm)].map((m) => m[1]).sort()
+  const mine = [...NWS_EVENT_FILTER_LIST].sort()
+  if (inSource.length === 0) {
+    console.log('  ✗ NWS 白名单自检：没能从 client/src/05h 解析出白名单（正则与实现脱节了？）')
+    process.exitCode = 1
+    return false
+  }
+  if (inSource.join('|') !== mine.join('|')) {
+    console.log('  ✗ NWS 白名单不一致（在线 ?event= 查询会漏查）：')
+    console.log('     client/src/05h =', inSource.join(' / '))
+    console.log('     本脚本         =', mine.join(' / '))
+    process.exitCode = 1
+    return false
+  }
+  console.log('  NWS 白名单自检：' + mine.length + ' 类与 client/src/05h 一致')
+  return true
+}
 // 返回数组 = 逐条检查（nmc 的列表天然是多条）；返回空数组 = 上游这一次没有可检查的数据。
 
 const SOURCES = [
@@ -208,11 +235,17 @@ const SOURCES = [
       //   · history 给的是同一份电文的副本（同结构），随时都有内容，且不占长连接。
       // 参数形式是**重复键** `codes=551&codes=556`：逗号形式（`codes=551,556`）实测返回
       // 400 `extra keys found`——整串被当成一个未知键。
-      const list = JSON.parse(await getText('https://api.p2pquake.net/v2/history?codes=551&codes=556&limit=1'))
-      const first = Array.isArray(list) ? list[0] : null
-      // 最近一条 551/556 都没有（EEW 与震度速报都稀疏）→ 上层记 empty，这是合法形态
-      if (!first) return []
-      return [{ label: 'code ' + first.code, args: [first] }]
+      // **三种 code 各拉最近一条分别检查**（0.9.2 修复）：此前只查 551/556，552 海啸电文
+      // 完全没有真实结构覆盖（离线样本是手写的规格示例，不会随上游漂移）。而"整表 limit=1"
+      // 常常取到 551/556，所以必须逐 code 拉，552 才真的会被验证到。
+      const out = []
+      for (const code of [551, 552, 556]) {
+        const list = JSON.parse(await getText('https://api.p2pquake.net/v2/history?codes=' + code + '&limit=1'))
+        const first = Array.isArray(list) ? list[0] : null
+        // 该 code 没有历史（EEW 与海啸都稀疏）→ 跳过，上层按"没有可检查的数据"记 empty
+        if (first) out.push({ label: 'code ' + first.code, args: [first] })
+      }
+      return out
     },
   },
   {
@@ -324,9 +357,17 @@ const SOURCES = [
       // 只喂**白名单内**的那一条：--offline 的规则是"样本必须解析出 Alert"（样本是刻意挑的
       // 有效数据），而这份 fixture 里 frost advisory 与 wind warning 两条本来就该判 empty
       // ——它们正是"两道过滤器在工作"的证据，但那属于回归测试的职责，不是契约检查的。
-      const f = readJson('eccc/eccc-alerts.geojson').features
-        .find((x) => x.properties && x.properties.alert_name_en === 'storm surge warning')
-      return f ? [{ label: 'samples/eccc/ → storm surge warning', args: [f] }] : []
+      // **不绑定具体灾种**（0.9.2 修复）：此前写死 alert_name_en === 'storm surge warning'，
+      // 非风暴季重抓 fixture 后这一条不存在 → 离线检查因"没有可检查的数据"而红，且原因与
+      // 代码改动无关。改成按白名单关键词挑（与 05h 同口径），挑不到就如实返回空（上层记 empty）。
+      const feats = readJson('eccc/eccc-alerts.geojson').features || []
+      const f = feats.find((x) => {
+        const p = (x && x.properties) || {}
+        if (p.alert_type !== 'warning') return false
+        const name = String(p.alert_name_en || '')
+        return /rain|flood|surge|hydrolog|water/i.test(name) && !/frost|fog|freez|wind|heat|snow|ice/i.test(name)
+      })
+      return f ? [{ label: 'samples/eccc/ → ' + String(f.properties.alert_name_en), args: [f] }] : []
     },
     online: async () => {
       // ECCC 的 API 没有灾种过滤参数（白名单在 Client 侧做），所以在线拉全国范围再看能认多少。
@@ -491,6 +532,9 @@ async function main() {
   // 而那种漏法不会有任何症状——直到那个源悄悄坏掉。
   const uncovered = Object.keys(contracts).filter((id) => !SOURCES.some((s) => s.id === id))
   const extra = SOURCES.filter((s) => !Object.prototype.hasOwnProperty.call(contracts, s.id)).map((s) => s.id)
+
+  // 手抄名单自检（0.9.2）：第三份 NWS 白名单与 client/src/05h 必须一致，否则在线查询静默变窄。
+  assertWhitelistInSync()
 
   const sources = []
   for (const src of SOURCES) {

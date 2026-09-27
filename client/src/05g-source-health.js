@@ -159,17 +159,27 @@ function clearData(sourceId, detail, t) {
  * 记录一次解析结果。返回 true 表示"这条数据不可用，调用方不应继续处理它"
  * —— 注意这与"是否点亮蓝点"**已经解耦**（0.5.3）：单条坏数据不该让整个源变蓝。
  *
- * empty 仍然算"结构是好的"（源正常地给出了这一条，只是与本插件无关），所以它会清掉蓝点
- * ——这条语义沿用 0.4.2，JMA 的常态就是 empty。
+ * empty 仍然算"结构是好的"（源正常地给出了这一条，只是与本插件无关），**默认**清掉蓝点
+ * ——这条语义沿用 0.4.2，JMA 的常态就是 empty（否则一条坏电文会让蓝点挂到下一次成功解析为止）。
+ *
+ * **唯一例外是逐条上报（`opts.perItem`）**：那时 empty 只计数、不清 data 层。理由：empty 是
+ * "**这一条**与本插件无关"，不能证明"同一批次里此前那条 schema 失败的已恢复"。批量取数
+ * （12e 一轮查 N 个关注点）里立即 `clearData` 会把**其它条目**的失败计数与 `r.data` 一起清掉
+ * ——实测（1 个被拦截的 URL + 4 个只有非白名单事件的 URL，连跑 6 轮）：schema 计数涨到 6 而
+ * `consecutiveFail` 恒为 0，两条升级阈值都不可达、蓝点永不点亮。那正是"局部改版 / 局部拦截"
+ * 退化成**静默漏报**的形态——本插件最不能接受的失败。
+ *
+ * 「条级独立」的来源（12b 的 feed、15-entry 的 WS：每条电文 / 消息各是一次独立事实）**不传**
+ * `perItem`，保持 0.4.2 语义；只有"一轮 = 一批请求"的海外源逐条上报才传它。
  */
-export function noteParseResult(sourceId, res, now) {
+export function noteParseResult(sourceId, res, now, opts) {
   if (!res || res.ok) return false
   const t = now === undefined ? Date.now() : now
   const r = ensure(sourceId)
   const kind = res.kind === 'value' ? 'value' : (res.kind === 'empty' ? 'empty' : 'schema')
   if (kind === 'empty') {
     r.counters.empty += 1
-    clearData(sourceId, '数据格式已恢复正常', t)
+    if (!(opts && opts.perItem)) clearData(sourceId, '数据格式已恢复正常', t)
     return false
   }
   r.counters[kind] += 1

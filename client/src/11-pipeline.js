@@ -277,7 +277,15 @@ function handleAlert(alert, cfg, opts) {
   // 消息级去重按 alert.id。**但强度升级要放行**：全球源的修订版复用同一个 id
   // （EMSC 的 unid / USGS 的 feature id），一律挡掉会让震级上修永远不再提醒。
   // 放行后由下面的 isEventRepeat 判定"确实升级才播报"，未升级仍只记历史。
-  if (isDuplicate(alert.id, cfg.dedupe.windowMinutes) && !isStrengthUpgrade(alert)) {
+  //
+  // `isDuplicate` 有登记副作用（见 10-dedupe），所以只求值一次并留用；`isStrengthUpgrade` 保留
+  // 短路——它只在"消息 id 已重复"时才可求值。
+  // `upgrading` 还要留到**跨标签页认领**那一步用：认领键是消息 id、记忆保留 10 分钟，同 id 的
+  // 修订版会被本标签页自己上一次的认领当成"其它标签页已提醒"挡下——那正是这条放行本来要防住的
+  // 漏报（震级上修在最后一跳被静默）。
+  const dup = isDuplicate(alert.id, cfg.dedupe.windowMinutes)
+  const upgrading = dup && isStrengthUpgrade(alert)
+  if (dup && !upgrading) {
     return { notified: false, reason: 'duplicate', detail: '同一条消息刚处理过（去重窗口内）' }
   }
   if (alert.cancelled) {
@@ -411,7 +419,9 @@ function handleAlert(alert, cfg, opts) {
   }
   // 其它 DSH 标签页已经播报过同一条消息 → 本标签页静默，避免多个页面同时响铃。
   // 用消息 id 而不是事件键：多标签页收到的是同一条消息，而同一事件的不同消息（如强度升级）不应被拦。
-  if (!claimAlertForTab(alert.id, cancelKeyOf(alert))) {
+  // **但同 id、更高强度的修订版必须绕开认领**（`upgrading`）：认领记忆按消息 id 保留 10 分钟，
+  // 不绕开的话"震级上修"会被上一次同 id 的认领抑制，成为一条静默的漏报。
+  if (!upgrading && !claimAlertForTab(alert.id, cancelKeyOf(alert))) {
     pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,

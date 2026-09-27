@@ -1331,6 +1331,10 @@ function SettingsPanel(props) {
       // 配置被**整体替换**了：组件里的 cfg 快照要跟着换，否则界面还显示导入前的关注点与阈值
       // （语言同理——`applyCfg` 已经让 i18n 切过去了，这里只负责让 React 重渲染）。
       setCfgState(currentCfg())
+      // 导入是**整体替换**：地区页签要跟着新配置重算（0.9.2 修复）。`regionTab` 只在挂载时
+      // 推导过一次，此后只由页签按钮切换——不重算的话，导入一份"只有全球关注点"的配置后，
+      // 一级选择器仍高亮旧的日本分支，用户会以为关注点没导进来。
+      setRegionTab(inferRegionTab(currentCfg()))
       setCfgIoBackupAt(res.backupAt)
       setCfgIoMsg(t('settings.configIo.imported'))
     }).catch((err) => {
@@ -1344,6 +1348,9 @@ function SettingsPanel(props) {
     const res = undoConfigImport()
     if (!res.ok) { setCfgIoMsg(t('settings.configIo.noBackup')); return }
     setCfgState(currentCfg())
+    // 撤销是一次性的：备份已被清掉（0.9.2），界面上的按钮与备份时间要跟着消失——否则按钮还挂着，
+    // 再点一次只会得到"没有可撤销的导入记录"。
+    setCfgIoBackupAt('')
     setCfgIoMsg(t('settings.configIo.undone'))
   }
   const sectionConfigIo = () => s.section(t('settings.configIo.title'),
@@ -1355,6 +1362,11 @@ function SettingsPanel(props) {
       // 比没有这个按钮更容易让人以为出了问题。
       cfgIoBackupAt ? s.btn(t('settings.configIo.undoBtn'), onUndoCfg) : null,
     ),
+    // 备份时间要**看得见**（0.9.2 修复）：备份跨会话保留，而"撤销"会把导入之后的所有改动整体
+    // 回滚。此前按钮只说"撤销上次导入"、不显示备份时间，用户无从判断要恢复的是多久之前的快照，
+    // 陈旧备份一旦被误触就是一次静默的配置丢失。
+    cfgIoBackupAt ? h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4 } },
+      t('settings.configIo.undoAt', { at: formatIssuedLocal(cfgIoBackupAt) })) : null,
     h('input', {
       ref: cfgIoFileRef,
       type: 'file',

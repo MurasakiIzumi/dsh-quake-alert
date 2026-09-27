@@ -420,7 +420,10 @@ export function createOverseasSource(opts = {}) {
             continue
           }
           // 契约分类：empty（不在本插件范围 / 该点无预警）不计失败，schema / value 计入健康。
-          if (noteParseResult(id, res)) continue
+          // **逐条 empty 传 `perItem`**：只计数、不清蓝点——单条"不在范围内"不能证明同轮其它
+          // 条目的 schema 失败已恢复（不传的话，1 个被拦截的 URL + N 个非白名单事件的 URL
+          // 会让蓝点永不点亮。0.6.2 只把"空数组"挪到了轮末，这里是同型的另一半）。
+          if (noteParseResult(id, res, undefined, { perItem: true })) continue
           if (!res.ok) continue
           const alert = res.alert
           if (seen.has(alert.id)) continue
@@ -500,6 +503,7 @@ export function createOverseasSource(opts = {}) {
     //    逐响应上报会让局部失败（5 个采样点里 1 个被拦截）永远升不了级，见上面的说明。
     //    `applied === 0` 时才需要它——有成功解析的条目时 `noteSourceSuccess` 已经清过蓝点。
     if (okCount > 0 && failCount === 0 && applied === 0) {
+      // 轮级判定：整轮无失败、只是没有本插件范围内的条目 → 结构正常，照旧清蓝点（不传 perItem）。
       noteParseResult(id, failResult('empty', '本轮响应结构正常，但没有本插件范围内的条目'))
     }
     // 停用之后不再写状态（0.6.0 review A-1）：否则"用户主动关掉插件"会在侧边栏留下红点，

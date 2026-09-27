@@ -1,6 +1,14 @@
 # ---- 规划与设计文档（面向开发，不上传仓库）----
 /DESIGN.md
 
+# ---- 本地工作产物（不进仓库）----
+# .publish/   投稿到 awesome-dsh-plugin 的准备物（条目 yml + 投稿指引）——投稿物本身属于另一个仓库
+# .tmp-hs/    Hindsight 检索的中间产物（文档 / 列表 / 分块），用完即弃
+# REVIEW.md   全项目 review 报告（本地留档，不入库）
+/.publish/
+/.tmp-hs/
+/REVIEW.md
+
 # ---- 依赖与构建产物 ----
 node_modules/
 dist/

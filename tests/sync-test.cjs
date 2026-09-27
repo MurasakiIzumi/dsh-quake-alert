@@ -224,6 +224,9 @@ console.log('== 区域名归一：EEW 全量区域名（気象庁 188 个） =='
     if (got.join(',') !== want.join(',')) bad.push(name + ' 期望 ' + want.join('/') + ' 实得 ' + (got.join('/') || '空'))
   }
   const total = Object.keys(EEW_AREA_EXPECT).length
+  // 「全量」要**被断言守住**，不能只出现在日志里（0.9.2 review）：此前只遍历已存在的 key，
+  // 从表里删掉任意一个区域名测试仍然全绿——"188 个全集"于是成了一句无人守护的注释。
+  assert(total === 188, 'EEW 区域名表覆盖気象庁全量 188 个（实际 ' + total + '）')
   assert(bad.length === 0, total + ' 个 EEW 区域名全部归一正确' + (bad.length ? '（失败 ' + bad.length + ' 个：' + bad.slice(0, 5).join(' | ') + '）' : ''))
 }
 console.log('== 区域名归一：海啸全量予報区（気象庁 66 个） ==')
@@ -235,6 +238,7 @@ console.log('== 区域名归一：海啸全量予報区（気象庁 66 个） ==
     if (got.join(',') !== want.join(',')) bad.push(name + ' 期望 ' + want.join('/') + ' 实得 ' + (got.join('/') || '空'))
   }
   const total = Object.keys(TSUNAMI_AREA_EXPECT).length
+  assert(total === 66, '津波予報区表覆盖気象庁全量 66 个（实际 ' + total + '）')
   assert(bad.length === 0, total + ' 个津波予報区全部归一正确' + (bad.length ? '（失败 ' + bad.length + ' 个：' + bad.slice(0, 5).join(' | ') + '）' : ''))
 }
 console.log('== 回归：本轮修复的漏报场景 ==')
@@ -2050,6 +2054,26 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         .replace('<event>Tsunami Information</event>', '<event>Tsunami Advisory</event>'),
       { id: 'adv' })
     assert(t.matchAlert(capAdv, capCfg).hit === true, '同一份 CAP 改成 Advisory → 在 M9.0 阈值下仍命中（海啸不受震级限制）')
+    // 0.9.2：**标签必须与档位同口径**。Advisory / Watch 的等级是 2（警报档），标签曾写作「注意报」
+    // ——把阈值收紧到「警报及以上」的用户会在警报档收到一条显示为注意报的提醒，两边互相打脸。
+    // 这里把四种事件的「等级」（tsunamiRank / maxScale / strength 三处）与「标签里的档位词」
+    // 钉在一起，防止任一边单独漂走。
+    {
+      const capSrc = fs.readFileSync(path.join(ROOT, 'samples', 'global', 'noaa-pheb-cap.xml'), 'utf8')
+      const cases = [
+        ['Tsunami Warning', 3, '大海啸警报'],
+        ['Tsunami Advisory', 2, '海啸警报'],
+        ['Tsunami Watch', 2, '海啸警报'],
+        ['Tsunami Information', 0, '海啸信息'],
+      ]
+      for (const [ev, rank, word] of cases) {
+        const one = t.parseNoaaCap(capSrc.replace(/<event>[^<]*<\/event>/, '<event>' + ev + '</event>'), { id: 'rank-' + rank })
+        assert(one && one.tsunamiRank === rank && one.maxScale === rank && one.strength === rank,
+          ev + ' → 等级 ' + rank + '（tsunamiRank / maxScale / strength 三处同一值）')
+        assert(one && one.kindLabel.indexOf(word) === 0,
+          ev + ' 的标签以「' + word + '」开头，与档位同口径（实际：' + (one && one.kindLabel) + '）')
+      }
+    }
   } catch (err) {
     assert(false, '全球测试消息验证失败：' + err.message)
   }
@@ -2674,6 +2698,31 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.isStrengthUpgrade(ev) === false, '同强度不算升级')
     assert(t.isDuplicate(ev.id, 10) === true, '同一 id 第二次确实被消息级去重挡住（升级由调用方放行）')
 
+    // ③b 同 id 的强度升级要**绕过跨标签页认领**（0.9.2 修复）。认领键是消息 id、记忆保留 10 分钟，
+    //     而 EMSC 的修订版复用同一个 unid——不绕开的话"震级上修"会被本标签页自己上一次的认领
+    //     当成"其它标签页已提醒"抑制，成为一条静默漏报（单标签页即可复现）。
+    {
+      const ucfg = {
+        watch: { prefectures: [], cities: [], places: [{ name: '雅典', lat: 37.98, lon: 23.73, radiusKm: 500 }] },
+        disasters: { earthquake: true, tsunami: true, weather: true },
+        thresholds: { globalMagnitude: 4.5, quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch' },
+        dedupe: { windowMinutes: 10 }, notify: {}, quietHours: { enabled: false },
+      }
+      // 用**真实解析器**产出的 Alert（手构的容易缺 matchAlert 要的字段），再模拟"同一 unid 的
+      // 修订版"——id 相同、强度更高，正是 EMSC 修订版（action: 'update'）的形态。
+      // 另起一个**干净实例**：③/④ 段已经调过 isDuplicate / isEventRepeat 登记过去重与事件记忆，
+      // 复用同一个 `t` 会让"首次播报"这条前置断言被前面的登记干扰（实测被判 event-repeat）。
+      const tu = loadClientEx({}, {}).exports.__test
+      const base = tu.parseEmsc(JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'global', 'emsc-ws-sample.json'), 'utf8')))
+      const up1 = Object.assign({}, base, { strength: 5.2, magnitude: 5.2, severity: 'yellow' })
+      const up2 = Object.assign({}, base, { strength: 6.4, magnitude: 6.4, severity: 'red' })
+      const rr1 = tu.handleAlert(up1, ucfg, { skipQuietHours: true })
+      assert(rr1.notified === true, '（前置）M5.2 首次播报（实际：' + JSON.stringify(rr1) + '）')
+      const rr2 = tu.handleAlert(up2, ucfg, { skipQuietHours: true })
+      assert(rr2.notified === true && rr2.reason !== 'other-tab',
+        '同 id 的震级上修绕过跨标签页认领 → 仍然播报（修复前被判 other-tab 静默；实际：' + JSON.stringify(rr2) + '）')
+    }
+
     // ④ 坐标型的近似事件归并：跨源 / 修订会让「分钟 + 0.1 度」指纹换键
     const a1 = { id: 'e1', eventKey: 'geo:k1', strength: 5.0, locator: 'point', issued: '2026-09-13T10:00:00Z', geo: { lat: 10.1, lon: 100.2 } }
     const a2 = { id: 'u1', eventKey: 'geo:k2', strength: 5.0, locator: 'point', issued: '2026-09-13T10:00:30Z', geo: { lat: 10.15, lon: 100.25 } }
@@ -2760,6 +2809,22 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       'empty 清掉 schema-error（不再是"不覆盖已有异常"）')
     assert(t.noteSourceSuccess('usgs') === false, '已经恢复的源再报成功 → 无动作（不会重复上报）')
     assert(t.effectiveStatusOf('p2pquake', 'open', 'ok').status === 'open', '没有异常记录的源不受影响')
+    // 0.9.2 修复：**逐条上报的 empty 不清蓝点**（`opts.perItem`）。批量取数（12e 一轮查 N 个
+    // 关注点）里，1 个被拦截的 URL 产生的 schema 失败会被同轮其它 URL 的"非白名单事件"empty
+    // 清掉，于是蓝点永不点亮——局部改版 / 局部拦截退化成静默漏报（0.6.2 只把"空数组"挪到了轮末，
+    // 这是同型的另一半）。
+    t.resetSourceHealth()
+    t.store.clearSources()
+    for (let i = 0; i < t.SCHEMA_ESCALATE_CONSECUTIVE; i++) {
+      t.noteParseResult('nws_alerts', t.failResult('schema', '响应不是合法 JSON（可能是拦截页或上游改版）'))
+    }
+    assert(t.store.sources.nws_alerts.status === 'schema-error', '（前置）局部拦截 → schema-error（蓝点）')
+    t.noteParseResult('nws_alerts', t.failResult('empty', '事件类型不在本插件范围内'), undefined, { perItem: true })
+    assert(t.store.sources.nws_alerts.status === 'schema-error' && t.sourceHealthOf('nws_alerts').data !== null,
+      '逐条 empty（perItem）不清蓝点：同轮其它条目的结构异常要留着（修复前蓝点会在这里被清掉）')
+    t.noteParseResult('nws_alerts', t.failResult('empty', '本轮响应结构正常，但没有本插件范围内的条目'))
+    assert(t.sourceHealthOf('nws_alerts').data === null && t.store.sources.nws_alerts.status === 'open',
+      '对照：轮级 empty（不传 perItem）照旧清蓝点（0.4.2 的 JMA 语义没有被顺手改掉）')
     // 第二条升级路径：**坏法不重样**（上游把结构改得面目全非时每条 detail 都不同，
     // 按原因计数永远到不了阈值）→ 由连续失败数兜住
     t.resetSourceHealth()
@@ -5492,14 +5557,26 @@ console.log('== 机器级持久化：Host settings 桥 ==')
 
     // ---- 10. 两道过滤器：advisory 与不在白名单的灾种都判 empty ----
     {
-      const kinds = {}
+      // **不绑定具体 alert_code**（0.9.2 修复）：fixture 的灾种分布随季节变化，点名 FTA / WDW / CFW
+      // 会在重抓样本后因某个码不存在而失败——而失败原因与代码改动无关（0.6.2 已在别处改用
+      // ecccWarnShell，这里是同类残留）。改为断言**两道过滤器的不变量**（与季节无关）。
+      const rows = []
       for (const f of ecccSample.features) {
         const r = T6.parseEcccAlertResult(f, { place: caPlace })
-        kinds[f.properties.alert_code] = r.ok ? 'ok' : r.kind
+        rows.push({ code: String(f.properties.alert_code), type: String(f.properties.alert_type || ''), kind: r.ok ? 'ok' : r.kind })
       }
-      assert(kinds.FTA === 'empty', 'frost advisory（advisory）判 empty：官方定义就是"非危险天气"')
-      assert(kinds.WDW === 'empty', 'wind warning 判 empty：不在本插件的灾种范围内')
-      assert(kinds.CFW === 'ok', 'storm surge warning 解析成功（加拿大当前唯一命中的一类）')
+      assert(rows.length > 0, 'ECCC fixture 至少有一条样本')
+      assert(rows.every((r) => r.type === 'warning' || r.kind === 'empty'),
+        '过滤器一：非 warning（advisory / statement 等）一律判 empty——官方定义就是"非危险天气"')
+      assert(rows.filter((r) => r.type === 'warning').every((r) => r.kind === 'ok' || r.kind === 'empty'),
+        '过滤器二：warning 只可能是 ok（名称在白名单内）或 empty（不在），不能是 schema——按码猜是 4.6.3 踩过的坑')
+      // 与季节无关的对照：ecccWarnShell 构造的"白名单内 warning"必须 ok；改成 advisory 必须 empty。
+      assert(T6.parseEcccAlertResult(ecccWarnShell(), { place: caPlace }).ok === true,
+        '对照：白名单内的 warning（构造，不依赖当季样本）→ ok')
+      const adv = ecccWarnShell()
+      adv.properties.alert_type = 'advisory'
+      assert(T6.parseEcccAlertResult(adv, { place: caPlace }).kind === 'empty',
+        '对照：同一条改成 advisory → empty（过滤器一）')
     }
 
     // ---- 11. 白名单按名称关键词，**按码猜是错的**（4.6.3 踩过 CFW 那个坑）----
@@ -6904,6 +6981,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(ioBackup && ioBackup.cfg.thresholds.quakeScale === 40, '导入前自动备份了当前配置（撤销的依据）')
       const ioUndo = t11.undoConfigImport()
       assert(ioUndo.ok && t11.currentCfg().thresholds.quakeScale === 40, '撤销回到导入前的配置')
+      // 0.9.2：撤销是**一次性**的——成功后清掉备份。此前备份永久保留，于是「撤销上次导入」按钮
+      // 跨会话一直挂着，而它回滚的是"导入之前"的整份配置：几周后误触就是一次静默的配置丢失。
+      assert(t11.loadConfigBackup() === null,
+        '撤销后备份被清掉（一次性撤销）——否则这份陈旧快照会一直挂着、随时可被误触')
+      assert(t11.undoConfigImport().ok === false, '再撤一次返回 no-backup（界面上按钮与备份时间已消失）')
 
       // ---- 校验失败时什么都不写（连备份都不做） ----
       const ioBeforeBad = JSON.stringify(t11.currentCfg())
@@ -7037,6 +7119,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
           const seed = {}
           seed[t13.STORAGE_KEY] = JSON.stringify(smokeCfg(lang))
           seed['dsh.quakeAlert.history'] = smokeHistory
+          // 配置备份（0.9.2 修复的落点）：让「撤销上次导入」旁的**备份时间**也进渲染冒烟。
+          seed['dsh.quakeAlert.backup'] = JSON.stringify({ at: '2026-09-26T10:00:00.000Z', config: smokeCfg(lang) })
           const { exports: ex } = loadClientEx(seed, { react })
           let tree
           try { tree = ex.__test.SettingsPanel({ initialTab: tab }) } catch (e) {
@@ -7047,6 +7131,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
           collectTexts(tree, out)
           rendered++
           const blob = out.join('\n')
+          // 配置页要显示**备份时间**（0.9.2）：备份跨会话保留，而"撤销"会把导入之后的改动整体
+          // 回滚——界面必须让用户看到要恢复的是什么时候的快照（此前只显示一个没有任何时间信息的
+          // 按钮，陈旧备份被误触就是一次静默的配置丢失）。
+          if (tab === 'misc') {
+            const want = ex.__test.t('settings.configIo.undoAt',
+              { at: ex.__test.formatIssuedLocal('2026-09-26T10:00:00.000Z') })
+            assert(blob.indexOf(want) !== -1, lang + '：配置页显示备份时间（实际渲染里没有「' + want + '」）')
+          }
           const ph = [...new Set(blob.match(/\{[a-zA-Z]\w*\}/g) || [])]
           assert(ph.length === 0, lang + ' / ' + tab + ' 渲染文本里没有未替换的插值' +
             (ph.length ? '（' + ph.join(',') + '）' : ''))

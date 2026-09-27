@@ -565,7 +565,7 @@ const SETTINGS = {
     'settings.diag.scenarioNote.emsc': 'M6.2',
     'settings.diag.scenario.usgs': 'USGS 地震（约 80km 外）',
     'settings.diag.scenarioNote.usgs': 'M5.6 · 近处，小半径也可能不命中',
-    'settings.diag.scenario.noaa': 'NOAA 海啸注意报',
+    'settings.diag.scenario.noaa': 'NOAA 海啸警报',
     'settings.diag.scenarioNote.noaa': 'Tsunami Advisory',
     'settings.diag.scenario.emsc-far': 'EMSC 远地地震（约 550km 外）',
     'settings.diag.scenarioNote.emsc-far': 'M7.0 · 用于演示半径：半径 < 550km 时不命中',
@@ -893,7 +893,7 @@ const SETTINGS = {
     'settings.diag.scenarioNote.emsc': 'M6.2',
     'settings.diag.scenario.usgs': 'USGS の地震（約 80km 離れている）',
     'settings.diag.scenarioNote.usgs': 'M5.6 · 近いため、半径が小さいと命中しないことも',
-    'settings.diag.scenario.noaa': 'NOAA 津波注意報',
+    'settings.diag.scenario.noaa': 'NOAA 津波警報',
     'settings.diag.scenarioNote.noaa': 'Tsunami Advisory',
     'settings.diag.scenario.emsc-far': 'EMSC の遠地地震（約 550km 離れている）',
     'settings.diag.scenarioNote.emsc-far': 'M7.0 · 半径のデモ用：半径 < 550km では命中しません',
@@ -1219,7 +1219,7 @@ const SETTINGS = {
     'settings.diag.scenarioNote.emsc': 'M6.2',
     'settings.diag.scenario.usgs': 'USGS earthquake (~80 km away)',
     'settings.diag.scenarioNote.usgs': 'M5.6 · nearby, so a small radius may still miss it',
-    'settings.diag.scenario.noaa': 'NOAA tsunami advisory',
+    'settings.diag.scenario.noaa': 'NOAA tsunami warning',
     'settings.diag.scenarioNote.noaa': 'Tsunami Advisory',
     'settings.diag.scenario.emsc-far': 'EMSC distant earthquake (~550 km away)',
     'settings.diag.scenarioNote.emsc-far': 'M7.0 · demonstrates the radius: not matched when radius < 550 km',
@@ -1288,6 +1288,7 @@ const CONFIG_IO = {
     'settings.configIo.copyFailed': '复制失败，请手动全选复制。',
     'settings.configIo.imported': '已导入配置。',
     'settings.configIo.undoBtn': '撤销上次导入',
+    'settings.configIo.undoAt': '备份于 {at}',
     'settings.configIo.undone': '已恢复导入前的配置。',
     'settings.configIo.noBackup': '没有可撤销的导入记录。',
     'settings.configIo.errJson': '不是有效的 JSON 文件。',
@@ -1312,6 +1313,7 @@ const CONFIG_IO = {
     'settings.configIo.copyFailed': 'コピーできませんでした。手動で全選択してコピーしてください。',
     'settings.configIo.imported': '設定をインポートしました。',
     'settings.configIo.undoBtn': '直前のインポートを元に戻す',
+    'settings.configIo.undoAt': 'バックアップ日時：{at}',
     'settings.configIo.undone': 'インポート前の設定に戻しました。',
     'settings.configIo.noBackup': '元に戻せるインポート履歴がありません。',
     'settings.configIo.errJson': '有効な JSON ファイルではありません。',
@@ -1336,6 +1338,7 @@ const CONFIG_IO = {
     'settings.configIo.copyFailed': 'Copy failed. Select all and copy manually.',
     'settings.configIo.imported': 'Settings imported.',
     'settings.configIo.undoBtn': 'Undo last import',
+    'settings.configIo.undoAt': 'Backed up at {at}',
     'settings.configIo.undone': 'Restored the settings from before the import.',
     'settings.configIo.noBackup': 'There is no import to undo.',
     'settings.configIo.errJson': 'Not a valid JSON file.',
@@ -4078,13 +4081,19 @@ function parseUsgsFeed(json) {
 // NOAA tsunami.gov 的事件分级。CAP 的 <severity>（Minor/Moderate/…）对海啸不够具体，
 // 真正决定行动的是 <event> 名称，实测样本是 "Tsunami Information"（Minor）。
 // 第三项是**等级**，与日本 552 的 TSUNAMI_RANK（Watch=1/Warning=2/MajorWarning=3）同一把尺，
-// 由 matchPointAlert 用 thresholds.tsunamiGrade 做闸门。
+// 由 matchPointAlert 用 thresholds.tsunamiGrade 做闸门；第四项是颜色。
+//
+// **等级与标签必须同口径**（0.9.2 修）：Advisory / Watch 的等级是 2（对应日本的「海啸警報」档），
+// 而标签曾写作「注意报」——于是把阈值收紧到「警报及以上」的用户，会在**警报档**收到一条显示为
+// **注意报**的提醒，两边互相打脸。NOAA 的官方定义是"对近水的人有危险"而非"可能有事"，归到警报档
+// 是对的，**错的是标签**，所以改标签、不降等级：降等级会让这条在「警报及以上」下静默，而海啸
+// 恰恰是这里最不能漏的一类。
 // 「Tsunami Information」= 0：它在语义上低于日本的「津波注意報」，是"没有破坏性海啸"的信息类
 // 电文——按 1 处理会让它在半径内直接响铃（全球海啸无法用等级收敛）。
 const NOAA_EVENT_RULES = [
   [/Tsunami Warning/i, '大海啸警报（NOAA）', 3, 'red'],
-  [/Tsunami Advisory/i, '海啸注意报（NOAA）', 2, 'orange'],
-  [/Tsunami Watch/i, '海啸注意报（NOAA）', 2, 'orange'],
+  [/Tsunami Advisory/i, '海啸警报（NOAA）', 2, 'orange'],
+  [/Tsunami Watch/i, '海啸警报（NOAA）', 2, 'orange'],
   [/Tsunami Information/i, '海啸信息（NOAA）', 0, 'info'],
 ];
 
@@ -4176,7 +4185,7 @@ function parseNoaaCap(xml, entry) {
 const TEST_GEO_SCENARIOS = [
   { key: 'emsc', label: 'EMSC 地震（震中就在关注点）', note: 'M6.2', source: 'emsc' },
   { key: 'usgs', label: 'USGS 地震（约 80km 外）', note: 'M5.6 · 近处，小半径也可能不命中', source: 'usgs' },
-  { key: 'noaa', label: 'NOAA 海啸注意报', note: 'Tsunami Advisory', source: 'noaa' },
+  { key: 'noaa', label: 'NOAA 海啸警报', note: 'Tsunami Advisory', source: 'noaa' },
   // 半径是可配的（1–2000km，新建默认 100km），所以这里**不能承诺"一定不命中"**：
   // 旧的「超出默认 300km 半径，刻意不命中」既是 0.4.0 的旧默认值（0.5.0 起新建默认 100km），
   // 也把半径 ≥556km 的用户引向相反的事实——那条测试会真的响铃（0.5.4 修正文案）。
@@ -5069,9 +5078,11 @@ const SOURCE_CONTRACTS = {
     timezone: 'UTC（properties.time 形如 2026-09-12T02:15:12.43Z，自带偏移，无需转换）',
     required: [
       '顶层 { action, data }（data 是 GeoJSON Feature，不是 FeatureCollection）',
-      'data.properties object：mag number、time string、flynn_region string',
+      'data.properties object：mag number、time string',
       'data.properties.lat/lon number，或 data.geometry.coordinates[0..1]',
     ],
+    tolerant: 'properties.flynn_region（地名）缺失**不判 schema**：解析器用 String(p.flynn_region||\'\') ' +
+      '取空串，正文退化成没有地名的形态而不是丢整条。required 只列实现真的会拦下的字段（0.5.1 定）。',
     empty: 'action === "delete"（事件被撤回），或 properties.evtype 不是 "ke"（非地震事件，如爆炸）',
     staleAfterMs: null,
     staleReason: '全球 M4+ 平均约 30 分钟一条，稀疏是常态，不能用消息间隔判死。活性由连接层负责' +
@@ -5087,10 +5098,12 @@ const SOURCE_CONTRACTS = {
     timezone: 'UTC（properties.time/updated 是 epoch 毫秒，经 toIso 转成带 Z 的 ISO）',
     required: [
       '顶层 GeoJSON：features[] 数组',
-      '每个 feature：id string、geometry.coordinates = [经度, 纬度, 深度km]',
-      'properties object：mag number、time number、updated number',
+      '每个 feature：geometry.coordinates = [经度, 纬度, 深度km]',
+      'properties object：mag number、time number',
       '顶层 metadata.generated number（feed 生成时刻，用于 stale 判定）',
     ],
+    tolerant: 'feature.id（缺失时解析器按 properties.code / 坐标兜底出稳定 id）与 properties.updated' +
+      '（当前实现不读它，修订版靠 properties.time + 坐标近似归并）——两者缺失都不判 schema。',
     empty: 'features 为空数组（该窗口内没有 M2.5+ 事件，罕见但正常）',
     staleAfterMs: 30 * 60 * 1000,
     staleReason: 'USGS 摘要 feed 每 5 分钟重新生成，metadata.generated 是它的生成时刻；' +
@@ -5107,8 +5120,9 @@ const SOURCE_CONTRACTS = {
     required: [
       '事件列表：<entry> + <link rel="related" title="CapXML document" href>',
       'CAP 电文：<alert> 根、<identifier>、<info>（event / sent）',
-      '区域：<area><circle> 或 info/parameter 里的 EventLatLon',
     ],
+    tolerant: '区域（<area><circle> 或 info/parameter 里的 EventLatLon）缺失**不判 schema**：' +
+      'alert.geo 取 {lat:null,lon:null}，行动提示退化成"无坐标"形态而不是丢整条。',
     empty: 'msgType === "Test"（演练电文）；或事件列表为空（大多数时候没有海啸）',
     staleAfterMs: null,
     staleReason: '事件列表只在有海啸时才有内容，"列表为空"是绝大多数时间的正常形态，不能据此判 stale。',
@@ -5773,17 +5787,27 @@ function clearData(sourceId, detail, t) {
  * 记录一次解析结果。返回 true 表示"这条数据不可用，调用方不应继续处理它"
  * —— 注意这与"是否点亮蓝点"**已经解耦**（0.5.3）：单条坏数据不该让整个源变蓝。
  *
- * empty 仍然算"结构是好的"（源正常地给出了这一条，只是与本插件无关），所以它会清掉蓝点
- * ——这条语义沿用 0.4.2，JMA 的常态就是 empty。
+ * empty 仍然算"结构是好的"（源正常地给出了这一条，只是与本插件无关），**默认**清掉蓝点
+ * ——这条语义沿用 0.4.2，JMA 的常态就是 empty（否则一条坏电文会让蓝点挂到下一次成功解析为止）。
+ *
+ * **唯一例外是逐条上报（`opts.perItem`）**：那时 empty 只计数、不清 data 层。理由：empty 是
+ * "**这一条**与本插件无关"，不能证明"同一批次里此前那条 schema 失败的已恢复"。批量取数
+ * （12e 一轮查 N 个关注点）里立即 `clearData` 会把**其它条目**的失败计数与 `r.data` 一起清掉
+ * ——实测（1 个被拦截的 URL + 4 个只有非白名单事件的 URL，连跑 6 轮）：schema 计数涨到 6 而
+ * `consecutiveFail` 恒为 0，两条升级阈值都不可达、蓝点永不点亮。那正是"局部改版 / 局部拦截"
+ * 退化成**静默漏报**的形态——本插件最不能接受的失败。
+ *
+ * 「条级独立」的来源（12b 的 feed、15-entry 的 WS：每条电文 / 消息各是一次独立事实）**不传**
+ * `perItem`，保持 0.4.2 语义；只有"一轮 = 一批请求"的海外源逐条上报才传它。
  */
-function noteParseResult(sourceId, res, now) {
+function noteParseResult(sourceId, res, now, opts) {
   if (!res || res.ok) return false
   const t = now === undefined ? Date.now() : now;
   const r = ensure(sourceId);
   const kind = res.kind === 'value' ? 'value' : (res.kind === 'empty' ? 'empty' : 'schema');
   if (kind === 'empty') {
     r.counters.empty += 1;
-    clearData(sourceId, '数据格式已恢复正常');
+    if (!(opts && opts.perItem)) clearData(sourceId, '数据格式已恢复正常');
     return false
   }
   r.counters[kind] += 1;
@@ -7250,7 +7274,15 @@ function handleAlert(alert, cfg, opts) {
   // 消息级去重按 alert.id。**但强度升级要放行**：全球源的修订版复用同一个 id
   // （EMSC 的 unid / USGS 的 feature id），一律挡掉会让震级上修永远不再提醒。
   // 放行后由下面的 isEventRepeat 判定"确实升级才播报"，未升级仍只记历史。
-  if (isDuplicate(alert.id, cfg.dedupe.windowMinutes) && !isStrengthUpgrade(alert)) {
+  //
+  // `isDuplicate` 有登记副作用（见 10-dedupe），所以只求值一次并留用；`isStrengthUpgrade` 保留
+  // 短路——它只在"消息 id 已重复"时才可求值。
+  // `upgrading` 还要留到**跨标签页认领**那一步用：认领键是消息 id、记忆保留 10 分钟，同 id 的
+  // 修订版会被本标签页自己上一次的认领当成"其它标签页已提醒"挡下——那正是这条放行本来要防住的
+  // 漏报（震级上修在最后一跳被静默）。
+  const dup = isDuplicate(alert.id, cfg.dedupe.windowMinutes);
+  const upgrading = dup && isStrengthUpgrade(alert);
+  if (dup && !upgrading) {
     return { notified: false, reason: 'duplicate', detail: '同一条消息刚处理过（去重窗口内）' }
   }
   if (alert.cancelled) {
@@ -7384,7 +7416,9 @@ function handleAlert(alert, cfg, opts) {
   }
   // 其它 DSH 标签页已经播报过同一条消息 → 本标签页静默，避免多个页面同时响铃。
   // 用消息 id 而不是事件键：多标签页收到的是同一条消息，而同一事件的不同消息（如强度升级）不应被拦。
-  if (!claimAlertForTab(alert.id, cancelKeyOf(alert))) {
+  // **但同 id、更高强度的修订版必须绕开认领**（`upgrading`）：认领记忆按消息 id 保留 10 分钟，
+  // 不绕开的话"震级上修"会被上一次同 id 的认领抑制，成为一条静默的漏报。
+  if (!upgrading && !claimAlertForTab(alert.id, cancelKeyOf(alert))) {
     pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
       issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
@@ -9118,7 +9152,10 @@ function createOverseasSource(opts = {}) {
             continue
           }
           // 契约分类：empty（不在本插件范围 / 该点无预警）不计失败，schema / value 计入健康。
-          if (noteParseResult(id, res)) continue
+          // **逐条 empty 传 `perItem`**：只计数、不清蓝点——单条"不在范围内"不能证明同轮其它
+          // 条目的 schema 失败已恢复（不传的话，1 个被拦截的 URL + N 个非白名单事件的 URL
+          // 会让蓝点永不点亮。0.6.2 只把"空数组"挪到了轮末，这里是同型的另一半）。
+          if (noteParseResult(id, res, undefined, { perItem: true })) continue
           if (!res.ok) continue
           const alert = res.alert;
           if (seen.has(alert.id)) continue
@@ -9198,6 +9235,7 @@ function createOverseasSource(opts = {}) {
     //    逐响应上报会让局部失败（5 个采样点里 1 个被拦截）永远升不了级，见上面的说明。
     //    `applied === 0` 时才需要它——有成功解析的条目时 `noteSourceSuccess` 已经清过蓝点。
     if (okCount > 0 && failCount === 0 && applied === 0) {
+      // 轮级判定：整轮无失败、只是没有本插件范围内的条目 → 结构正常，照旧清蓝点（不传 perItem）。
       noteParseResult(id, failResult('empty', '本轮响应结构正常，但没有本插件范围内的条目'));
     }
     // 停用之后不再写状态（0.6.0 review A-1）：否则"用户主动关掉插件"会在侧边栏留下红点，
@@ -9621,6 +9659,13 @@ function buildDiagSnapshot(now) {
     // 它们不进历史（DESIGN 3.4），所以诊断里没有的话就彻底不可见。
     authority: safe(authorityRow, {}, warnings, 'authority'),
     history: safe(historySummary, {}, warnings, 'history'),
+    // 投递面（0.9.2）：**"收到并命中但没响"与"根本没收到"在用户叙述里长得一样**。音频未解锁
+    // （用户从未点过页面）与系统通知权限被拒都**无法从 config 推导**——config.notify.system 是
+    // "用户想不想要"，这里是"浏览器允不允许 / 解锁没解锁"。两者都是只读探测，符合快照的只读纪律。
+    delivery: safe(() => ({
+      audio: str(audioState()),
+      notificationPermission: str(notificationPermission()),
+    }), {}, warnings, 'delivery'),
     // 生成过程中被兜住的异常：诊断工具自身的失败也要可见，不能假装一切正常
     warnings,
   }
@@ -9754,6 +9799,12 @@ function loadConfigBackup() {
   return { at: String(b.at || ''), cfg: normalizeCfg(b.config) }
 }
 
+function clearConfigBackup() {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) window.localStorage.removeItem(CONFIG_BACKUP_KEY);
+  } catch (err) { /* 存储不可用时忽略：清不掉备份不影响正确性 */ }
+}
+
 /**
  * 导入：**先备份当前配置，再整体替换**。校验失败时**什么都不写**（连备份都不做）。
  * @returns {{ok:true,cfg:object,backupAt:string}|{ok:false,error:string,detail?:string}}
@@ -9769,11 +9820,19 @@ function importConfig(text, now) {
   return { ok: true, cfg: next, backupAt }
 }
 
-/** 撤销上次导入：把备份写回去。备份会被保留（可以反复撤），由 clearConfigBackup 单独清。 */
+/**
+ * 撤销上次导入：把备份写回去，**然后清掉备份**（0.9.2 起为一次性撤销）。
+ *
+ * 此前备份永久保留（原注释写"可以反复撤"），于是「撤销上次导入」按钮**跨会话一直存在**，
+ * 而它回滚的是"导入之前"的整份配置——用户在几周后误触它，就是一次静默的配置丢失。而"反复撤"
+ * 本身没有实际价值：第二次撤写的还是同一份备份。改为一次性：撤销成功即清掉快照，
+ * 按钮随之消失（这也让 clearConfigBackup 第一次有了调用点）。
+ */
 function undoConfigImport() {
   const b = loadConfigBackup();
   if (!b) return { ok: false, error: 'no-backup' }
   applyCfg(b.cfg);
+  clearConfigBackup();
   return { ok: true, at: b.at }
 }
 
@@ -11131,6 +11190,10 @@ function SettingsPanel(props) {
       // 配置被**整体替换**了：组件里的 cfg 快照要跟着换，否则界面还显示导入前的关注点与阈值
       // （语言同理——`applyCfg` 已经让 i18n 切过去了，这里只负责让 React 重渲染）。
       setCfgState(currentCfg());
+      // 导入是**整体替换**：地区页签要跟着新配置重算（0.9.2 修复）。`regionTab` 只在挂载时
+      // 推导过一次，此后只由页签按钮切换——不重算的话，导入一份"只有全球关注点"的配置后，
+      // 一级选择器仍高亮旧的日本分支，用户会以为关注点没导进来。
+      setRegionTab(inferRegionTab(currentCfg()));
       setCfgIoBackupAt(res.backupAt);
       setCfgIoMsg(t('settings.configIo.imported'));
     }).catch((err) => {
@@ -11144,6 +11207,9 @@ function SettingsPanel(props) {
     const res = undoConfigImport();
     if (!res.ok) { setCfgIoMsg(t('settings.configIo.noBackup')); return }
     setCfgState(currentCfg());
+    // 撤销是一次性的：备份已被清掉（0.9.2），界面上的按钮与备份时间要跟着消失——否则按钮还挂着，
+    // 再点一次只会得到"没有可撤销的导入记录"。
+    setCfgIoBackupAt('');
     setCfgIoMsg(t('settings.configIo.undone'));
   };
   const sectionConfigIo = () => s.section(t('settings.configIo.title'),
@@ -11155,6 +11221,11 @@ function SettingsPanel(props) {
       // 比没有这个按钮更容易让人以为出了问题。
       cfgIoBackupAt ? s.btn(t('settings.configIo.undoBtn'), onUndoCfg) : null,
     ),
+    // 备份时间要**看得见**（0.9.2 修复）：备份跨会话保留，而"撤销"会把导入之后的所有改动整体
+    // 回滚。此前按钮只说"撤销上次导入"、不显示备份时间，用户无从判断要恢复的是多久之前的快照，
+    // 陈旧备份一旦被误触就是一次静默的配置丢失。
+    cfgIoBackupAt ? h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4 } },
+      t('settings.configIo.undoAt', { at: formatIssuedLocal(cfgIoBackupAt) })) : null,
     h('input', {
       ref: cfgIoFileRef,
       type: 'file',

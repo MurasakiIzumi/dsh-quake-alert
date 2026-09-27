@@ -130,11 +130,19 @@ function importConfig(text, now) {
   return { ok: true, cfg: next, backupAt }
 }
 
-/** 撤销上次导入：把备份写回去。备份会被保留（可以反复撤），由 clearConfigBackup 单独清。 */
+/**
+ * 撤销上次导入：把备份写回去，**然后清掉备份**（0.9.2 起为一次性撤销）。
+ *
+ * 此前备份永久保留（原注释写"可以反复撤"），于是「撤销上次导入」按钮**跨会话一直存在**，
+ * 而它回滚的是"导入之前"的整份配置——用户在几周后误触它，就是一次静默的配置丢失。而"反复撤"
+ * 本身没有实际价值：第二次撤写的还是同一份备份。改为一次性：撤销成功即清掉快照，
+ * 按钮随之消失（这也让 clearConfigBackup 第一次有了调用点）。
+ */
 function undoConfigImport() {
   const b = loadConfigBackup()
   if (!b) return { ok: false, error: 'no-backup' }
   applyCfg(b.cfg)
+  clearConfigBackup()
   return { ok: true, at: b.at }
 }
 

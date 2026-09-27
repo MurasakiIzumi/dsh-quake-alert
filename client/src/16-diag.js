@@ -28,6 +28,8 @@ import { store } from './07-store.js'
 import { authorityStatsOf } from './10-dedupe.js'
 import { feedStatsOf } from './12b-feed-poll.js'
 import { overseasStatsOf } from './12e-overseas-poll.js'
+import { audioState } from './08-audio.js'
+import { notificationPermission } from './09-notify.js'
 import { cnStreamRegistry } from './12c-cn-stream.js'
 
 /** 快照格式版本（与插件版本无关，见文件头）。逐版对应：
@@ -280,6 +282,13 @@ export function buildDiagSnapshot(now) {
     // 它们不进历史（DESIGN 3.4），所以诊断里没有的话就彻底不可见。
     authority: safe(authorityRow, {}, warnings, 'authority'),
     history: safe(historySummary, {}, warnings, 'history'),
+    // 投递面（0.9.2）：**"收到并命中但没响"与"根本没收到"在用户叙述里长得一样**。音频未解锁
+    // （用户从未点过页面）与系统通知权限被拒都**无法从 config 推导**——config.notify.system 是
+    // "用户想不想要"，这里是"浏览器允不允许 / 解锁没解锁"。两者都是只读探测，符合快照的只读纪律。
+    delivery: safe(() => ({
+      audio: str(audioState()),
+      notificationPermission: str(notificationPermission()),
+    }), {}, warnings, 'delivery'),
     // 生成过程中被兜住的异常：诊断工具自身的失败也要可见，不能假装一切正常
     warnings,
   }

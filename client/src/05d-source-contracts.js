@@ -121,9 +121,11 @@ export const SOURCE_CONTRACTS = {
     timezone: 'UTC（properties.time 形如 2026-09-12T02:15:12.43Z，自带偏移，无需转换）',
     required: [
       '顶层 { action, data }（data 是 GeoJSON Feature，不是 FeatureCollection）',
-      'data.properties object：mag number、time string、flynn_region string',
+      'data.properties object：mag number、time string',
       'data.properties.lat/lon number，或 data.geometry.coordinates[0..1]',
     ],
+    tolerant: 'properties.flynn_region（地名）缺失**不判 schema**：解析器用 String(p.flynn_region||\'\') ' +
+      '取空串，正文退化成没有地名的形态而不是丢整条。required 只列实现真的会拦下的字段（0.5.1 定）。',
     empty: 'action === "delete"（事件被撤回），或 properties.evtype 不是 "ke"（非地震事件，如爆炸）',
     staleAfterMs: null,
     staleReason: '全球 M4+ 平均约 30 分钟一条，稀疏是常态，不能用消息间隔判死。活性由连接层负责' +
@@ -139,10 +141,12 @@ export const SOURCE_CONTRACTS = {
     timezone: 'UTC（properties.time/updated 是 epoch 毫秒，经 toIso 转成带 Z 的 ISO）',
     required: [
       '顶层 GeoJSON：features[] 数组',
-      '每个 feature：id string、geometry.coordinates = [经度, 纬度, 深度km]',
-      'properties object：mag number、time number、updated number',
+      '每个 feature：geometry.coordinates = [经度, 纬度, 深度km]',
+      'properties object：mag number、time number',
       '顶层 metadata.generated number（feed 生成时刻，用于 stale 判定）',
     ],
+    tolerant: 'feature.id（缺失时解析器按 properties.code / 坐标兜底出稳定 id）与 properties.updated' +
+      '（当前实现不读它，修订版靠 properties.time + 坐标近似归并）——两者缺失都不判 schema。',
     empty: 'features 为空数组（该窗口内没有 M2.5+ 事件，罕见但正常）',
     staleAfterMs: 30 * 60 * 1000,
     staleReason: 'USGS 摘要 feed 每 5 分钟重新生成，metadata.generated 是它的生成时刻；' +
@@ -159,8 +163,9 @@ export const SOURCE_CONTRACTS = {
     required: [
       '事件列表：<entry> + <link rel="related" title="CapXML document" href>',
       'CAP 电文：<alert> 根、<identifier>、<info>（event / sent）',
-      '区域：<area><circle> 或 info/parameter 里的 EventLatLon',
     ],
+    tolerant: '区域（<area><circle> 或 info/parameter 里的 EventLatLon）缺失**不判 schema**：' +
+      'alert.geo 取 {lat:null,lon:null}，行动提示退化成"无坐标"形态而不是丢整条。',
     empty: 'msgType === "Test"（演练电文）；或事件列表为空（大多数时候没有海啸）',
     staleAfterMs: null,
     staleReason: '事件列表只在有海啸时才有内容，"列表为空"是绝大多数时间的正常形态，不能据此判 stale。',
