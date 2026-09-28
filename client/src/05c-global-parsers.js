@@ -1,32 +1,20 @@
 // ============================================================================
 // dsh-quake-alert · client/src/05c-global-parsers.js
-//
-// 作用：把三个全球源的消息解析成与日本源同一套内部模型（Alert）。
-// 内容：EMSC standing_order WebSocket（GeoJSON Feature）、USGS summary feed
-//       （FeatureCollection）、NOAA tsunami.gov 的 CAP 1.2 电文。
-// 依赖：02-storage（isPlainObject）。
-//
-// 与日本源的差别，也是本文件引入的新字段：
-//   · 全球源只给「震中坐标 + 震级」，没有都道府县 / 市町村 → `locator: 'point'`、
-//     `regions` 恒为空数组，匹配交给 06-matcher 的 matchPointAlert 用 Haversine 距离完成。
-//   · 震级（M）与日本的震度是两套不可换算的体系，所以阈值也是独立旋钮
-//     （thresholds.globalMagnitude），而不是复用 quakeScale。
-//
-// 字段差异全部来自实测样本（见 samples/global/），踩过的坑写在各自函数上方：
-//   · EMSC：顶层 { action, data }，data 是 GeoJSON **Feature**（不是 FeatureCollection）；
-//     区域字段叫 flynn_region（没有 region）；time 是 ISO8601 字符串；lat/lon 在 properties 里。
-//   · USGS：FeatureCollection；geometry.coordinates = [lon, lat, depthKm]；time/updated 是 epoch 毫秒。
-//   · NOAA CAP：alert > info > area > circle "lat,lon 半径"；震级与位置同时也在 info 的
-//     parameter 里（EventPreliminaryMagnitude / EventLatLon）。
+// 作用：三个全球源 → 与日本源同套 Alert：EMSC standing_order WebSocket（顶层 { action, data }，data 是
+//       GeoJSON **Feature** 而非 FeatureCollection）、USGS summary feed、NOAA tsunami.gov 的 CAP 1.2。
+// 依赖：02-storage（isPlainObject）、00-i18n（t）。
+// 契约：全球源只给「震中坐标 + 震级」，没有都道府县 / 市町村 → locator:'point'、regions 恒为空数组，匹配交给
+//       06-matcher 的 matchPointAlert（Haversine 距离）；震级阈值是独立旋钮 thresholds.globalMagnitude（与
+//       日本的震度不可换算）。EMSC 的区域字段叫 flynn_region、time 是 ISO 字符串、lat/lon 在 properties 里；
+//       USGS 的 geometry.coordinates = [lon, lat, depthKm]、time/updated 是 epoch 毫秒；NOAA 的 circle 是
+//       "lat,lon 半径"，震级与震中另有 parameter（EventPreliminaryMagnitude / EventLatLon）。
 // ============================================================================
 
 import { isPlainObject } from './02-storage.js'
 import { t } from './00-i18n.js'
 
-/** 取第一个可用数值（全球源的坐标/震级可能同时存在于两三个地方，按优先级回退）。
- *  经 toNumOrNull 归一，所以**数字字符串也算**：源侧类型并不稳定（CAP 的 parameter 里全是字符串，
- * 而 EMSC/USGS 某次改版也可能把 mag 序列化成 "5.6"）。只认 typeof number 的话，
- * `magnitude` 会变成 null → 震级闸门被整个跳过 → 低于阈值的地震照常响铃（误报）。 */
+// 取第一个可用数值（全球源的坐标 / 震级可能同时存在于两三个地方，按优先级回退），经 toNumOrNull 规整，
+// 所以**数字字符串也算**（CAP 的 parameter 全是字符串）：只认 typeof number 会让 magnitude 变 null、震级门槛被整个跳过。
 function firstNumber(...vals) {
   for (const v of vals) {
     const n = toNumOrNull(v)
@@ -34,8 +22,7 @@ function firstNumber(...vals) {
   }
   return null
 }
-/** 字符串（CAP 的 parameter 里全是字符串）→ 数值；空串与垃圾值一律给 null。
- *  注意不能用 Number('')——它等于 0，会把"没有震级"变成"震级 0"。 */
+// 字符串 → 数值；空串与垃圾值一律给 null。不能用 Number('')——它等于 0，会把"没有震级"变成"震级 0"。
 function toNumOrNull(v) {
   if (typeof v === 'number') return Number.isFinite(v) ? v : null
   const s = String(v === undefined || v === null ? '' : v).trim()
@@ -55,11 +42,8 @@ function tagText(scope, name) {
   return m ? decodeXml(m[1]).trim() : ''
 }
 
-/**
- * 震级 → severity。日本源按震度分级（10..70），全球源只有震级，所以这里单独一套边界。
- * 取值依据：M7 以上是「需要跨区域响应」的大地震，M6 以上可能造成局部破坏，
- * M5 以上普遍有感——与 EMSC/USGS 的公众提示口径一致。
- */
+// 震级 → severity，与日本源按震度分级（10..70）是两套独立边界：M7 以上是需跨区域响应的大地震，
+// M6 以上可能造成局部破坏，M5 以上普遍有感。
 function severityOfMagnitude(mag) {
   if (typeof mag !== 'number' || !Number.isFinite(mag)) return 'info'
   if (mag >= 7) return 'red'
@@ -68,16 +52,9 @@ function severityOfMagnitude(mag) {
   return 'info'
 }
 
-/**
- * 事件键里的「发震时刻（分钟）」必须先**归一到 UTC**再取分钟。
- *
- * 各源给的 ISO 字符串偏移不同：EMSC 是 `…Z`、USGS 经 toIso 也是 `…Z`，而 0.5.0 新接的大陆源是
- * `+08:00`。直接切字符串前 16 位的话，同一场地震在两边会落进**相隔 8 小时**的两个桶里——
- * 键永远不相等，跨源归并彻底失效，同一场地震响两次（实测样本里 cenc_eqlist 含境外地震，
- * 福克斯群岛 M6.5 这类事件 USGS / EMSC 也会推，所以这条路径是走得到的，不是理论问题）。
- *
- * 无法解析时返回 null（0.9.4 改，见 geoEventKey）。
- */
+// 事件键里的「发震时刻（分钟）」必须先**换算到 UTC** 再取分钟：各源给的 ISO 偏移不同（EMSC 是 `…Z`、
+// USGS 经 toIso 也是 `…Z`，大陆源是 `+08:00`），直接切字符串前 16 位会让同一场地震落进相隔 8 小时的
+// 两个桶，键永远不相等、跨源归并失效，同一场地震响两次。无法解析时返回 null（见 geoEventKey）。
 function minuteKeyOf(timeIso) {
   const s = String(timeIso === undefined || timeIso === null ? '' : timeIso)
   // 局部变量不叫 `t`（那是 00-i18n 的取词函数，遮蔽了本函数里的 t('key') 会去调 Date.parse）
@@ -86,41 +63,25 @@ function minuteKeyOf(timeIso) {
   return new Date(ms).toISOString().slice(0, 16)
 }
 
-/**
- * 跨源事件键：同一场地震 EMSC 与 USGS 都会推，两边机构、编号、震级都可能不同，
- * 但「发震时刻（分钟）+ 震中（0.1 度 ≈ 11km）」是一致的。用它把两个全球源的同一次地震
- * 归并成一个事件，避免同一场地震因为接了第二个源而响两次。
- * 代价：跨分钟边界（两边测定的发震时刻差过一分钟）时归并会失败——宁可多响一次，不漏报。
- * 0.5.0 起大陆源（cenc_eew / cenc_eqlist）也走同一把钥匙：它们的 **EventID 与 EEW 完全不同格式**
- * （EEW 是 `b4kybfnuqayyy` 这类随机串，速报是 `CD.20260918205536.056`；0.5.4 按样本修正，
- * 此处原写 EEW 是 `202609182050.0001`），归并只能靠时间 + 震中。
- */
-/**
- * 0.1° 桶的字符串化。**必须把 "-0.0" 归一成 "0.0"**：`(-0.02).toFixed(1)` 得到 "-0.0"，
- * 而 `(0.02).toFixed(1)` 得到 "0.0" —— 赤道与本初子午线两侧的震中会落进两个不同的桶，
- * 事件键永远不相等 → 跨源归并失败、同一场地震响两次。近似归并（±2 分钟 + 50km）通常还能
- * 兜住，所以它表现为概率性重复而不是稳定故障（0.5.1 修）。
- */
+// 跨源事件键：同一场地震 EMSC 与 USGS 都会推，两边机构、编号、震级都可能不同，但「发震时刻（分钟）+
+// 震中（0.1 度 ≈ 11km）」是一致的，用它把两个全球源的同一次地震归并成一个事件。跨分钟边界（两边测定的
+// 发震时刻差过一分钟）时归并会失败——宁可多响一次，不漏报。大陆源（cenc_eew / cenc_eqlist）走同一把钥匙：
+// 它们的 **EventID 与 EEW 格式完全不同**（EEW 是 `b4kybfnuqayyy` 这类随机串，速报是 `CD.20260918205536.056`），归并只能靠时间 + 震中。
+// 0.1° 桶的字符串化。**必须把 "-0.0" 统一成 "0.0"**：`(-0.02).toFixed(1)` 得 "-0.0" 而 `(0.02).toFixed(1)`
+// 得 "0.0"，赤道与本初子午线两侧的震中会落进两个不同的桶，事件键永远不相等 → 跨源归并失败、同一场地震响两次。
 function oneDp(n) {
   if (typeof n !== 'number' || !Number.isFinite(n)) return '?'
   const s = n.toFixed(1)
   return s === '-0.0' ? '0.0' : s
 }
 
-/**
- * 时间不可解析时的事件键序号。**只增不减**，且带调用序号，所以两段时间不可解析的事件
- * 永远不会得到同一个键（见 geoEventKey 的说明）。
- */
+// 时间不可解析时的事件键序号，**只增不减**：两段时间不可解析的事件永远不会得到同一个键（见 geoEventKey）。
 let unknownTimeSeq = 0
 
 function geoEventKey(timeIso, lat, lon) {
   const min = minuteKeyOf(timeIso)
-  // 0.9.4 修：此前时间不可解析时回退 `String(timeIso).slice(0, 16)`，而**空串会切片成空串**
-  // —— 于是键退化成 `geo:@30.9,99.9`，该震中之后**所有**事件共用这一个键：isEventRepeat 先由
-  // eventSeen 精确命中，再按"强度未升级"判重复 → 后续地震全部静默（漏报）。
-  // 触发前提是源侧改时间格式或字段改名，而那正是解析层最该保守的地方。
-  // 现在给一个**不可能与其它事件相同**的键：代价是同一事件也可能多响一次（消息级 id 去重仍在，
-  // 事件级归并失效），方向与全项目一致——宁可多响一次，也不让不同事件互相吃掉。
+  // 时间不可解析时**不能**退回 `String(timeIso).slice(0, 16)`：空串会切片成空串，键退化成 `geo:@30.9,99.9`，
+  // 该震中之后**所有**事件共用这一个键，后续地震全部被判重复而静默（漏报）。给一个不可能与其它事件相同的键。
   const at = min === null ? ('!t' + (++unknownTimeSeq)) : min
   return 'geo:' + at + '@' + oneDp(lat) + ',' + oneDp(lon)
 }
@@ -134,11 +95,8 @@ function toIso(v) {
   return typeof v === 'string' ? v : ''
 }
 
-/**
- * EMSC standing_order WebSocket 消息 → Alert。
- * 消息形如 { action: 'create'|'update'|'delete', data: Feature }；非地震事件（爆炸等）由
- * properties.evtype 区分，实测 'ke' = known earthquake。
- */
+// EMSC standing_order WebSocket 消息 → Alert。消息形如 { action: 'create'|'update'|'delete', data: Feature }；
+// 非地震事件（爆炸等）由 properties.evtype 区分，实测 'ke' = known earthquake。
 function parseEmsc(raw) {
   if (!isPlainObject(raw)) return null
   const d = isPlainObject(raw.data) ? raw.data : null
@@ -186,9 +144,7 @@ function parseUsgsFeature(f) {
   const coords = (isPlainObject(f.geometry) && Array.isArray(f.geometry.coordinates)) ? f.geometry.coordinates : []
   const lon = firstNumber(coords[0], p.lon)
   const lat = firstNumber(coords[1], p.lat)
-  // 0.9.4（P3-30）：坐标不完整时**不造事件对象**。此前缺 geometry 时 geo 是
-  // `{lat: null, lon: null}`、id 是 `'usgs:null,null,<time>'`——matcher 虽然会被 validGeo 挡下，
-  // 但这个"看起来有效"的对象仍会进历史与诊断，而且**不同地震的 id 会撞在一起**（同一个 null 组合）。
+  // 坐标不完整时**不造事件对象**：null 组合会让不同地震的 id 撞在一起（`usgs:null,null,<time>`），并进历史与诊断。
   if (typeof lat !== 'number' || !Number.isFinite(lat) ||
       typeof lon !== 'number' || !Number.isFinite(lon)) return null
   const depth = firstNumber(coords[2], null)
@@ -212,8 +168,7 @@ function parseUsgsFeature(f) {
     geo: { lat, lon, depthKm: depth },
     magnitude: mag,
     magType: String(p.magType || ''),
-    // USGS 的 alert 字段（green/yellow/orange/red）是 PAGER 的损失评估，11 条实测里全是 null；
-    // 这里不做映射，severity 统一按震级判定，避免"两个源对同一地震给出不同颜色"。
+    // USGS 的 alert 字段（green/yellow/orange/red）是 PAGER 的损失评估，实测全为 null：不做映射，severity 统一按震级判，避免两个源对同一地震给出不同颜色。
     hypo: { name: place, magnitude: mag },
     regions: [],
     eventKey: geoEventKey(time, lat, lon),
@@ -223,32 +178,14 @@ function parseUsgsFeature(f) {
   }
 }
 
-// 0.9.4（P3-42）：**删掉了 `parseUsgsFeed`（整文件 FeatureCollection → Alert[]）**。
-// 它在生产路径上没有调用点：Host 把每条 entry 的原文交给 Client，Client 逐条走
-// `parseUsgsFeature`（`scripts/check-contracts.mjs` 也是取 `features[0]`）。留着一个只有测试
-// 用的整文件映射器，会让下一个人以为存在"整包解析"这条路。回归里改成由测试自己 map
-// 真实样本的每个 feature —— 覆盖面不变，形状的错觉没有了。
-
-// NOAA tsunami.gov 的事件分级。CAP 的 <severity>（Minor/Moderate/…）对海啸不够具体，
-// 真正决定行动的是 <event> 名称，实测样本是 "Tsunami Information"（Minor）。
-// 第三项是**等级**，与日本 552 的 TSUNAMI_RANK（Watch=1/Warning=2/MajorWarning=3）同一把尺，
-// 由 matchPointAlert 用 thresholds.tsunamiGrade 做闸门；第四项是颜色。
-//
-// **等级与标签必须同口径**（0.9.2 修）：Advisory / Watch 的等级是 2（对应日本的「海啸警報」档），
-// 而标签曾写作「注意报」——于是把阈值收紧到「警报及以上」的用户，会在**警报档**收到一条显示为
-// **注意报**的提醒，两边互相打脸。NOAA 的官方定义是"对近水的人有危险"而非"可能有事"，归到警报档
-// 是对的，**错的是标签**，所以改标签、不降等级：降等级会让这条在「警报及以上」下静默，而海啸
-// 恰恰是这里最不能漏的一类。
-// 「Tsunami Information」= 0：它在语义上低于日本的「津波注意報」，是"没有破坏性海啸"的信息类
-// 电文——按 1 处理会让它在半径内直接响铃（全球海啸无法用等级收敛）。
-// 0.9.4（P2-11）：改为**整串锚定**匹配，并去掉"什么都能匹配"的兜底。
-// 此前用 `/Tsunami Warning/i` 这样的子串匹配，于是 "Not a Tsunami Warning"、
-// "Tsunami Warning Cancellation" 这类 event 也会被抬到最高档（3）并通过等级闸门 ——
-// 误报方向，而海啸的误报会直接让用户按"大海啸"行动。event 名是**受控词表**（CAP 里由发布
-// 机构填写），所以锚定整串是安全的；大小写与多余空格先归一。
-// 兜底那一项原本是 `[/./, '海啸信息（NOAA）', 0, 'info']`：任何新 event 都会被静默归成
-// "信息类"。等级 0 确实不会响铃（安全方向），但它把"上游加了新 event 名"这件事藏了起来。
-// 现在未识别的 event 用**如实标签**（带原始 event 名）落历史，等级仍是 0。
+// NOAA tsunami.gov 的事件分级。CAP 的 <severity>（Minor/Moderate/…）对海啸不够具体，真正决定行动的是
+// <event> 名称。第三项是**等级**，与日本 552 的 TSUNAMI_RANK（Watch=1/Warning=2/MajorWarning=3）同一把尺，
+// 由 matchPointAlert 用 thresholds.tsunamiGrade 做门槛；第四项是颜色。**等级与标签必须同口径**：Advisory /
+// Watch 的等级是 2（对应日本的「海啸警報」档，NOAA 的官方定义是"对近水的人有危险"），标签不能写成「注意报」。
+// 「Tsunami Information」= 0：语义上低于日本的「津波注意報」，按 1 处理会让它在半径内直接响铃。
+// event 名是**受控词表**（CAP 里由发布机构填写），所以**整串锚定**匹配（大小写与多余空格先统一）：子串匹配会把
+// "Not a Tsunami Warning" / "Tsunami Warning Cancellation" 抬到最高档 3（误报方向）。未识别的 event 用如实
+// 标签落历史，等级仍是 0（不会响铃，但能看出上游加了新 event 名）。
 const NOAA_EVENT_RULES = [
   [/^tsunami warning$/, 'kind.noaaMajorWarning', 3, 'red'],
   [/^tsunami advisory$/, 'kind.noaaWarning', 2, 'orange'],
@@ -256,13 +193,9 @@ const NOAA_EVENT_RULES = [
   [/^tsunami information( statement)?$/, 'kind.noaaInfo', 0, 'info'],
 ]
 
-/**
- * NOAA tsunami.gov 的 CAP 1.2 电文 → Alert。
- * 结构：alert > info > area > circle（"纬度,经度 半径"），震级与震中另有 parameter 备份。
- * msgType=Cancel 表示解除——走与日本源相同的取消 / 解除链路。
- * @param {string} xml CAP 原文
- * @param {{ id?: string }} [entry] 事件列表里的条目（用于给 Alert 一个稳定 id）
- */
+// NOAA tsunami.gov 的 CAP 1.2 电文 → Alert。结构：alert > info > area > circle（"纬度,经度 半径"），
+// 震级与震中另有 parameter 备份；msgType=Cancel 是解除，走与日本源相同的取消 / 解除链路。
+// xml 是 CAP 原文；entry 是事件列表里的条目（用于给 Alert 一个稳定 id）。
 function parseNoaaCap(xml, entry) {
   const text = String(xml || '')
   if (text.indexOf('<alert') === -1) return null
@@ -279,9 +212,8 @@ function parseNoaaCap(xml, entry) {
     const n = tagText(m[1], 'valueName')
     if (n) params[n] = tagText(m[1], 'value')
   }
-  // 震中优先取 area 的 circle（"纬,经 半径"），它才是配信覆盖范围；EventLatLon 只是备份。
-  // CAP 允许一个 info 下**多个 <area>**，各有自己的 circle——全部收集。
-  // 只看第一个 circle 会让其余海域的沿海用户漏报，而多区域海啸恰恰是最常见的形态。
+  // 震中优先取 area 的 circle（"纬,经 半径"），它才是配信覆盖范围，EventLatLon 只是备份。CAP 允许一个
+  // info 下**多个 <area>**，各有自己的 circle——全部收集：只看第一个会让其余海域的沿海用户漏报。
   const geoList = []
   for (const m of text.matchAll(/<circle>([\s\S]*?)<\/circle>/g)) {
     const cm = /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/.exec(m[1])
@@ -293,12 +225,11 @@ function parseNoaaCap(xml, entry) {
   }
   const geo = geoList.length ? geoList[0] : { lat: null, lon: null }
   const mag = toNumOrNull(params.EventPreliminaryMagnitude)
-  // 整串锚定匹配（0.9.4，见 NOAA_EVENT_RULES）。认不出时**如实标注**而不是冒充"海啸信息"：
-  // 等级仍是 0（不会响铃），但历史与诊断里能看出"上游加了一个我们不认识的事件名"。
+  // 认不出时**如实标注**而不是冒充"海啸信息"：等级仍是 0（不会响铃），但历史里能看出上游加了新 event 名。
   const eventNorm = String(event || '').trim().toLowerCase().replace(/\s+/g, ' ')
   const matched = NOAA_EVENT_RULES.find(([re]) => re.test(eventNorm))
-  // 匹配到时 rule[1] 是**文案 key**（要取词）；没匹配到时已经是取好词的句子，	() 对不存在的
-  // key 会原样回显，所以下面统一过一遍 t() 是安全的。
+  // 匹配到时 rule[1] 是**文案 key**（要取词）；没匹配到时已经是取好词的句子，t() 对不存在的 key 原样回显，
+  // 所以下面统一过一遍 t() 是安全的。
   const rule = matched || [null, t('kind.noaaUnrecognized', { event: String(event || '—').slice(0, 40) }), 0, 'info']
   const ruleLabel = t(rule[1])
   const cancelled = msgType === 'Cancel'
@@ -319,7 +250,7 @@ function parseNoaaCap(xml, entry) {
     issued: sent || origin,
     headline,
     maxScale: rule[2],
-    // 与日本 552 的等级共用同一把尺，供 matchPointAlert 做 tsunamiGrade 闸门
+    // 与日本 552 的等级共用同一把尺，供 matchPointAlert 做 tsunamiGrade 门槛
     tsunamiRank: rule[2],
     level: 0,
     geo,
@@ -337,23 +268,14 @@ function parseNoaaCap(xml, entry) {
 }
 
 
-/**
- * 测试场景（0.4.0）。全球源的地震不是随时都有，用户没法"等一条"来验证链路——
- * 日本气象链路早有「发送测试气象警报」按钮，这里补上对应的东西。
- *
- * 与气象按钮同样的做法：**构造源格式的原文**（EMSC 的 WebSocket 帧、USGS 的 GeoJSON feature、
- * NOAA 的 CAP 电文），再交给真正的解析器与匹配引擎。因此点一次就同时验证了
- * 「解析器 → 坐标匹配 → 通知 → 历史」整条链路，而且不发任何网络请求。
- *
- * 四个场景覆盖两个维度：三个源各自的解析路径，以及"半径内命中 / 半径外不命中"。
- */
+// 测试场景。全球源的地震不是随时都有，用户没法"等一条"来验证链路——与气象按钮同样的做法：**构造源格式的
+// 原文**（EMSC 的 WebSocket 帧、USGS 的 GeoJSON feature、NOAA 的 CAP 电文）再交给真正的解析器与匹配引擎，
+// 点一次就验证「解析器 → 坐标匹配 → 通知 → 历史」整条链路，且不发任何网络请求。
 export const TEST_GEO_SCENARIOS = [
   { key: 'emsc', source: 'emsc' },
   { key: 'usgs', source: 'usgs' },
   { key: 'noaa', source: 'noaa' },
-  // 半径是可配的（1–2000km，新建默认 100km），所以这里**不能承诺"一定不命中"**：
-  // 旧的「超出默认 300km 半径，刻意不命中」既是 0.4.0 的旧默认值（0.5.0 起新建默认 100km），
-  // 也把半径 ≥556km 的用户引向相反的事实——那条测试会真的响铃（0.5.4 修正文案）。
+  // 半径是可配的（1–2000km，新建默认 100km），所以这里**不能承诺"一定不命中"**：半径 ≥556km 的用户会真的响铃。
   { key: 'emsc-far', source: 'emsc' },
 ]
 
@@ -374,13 +296,9 @@ function capTestXml(identifier, event, headline, name, lat, lon, mag, stamp) {
     '</info></alert>'
 }
 
-/**
- * 按场景构造一条**测试用**的源原文。
- * @param {{name?: string, lat: number, lon: number}} place 用户的第一个全球关注点
- * @param {number} nowMs 时间戳（id 里带上它，连点两次不会被消息级去重吞掉）
- * @param {string} key TEST_GEO_SCENARIOS 里的 key
- * @returns {{ source: string, payload: object|string, label: string, note: string }}
- */
+// 按场景构造一条**测试用**的源原文。
+// @param place 用户的第一个全球关注点 { name?, lat, lon }；@param nowMs 时间戳（id 里带上它，连点两次不会被
+// 消息级去重吞掉）；@param key TEST_GEO_SCENARIOS 里的 key。返回 { source, payload, label, note }。
 export function buildTestGlobalMessage(place, nowMs, key) {
   const ms = nowMs || Date.now()
   const p = place || {}
@@ -453,9 +371,8 @@ export function parseTestGlobalMessage(msg) {
     alert = parseEmsc(msg.payload)
   }
   if (!alert) return null
-  // 测试消息的事件键必须每次不同，否则第二次点击会被判成"同一场地震的重复发布"而静默——
-  // 用户会以为按钮坏了。生产的事件键按「分钟 + 震中」归并（那是为了让同一场地震只响一次），
-  // 连点两次必然落在同一分钟；这里换成带毫秒的 id，语义也成立：每次点击本来就是一次独立演示。
+  // 测试消息的事件键必须每次不同，否则第二次点击会被判成"同一场地震的重复发布"而静默（用户会以为按钮坏了）。
+  // 生产的事件键按「分钟 + 震中」归并，连点两次必然落在同一分钟；这里换成带毫秒的 id。
   alert.eventKey = 'test:' + alert.id
   return alert
 }

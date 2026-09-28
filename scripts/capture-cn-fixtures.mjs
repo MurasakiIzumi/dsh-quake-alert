@@ -1,24 +1,13 @@
 #!/usr/bin/env node
 // dsh-quake-alert · 大陆源 fixture 抓取脚本（开发用，不入发行包）
-//
-// 作用：把 Wolfx 的大陆源（`cenc_eew` / `cenc_eqlist`）的**真实结构**抓成 samples/cn/ 下的
-//       fixture。DESIGN 11.4 的落地：大陆 EEW 稀疏（门槛约 M4.0，数天一次），开发时不能等一个
-//       真实事件来验证，所以用 Wolfx 自带的回放能力取结构。
-//
-// 两条取数路径，用途不同（两条都实测可用，2026-09-19）：
-//   1. REST 快照 `https://api.wolfx.jp/<id>.json` —— 拿"最后一条 EEW / 整张速报列表"的稳定快照，
-//      适合做**黄金样本**（字段齐全、可反复回放）。本脚本默认走这条。
-//   2. WebSocket `wss://ws-api.wolfx.jp/<id>` + 纯文本指令 `query_<id>`（**不是** JSON）
-//      —— 拿到的结构与推送完全一致（带 `{"type":"cenc_eew",…}` 包裹），适合核对"推送包裹形态"。
-//      注意：指令是纯文本 `query_cenceew` / `query_cenceqlist`；发 JSON 不会有任何响应（实测）。
-//
+// 抓 Wolfx 大陆源 cenc_eew / cenc_eqlist 的真实结构，写入 samples/cn/。
+// REST 路径 https://api.wolfx.jp/<id>.json 取字段齐全的稳定快照；WebSocket 路径 wss://ws-api.wolfx.jp/<id>
+// 配纯文本指令 query_<id>（不是 JSON，发 JSON 不会有响应）取与推送一致的包裹形态。
+// 抓到的样本可能与上一版完全相同（EEW 数天不变）：fixture 是结构样本，样本 diff 不代表抓取失败。
 // 用法：
 //   node scripts/capture-cn-fixtures.mjs            # 抓 REST 快照写入 samples/cn/
 //   node scripts/capture-cn-fixtures.mjs --ws       # 改用 WebSocket query 指令抓（含推送包裹）
-//   node scripts/capture-cn-fixtures.mjs --dry      # 只打印，不写盘
-//
-// 边界：只抓结构、不做判断。抓到的东西可能与上一版一模一样（EEW 数天不变）——这是正常的，
-//       fixture 本来就是"结构样本"而不是"新闻"。差异请用 git diff 看。
+//   node scripts/capture-cn-fixtures.mjs --dry      # 只打印，不写入文件
 
 import { writeFileSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -40,7 +29,7 @@ async function fetchRest(id) {
   return JSON.parse(text)
 }
 
-/** WebSocket + 纯文本 query 指令（拿到的是推送包裹形态）。 */
+/** WebSocket + 纯文本 query 指令（拿到的是推送包裹形态）；心跳约 60 秒一次先到，跳过等真正的数据包。 */
 function fetchWs(id) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket('wss://ws-api.wolfx.jp/' + id)
@@ -50,7 +39,6 @@ function fetchWs(id) {
     ws.onmessage = (e) => {
       let o = null
       try { o = JSON.parse(String(e.data)) } catch { return }
-      // 心跳先到（约 60 秒一次），跳过；等到真正的数据包再收工
       if (o && o.type && o.type !== 'heartbeat') done(o)
     }
     ws.onerror = () => { clearTimeout(timer); reject(new Error('WebSocket 连接失败')) }

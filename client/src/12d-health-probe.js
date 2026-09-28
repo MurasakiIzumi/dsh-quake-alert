@@ -1,52 +1,22 @@
 // ============================================================================
 // dsh-quake-alert · client/src/12d-health-probe.js
 //
-// 作用：**机制层**的探针调度（0.5.3 / DESIGN 11.9 B）。
-// 内容：一个定时器，按 `SOURCE_CONTRACTS[*].staleAfterMs` 判定每个源的新鲜度，
-//       并顺带驱动蓝点的 TTL 自愈（`pruneHealth`）。
+// 作用：机制层的自检调度——定时器按 `SOURCE_CONTRACTS[*].staleAfterMs` 判定各源新鲜度，并驱动
+//       蓝点 TTL 自愈（`pruneHealth`）。契约是唯一阈值来源，源只上报最后取数时刻、自己不判 stale；
+//       自检不发外部请求，只读已有的数据时间。
 // 依赖：05d（契约声明）、05g（健康记录）、07-store（状态上报）。
-//
-// ---------------------------------------------------------------------------
-// 这个文件存在的唯一理由：**让契约里的阈值从"文档"变成"开关"**。
-//
-// 0.5.3 开工前 grep 的结论：`SOURCE_CONTRACTS[*].staleAfterMs`（8 个源）在整个代码库里
-// **没有任何读取点**。阈值实际散在四处硬编码 —— lib/index.js 的 feedStaleMs（jma 3h /
-// usgs 30min / nmc 3h）、lib/wolfx-source.js 的 preset（速报 48h）、15-entry 传给
-// 12-websocket 的 staleAfterMs（emsc 3h）、以及 12c 对 SSE status 帧的直通。
-// 后果是：改契约里的数字，行为一点不变；而"某个源的阈值到底是多少"要翻四个文件才对得上。
-//
-// 现在：**探针是唯一的判定者，契约是唯一的阈值来源**。各源只上报"我最后一次拿到数据的
-// 时刻"（`noteFreshness`），不再自己判 stale。
-//
-// ---------------------------------------------------------------------------
-// 两个刻意的例外（不统一是为了不把事情做坏）
-//
-// ① **`staleAfterMs: null` 的源不判**（P2PQuake / EMSC / cenc_eew）。推送源没有"数据新鲜度"
-//    这个概念——日本可能数小时没有有感地震，而连接是好的。它们的活性由连接层负责
-//    （建连看门狗 + 半开检测），契约里的 `staleReason` 已经写明了这一点。探针读到 null 就跳过。
-// ② **Host 侧保留自己的常量**。`lib/` 不能 import Client 的契约（两个半边是分开构建的），
-//    所以 Host 的 `feedStaleMs` 仍然存在。两边的一致性由**回归断言**守护
-//    （`SOURCE_CONTRACTS[src].staleAfterMs === Host 侧同名常量`），而不是靠"记得同时改两处"。
-//
-// 明确不做：不在探针里发起任何外部请求。它只读已经存在的数据时间——源到不了的时候，
-// "最后数据时间"自然就旧了，不需要另外去探（多一条外部请求路径就多一个要处理的失败形态）。
 // ============================================================================
 
 import { SOURCE_CONTRACTS } from './05d-source-contracts.js'
 import { sourceHealthOf, noteStale, pruneHealth, publishStatus } from './05g-source-health.js'
 
-/**
- * 探针周期。30 秒的依据：最短的阈值是 USGS 的 30 分钟，30 秒的分辨率足以让"刚过期"和
- * "过期半小时"在 UI 上的差别不值得更细；而它足够轻（只遍历 8 条记录、不发请求）。
- */
+/** 自检周期。最短阈值是 USGS 的 30 分钟，30 秒分辨率够用，每轮只遍历 8 条记录、不发请求。 */
 export const PROBE_INTERVAL_MS = 30 * 1000
 
 /**
- * 取某个源的新鲜度阈值（毫秒）；`null` / 非正数表示"这条链路不判新鲜度"。
- *
- * 抽成导出函数是为了让"声明生效"这件事可以被直接断言：测试里把契约的字段改成 1 分钟，
- * 探针的行为必须跟着变——那就证明阈值真的来自契约，而不是某个硬编码。
- * @param {string} sourceId
+ * 取某个源的新鲜度阈值（毫秒）；`null` / 非正数表示这条链路不判新鲜度。`staleAfterMs: null` 的是推送源
+ * （P2PQuake / EMSC / cenc_eew，活性由连接层负责）。Host 与 Client 分开构建，`lib/` 不能 import 本契约，
+ * 故 Host 侧仍保留自己的 `feedStaleMs` 常量，两边一致性由回归断言守护。
  */
 export function staleAfterOf(sourceId) {
   const c = SOURCE_CONTRACTS[sourceId]
@@ -63,19 +33,12 @@ function humanMinutes(ms) {
 }
 
 /**
- * 建一个探针。定时器与 pushSource 都可注入（测试用假时钟直接调 `tick()`，不等真实定时器）。
- *
- * @param {object} [opts]
- * @param {() => number} [opts.now]
- * @param {number} [opts.intervalMs]
- * @param {(fn: Function, ms: number) => any} [opts.setTimer]
- * @param {(t: any) => void} [opts.clearTimer]
- * @param {(id: string, patch: object) => void} [opts.pushSource] 注入点（测试用）。**默认不走它**：
- *   生产路径必须经 `publishStatus` 合成（见下），注入时保持"原样推送"以便断言原始 patch。
- * @param {(id: string) => boolean} [opts.sourceEnabled] 该源当前是否被用户开着（0.9.4 / P2-17）。
- *   关掉的源不该被判 stale：用户主动关掉一个源之后，我们**不再去问它**了，dataTime 自然停住，
- *   于是几小时后界面把"我已关闭"改写成"上游数据已过期（事实是我们不再问了）"，整体状态还被
- *   这个已关闭的源拖成中灰，重新打开也不能立即自愈。默认全部视为开启（保持既有行为）。
+ * 建一个自检器。定时器与 pushSource 都可注入（测试用假时钟直接调 `tick()`，不等真实定时器）。
+ * @param {object} [opts] 另有 now / intervalMs / setTimer / clearTimer 可注入。
+ * @param {(id: string, patch: object) => void} [opts.pushSource] 注入点（测试用）：注入时按原样
+ *   推送以便断言原始 patch；生产路径必须经 `publishStatus` 合成新鲜度 / 连接层 / 数据健康层。
+ * @param {(id: string) => boolean} [opts.sourceEnabled] 该源当前是否被用户开着。关掉的源不判
+ *   stale：Client 不再拉它，dataTime 停在关掉前的值。默认全部视为开启。
  */
 export function createHealthProbe(opts = {}) {
   const now = opts.now || (() => Date.now())
@@ -83,17 +46,14 @@ export function createHealthProbe(opts = {}) {
   const setTimer = opts.setTimer || ((fn, ms) => setInterval(fn, ms))
   const clearTimer = opts.clearTimer || ((t) => clearInterval(t))
   const sourceEnabled = opts.sourceEnabled || (() => true)
-  // 默认经 publishStatus（0.5.4）：探针报的是**新鲜度**这一层，而展示状态要把它与连接层、
-  // 数据健康层合成。此前直接 pushSource，于是"数据已恢复更新"这一句会把一条 schema-error
-  // 蓝点整个刷掉，而 health 里 escalated 仍为 true —— 用户再也看不到"上游改版"的信号。
+  // 默认经 publishStatus 合成展示状态（新鲜度 + 连接层 + 数据健康层）；直接 pushSource 会让
+  // "数据已恢复更新"刷掉 schema-error 蓝点。
   const push = opts.pushSource || ((id, patch) => publishStatus(id, patch))
   let timer = null
 
   /**
-   * 跑一轮：先做 TTL 自愈，再逐源判新鲜度。
-   *
-   * `dataTime` 从未上报（值为 0）时**不判**——"不知道数据什么时候来的"不等于"数据是旧的"，
-   * 把它当成 stale 会在每个源刚启动的头几秒里闪一片中灰。
+   * 跑一轮：先做 TTL 自愈，再逐源判新鲜度。`dataTime` 从未上报（0）时不判——"不知道数据什么时候
+   * 来的"不等于"数据是旧的"。返回本轮时刻。
    */
   function tick() {
     const t = now()
@@ -101,9 +61,8 @@ export function createHealthProbe(opts = {}) {
     for (const id of Object.keys(SOURCE_CONTRACTS)) {
       const after = staleAfterOf(id)
       if (after <= 0) continue
-      // 0.9.4（P2-17）：源被用户关掉时不判新鲜度。关掉之后 Client 不再拉它，dataTime 停在
-      // 关掉前的值——继续判 stale 就是在说"上游停更了"，而事实是我们自己不再问了。
-      // 先清掉可能残留的 stale（否则关闭那一刻的 stale 会一直挂到重开）
+      // 源被用户关掉时不判新鲜度（Client 不再拉它，dataTime 停在关掉前的值）；先清掉可能残留的
+      // stale，否则关闭那一刻的 stale 会一直挂到重开。
       if (!sourceEnabled(id)) {
         const recOff = sourceHealthOf(id)
         if (recOff && recOff.fresh && recOff.fresh.stale) {
@@ -119,9 +78,8 @@ export function createHealthProbe(opts = {}) {
       const was = !!(rec && rec.fresh && rec.fresh.stale)
       noteStale(id, stale, t)
       if (stale !== was) {
-        // 只在**翻转**的那一刻上报：状态没变时每次 push 都会让设置页与状态点重渲一遍。
-        // 恢复时给的是 `open`，而源自己的连接状态可能是 reconnecting —— 那由源的下一次
-        // 上报（feed 源 15 秒一轮）纠正。用 05g 记录的连接状态去猜反而会引入两份真相。
+        // 只在翻转的那一刻上报：状态没变时每次 push 都会让设置页与状态点重渲一遍。恢复时给的
+        // 是 `open`，源自己的连接状态由源的下一次上报纠正。
         push(id, stale
           ? { status: 'stale', detail: 'stale · no new data for ' + humanMinutes(after) }
           : { status: 'open', detail: 'data fresh again' })

@@ -1,47 +1,27 @@
 // ============================================================================
 // dsh-quake-alert · client/src/02-storage.js
-//
-// 作用：浏览器侧存储层——localStorage 读写与配置归一化。
-// 内容：JSON 安全读写、isPlainObject/numOr/boolOr/timeOr 等类型守卫、
-//       normalizeCfg（任何脏输入都归一成一份合法配置）、loadCfg/saveCfg、
-//       历史记录的字段规整（normalizeHistoryEntry / loadHistory）。
-// 依赖：01-constants。
+// 浏览器侧存储层：localStorage 读写、类型守卫（isPlainObject / numOr / boolOr / timeOr）、
+// 配置规整 normalizeCfg、loadCfg / saveCfg、历史记录规整。
+// 依赖 01-constants、00-i18n。读到的内容一律做类型校验，任何异常退回默认值。
 // ============================================================================
 
 import { PREF_SET, PREFECTURES, TSUNAMI_OPTIONS, SCALE_OPTIONS, DEFAULT_CFG, STORAGE_KEY, HISTORY_KEY, HISTORY_MAX, HISTORY_MAX_AGE_MS, MAX_WATCH_PLACES, MAX_WATCH_CITIES, LEGACY_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM } from './01-constants.js'
 import { resolveLang, setLanguage } from './00-i18n.js'
 
 // ---------- 存储（localStorage） ----------
-// 读入的数据可能被旧版本、其它脚本或用户手工改坏。所有读入都做类型校验，
-// 任何异常都退回默认值——一条脏数据绝不能把整个插件拖崩（曾因 history 非数组
-// 触发 loadJSON(...).slice is not a function，导致模块加载失败、设置页与连接全部消失）。
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
-/**
- * 历史条目是否还在「过去 5 天」里（0.9.4 / D-1，见 HISTORY_MAX_AGE_MS）。
- *
- * **以这条记录的写入时刻（`at`）为准**，不是电文的发布时刻（`issued`）。两个理由：
- *  ① 设计稿的用意是"防陈年条目占位"——占位的是**已经躺在列表里**的那些记录，所以计时从落笔开始；
- *  ② 用 `issued` 会让"历史里还有哪些条目"取决于今天几号，而本项目的回归明确要求断言不依赖当天
- *     日期（0.6.1 修过一条同类断言）。落笔时刻由我们自己写，测试可以注入，行为确定。
- * 老记录（0.9.4 之前写的）没有 `at`，退回按 `issued` 判一次——那正是这次要清掉的历史；
- * 两者都认不出时**保留**（宁可留一条说不清时间的记录，也不因为缺字段把用户的历史删掉）。
- */
+/** 历史条目是否还在「过去 5 天」里。判据是记录的**写入时刻**（`at`），不是电文的发布时刻
+ *（占位的是已经躺在列表里的记录，计时从落笔开始）；老记录没有 `at` 时退回按 `issued` 判一次，
+ *  两者都认不出时**保留**（不因为缺字段删用户的数据）。 */
 export function withinHistoryAge(e, now) {
-  // `at > 0` 才算"有写入时刻"：归一化会给老条目补 `at: 0`（表示不知道），那一支要退回 issued
+  // `at > 0` 才算"有写入时刻"：规整时会给老条目补 `at: 0`（表示不知道），那一支要退回 issued
   const written = (e && typeof e.at === 'number' && Number.isFinite(e.at) && e.at > 0) ? e.at : NaN
   if (Number.isFinite(written)) return (now - written) <= HISTORY_MAX_AGE_MS
   const issued = Date.parse(String((e && e.issued) || ''))
   if (Number.isFinite(issued)) return (now - issued) <= HISTORY_MAX_AGE_MS
   return true
 }
-/**
- * 数值归一：夹取到 [min,max]，类型不符时回退默认值。
- *
- * 0.9.4：**数字字符串也当数值**（`"100"` → 100）。此前只认 `typeof v === 'number'`，于是一份
- * 把数字写成字符串的配置（手工改过的 JSON、别的工具生成的）会让 `radiusKm: "100"` 静默变成
- * 默认的 **300 km** —— 不是"保守取值"而是把半径放大 3 倍，用户看到的是"提醒的区域莫名变大了"。
- * 夹取语义没变：越界仍然夹到边界。
- */
+/** 数值规整：夹取到 [min,max]，类型不符时回退 fallback。**数字字符串也当数值**（`"100"` → 100）， 否则把数字写成字符串的配置会让 `radiusKm: "100"` 静默退回兜底的 300 km，反而放大半径。 */
 function numOr(v, fallback, min, max) {
   let n = v
   if (typeof n === 'string' && n.trim() !== '') n = Number(n)
@@ -58,8 +38,7 @@ const minutesOfTime = (v) => {
   const m = TIME_RE.exec(String(v === undefined || v === null ? '' : v).trim())
   return m ? Number(m[1]) * 60 + Number(m[2]) : null
 }
-// 静默时段判定。start > end 表示跨午夜（23:00–07:00）；start === end 视为「不静默」。
-// now 可注入，便于回归测试覆盖边界而不依赖运行时刻。
+// 静默时段判定：start > end 表示跨午夜（23:00–07:00），start === end 视为「不静默」。 now 可注入，便于测试覆盖边界而不依赖运行时刻。
 function inQuietHours(cfg, now) {
   const q = cfg && cfg.quietHours
   if (!q || q.enabled !== true) return false
@@ -84,41 +63,29 @@ function loadJSON(key, fallback) {
 function saveJSON(key, value) {
   try { window.localStorage.setItem(key, JSON.stringify(value)) } catch (err) { /* 容量/隐私模式忽略 */ }
 }
-// 历史记录必须是「对象数组」，且每个字段必须是渲染层能直接交给 React 的基本类型：
-// 元素为 null 会抛错；字段是对象/数组则会让 React 抛「Objects are not valid as a React child」。
+// 历史记录必须是「对象数组」，且每个字段都必须是渲染层能直接交给 React 的基本类型： 元素为 null 会抛错，字段是对象/数组会让 React 抛「Objects are not valid as a React child」。
 const strOr = (v, fallback) => (typeof v === 'string' ? v : (typeof v === 'number' || typeof v === 'boolean' ? String(v) : fallback))
-/**
- * 历史条目里正文的保留上限（0.6.1）。
- *
- * `detail` 是解析层给出的官方正文（NWS 的 description + instruction；ECCC 的正文 + 署名），
- * 展开条目时给用户看"该怎么做"。必须截断：历史最多 30 条、写进 localStorage，
- * NWS 的 description + instruction 单条实测可达数 KB，不设上限会让这条 key 轻易撑爆配额
- *（超配额时 saveJSON 是**静默失败**的，整份历史会停止落盘）。
- */
+// 历史条目里 `detail` 正文的保留上限。正文是解析层给的官方长文（NWS 的 description + instruction、 ECCC 的正文 + 署名），单条可达数 KB； 历史最多 30 条且写进 localStorage，
+// 不截断会撑爆配额， 而超配额时 saveJSON 是**静默失败**的，整份历史会停止写入本地存储。
 const HISTORY_DETAIL_MAX = 1200
 function normalizeHistoryEntry(e, i) {
   const key = strOr(e.key, '') || strOr(e.id, '')
   return {
     key: key || 'legacy-' + i, // 早期版本可能没有 key，补一个稳定兜底键，保证 React key 与去重都可用
     id: strOr(e.id, ''),
-    // code：区分来源用（'emsc'/'usgs'/'noaa'/'jma'/551…）。只看 kind 会把全球地震
-    // （kind 也是 'quake'）标成「code 551」——与 0.3.2 修过的"气象条目被标成 code 551"同类。
-    // 旧历史条目没有这个字段 → 空串，展示层回退到 kind 映射。
+    // code 是来源标识（'emsc'/'usgs'/'noaa'/'jma'/551…）：只看 kind 会把全球地震 （kind 也是 'quake'）标成「code 551」。旧条目没有它 → 空串，展示层回退到 kind 映射。
     code: strOr(e.code, ''),
     kind: strOr(e.kind, ''),
     label: strOr(e.label, ''),
     severity: strOr(e.severity, ''),
     issued: strOr(e.issued, ''),
     headline: strOr(e.headline, ''),
-    // 官方正文（0.6.1）：NWS 的 description + instruction / ECCC 的正文 + 署名。
-    // 旧条目没有这个字段 → 空串，展示层不渲染那一行。
     detail: strOr(e.detail, '').slice(0, HISTORY_DETAIL_MAX),
     pref: strOr(e.pref, ''),
     hit: e.hit === true,
     suppressed: e.suppressed === true,
     suppressedReason: strOr(e.suppressedReason, ''),
-    // 写入时刻（0.9.4 / D-1）：历史保留的"过去 5 天"以它为准（见 withinHistoryAge）。
-    // 老条目没有它 → 0（表示"不知道"，此时退回按 issued 判一次）。
+    // 写入时刻：历史保留的「过去 5 天」以它为准（见 withinHistoryAge）；老条目 → 0 表示不知道
     at: (typeof e.at === 'number' && Number.isFinite(e.at)) ? e.at : 0,
   }
 }
@@ -131,54 +98,29 @@ function loadHistory(nowMs) {
     .slice(0, HISTORY_MAX)
     .map(normalizeHistoryEntry)
 }
-// 每次都返回全新对象：避免调用方改动嵌套字段时污染 DEFAULT_CFG 常量。
-// 由 DEFAULT_CFG **深拷贝派生**（而不是手抄字段清单）：freshCfg 是 settingsOpsFor 判断
-// "某字段是否等于默认值"的唯一基准，手抄的话以后给 DEFAULT_CFG 加字段而漏改这里，
-// 新字段会被永久判为"非默认"，永远写进 settings.yaml 而永不 unset。
+// 每次都返回全新对象，避免调用方改动嵌套字段时污染 DEFAULT_CFG；深拷贝派生而不是手抄字段清单， 因为 freshCfg 是 settingsOpsFor 判断「某字段是否等于默认值」的唯一基准（漏抄的字段永不 unset）。
 const cloneCfg = (v) => (Array.isArray(v)
   ? v.map(cloneCfg)
   : (isPlainObject(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, cloneCfg(x)])) : v))
 const freshCfg = () => cloneCfg(DEFAULT_CFG)
-// 全球关注点：[{ name, lat, lon, radiusKm, origin }]。坐标必须落在合法范围——脏数据里的 NaN 或
-// 越界值会让距离计算得出无意义的结果，表现为"看起来配好了却永远不提醒"（静默漏报）。
-// 半径夹在 1–2000 km；同一个点重复添加是常见操作，按经纬度（三位小数）去重。
-/**
- * 关注点的**来源分支**（0.8.0 / DESIGN 9.3）。
- *
- * 取值 jp / cn / global。它回答"这个关注点是在哪个国家的分支下加的"，两个消费者：
- * ① 3.4 的跨源权威源据此判断权威源；② 06-matcher 的大陆气象（行政区层级）匹配据此挑出
- * 参与匹配的大陆关注点（0.8.2 / DESIGN 11.9 B——此前那边是"名字里有没有 `·`"，手填坐标
- * 只要名字带 `·` 就会被算成大陆点）。诊断快照里也要能看到（判错时第一个要核的就是
- * "这个点被算作了谁的分支"）。
- *
- * **老配置没有这个字段，不能因此判它非法**——那等于把用户攒下的关注点整条丢掉。缺失时按
- * **名称形状推导**：设置页的「中国大陆」级联产出的名字恒为「省·市」（见 04-city-table 的
- * cnPlaceOf，用 U+00B7 分隔以免两个省的"城区"撞名），其余（手填坐标、「用我的位置」、
- * 将来的全球城市）都是 'global'。推导只在字段缺失时发生，写回配置后即固定。
- */
+// 全球关注点：[{ name, lat, lon, radiusKm, origin }]。经纬度只接受合法范围——格式不合法的数据里的 NaN 或越界值 会让距离计算得出无意义的结果，表现为"看起来配好了却永远不提醒"。半径夹在 1–2000 km； 按经纬度（三位小数）去重。
+/** 关注点的**来源分支**：jp / cn / global，回答"这个点是在哪个国家的分支下加的"。消费者：跨源归并 判断优先源、大陆气象（行政区层级）匹配挑出大陆关注点、诊断快照。老配置没有这个字段，
+ *   缺失时按 **名称形状推导**（设置页「中国大陆」级联产出的名字恒为「省·市」，见 04-city-table 的 cnPlaceOf）， 其余为 'global'。 */
 const PLACE_ORIGINS = { jp: true, cn: true, global: true }
 function placeOriginOf(p, name) {
   const raw = String((p && p.origin) || '')
   if (own(PLACE_ORIGINS, raw)) return raw
   return String(name || '').indexOf('·') > 0 ? 'cn' : 'global'
 }
-/**
- * @param {object[]} list
- * @param {{ total?: number, dropped?: number, radiusFixed?: number }} [audit]
- *   0.9.4 加的**体检账本**（可选）：normalizePlaces 的契约是"任何脏输入都归一成合法配置"，
- *   也就是**静默**丢弃非法条目。那对 localStorage 里的历史数据是对的（不能因为一条脏数据
- *   就让整份配置失效），但对"导入一份配置"这个动作不对：用户看到"已导入配置。"，实际少了
- *   一半关注点，而配置里、界面里、诊断里都看不出来——数据丢失方向且无任何反馈。
- *   传了 audit 就顺手记下"总共几条 / 丢了几条 / 几条的半径不是数值"，供界面如实说明。
- */
+/** @param {{ total?: number, dropped?: number, radiusFixed?: number }} [audit] 可选的**检查清单**： 本函数的契约是静默丢弃非法条目（
+ *   对 localStorage 里的数据是对的），但"导入一份配置"时需要 如实说明少了什么，传了 audit 就记下"总共几条 / 丢了几条 / 几条的半径不是数值"。 */
 function normalizePlaces(list, audit) {
   const out = []
   const seen = new Set()
   for (const p of list) {
     if (audit) audit.total += 1
     if (!isPlainObject(p)) { if (audit) audit.dropped += 1; continue }
-    // 用显式范围判断而不是 numOr：numOr 对越界值是**夹取**，而经纬度越界意味着这份数据本身
-    // 是坏的（例如把半径填进了纬度列）。夹到边界会造出一个"看起来合法"的错误关注点。
+    // 用显式范围判断而不是 numOr：numOr 对越界值是**夹取**，而经纬度越界意味着数据本身是坏的 （例如把半径填进了纬度列），夹到边界会造出一个"看起来合法"的错误关注点。
     const lat = (typeof p.lat === 'number' && Number.isFinite(p.lat) && Math.abs(p.lat) <= 90) ? p.lat : null
     const lon = (typeof p.lon === 'number' && Number.isFinite(p.lon) && Math.abs(p.lon) <= 180) ? p.lon : null
     if (lat === null || lon === null) { if (audit) audit.dropped += 1; continue }
@@ -187,8 +129,7 @@ function normalizePlaces(list, audit) {
     seen.add(key)
     const name = strOr(p.name, '').slice(0, 30).trim() || (lat.toFixed(2) + ', ' + lon.toFixed(2))
     const origin = placeOriginOf(p, name)
-    // 半径"不是数值"（缺失 / null / true / 乱字符串）时 numOr 会退回 300；数字字符串是合法的
-    // （0.9.4 起 numOr 接受它），所以这里只在真正回退时记账。
+    // 半径"不是数值"（缺失 / null / true / 乱字符串）时 numOr 会退回兜底值；数字字符串是合法的， 所以只在真正回退时记账。
     const radiusOk = (typeof p.radiusKm === 'number' && Number.isFinite(p.radiusKm)) ||
       (typeof p.radiusKm === 'string' && p.radiusKm.trim() !== '' && Number.isFinite(Number(p.radiusKm)))
     if (audit && !radiusOk) audit.radiusFixed += 1
@@ -196,16 +137,11 @@ function normalizePlaces(list, audit) {
       name,
       lat,
       lon,
-      // 半径用统一常量（0.9.4 / P3-37）：这里此前硬编码 `300, 1, 2000`，而 01-constants 已经导出了
-    // DEFAULT_PLACE_RADIUS_KM / MIN_PLACE_RADIUS_KM / MAX_PLACE_RADIUS_KM —— 设置页按常量渲染
-    // 档位、归一化按硬编码夹取，两边一改一不改就会出现"界面允许 100、存进去变成 300"这类错位。
-    // 注意默认值取 MIN/MAX 与默认半径三个常量，而不是"默认半径当兜底"：兜底值就是默认半径。
+    // 半径走 01-constants 的统一常量，与设置页渲染档位、Host schema 的 1–2000 保持一致
     radiusKm: numOr(p.radiusKm, LEGACY_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM),
       origin,
     }
-    // 大陆关注点的省 / 市（0.8.2 / DESIGN 11.9 B）：显式落在 place 上，matcher 与诊断不再从
-    // 「省·市」这个名字反推。老配置（0.8.1 及以前）只有名字，这里**迁移一次并固化**——名字形状
-    // 已经是 `placeOriginOf` 判 'cn' 的依据，所以这一步不会改变既有归属，只是把结论写下来。
+    // 大陆关注点的省 / 市：显式落在 place 上，matcher 与诊断不再从「省·市」这个名字反推； 老配置只有名字，这里从名字拆一次并固化。
     if (origin === 'cn') {
       let province = strOr(p.province, '').slice(0, 20).trim()
       let city = strOr(p.city, '').slice(0, 20).trim()
@@ -226,21 +162,11 @@ function normalizePlaces(list, audit) {
   }
   return out
 }
-// 逐字段校验 + 回退默认值：任何形状的输入都归一成一份合法配置
-// audit（0.9.4，可选）：关注点体检账本，见 normalizePlaces。只有导入路径会传它。
-/**
- * 数值归一 + **吸附到最近的合法档位**（0.9.4 / PD-2，产品决策）。
- *
- * 机器级配置（`settings.yaml` / profile 条目）可以被手工改成任意数字：`quakeScale: 42` 此前会
- * 原样进入配置，而界面上只有 5 的倍数档——下拉选不中它、显示会错位，用户也说不清当前阈值是多少。
- * Host schema 只校验范围（改成严格枚举会让脏值**注册失败**，比现状更糟，DESIGN 11.9 #2 已排除），
- * 所以"就近对齐"放在 Client 这一步：先按既有语义夹到 [min,max]，再吸附到最近的档位。
- * 档位清单直接取界面用的那份（SCALE_OPTIONS / *_MAG_OPTIONS），不另抄一套。
- */
+// 数值规整 + **吸附到最近的合法档位**：机器级配置可以被手工改成任意数字（`quakeScale: 42`），而界面
+// 下拉里只有固定档位（严格枚举会让脏值注册失败），所以"就近对齐"放在 Client：先夹到 [min,max] 再吸附。
 function snapOr(v, fallback, options, min, max) {
   const n = numOr(v, fallback, min, max)
-  // 0 在这两个字段上有明确含义（"来者不拒"，匹配层是 `scale >= threshold`），而它不是档位表里
-  // 的一项——按"最近档位"吸附会把它推到 10，等于**收窄**了用户的范围（漏报方向），所以保留它。
+  // 0 在这两个字段上有明确含义（"来者不拒"，匹配层是 `scale >= threshold`），而它不是档位表里的一项 ——按"最近档位"吸附会把它推到 10，等于**收窄**了用户的范围，所以保留它。
   if (n === 0) return 0
   const vals = (Array.isArray(options) ? options : [])
     .map((o) => (o && typeof o === 'object' ? o.v : o))
@@ -251,9 +177,9 @@ function snapOr(v, fallback, options, min, max) {
   return best
 }
 
+// 逐字段校验 + 回退默认值：任何形状的输入都规整成一份合法配置。audit 见 normalizePlaces， 只有导入路径会传它。
 function normalizeCfg(input, audit) {
-  // 兜底：调用方（loadCfg / sectionToCfg / applyCfg）都保证传对象，但归一化函数自己不该因为
-  // 传进 null/undefined 就抛错——它的契约是"任何脏输入都能归一成一份合法配置"。
+  // 调用方都保证传对象，但本函数的契约是"任何脏输入都能规整"，不该因为传进 null/undefined 就抛错
   const stored = isPlainObject(input) ? input : {}
   const w = isPlainObject(stored.watch) ? stored.watch : {}
   const d = isPlainObject(stored.disasters) ? stored.disasters : {}
@@ -264,57 +190,47 @@ function normalizeCfg(input, audit) {
   return {
     version: DEFAULT_CFG.version,
     source: stored.source === 'sandbox' ? 'sandbox' : 'prod',
-    // 大陆源的链路选择（0.5.0）：白名单，只认 'poll'，其余一律回 'auto'。
-    // 用白名单而不是"非 poll 即 auto"的等价写法，是为了让将来加第三种取值时不会静默错位。
+    // 白名单校验：只认 'poll'，其余一律回 'auto'（将来加第三种取值时不会静默错位）
     cnTransport: stored.cnTransport === 'poll' ? 'poll' : 'auto',
     watch: {
-      // 只保留 47 县中确实存在的名字，避免脏数据在设置页渲染出幽灵按钮
+      // 只保留 47 县中确实存在的名字，避免格式不合法的数据在设置页渲染出幽灵按钮
       prefectures: Array.isArray(w.prefectures)
         ? Array.from(new Set(w.prefectures.filter((p) => typeof p === 'string' && PREF_SET.has(p))))
         : [],
-      // 市区町村：这里只保证类型、去重与规模；名字是否真实存在由数据表加载后校验
-      // 上限用 MAX_WATCH_CITIES 常量（0.9.4 / P3-37，此前硬编码 300，与设置页的上限各说各话）
+      // 市区町村：这里只保证类型、去重与规模（上限与设置页同一常量），名字是否存在由数据表校验
       cities: Array.isArray(w.cities)
         ? Array.from(new Set(w.cities.filter((c) => typeof c === 'string' && c.length > 0 && c.length <= 30))).slice(0, MAX_WATCH_CITIES)
         : [],
-      // 全球关注点（0.4.0 新增）。旧配置没有这个字段 → 归一成空数组，不影响日本模式
+      // 旧配置没有这个字段 → 统一成空数组
       places: Array.isArray(w.places) ? normalizePlaces(w.places, audit) : [],
     },
     disasters: {
       earthquake: boolOr(d.earthquake, DEFAULT_CFG.disasters.earthquake),
       tsunami: boolOr(d.tsunami, DEFAULT_CFG.disasters.tsunami),
-      // 0.3.0 新增。旧配置没有这个字段 → 取默认值 true，不会被清空或误关
       weather: boolOr(d.weather, DEFAULT_CFG.disasters.weather),
-      // 大陆气象灾害的两类（0.5.2）。同样必须在这里同步——漏掉就会被 applyCfg 静默丢弃，
-      // 表现是"用户关掉了暴雨提醒，刷新后又自己开了"。
+      // 以下三个**必须在这里同步**，漏掉就会被 applyCfg 静默丢弃， 表现是"用户关掉了这类提醒，刷新之后它又自己开了"。
       cnRainstorm: boolOr(d.cnRainstorm, DEFAULT_CFG.disasters.cnRainstorm),
       cnGeology: boolOr(d.cnGeology, DEFAULT_CFG.disasters.cnGeology),
-      // 海外气象灾害（0.6.0）。同上：**必须在这里同步**，否则用户关掉之后刷新又自己开了。
       overseasWeather: boolOr(d.overseasWeather, DEFAULT_CFG.disasters.overseasWeather),
     },
     thresholds: {
-      // 0.9.4（PD-2）：夹取之后**吸附到界面上的合法档位**（手改的 42 → 40）。见 snapOr。
+      // 夹取之后吸附到界面上的合法档位（手改的 42 → 40），见 snapOr
       quakeScale: snapOr(t.quakeScale, DEFAULT_CFG.thresholds.quakeScale, SCALE_OPTIONS, 0, 70),
       eewScale: snapOr(t.eewScale, DEFAULT_CFG.thresholds.eewScale, SCALE_OPTIONS, 0, 70),
       // 白名单校验，同时避免 'constructor' 之类的原型链键被当成合法等级
       tsunamiGrade: TSUNAMI_OPTIONS.some((o) => o.g === t.tsunamiGrade)
         ? t.tsunamiGrade
         : DEFAULT_CFG.thresholds.tsunamiGrade,
-      // 全球源的最低震级（0.4.0）。0 是有意义的取值（来者不拒），所以下界是 0 而不是 1。
-      // **不吸附档位**（0.9.4 / PD-2 的边界）：下拉里那些 M3〜M7 只是常用预设，而 M6.7 这样的
-      // 自定义门槛是合法且有意义的——按预设吸附会把用户的实际门槛改掉（那是改语义，不是纠错）。
-      // 吸附只用于**震度档位**（10/20/…/70 这种离散阶梯，非档位值没有意义）。
+      // 全球源的最低震级：0 是有意义的取值（来者不拒），所以下界是 0。**不吸附档位**——下拉里那些 M3〜M7 只是常用预设，M6.7 这样的自定义门槛是合法且有意义的，吸附会改掉用户的实际门槛。
       globalMagnitude: numOr(t.globalMagnitude, DEFAULT_CFG.thresholds.globalMagnitude, 0, 10),
-      // 大陆速报的独立门槛（0.5.0）。新增字段必须在这里同步，否则 applyCfg 会**静默丢弃**它
-      // ——这正是 DESIGN 11.6 第 10 条那个"有保护的残留"：忘了同步时回归断言会失败。同上，不吸附。
+      // 大陆速报的独立门槛。新增字段**必须在这里同步**，否则 applyCfg 会静默丢弃它。同上，不吸附。
       cnReportMagnitude: numOr(t.cnReportMagnitude, DEFAULT_CFG.thresholds.cnReportMagnitude, 0, 10),
     },
     notify: {
       sound: boolOr(n.sound, DEFAULT_CFG.notify.sound),
       system: boolOr(n.system, DEFAULT_CFG.notify.system),
       volume: numOr(n.volume, DEFAULT_CFG.notify.volume, 0, 1),
-      // 分灾害音效开关（0.9.4 / C1）：**必须在这里同步**，否则 applyCfg 会静默丢弃它们，
-      // 表现是"关掉了海啸的声音，刷新之后它又自己开了"。
+      // 分灾害音效开关：**必须在这里同步**，否则 applyCfg 会静默丢弃它们
       soundQuake: boolOr(n.soundQuake, DEFAULT_CFG.notify.soundQuake),
       soundTsunami: boolOr(n.soundTsunami, DEFAULT_CFG.notify.soundTsunami),
       soundWeather: boolOr(n.soundWeather, DEFAULT_CFG.notify.soundWeather),
@@ -328,11 +244,7 @@ function normalizeCfg(input, audit) {
       end: timeOr(qh.end, DEFAULT_CFG.quietHours.end),
       breakForSevere: boolOr(qh.breakForSevere, DEFAULT_CFG.quietHours.breakForSevere),
     },
-    // 界面语言（0.8.1 立字段 / 0.9.0 真正生效 / 0.9.3 加繁体）：走 BCP 47 惯例的逐级回退，
-    // 认不出的一律落到默认语言（不是"原样放行"——手改配置写进一个没有语言包的代码，界面会进入
-    // 一个谁也说不清的半本地化状态）。回退顺序：精确匹配 → 中文按脚本 / 地区分流
-    // （zh-TW / zh-HK / zh-MO / zh-Hant → zh-TW；zh / zh-CN / zh-SG / zh-Hans → zh-CN）
-    // → 其它主语言（ja-JP → ja）→ 默认语言。
+    // 界面语言：走 BCP 47 惯例的逐级回退（精确匹配 → 中文按脚本 / 地区分流 → 其它主语言 → 默认语言）；认不出的一律落到默认语言，手改进来的无语言包代码不会把界面带进半本地化状态。
     language: resolveLang(stored.language),
   }
 }
@@ -341,8 +253,7 @@ function loadCfg() {
   if (!isPlainObject(stored)) {
     const fresh = freshCfg()
     saveJSON(STORAGE_KEY, fresh)
-    // 语言要在**任何界面文本被取用之前**生效：配置是启动最早读到的状态，而通知 / 状态条
-    // 的文案可能在第一帧就渲染。所以设置语言与"读配置"绑在一起，不留给调用方记得去做。
+    // 语言要在**任何界面文本被取用之前**生效：配置是启动最早读到的状态，而通知 / 状态条的文案 可能第一帧就渲染，所以设置语言与"读配置"绑在一起。
     setLanguage(fresh.language)
     return fresh
   }
@@ -350,19 +261,15 @@ function loadCfg() {
   try {
     cfg = normalizeCfg(stored)
   } catch (err) {
-    // 0.9.5（fresh review）：一条脏数据绝不能把整个插件拖崩——这正是本文件开头的承诺。
-    // 归一化会调 i18n 取词，而某些字符串化不了的形状（`{toString:null, valueOf:null}`，
-    // JSON / YAML 都造得出来）会让 `String(v)` 抛 TypeError。loadCfg 的调用方里有**渲染期**的
-    // （设置页 `useState(() => currentCfg())`），所以这里抛 = 整页白屏（插件没有 error boundary）。
-    // 退回默认配置，并留一条能查的日志。
+    // 一条格式不合法的数据绝不能把整个插件拖崩。规整流程会调 i18n 取词，而某些字符串化不了的形状 （`{toString:null, valueOf:null}`，JSON / YAML 都造得出来） 会让 `String(v)` 抛 TypeError；
+    // 调用方里有**渲染期**的（设置页 `useState(() => currentCfg())`），抛错 = 整页白屏。
     try { console.warn('[dsh-quake-alert] 配置归一化失败，本次改用默认配置：' + String((err && err.message) || err)) } catch (e) { /* 忽略 */ }
     const fresh = freshCfg()
     saveJSON(STORAGE_KEY, fresh)
     setLanguage(fresh.language)
     return fresh
   }
-  // 版本不同（插件升级 / 用户手改）时不再直接清空：按当前 schema 归一保留可识别字段，再写回当前版本号。
-  // 旧实现会在这里 saveJSON(默认值)，一次版本号变化就会静默丢掉用户选好的关注地区与阈值。
+  // 版本不同（插件升级 / 用户手改）时按当前 schema 统一保留可识别字段，再写回当前版本号； 不能写回默认值——一次版本号变化就会静默丢掉用户选好的关注地区与阈值。
   if (stored.version !== DEFAULT_CFG.version) saveJSON(STORAGE_KEY, cfg)
   setLanguage(cfg.language)
   return cfg
@@ -374,9 +281,7 @@ function saveCfg(cfg) {
 }
 
 
-// 安全字典查找：外部数据里的 'constructor'/'toString' 等键会命中原型链，
-// 例如 AREA_PREF['constructor'] 会返回 Object 构造函数并让 .slice() 抛错。
-// （原在 05-parser，因被 city-table / parser / matcher 共用而移到这里）
+// 安全字典查找：外部数据里的 'constructor'/'toString' 等键会命中原型链，例如 AREA_PREF['constructor'] 会返回 Object 构造函数并让 .slice() 抛错。04-city-table / 解析层共用。
 const own = (map, key) => (Object.prototype.hasOwnProperty.call(map, key) ? map[key] : undefined)
 
 export { own, isPlainObject, numOr, boolOr, timeOr, minutesOfTime, inQuietHours, loadJSON, saveJSON, normalizeHistoryEntry, loadHistory, freshCfg, PLACE_ORIGINS, placeOriginOf, normalizePlaces, normalizeCfg, loadCfg, saveCfg }

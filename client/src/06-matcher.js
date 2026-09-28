@@ -1,11 +1,7 @@
 // ============================================================================
 // dsh-quake-alert · client/src/06-matcher.js
-//
-// 作用：匹配引擎——决定一条 Alert 是否该提醒用户。
-// 内容：regionInWatch（县级 + 市级收窄）、阈值判定（震度/海啸等级）、
-//       missReason（未命中原因，含未识别区域名与市级收窄提示）。
-// 依赖：01-constants、04-city-table（lookupAddrCity）。
-// 放行规则：区域级数据与归一不到市町村的观测点一律放行，宁可多报绝不漏报。
+// 作用：匹配引擎——决定一条 Alert 是否该提醒用户（区域匹配、阈值判定、未命中原因）；
+//       依赖 01-constants、04-city-table（lookupAddrCity）、05h-overseas-parsers。
 // ============================================================================
 
 import { TSUNAMI_RANK } from './01-constants.js'
@@ -14,20 +10,14 @@ import { own, placeOriginOf } from './02-storage.js'
 import { lookupAddrCity, normKana } from './04-city-table.js'
 import { OVERSEAS_BROADCAST_MIN_RANK } from './05h-overseas-parsers.js'
 
-// ---------- 匹配引擎 ----------
-// 关注地区匹配：县级始终生效（watch.prefectures 为空 = 全日本）；市级只在数据本身有
-// 市区町村粒度时收窄——即 551 的观测点条目（isArea=false，addr 形如「白河市新白河」）。
-// 两类情况一律放行，宁可多提醒也绝不漏报：
-//   ① 区域级数据：isArea=true 的区域名、556 的区域名、552 的津波予報区名都对应不到市町村；
-//   ② addr 归一不到任何市町村：机场观测点（新千歳空港）、未收录写法等。
+// 关注地区匹配：县级始终生效（watch.prefectures 为空 = 全日本）；市级只在数据本身有市区町村粒度
+// 时收窄（cityLevel）。放行两类：区域级数据（对应不到市町村）、addr 认不出市町村。
 function regionInWatch(region, watch, cityLevel, anyResolvedPref) {
   const list = watch && watch.prefectures
   const cities = (watch && watch.cities) || []
-  // region.pref 为空 = 归属县未能识别。这里**不能简单地一律放行**（0.4.2 修正）：
-  // 552/556 走的是 cityLevel=false，县级过滤是**唯一**的收窄手段，一律放行会让一条含
-  // "未收录预报区名"的海啸电文提醒**所有关注列表非空的用户**（海啸域的误报最伤信任）。
-  // 口径：同一条消息里只要**有**区域能归到县，归不到的条目不参与县级过滤（不因它命中）；
-  // 只有当整条消息的区域**全都**归不到县时，才为了不漏报而放行（DESIGN 3.2 的"边界情况让步"）。
+  // region.pref 为空 = 归属县未能识别，不能一律放行：552 / 556 的县级过滤是唯一的收窄手段，
+  // 一律放行会让含"未收录预报区名"的海啸电文提醒所有关注列表非空的用户。
+  // 口径：同一条消息里只要有区域能归到县，归不到的条目不参与县级过滤；全都归不到县时才放行。
   if (list && list.length > 0) {
     if (region.pref) {
       if (list.indexOf(region.pref) === -1) return false
@@ -42,14 +32,9 @@ function regionInWatch(region, watch, cityLevel, anyResolvedPref) {
   return cities.indexOf(addrCity) !== -1
 }
 
-// 气象警报（泥石流 / 洪水 / 大雨 / 高潮…）的关注地区匹配。
-// 与 551 不同，JMA 电文的区域在解析阶段就已经归到「县 + 市町村」，不需要再做 addr 归一；
-// 两类一律放行，宁可多报绝不漏报：
-//   ① pref 为空（区域码认不出县、或名称反查不到）——无法判定，放行；
-//   ② 区域级条目（city 为空，如「宗谷地方」「○○川上流」）——对应不到市町村，放行。
-// 市町村比对走 normKana 归一等价：电文/河川区域表的假名写法可能与本表不同
-// （「金ケ崎町」vs「金け崎町」、「南アルプス市」vs「南あるぷす市」），
-// 直接 indexOf 会让勾选了该市町村的用户漏报。
+// 气象警报（泥石流 / 洪水 / 大雨 / 高潮…）的关注地区匹配。与 551 不同：JMA 电文的区域在解析阶段
+// 就已归到「县 + 市町村」，不再做 addr 反查。放行两类：pref 为空（无法判定）、区域级条目（city 为空）。
+// 市町村比对走 normKana 等价（「金ケ崎町」vs「金け崎町」），直接 indexOf 会让已勾选的用户漏报。
 function regionInWeatherWatch(region, watch) {
   const list = (watch && watch.prefectures) || []
   const cities = (watch && watch.cities) || []
@@ -61,10 +46,8 @@ function regionInWeatherWatch(region, watch) {
 }
 
 // ---------- 坐标匹配（全球源：EMSC / USGS / NOAA CAP） ----------
-// 全球源给的是「震中坐标 + 震级」，没有日本那样的都道府县 / 市町村。用户的关注表达因此是
-// 「我所在的位置 + 可接受半径」，由这里做球面距离判定（Haversine，误差 <0.5%）。
-// 与行政区匹配同一条原则：宁可多报绝不漏报；但坐标缺失时**不猜**——如实说明无法判定，
-// 而不是默默放行（放行会让"配错了关注点"看起来像"根本没有地震"）。
+// 全球源只给「震中坐标 + 震级」，用户按「位置 + 半径」关注，这里做球面距离判定（Haversine）；
+// 坐标缺失时如实说明无法判定，不猜、不静默放行。
 const EARTH_RADIUS_KM = 6371
 function distanceKm(lat1, lon1, lat2, lon2) {
   const toRad = (d) => (d * Math.PI) / 180
@@ -74,16 +57,14 @@ function distanceKm(lat1, lon1, lat2, lon2) {
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.pow(Math.sin(dLon / 2), 2)
   return 2 * EARTH_RADIUS_KM * Math.asin(Math.min(1, Math.sqrt(a)))
 }
-/** 坐标是否可用于计算：数值、有限、且在合法范围内（-200 这类"未知"哨兵值会被挡下）。 */
+/** 坐标是否可用于计算：数值、有限、且在合法范围内（-200 这类"未知"特殊标记值会被挡下）。 */
 function validGeo(geo) {
   return !!geo && typeof geo.lat === 'number' && Number.isFinite(geo.lat) &&
     typeof geo.lon === 'number' && Number.isFinite(geo.lon) &&
     Math.abs(geo.lat) <= 90 && Math.abs(geo.lon) <= 180
 }
 /**
- * 坐标型警报的匹配：震中落在任一关注点的半径内即命中。
- * 震级阈值单独判断（globalMagnitude）——全球源给出的是震级，与日本的震度不可换算，
- * 用一个独立旋钮比"假装能换算"诚实。
+ * 坐标型警报的匹配：震中落在任一关注点的半径内即命中；震级阈值单独判断。
  * @returns {{ hit: boolean, reason: string, place?: object, distanceKm?: number }}
  */
 function matchPointAlert(alert, cfg) {
@@ -91,17 +72,14 @@ function matchPointAlert(alert, cfg) {
   if (places.length === 0) {
     return { hit: false, reason: t('reason.noGlobalWatch') }
   }
-  // 多区域电文（CAP 允许一个 info 下多个 <area><circle>）：任一圆心落在半径内即算命中。
-  // 只看第一个 circle 会让其余海域的沿海用户漏报——多区域海啸恰恰是最常见形态。
+  // 多区域电文（CAP 允许一个 info 下多个 <area><circle>）：任一圆心落在半径内即算命中，只看第一个
+  // circle 会让其余海域的沿海用户漏报。
   const pts = (Array.isArray(alert.geoList) && alert.geoList.length ? alert.geoList : [alert.geo]).filter(validGeo)
   if (pts.length === 0) {
     return { hit: false, cannotJudge: true, reason: t('reason.noCoordinates') }
   }
-  // 海啸的**等级闸门**同样适用于全球源（0.4.1）。NOAA CAP 的 <event> 决定等级
-  // （Warning=3 / Advisory・Watch=2 / Information=0，见 05c 的 NOAA_EVENT_RULES），
-  // 与日本 552 的 tsunamiGrade 共用同一把尺。此前这条闸门只作用于日本源，于是
-  // 「Tsunami Information」（气象机构明确表示无破坏性海啸的信息）也会在半径内响铃——
-  // 全球海啸完全无法用等级收敛，而海啸的误报会直接摧毁用户对整条链路的信任。
+  // 海啸等级门槛同样适用于全球源：NOAA CAP 的 <event> 决定等级，与日本 552 的 tsunamiGrade 共用
+  // 一把尺（Warning=3 / Advisory・Watch=2 / Information=0）。
   if (alert.kind === 'tsunami') {
     const rank = typeof alert.tsunamiRank === 'number'
       ? alert.tsunamiRank
@@ -111,17 +89,13 @@ function matchPointAlert(alert, cfg) {
       return { hit: false, reason: t('reason.tsunamiBelowGrade', { rank: rank, min: minRank }) }
     }
   }
-  // 震级门槛分两把（0.5.0）：坐标型**预警**（EMSC / USGS / cenc_eew）用 globalMagnitude，
-  // 大陆**速报**（cenc_eqlist，alert.speedReport）用独立的 cnReportMagnitude——速报覆盖低到
-  // M2.5 且每天都有数据，用预警门槛播报会被小震频繁打扰（DESIGN 8.4）。
+  // 震级门槛分两把：坐标型预警（EMSC / USGS / cenc_eew）用 th.globalMagnitude，
+  // 大陆速报（cenc_eqlist，alert.speedReport）用 th.cnReportMagnitude。
   const th = cfg.thresholds || {}
   const minMag = alert.speedReport ? th.cnReportMagnitude : th.globalMagnitude
   const magName = alert.speedReport ? t('reason.magThresholdReport') : t('reason.magThresholdGlobal')
   const mag = typeof alert.magnitude === 'number' && Number.isFinite(alert.magnitude) ? alert.magnitude : null
-  // 震级阈值只作用于地震。海啸的严重性由它自己的等级决定（上面的闸门），
-  // 不该被"引发它的那次地震有多大"过滤掉：NOAA 电文里那个前震震级只是参考值，而且用同一个
-  // 阈值卡海啸是危险的——用户把全球阈值调到 M7.0 时，一场 M6.7 引发的海啸警报会被静默丢掉，
-  // 而海啸恰恰是这里最不能漏的一类。
+  // 震级阈值只作用于地震：海啸的严重性由自己的等级决定，NOAA 电文里的前震震级只是参考值。
   const quakeLike = alert.kind === 'quake' || alert.kind === 'eew'
   if (quakeLike && mag !== null && typeof minMag === 'number' && mag < minMag) {
     return { hit: false, reason: t('reason.magBelow', { mag: mag, name: magName, min: minMag }) }
@@ -159,14 +133,11 @@ function missReason(alert, watch, base) {  const list = watch && watch.prefectur
   return reason
 }
 
-// ---------- 行政区层级匹配（大陆气象源，0.5.2 / DESIGN 8.5） ----------
+// ---------- 行政区层级匹配（大陆气象源） ----------
 /**
- * 「省·市」名字 → 行政区对。设置页「中国大陆」加进来的点由 04-city-table 的 cnPlaceOf 生成，
- * 名字固定是「省·市」（用 U+00B7 分隔，以免两个省的"城区"撞名）。
- *
- * **它不再是"这个点算不算大陆点"的判据**（0.8.2 / DESIGN 11.9 B）——那个判据是 `origin`，
- * 见 `cnWatchPlaces`。这里只做一件事：给 0.8.1 及以前存下的老配置（place 上只有名字、
- * 没有显式 `province` / `city`）解析出省 / 市，迁移一次之后就不再需要。
+ * 「省·市」名字 → 行政区对（分隔符是 U+00B7，以免两个省的"城区"撞名）。
+ * 只服务老配置（place 上只有名字、没有显式 province / city）的解析，**不是**"这个点算不算
+ * 大陆点"的判据——那个判据是 `origin`，见 cnWatchPlaces。
  */
 function cnPlaceParts(name) {
   const s = String(name === undefined || name === null ? '' : name).trim()
@@ -177,20 +148,13 @@ function cnPlaceParts(name) {
 
 const trimmed = (v) => (typeof v === 'string' ? v.trim() : '')
 
-// 「一个大陆关注点都没配」的说明。noWatch 与普通未命中的区别见 11-pipeline：前者不进历史。
+// 一条大陆关注点都没配时的说明；noWatch 的条目在 11-pipeline 里不进历史。
 const NO_CN_WATCH_REASON = t('reason.noCnWatch')
 
 /**
- * 从关注点列表里挑出**大陆关注点**，并给出每条的省 / 市（0.8.2 / DESIGN 11.9 B）。
- *
- * 判据是 0.8.0 就有的显式来源分支 `origin`（DESIGN 9.3），且走 02-storage 的 `placeOriginOf`
- * ——与 `normalizePlaces` 用**同一个函数**，两处口径不会各写一份然后漂开。
- * 原实现是「名字里有没有 `·`」：手填坐标（origin 是 'global'）只要名字里带 `·` 就被算成大陆点，
- * 未命中也会往履历里写；而 `origin` 缺失的老配置由 `placeOriginOf` 按同一形状规则推导，
- * 所以这条回退不会把 0.8.1 及以前的大陆关注点判丢。
- *
- * 省 / 市优先读 place 上的显式字段（0.8.2 起 `cnPlaceOf` 写入），缺失时回退解析「省·市」名字。
- * 回退**只发生在已经确定是大陆点之后**——它服务的是老配置，不是判定依据。
+ * 从关注点列表里挑出**大陆关注点**（判据是 placeOriginOf 给的 origin，与 normalizePlaces 同一个
+ * 函数，两处口径不会漂开），并给出每条的省 / 市：优先读 place 上的显式字段，缺失时回退解析
+ * 「省·市」名字——回退只发生在已确定是大陆点之后。
  */
 function cnWatchPlaces(places) {
   const out = []
@@ -211,24 +175,12 @@ function cnWatchPlaces(places) {
   return out
 }
 
-/** 等级中文（与 05f 的 NMC_LEVEL_TEXT 同源；这里只需要拼 reason，不复制映射表会更好，
- *  但 06 不该依赖解析层——所以就地写一份最小的，并靠回归断言钉住两边一致。 */
-// 等级词与灾种名是**我们给起的**（不是电文原文）→ 按界面语言取词（0.9.4）
+// 等级词与灾种名是界面用语（不是电文原文）→ 按界面语言取词
 const NMC_LEVEL_KEY = { red: 'kind.cnLevelRed', orange: 'kind.cnLevelOrange', yellow: 'kind.cnLevelYellow', blue: 'kind.cnLevelBlue' }
 
 /**
- * 大陆气象预警的匹配。规则按优先级排，每一条都对应一个"用户会问为什么"的场景：
- *
- *  ① 灾种开关（DESIGN 8.4 把它们拆成两个：暴雨的橙 / 红常年可见，地质灾害实测全是黄色）。
- *  ② **先确认有没有大陆关注点，再看播报门槛**（0.8.2 调整，DESIGN 11.9 A）。原来门槛排在前面，
- *     于是"一个大陆关注点都没配"的用户，黄 / 蓝预警会持续写进履历——同一路数据橙色以上不进历史、
- *     蓝色却进，两种口径（11-pipeline 的 `noWatch` 只对走到后面那条分支的条目生效）。
- *  ③ 播报门槛：**橙色及以上**才打扰；黄 / 蓝是"未达档位"，0.9.4（PD-1）起**既不播报也不进
- *     历史**（此前只入历史）。不满足时 reason 要说清是"等级不够"，
- *     而不是含糊的"未命中"——否则用户会把"这条预警我收到了但没响"读成故障。
- *  ④ 归属：市能对上就用市；市对不上（省直辖县 / 省台发布 / 机构名错字）时**按省放行**；
- *     连省都认不出（国家级机构等）也放行。后两条都是 DESIGN 3.2 / 8.5 的"宁可多报绝不漏报"
- *     ——一次漏报的代价远大于一次多报。**放行的对象只有真正的大陆关注点**（见 cnWatchPlaces）。
+ * 大陆气象预警的匹配，规则按优先级排：灾种开关 → 有无大陆关注点（无则 noWatch）→ 播报门槛
+ * （橙色及以上）→ 归属（市对上用市；市对不上按省放行；连省都认不出也放行）。
  */
 function matchCnAreaAlert(alert, cfg) {
   const d = cfg.disasters || {}
@@ -238,17 +190,15 @@ function matchCnAreaAlert(alert, cfg) {
     return { hit: false, reason: t('reason.cnRainstormOff') }
   }
   if (alert.cancelled) return { hit: false, reason: t('reason.clearedMuted') }
-  // 等级词与灾种名都是**我们给起的**（不是电文原文）→ 按界面语言取词（0.9.4，见 00g-texts-events）
+  // 等级词与灾种名都是界面用语（不是电文原文）→ 按界面语言取词
   const levelWord = t(NMC_LEVEL_KEY[alert.cnLevel] || 'kind.cnLevelUnknown')
   const kindWord = t(alert.cnKind === 'geology' ? 'kind.cnGeology' : 'kind.cnRainstorm')
   const what = t('kind.cnWhat', { kind: kindWord, level: levelWord })
   const places = (cfg.watch && cfg.watch.places) || []
   const cnPlaces = cnWatchPlaces(places)
   if (cnPlaces.length === 0) {
-    // 与坐标型源同一条原则：没有关注点就明确说明怎么加，**不静默**——
-    // "配错了关注点"看起来像"根本没有预警"是这套系统最该避免的误解之一。
-    // `noWatch` 让 11-pipeline 能把这一类和"命中了但不在列表里"区分开（前者不进历史，0.5.4）。
-    // 它必须排在门槛之前：否则黄 / 蓝预警会绕过 noWatch 继续进历史（DESIGN 11.9 A）。
+    // 没有关注点就明确说明怎么加，不静默；noWatch 让 11-pipeline 把这一类和"命中了但不在列表里"
+    // 区分开（前者不进历史），所以它必须排在门槛之前。
     return { hit: false, noWatch: true, reason: NO_CN_WATCH_REASON }
   }
   const rank = typeof alert.cnRank === 'number' ? alert.cnRank : 0
@@ -268,11 +218,8 @@ function matchCnAreaAlert(alert, cfg) {
       reason: t('reason.cnNotWatched', { what: what, province: province, city: city }),
     }
   }
-  // 市级归属未知：省内有任何一个关注点就放行，并在 reason 里如实说明只定位到省。
-  // 实测这一类的来源是海南省直辖县（乐东 / 昌江 / 琼中…）、上海市辖区，以及上游的机构名错字
-  //（「黑龙江省齐哈尔市克山县」少了"齐"）——它们都是真实预警，丢掉就是漏报。
-  // 省名也认不出时按全国放行，同样是 DESIGN 8.4 的兜底（国家级机构发布的预警没有省可对）。
-  // 这一条以前会把**任一**关注点（含手填坐标）当放行依据，现在 `cnPlaces` 只剩真正的大陆点。
+  // 市级归属未知：省内有任何一个关注点就放行，并在 reason 里说明只定位到省（省直辖县、省台发布、
+  // 机构名错字都属这一类）；省名也认不出时按全国放行。
   const sameProv = cnPlaces.filter((p) => !province || p.province === province)
   if (sameProv.length > 0) {
     return {
@@ -287,26 +234,15 @@ function matchCnAreaAlert(alert, cfg) {
 }
 
 /**
- * 海外气象源（0.6.0）的命中判定：**查询即匹配**（DESIGN 4.7.3）。
- *
- * 与 matchPointAlert 的根本差别：那边的语义是"震中距 ≤ 半径"，坐标在**电文里**；
- * 这边的语义是"这条预警属于用户关注的哪个点"，归属在**取数时就确定了**
- * （取数器按关注点查 NWS 的 `?point=` / ECCC 的 `?bbox=`），所以这里不算距离——
- * 算也没有意义：NWS 返回的是"该点所在县 / 区划"的预警，一个县没有"距关注点多少公里"。
- *
- * 剩下的三个判定都是"用户看不见的漏报"防线：
- *   ① 关注点被删了（用户改配置后取数器要下一轮才生效）→ 如实说明，不当成命中；
- *   ② 档位不够（NWS 的 Watch / Advisory / Statement）→ 不播报；0.9.4（PD-1）起"未达档位"
- *      也不再进历史（此前只记历史），与大陆源的黄 / 蓝同一口径；
- *   ③ 取数器没记归属（理论上不该发生）→ 不猜，明确说"无法判定"。
+ * 海外气象源的命中判定：**查询即匹配**——取数器按关注点查 NWS 的 `?point=` / ECCC 的 `?bbox=`，
+ * 归属在取数时就已确定，这里不算距离。三个判定都是漏报防线：关注点被删了如实说明、档位不够不播报
+ * （也不进历史）、取数器没记归属就明确说无法判定。
  */
 function matchOverseasAlert(alert, cfg) {
   const d = cfg.disasters || {}
   if (d.overseasWeather === false) return { hit: false, reason: t('reason.overseasWeatherOff') }
-  // **防御性守卫，不是本函数的正常输入路径**（0.6.1 review 订正注释）：取消 / 解除消息由
-  // 11-pipeline 的 handleAlert 在 matchAlert **之前**就交给 handleCancelled 了，所以线上
-  // 走到这里的一定不是 cancelled。保留它是为了守住 matchAlert 的对外不变量——"cancelled 的
-  // 消息永远不返回 hit"，避免将来多一条调用路径时把一条"已作废"当成新警报播出去。
+  // 防御性守卫：取消 / 解除消息的正常路径在 11-pipeline 里已由 handleCancelled 处理，走到这里
+  // 的不是 cancelled。保留是为守住 matchAlert 的对外不变量——cancelled 的消息永不返回 hit。
   if (alert.cancelled) return { hit: false, reason: t('reason.cancelledMuted') }
   const places = (cfg.watch && cfg.watch.places) || []
   if (places.length === 0) {
@@ -318,7 +254,7 @@ function matchOverseasAlert(alert, cfg) {
   }
   const origin = alert.originPlace
   if (!origin) return { hit: false, cannotJudge: true, reason: t('reason.overseasNoOrigin') }
-  // 关注点还在不在：按"名字 + 坐标"比对（用户只改半径时仍是同一个点，命中判定不变）。
+  // 关注点还在不在按"名字 + 坐标"比对（用户只改半径时仍是同一个点）
   const still = places.some((p) => p && p.name === origin.name && p.lat === origin.lat && p.lon === origin.lon)
   if (!still) {
     return { hit: false, reason: t('reason.overseasOriginGone', { place: (origin.name || t('reason.placeUnnamed')) }) }
@@ -339,17 +275,17 @@ function matchOverseasAlert(alert, cfg) {
 
 function matchAlert(alert, cfg) {
   const w = cfg.watch || {}
-  // 局部变量**不能叫 	**：那是 00-i18n 的取词函数，遮蔽之后本函数里的 t('reason…') 会变成
-  // 调用配置对象（TypeError）。0.9.4 引入本地化时踩到过，check-imports 现在会拦这种遮蔽。
+  // 局部变量不能叫 `t`：那是 00-i18n 的取词函数，遮蔽之后本函数里的 t('reason…') 会变成调用
+  // 配置对象（TypeError）；check-imports 会拦这种遮蔽。
   const th = cfg.thresholds || {}
-  // 这条消息里是否存在**能归到县**的区域：决定"归不到县的区域"要不要放行（见 regionInWatch）
+  // 这条消息里是否存在能归到县的区域：决定"归不到县的区域"要不要放行（见 regionInWatch）
   const anyPref = (alert.regions || []).some((r) => !!r.pref)
   if (alert.kind === 'eew' || alert.kind === 'quake') {
     if ((cfg.disasters || {}).earthquake === false) return { hit: false, reason: t('reason.quakeOff') }
     if (alert.cancelled) return { hit: false, reason: t('reason.cancelledMuted') }
     // 全球源（EMSC / USGS）只有震中坐标、没有行政区区域 → 走坐标匹配
     if (alert.locator === 'point') return matchPointAlert(alert, cfg)
-    // 551 的「震源情报 / 远地地震」没有 points，无从按震度判定——明确说明，避免用户误以为链路故障
+    // 551 的「震源情报 / 远地地震」没有 points，无从按震度判定
     if (alert.regions.length === 0) {
       return {
         hit: false,
@@ -366,7 +302,7 @@ function matchAlert(alert, cfg) {
   if (alert.kind === 'tsunami') {
     if ((cfg.disasters || {}).tsunami === false) return { hit: false, reason: t('reason.tsunamiOff') }
     if (alert.cancelled) return { hit: false, reason: t('reason.clearedMuted') }
-    // NOAA CAP 的海啸同样是坐标型（CAP 里给的是 circle / polygon，不是日本的津波予報区）
+    // NOAA CAP 的海啸同样是坐标型（CAP 里给的是 circle / polygon，不是津波予報区）
     if (alert.locator === 'point') return matchPointAlert(alert, cfg)
     if (alert.regions.length === 0) return { hit: false, cannotJudge: true, reason: t('reason.noTsunamiAreas') }
     const minRank = own(TSUNAMI_RANK, th.tsunamiGrade) || 1
@@ -376,24 +312,17 @@ function matchAlert(alert, cfg) {
       : { hit: false, reason: missReason(alert, w, t('reason.tsunamiMissed')) }
   }
   if (alert.kind === 'weather') {
-    // 海外气象源（0.6.0）走**查询即匹配**：取数器是按关注点查的（NWS 按点、ECCC 按 bbox），
-    // "这条属于哪个关注点"在取数时就已经确定，所以这里不做距离计算，只做归属与档位判定。
+    // 海外气象源走**查询即匹配**：取数器按关注点查，归属在取数时已定，这里不做距离计算
     if (alert.locator === 'overseas') return matchOverseasAlert(alert, cfg)
-    // 大陆气象源（0.5.2）走**行政区层级**匹配，与日本电文那套（都道府县 + 市町村名）是两套
-    // 规则：那边的粒度是市町村、兜底是"区域级条目放行"；这边的粒度是地级市、兜底是"省级放行"，
-    // 而且多一道**等级门槛**（DESIGN 8.4：橙色及以上才播报）。
+    // 大陆气象源走**行政区层级**匹配，多一道等级门槛（橙色及以上才播报）
     if (alert.locator === 'area') return matchCnAreaAlert(alert, cfg)
     if ((cfg.disasters || {}).weather === false) return { hit: false, reason: t('reason.weatherOff') }
     if (alert.cancelled) return { hit: false, reason: t('reason.clearedMuted') }
     if (alert.regions.length === 0) return { hit: false, cannotJudge: true, reason: t('reason.jmaNoUsableArea') }
-    // 播报边界写死在 L4：L1〜L3 仍然解析，但 0.9.4（PD-1）起**不再进历史**
-    //（此前会留下灰色条目），只是不打扰。
-    // 依据见 DESIGN 10.3——L3 是「高齢者等避難」，与 DSH 用户群不匹配；L4 才是避难指示级。
-    //
-    // **闸门必须看命中地区自己的级别**，不能看电文最大值：同一条 VPWW55 里姫路市是
-    // L4 大雨危険警報、相生市是 L3 大雨警報、西脇市是 L2 大雨注意報（2026-09-14 兵庫県实测）。
-    // 用电文最大值会把只到 L2 的地区播成「警戒レベル4（避难指示级）」——内容夸大，
-    // 而且让「市级收窄」彻底失去意义。region.level 缺失时（老对象 / 类型未识别）回退电文级别。
+    // 播报边界写死在 L4：L1〜L3 仍然解析，但既不播报也不进历史（L3 是「高齢者等避難」，L4 才是
+    // 避难指示级）。是否播报必须看命中地区**自己的**级别，不能看电文最大值：同一条 VPWW55 里姫路市 L4、
+    // 相生市 L3、西脇市 L2 是常态，用电文最大值会把只到 L2 的地区播成「警戒レベル4」，还让市级收窄
+    // 失去意义。region.level 缺失时（老对象 / 类型未识别）回退电文级别。
     const lvOf = (r) => (typeof r.level === 'number' ? r.level : alert.level)
     const hitRegion = alert.regions.find((r) => regionInWeatherWatch(r, w) && lvOf(r) >= 4)
     if (!hitRegion) {

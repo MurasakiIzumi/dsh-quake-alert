@@ -1,17 +1,8 @@
 // ============================================================================
 // dsh-quake-alert · client/src/04-city-table.js
-//
-// 作用：市区町村表与「观测点 addr → 市町村」归一。
-// 内容：表的注入与规整（setCityTable/citiesOfPref/pruneUnknownCities、
-//       pruneCitiesOfUnwatchedPrefs）、
-//       地名假名归一（normKana）与规范写法反查（canonicalCityOf）、
-//       从 Host 只读路由拉表（loadCityTable）、写法变体展开（cityAliases）、
-//       前缀索引（buildAddrIndex）与查询（lookupAddrCity）。
-// 依赖：01-constants、02-storage、03-settings-bridge（两个 prune 都会写配置）。
-// 要点：気象庁/P2PQuake 的观测点名用短名与消歧写法（大阪北区茶屋町、福島伊達市、
-//       渡島北斗市），必须先归一到市町村全称再比对，否则会大面积漏报；
-//       河川区域表与 JMA 电文还可能与本表假名写法不同（南アルプス市 / 南あるぷす市），
-//       所以「比对」与「反查」一律经 normKana，显示仍用本表写法。
+// 市区町村表与「观测点 addr → 市町村」的对应：表的注入与规整、假名写法对齐、规范写法反查、拉表与查询。
+// 要点：気象庁/P2PQuake 的观测点名用短名与消歧写法，必须先统一到市町村全称再比对；假名写法不
+// 同时一律经 normKana 比对与反查，显示仍用本表写法。
 // ============================================================================
 
 import { PREF_SET } from './01-constants.js'
@@ -19,25 +10,18 @@ import { isPlainObject, own } from './02-storage.js'
 import { currentCfg, applyCfg } from './03-settings-bridge.js'
 import { store } from './07-store.js'
 
-// ---------- 市区町村表（0.2.0）：Host 路由提供，Client 拉一次并缓存 ----------
-// 全国约 1700+ 个市町村，体积不适合内联进 client bundle。Host 侧在
-// /dsh-quake-alert/areas 返回 { prefectures: { "<都道府県>": ["市町村全称", ...] } }。
-// 拉取失败时表保持为空，功能退化为「只能按都道府县关注」——不影响 M1 的任何行为。
+// ---------- 市区町村表：Host 路由提供，Client 拉一次并缓存 ----------
+// /dsh-quake-alert/areas 返回 { prefectures: {...} }（全国 1700+ 条，不内联进 bundle）。
 const AREAS_PATH = '/dsh-quake-alert/areas'
 let cityTable = null
 let cityTableState = 'idle' // idle | loading | ready | failed
 let cityNameSet = null // 全部市町村名（校验配置用）
-let cityPrefIndex = null // Map<归一市町村名, { name: 规范写法, prefs: 都道府県[] }>：JMA 电文只给市町村名，要反查所属县
+let cityPrefIndex = null // Map<统一后的市町村名, { name: 规范写法, prefs: 都道府県[] }>：JMA 电文只给市町村名，要反查所属县
 let riverAreas = null // Map<河川予報区域コード, { name, cities }>：指定河川洪水予報用
 
-// ---------- 地名假名归一 ----------
-// 気象庁的不同数据源对同一个市町村写法不一致，实测三类（0.3.2）：
-//   ① 小写法不同：総務省コード表「金け崎町 / 六ゖ所村」↔ 河川区域 CSV「金ケ崎町 / 六ヶ所村」
-//   ② 假名种类不同：総務省コード表「南あるぷす市」↔ 河川区域 CSV「南アルプス市」
-//   ③ 旧写法：P2PQuake 观测点「龍ケ崎市」↔ 本表「龍け崎市」
-// 归一步骤：先「平假名 → 片假名」（け→ケ、ゖ→ヶ），再把「ケ → ヶ」（小写化）。
-// 两步都要：只做第一步的话「ケ」与「ヶ」会变得不相等，反而破坏既有的ケ/ヶ 等价。
-// 结果只用于比较与反查，绝不用于显示——界面上一律用本表的规范写法。
+// ---------- 地名假名写法对齐 ----------
+// 不同数据源对同一市町村的写法不一致（金け崎町 ↔ 金ケ崎町、南あるぷす市 ↔ 南アルプス市）。
+// 对齐步骤：先「平假名 → 片假名」，再把「ケ → ヶ」——两步都要。结果只用于比较与反查。
 const KANA_HIRA_MIN = 0x3041
 const KANA_HIRA_MAX = 0x3096
 const KANA_KE_RE = /\u30b1/g
@@ -67,7 +51,7 @@ function setCityTable(table) {
   if (Object.keys(clean).length === 0) return false
   cityTable = clean
   cityNameSet = names
-  // 索引键走假名归一：外部写法（河川区域表 / JMA 电文）与本表写法不同时也要能查到
+  // 索引键走假名写法对齐：外部写法（河川区域表 / JMA 电文）与本表写法不同时也要能查到
   cityPrefIndex = new Map()
   for (const pref of Object.keys(clean)) {
     for (const c of clean[pref]) {
@@ -82,29 +66,22 @@ function setCityTable(table) {
   return true
 }
 const citiesOfPref = (pref) => (cityTable && own(cityTable, pref)) || []
-/** 市町村名 → 所属都道府県（写法差异已归一；重名时返回多个；表未加载或未收录时返回空数组）。 */
+/** 市町村名 → 所属都道府県（写法差异已对齐；重名时返回多个；表未加载或未收录时返回空数组）。 */
 const prefsOfCity = (name) => {
   if (!cityPrefIndex) return []
   const hit = cityPrefIndex.get(normKana(name))
   return hit ? hit.prefs.slice() : []
 }
-/**
- * 市町村名 → 本表里的规范写法（写法差异已归一；表未加载或未收录时返回空字符串）。
- *
- * 为什么需要：用户勾选的市町村名来自本表（citiesOfPref），而 JMA 电文、河川区域表给的是
- * 外部写法。把外部写法直接写进 region.city，再与用户勾选的名字比对（indexOf）就会漏报；
- * 所以比对前先取规范名。表未加载时返回空串，调用方回退用原写法（宁可多报绝不漏报）。
- */
+/** 市町村名 → 本表里的规范写法（表未加载或未收录时返回空字符串）。JMA 电文、河川区域表给的是
+ *  外部写法，直接与用户勾选名比对会漏报，所以比对前先取规范名。 */
 const canonicalCityOf = (name) => {
   if (!cityPrefIndex) return ''
   const hit = cityPrefIndex.get(normKana(name))
   return hit ? hit.name : ''
 }
 
-/**
- * 河川予報区域表（0.3.0-a 由 scripts/build-areas.mjs 生成，Host 随 /areas 一起下发）。
- * 指定河川洪水予報的电文区域是河川名（「天塩川」），必须先映射到市町村才能与用户关注比对。
- */
+/** 河川予報区域表（scripts/build-areas.mjs 生成，Host 随 /areas 下发）。指定河川洪水予報的电文
+ *  区域是河川名（「天塩川」），必须先映射到市町村才能与用户关注比对。 */
 function setRiverAreas(list) {
   if (!Array.isArray(list)) return false
   const idx = new Map()
@@ -123,28 +100,13 @@ const riverAreaCities = (code) => {
   return hit ? hit.cities.slice() : []
 }
 
-// ---------- 中国行政区划表（0.5.0）：Host 随 /areas 一起下发 ----------
-// 与市区町村表同一理由：省 34 + 地级 384 共约 21KB，不内联进 client bundle。
-// 用途是设置页的三级级联（中国 → 省 → 地级市）与**关注点坐标填充**：
-// 大陆源（cenc_eew / cenc_eqlist）是坐标 + 半径匹配（DESIGN 8.3），
-// 让用户手填经纬度不现实，由这张表按所选城市给出坐标。
-// 表由 scripts/build-cn-areas.mjs 从 GeoNames 生成（含 TW/HK/MO），头部记着已知取舍。
+// ---------- 中国行政区划表：Host 随 /areas 一起下发 ----------
+// 省 34 + 地级 384 共约 21KB。设置页的三级级联与**关注点坐标填充**都用它（大陆源是坐标 + 半径匹配）。
 let cnAreas = null // [{ code, name, aliases, lat, lon, cities:[{name,aliases,lat,lon}] }]
-/**
- * 大陆行政区划表的加载结果（0.9.4 / P2-19）：空串 = 还没失败，非空 = 失败原因。
- *
- * 为什么必须单独记一笔：设置页那个分支此前只看 `cityTableState`（它只反映**市町村表**），
- * 于是 `setCnAreas` 失败时状态仍是 ready、`cnAreas` 仍是 null、province 列表为空——
- * 界面永远落在"正在加载…"那一支，用户无论等多久都不会知道是失败了，也没有重试入口。
- */
+/** 大陆行政区划表的加载结果：空串 = 还没失败，非空 = 失败原因。设置页据此区分"加载中"与"失败"。 */
 let cnAreasFailed = ''
-/**
- * 别名的规整：只留**有意义**的候选。
- *
- * 丢掉单字别名（"丽"这类会匹配到半个中国）与和显示名重复的项；上限 8 条，因为候选是长尾的
- * （个别条目有几十个历史名 / 罗马字音译），而匹配是**最长命中**，砍掉短名不影响建制全名。
- * 缺失 `aliases` 字段（Host 未升级 / 手写的旧数据）时返回空数组——**别名是增强，不是前提**。
- */
+/** 别名的规整：丢掉单字别名（"丽"这类会匹配到半个中国）与和显示名重复的项，上限 8 条（匹配是
+ *  **最长命中**，砍掉短名不影响建制全名）。缺失 `aliases` 字段时返回空数组——别名是增强，不是前提。 */
 function normAliases(list, name) {
   if (!Array.isArray(list)) return []
   const out = []
@@ -159,11 +121,8 @@ function normAliases(list, name) {
   }
   return out
 }
-/**
- * 注入并规整行政区划表。**逐字段校验**：表来自 Host 的 JSON，与 localStorage 一样属于
- * "不可信的输入"——一个坏条目会让级联渲染出幽灵选项，或把用户带到错误的坐标上
- *（后者在预警产品里是"该响的地方没响"）。规整失败的整体拒绝，不做部分接受。
- */
+/** 注入并规整行政区划表。**逐字段校验**：表来自 Host 的 JSON，与 localStorage 一样属于不可信输入
+ *  ——一个坏条目会让级联渲染出幽灵选项，或把用户带到错误的坐标上。整体规整失败就整体拒绝。 */
 function setCnAreas(list) {
   if (!Array.isArray(list)) { cnAreasFailed = '响应里没有 cnAreas'; return false }
   const out = []
@@ -183,7 +142,7 @@ function setCnAreas(list) {
       seenCity.add(cn2)
       cities.push({ name: cn2, aliases: normAliases(c.aliases, cn2), lat: c.lat, lon: c.lon })
     }
-    // 没有下级的省级项在级联里是死路：直接丢弃，避免用户选中后按钮没反应
+    // 没有下级的省级项在级联里是死路：直接丢弃
     if (cities.length === 0) continue
     seenProv.add(name)
     out.push({ code: typeof p.code === 'string' ? p.code : '', name, aliases: normAliases(p.aliases, name), lat: p.lat, lon: p.lon, cities })
@@ -205,17 +164,8 @@ const cnCitiesOf = (province) => {
   const hit = cnAreas.find((p) => p.name === province)
   return hit ? hit.cities.slice() : []
 }
-/**
- * 「省 + 市 + 半径」→ 一个关注点（表里查不到时返回 null）。
- *
- * 抽成纯函数是为了能直接断言级联的产物：用户点「添加」之后配置里到底会多出什么，
- * 比"界面上出现了两个下拉框"重要得多。名称取「省·市」以免两个省的"城区"撞名。
- *
- * `origin: 'cn'`（0.8.0 / DESIGN 9.3）：**关注点的来源分支**——用户在哪个国家的分支下加的
- * 点，那个国家的源就是该点的权威源（3.4 的跨源归并据此判断，诊断里也要能看到）。
- * 它只做标注，**不限制匹配范围**：一个坐标点对所有坐标型源（EMSC / USGS / NOAA）依然有效
- * （DESIGN 9.3 的"不锁死机制"：差异只能来自源本身，不能人为裁剪用户能关注哪里）。
- */
+/** 「省 + 市 + 半径」→ 一个关注点（表里查不到时返回 null）。名称取「省·市」以免两个省的"城区"撞名；
+ *  `origin: 'cn'` 是**来源分支**，只做标注、**不限制匹配范围**：坐标点对所有坐标型源依然有效。 */
 function cnPlaceOf(province, city, radiusKm) {
   if (!cnAreas) return null
   const p = cnAreas.find((x) => x.name === province)
@@ -224,25 +174,18 @@ function cnPlaceOf(province, city, radiusKm) {
   if (!c) return null
   const r = Number(radiusKm)
   if (!Number.isFinite(r) || r < 1 || r > 2000) return null
-  // province / city 显式落在关注点上（0.8.2 / DESIGN 11.9 B）：matcher 按行政区匹配时不再需要
-  // 从「省·市」这个名字反推。名字仍然保留——它是界面上给人看的标签，不是判据。
+  // province / city 显式落在关注点上，matcher 不再从「省·市」这个名字反推；名字是给人看的标签
   return { name: province + '·' + city, lat: c.lat, lon: c.lon, radiusKm: r, origin: 'cn', province, city }
 }
 
-// ---------- 全球主要城市表（0.8.0 / DESIGN 9.4：按国家分包，展开某国时才拉） ----------
-// 为什么不内联：整表 5224 条城市约 375KB 源码。用户只会关注一两个国家，所以 Host 按
-// `?country=XX` **分包下发**，这里按需拉取并缓存——同一国家只拉一次。
+// ---------- 全球主要城市表：按国家分包，展开某国时才拉 ----------
+// 整表 5224 条城市约 375KB 源码。Host 按 `?country=XX` **分包下发**，这里按需拉取并缓存。
 let worldCountries = null // [{ code, count, names: { 'zh-CN', 'zh-TW', ja, en } }]
 const worldCityPacks = new Map() // code -> { state: 'loading'|'ready'|'failed', cities, error }
 /** 界面语言清单（与 00-i18n 的 LANGS 同一批）：国家名的四条名字就按这个顺序兜底。 */
 const COUNTRY_NAME_LANGS = ['zh-CN', 'zh-TW', 'ja', 'en']
-/**
- * 国家名的本地化四条（0.9.4 / PD-3）。
- *
- * 此前 `/areas` 下发的 `name` 是**写死的中文**（生成脚本只算了 zh-CN），于是把界面语言切成
- * 日本語 / English 时国家下拉仍是简体中文。现在数据里带四种语言，取词时按当前语言解析，
- * 认不出该语言时逐级退回（zh-CN → en → code），最坏情况显示 ISO 码而不是空白。
- */
+/** 国家名的本地化四条：取词时按当前语言解析，认不出该语言时逐级退回（zh-CN → en → code），
+ *  最坏情况显示 ISO 码而不是空白。 */
 function setWorldCountries(list) {
   if (!Array.isArray(list)) return false
   const out = []
@@ -257,7 +200,7 @@ function setWorldCountries(list) {
       const v = isPlainObject(c.names) ? c.names[lang] : undefined
       if (typeof v === 'string' && v.trim()) { names[lang] = v.trim(); any = true }
     }
-    // 老 Host（或别处塞进来的）只给 `name`：当作默认语言那一份，照常可用
+    // 旧 Host（或别处塞进来的）只给 `name`：当作默认语言那一份，照常可用
     if (!any && typeof c.name === 'string' && c.name.trim()) { names['zh-CN'] = c.name.trim(); any = true }
     if (!any) continue
     seen.add(code)
@@ -275,13 +218,9 @@ function countryNameOf(entry, lang) {
 }
 const worldCountriesOf = () => (worldCountries ? worldCountries.map((c) => Object.assign({}, c)) : [])
 const countryPackOf = (code) => worldCityPacks.get(String(code === undefined || code === null ? '' : code).trim().toUpperCase()) || null
-/**
- * 拉某个国家的城市包。
- *
- * 同一国家的并发调用共用同一条在途请求（Map 里先落 `loading`）。三种失败要能分开说，
- * 因为出路不同：`failed`（拉不到 → 重试 / 重启 dsh web）、`error: 'not-covered'`
- *（Host 明确答 404：这个国家不在表里 → 用手填坐标）、以及正常但为空。
- */
+/** 拉某个国家的城市包。同一国家的并发调用共用同一条在途请求（Map 里先落 `loading`）。三种失败要能
+ *  分开说，因为出路不同：`failed`（拉不到 → 重试）、`error: 'not-covered'`（Host 答 404：这个国家不在
+ *  表里 → 用手填坐标）、以及正常但为空。 */
 async function loadCountryCities(code) {
   const cc = String(code === undefined || code === null ? '' : code).trim().toUpperCase()
   if (!cc) return null
@@ -315,27 +254,13 @@ function resetWorldCities() {
   worldCityPacks.clear()
 }
 
-/**
- * 发布机构名 → 行政区归属（0.5.2，大陆气象源用）。
- *
- * 输入是气象台的机构名（`气象台` 后缀已去掉或未去掉都可以），例如
- * `云南省丽江市宁蒗彝族自治县气象台`。输出 `{ province, city, matched }`。
- *
- * 三条规则，全部由 238 条真实样本定出来（见 DESIGN 8.5 的实测记录）：
- *  ① **省名必须出现在机构名的开头**，取最长命中。不能改成"全局搜索"：省别名里有
- *     「海南」，而青海省的机构名是「青海省海南藏族自治州共和县气象台」——全局搜会把
- *     一条青海的预警归到海南省，那是最难查的一类错误（名字看着对、地方错了几百公里）。
- *     实测 238 条**全部**以省名开头，所以这个约束不损失覆盖。
- *  ② 市级在**省名之后的那一段**里找最长命中，用 `aliases`（GeoNames 的全部中文候选）而不是
- *     只认显示名——实测显示名会挑到旧名（「毕节地区」对应气象台的「毕节市」、
- *     「思茅市」对应「普洱市」），只认显示名会让这些预警退化成"仅省"。
- *  ③ 市级找不到时，若该省下**只有一个可选条目**（直辖市 / 港澳），就用它：
- *     「上海市浦东新区气象台」的省名之后不含"上海市"，但上海市的关注点确实该响。
- *     其余情况返回 `city: ''`——由调用方走**省级兜底**（宁可多报，绝不漏报，DESIGN 8.5）。
- *
- * @param {unknown} org 机构名
- * @returns {{ province: string, city: string, matched: boolean }|null} 表未加载时返回 null
- */
+/** 发布机构名 → 行政区归属（大陆气象源用）：输入气象台的机构名（`气象台` 后缀去没去掉都可以），
+ *  输出 `{ province, city, matched }`。三条规则：① **省名必须出现在机构名的开头**并取最长命中——
+ *  不能全局搜索，省别名里有「海南」，而青海省的机构名是「青海省海南藏族自治州共和县气象台」，
+ *  全局搜会把一条青海的预警归到海南省；② 市级在**省名之后的那一段**里找最长命中，用 `aliases`
+ *  而不是只认显示名（显示名会挑到旧名，「毕节地区」对应气象台的「毕节市」）；③ 市级找不到时，
+ *  若该省下**只有一个可选条目**（直辖市 / 港澳）就用它，否则返回 `city: ''` 由调用方走省级兜底。
+ *  @returns {{ province: string, city: string, matched: boolean }|null} 表未加载时返回 null */
 function cnAreaOf(org) {
   if (!cnAreas || cnAreas.length === 0) return null
   const s = String(org === undefined || org === null ? '' : org).trim()
@@ -360,31 +285,20 @@ function cnAreaOf(org) {
   return { province: prov.name, city: city ? city.name : '', matched: true }
 }
 
-// ---------- addr → 市町村归一 ----------
-// 気象庁 / P2PQuake 的观测点名（551 的 points[].addr）与市町村全称有一批写法差异，
-// 匹配前先把 addr 归一到它所属的市町村全称；归一不了的（机场、区域名、未收录点）返回 null，
-// 调用方据此放行——宁可多提醒一次，也绝不因为写法差异漏报。
-//
-// 已覆盖的差异（均来自实测的直播 addr）：
-//   ① 政令市短名：大阪北区茶屋町       ← 大阪市北区
-//   ② 特别区加县短名：東京千代田区大手町 ← 千代田区
-//   ③ 重名消歧前缀：福島伊達市          ← 伊達市（福島県）
-//   ④ 北海道支庁名：渡島北斗市 / 日高地方日高町 ← 北斗市 / 日高町
-//   ⑤ 仮名表记：龍ケ崎市 ↔ 龍け崎市（归一函数见文件上方 normKana：平假名→片假名 + ケ→ヶ）
+// ---------- addr → 市町村对应 ----------
+// 551 的 points[].addr 与市町村全称有一批写法差异（政令市短名、重名消歧前缀、北海道支庁名、仮名表记），
+// 匹配前先统一到所属市町村全称；认不出的返回 null，调用方据此放行。
 const HOKKAIDO_BRANCHES = [
   '石狩', '後志', '空知', '渡島', '檜山', '胆振', '日高', '上川', '留萌', '宗谷',
   '網走', '北見', '紋別', '十勝', '釧路', '根室',
 ]
-// 展开一个市町村全称的全部书写变体
 function cityAliases(city, pref) {
   const out = [city]
   const m = /^(.+市)(.+区)$/.exec(city)
   if (m) out.push(m[1].slice(0, -1) + m[2])
   else if (/区$/.test(city)) out.push('東京' + city)
   if (pref) {
-    // 0.9.4（P3-38）：只削 県 / 都 / 府。「北海道」削出来是「北海」——那不是地名，
-    // 而且会给北海道的每个市町村造一条「北海○○市」的幻影别名（下面那一段才是北海道该走的路：
-    // 振興局名 + 「地方」变体）。
+    // 只削 県 / 都 / 府：「北海道」削出来是「北海」，会给北海道的每个市町村造一条幻影别名
     const short = String(pref).replace(/[都府県]$/, '')
     if (short && short !== pref) out.push(short + city)
   }
@@ -393,7 +307,7 @@ function cityAliases(city, pref) {
   }
   return out
 }
-let addrAliasIndex = null // Map<归一后的别名, 市町村全称>
+let addrAliasIndex = null // Map<统一后的别名, 市町村全称>
 let addrAliasMax = 0
 function buildAddrIndex() {
   const idx = new Map()
@@ -412,7 +326,7 @@ function buildAddrIndex() {
   addrAliasIndex = idx
   addrAliasMax = max
 }
-// addr → 市町村全称（最长前缀命中）；无法归一返回 null
+// addr → 市町村全称（最长前缀命中）；认不出返回 null
 function lookupAddrCity(area) {
   if (!addrAliasIndex || addrAliasIndex.size === 0) return null
   const a = normKana(area)
@@ -430,22 +344,10 @@ function pruneUnknownCities() {
   if (kept.length === cur.watch.cities.length) return
   applyCfg(Object.assign({}, cur, { watch: Object.assign({}, cur.watch, { cities: kept }) }))
 }
-/**
- * 清掉「所属都道府县已经不在关注列表里」的市町村（0.9.5 / C11①）。
- *
- * 为什么需要它：设置页取消关注某个县时，`togglePref` 会顺手清掉该县下的市町村
- * （13-ui-settings.js 的 togglePref）。那个清理**依赖市町村表**（`citiesOfPref`），
- * 而表是异步取的：表未就绪时 `citiesOfPref` 返回空数组，于是"该县下的市町村"一个都
- * 匹配不到，清理静默失效。后果**基本**不是误报：匹配层先看县，`regionInWatch` 对不在关注
- * 列表里的县直接返回 false。**但有一个窄口子**——县归不出来（`region.pref === ''`）且整条
- * 消息没有任何区域能归到县时，它会落到市级比对（`lookupAddrCity` → `watch.cities`），残留的
- * 市町村仍可能在那里命中一次（多报方向，构造得出但罕见）。所以这条清理不只是"收拾界面"，
- * 它同时关掉了那个口子（此前留下的条目会在下一次装载时被清掉）。
- *
- * 表就绪后补这一次清理，所以无论表什么时候到（包括 P2-18 的「重试」之后），残留都能收敛。
- * 两个保守边界：**关注列表为空 = 全日本**，此时所有市町村都有效，不清；
- * 归属认不出的条目保留（宁可留着用户的选择，也不擅自删他勾过的东西）。
- */
+/** 清掉「所属都道府县已经不在关注列表里」的市町村。设置页取消关注某个县时的清理**依赖市町村表**
+ *（表未就绪时 `citiesOfPref` 返回空数组，清理会悄悄失灵）；县归不出来且整条消息没有任何区域能归到县
+ *  时会落到市级比对，残留条目仍可能多报一次，表就绪后补做这一次清理即可消除。两个保守边界：
+ *  **关注列表为空 = 全日本**（不清）；归属认不出的条目保留。 */
 function pruneCitiesOfUnwatchedPrefs() {
   if (!cityPrefIndex) return
   const cur = currentCfg()
@@ -466,7 +368,6 @@ async function loadCityTable() {
   if (typeof window === 'undefined' || typeof window.fetch !== 'function') { cityTableState = 'failed'; return cityTableState }
   cityTableState = 'loading'
   store.push({})
-  // 经 window 取 AbortController：浏览器里就是它，沙箱测试也只需注入 window 上的实现
   const AC = (typeof window !== 'undefined' && window) ? window.AbortController : undefined
   cityTableAbort = typeof AC === 'function' ? new AC() : null
   try {
@@ -477,22 +378,15 @@ async function loadCityTable() {
     const data = await res.json()
     const payload = isPlainObject(data) && isPlainObject(data.prefectures) ? data.prefectures : data
     if (!setCityTable(payload)) throw new Error('payload 不含市町村表')
-    // 0.3.0：河川予報区域表随同一份响应下发；缺失只影响洪水，不影响泥石流与既有功能
+    // 河川予報区域表随同一份响应下发；缺失只影响洪水，不影响既有功能
     if (isPlainObject(data) && Array.isArray(data.riverAreas)) setRiverAreas(data.riverAreas)
-    // 0.5.0：中国行政区划表（省 → 地级市 + 坐标），供设置页的三级级联。
-    // 缺失只影响大陆源的"选城市"这条路径（仍可手填坐标），不影响日本链路与既有功能。
-    // 0.9.4（P2-19）：缺失 / 被拒时记下原因，界面据此显示"失败 + 重试"而不是永远"加载中"。
+    // 中国行政区划表供设置页的三级级联；缺失只影响大陆源的"选城市"路径，被拒时记原因以便显示重试
     if (isPlainObject(data) && Array.isArray(data.cnAreas)) setCnAreas(data.cnAreas)
     else cnAreasFailed = '响应里没有 cnAreas'
-    // 0.8.0：全球国家清单（城市本体按 `?country=` 分包另取，见 loadCountryCities）。
-    // 缺失只影响「其他国家 / 地区」分支的城市列表，手填坐标那条路照常可用。
+    // 全球国家清单（城市本体按 `?country=` 分包另取）；缺失只影响「其他国家 / 地区」分支的城市列表
     if (isPlainObject(data) && Array.isArray(data.worldCountries)) setWorldCountries(data.worldCountries)
-    // 0.3.0 起就在的清理：配置里残留了表里不存在的市町村名（手工改过配置 / 数据表更新）→ 清掉。
-    // **不能省**：C11① 那次补修一度把这一行挤掉了（改成只调下面那个），而回归里 pruneUnknownCities
-    // 是**直接调用**的，所以没有任何断言会红——补修引入的回归正好落在测试盲区里。
     pruneUnknownCities()
-    // 0.9.5（C11①）：再把"所属县已不在关注列表里"的市町村清掉
-    //（取消关注时那次清理依赖本表，表没到位就静默失效了——见函数说明）。
+    // 再把"所属县已不在关注列表里"的市町村清掉（见该函数说明）
     pruneCitiesOfUnwatchedPrefs()
   } catch (err) {
     // 插件卸载造成的中止不算"失败"：下次装载应当能重试
@@ -507,21 +401,13 @@ async function loadCityTable() {
 function abortCityTableLoad() {
   if (cityTableAbort) {
     try { cityTableAbort.abort() } catch (err) { /* 已结束等忽略 */ }
-    // 故意不在这里置空：loadCityTable 的 catch 要靠它的 signal 区分「被中止」与「真失败」，
-    // 置空由 loadCityTable 收尾时统一做（abort 幂等，重复调用无害）。
+    // 故意不在这里置空：loadCityTable 的 catch 要靠它的 signal 区分「被中止」与「真失败」
   }
 }
 
-/**
- * 重试加载行政区划表（0.9.4 / P2-18）。
- *
- * 为什么需要它：`loadCityTable` 的守卫会把 `loading` / `ready` 直接挡回去，而全仓库唯一的
- * 调用点是 15-entry 里那个 `ctx.effect`——只在插件装载时执行一次。于是**一次瞬时失败**
- * （Host 刚起来还没注册路由、一次 500、一次网络抖动）就让整场会话失去市町村表：
- * 市级收窄失效（`lookupAddrCity` 索引为空 → `regionInWatch` 一律放行 → 多报）、设置页选不出
- * 市町村、`pruneUnknownCities` 不再运行，而用户只能刷新页面或停用再启用插件。
- * 这里把状态复位后重跑一次，供设置页的「重试」按钮使用。
- */
+/** 重试加载行政区划表，供设置页的「重试」按钮使用：`loadCityTable` 的守卫会把 `loading` / `ready`
+ *  挡回去，而唯一的调用点是 15-entry 的 `ctx.effect`（只在插件装载时执行一次），一次瞬时失败就会让
+ *  整场会话失去市町村表（市级收窄失效 → 多报、设置页选不出市町村、prune 不再运行）。 */
 async function retryCityTable() {
   if (cityTableState === 'loading') return cityTableState
   cityTableState = 'idle'
@@ -530,7 +416,7 @@ async function retryCityTable() {
 }
 
 
-// 供单测钩子重置表状态
+// 供测试钩子重置表状态
 const resetCityTable = () => {
   abortCityTableLoad()
   cityTable = null; cityNameSet = null; cityTableState = 'idle'
@@ -539,7 +425,7 @@ const resetCityTable = () => {
   cnAreasFailed = ''
 }
 
-/** 大陆表的状态（0.9.4 / P2-19）：'idle' | 'ready' | 'failed'。设置页据此区分"加载中"与"失败"。 */
+/** 大陆表的状态：'idle' | 'ready' | 'failed'。设置页据此区分"加载中"与"失败"。 */
 const cnAreasStateOf = () => (cnAreas ? 'ready' : (cnAreasFailed ? 'failed' : 'idle'))
 
 export { AREAS_PATH, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, buildAddrIndex, lookupAddrCity, pruneUnknownCities, pruneCitiesOfUnwatchedPrefs, loadCityTable, retryCityTable, abortCityTableLoad, cityTableState, resetCityTable, setCnAreas, cnAreasStateOf, cnProvinces, cnCitiesOf, cnPlaceOf, cnAreaOf, normAliases, setWorldCountries, worldCountriesOf, countryNameOf, countryPackOf, loadCountryCities, resetWorldCities }

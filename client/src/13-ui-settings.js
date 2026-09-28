@@ -1,15 +1,9 @@
 // ============================================================================
-// dsh-quake-alert · client/src/13-ui-settings.js
-//
-// 作用：设置页面板（设置 → 灾害预警）的全部 UI。
-// 内容：连接状态与数据源、关注地区（都道府县 + 市区町村搜索多选）、
-//       三类阈值、通知与声音（含音量防抖落盘）、静默时段、免责声明、最近预警记录。
-// 依赖：00-i18n、01-constants、02-storage、03-settings-bridge、04-city-table、07-store、08-audio、09-notify。
-// 约定：所有写入都经 applyCfg，保证内存/镜像/Host 三处一致。
-// 依赖方向：本文件 → 00-i18n（取词），00-i18n 不反向依赖这里，所以没有环。
-// 文案：本文件里**我们生成的文本**一律走 t('settings.*')（表在 00b-texts-settings.js）。
-//       源侧文本（SOURCE_CODE_TEXT / store 的 label 与 detail / 地名 / headline / detail /
-//       kindLabel / res.detail）一律原样透传——DESIGN 11.10 的范围约定。
+// dsh-quake-alert · client/src/13-ui-settings.js — 设置页面板（设置 → 灾害预警）的全部 UI：连接状态与
+// 数据源、关注地区、阈值、通知与声音、静默时段、免责、最近预警记录。所有写入都经 applyCfg（保证内存 /
+// 镜像 / Host 三处一致）；本文件生成的文本一律走 t('settings.*')，源侧文本一律原样透传。
+// 依赖：00-i18n、01-constants、02-storage、03-settings-bridge、04-city-table、07-store、08-audio、
+// 09-notify、05b/05c（测试电文）、11-pipeline、12-websocket、12b/12c/12e（计数）、16-diag、17-config-io。
 // ============================================================================
 
 import { h, useState, useEffect, useRef, PREFECTURES, prefLabelOf, SCALE_OPTIONS, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, CN_REPORT_MAG_OPTIONS, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, HISTORY_MAX, HISTORY_KEY, MAX_WATCH_CITIES, MAX_WATCH_PLACES, LANGUAGE_OPTIONS, formatIssuedLocal } from './01-constants.js'
@@ -33,8 +27,7 @@ import { overseasStatsOf } from './12e-overseas-poll.js'
 import { broadcastHistoryCleared, forgetAllAlerted } from './10-dedupe.js'
 import { retrySource } from './05g-source-health.js'
 
-// ---------- 设置页 UI ----------
-// 连接状态 → 颜色 / 文案（设置页与侧边栏状态指示共用）
+// ---------- 设置页 UI（含侧边栏共用的状态映射） ----------
 function statusMetaOf(status, retries) {
   return {
     idle: { color: '#7c8494', text: t('settings.status.idle') },
@@ -42,8 +35,7 @@ function statusMetaOf(status, retries) {
     open: { color: '#4ade80', text: t('settings.status.open') },
     reconnecting: { color: '#d9a406', text: t('settings.status.reconnecting', { n: retries }) },
     closed: { color: '#e5484d', text: t('settings.status.closed') },
-    // 0.4.1：轮询源与"消息处理失败"也需要自己的状态。此前只有 WebSocket 的五个状态，
-    // 于是上游被墙 / 路由 500 / 主链抛错时界面上与"没有新闻"完全不可区分。
+    // 轮询源与"消息处理失败"也有自己的状态：否则上游被墙 / 路由 500 / 主链抛错在界面上与"没有新闻"完全不可区分。
     unreachable: { color: '#e5484d', text: t('settings.status.unreachable') },
     degraded: { color: '#d9a406', text: t('settings.status.degraded') },
     stale: { color: '#8b8f98', text: t('settings.status.stale') },
@@ -60,25 +52,19 @@ function settingsSyncLabel() {
     local: t('settings.storage.local'),
   }[settingsSync] || String(settingsSync)
 }
-// 历史条目「类型」行显示的 P2PQuake code。气象电文不在此表里（它不是 P2PQuake 来源），
-// 索引一律经 own()，避免外部数据里的 'constructor' 之类的键命中原型链。
+// 历史条目「类型」行显示的 P2PQuake code；气象电文不在此表里。索引一律经 own()，避免外部数据的键命中原型链。
 const P2P_KIND_CODE = { quake: 551, eew: 556, tsunami: 552 }
 /**
- * alert.code → 来源标注的**文案 key**（全球源、JMA 电文与大陆源没有 P2PQuake 的 code）。
- *
- * 0.9.4：值是 key，取词在 `p2pCodeTextOf` 里做。此前这里是**写死的中文**（`JMA 电文` /
- * `CENC 预警` / `中央气象台`），而它进的正是**履历条目的「类型」行**——用户实测在英文 / 日文
- * 界面下看到「JMA 电文」，那是简体中文。机构品牌名（EMSC / USGS / NOAA CAP / NWS / ECCC）与
- * `code N` 这种规范标识不翻：它们在任何语言下都该是同一个写法。
+ * alert.code → 来源标注的**文案 key**（全球源、JMA 电文与大陆源没有 P2PQuake 的 code）。值是 key，
+ * 取词在 `p2pCodeTextOf` 里做——这些字符串进履历条目的「类型」行，写死中文会在英 / 日界面下露出来。
+ * 机构品牌名（EMSC / USGS / NOAA CAP / NWS / ECCC）与 `code N` 这种规范标识不翻。
  */
 const SOURCE_CODE_TEXT = {
   emsc: 'EMSC', usgs: 'USGS', noaa: 'NOAA CAP', jma: 'sourceCode.jma',
   cenc_eew: 'sourceCode.cencEew', cenc_eqlist: 'sourceCode.cencEqlist',
-  // 0.5.2：大陆气象预警的发布主体是各级气象台、由中央气象台汇总。标成「JMA 电文」会让
-  // 一条云南暴雨预警看起来来自日本气象厅（同 SOURCE_CODE_TEXT 存在的理由）。
+  // 大陆气象预警的发布主体是各级气象台、由中央气象台汇总；标成「JMA 电文」会让一条云南暴雨预警指向日本气象厅。
   nmc_alarm: 'sourceCode.nmc',
-  // 0.6.0：海外气象源。机构名不能省——一条多伦多的降雨预警被标成「JMA 电文」是同一类错误，
-  // 而 ECCC 的许可（End-use Licence v2.1.1）本身就要求署名。
+  // 海外气象源同理，机构名不能省——ECCC 的许可（End-use Licence v2.1.1）本身就要求署名。
   nws_alerts: 'NWS', eccc_alerts: 'ECCC',
 }
 /** 表里的值可能是 key（要取词），也可能已经是品牌名（原样返回）。 */
@@ -88,13 +74,8 @@ const sourceCodeLabelOf = (value) => {
   return got === s ? s : got
 }
 /**
- * 历史条目「类型」行的来源标注。
- *
- * 0.4.1：优先用 alert.code，而不是 kind。全球地震（EMSC / USGS）的 kind 也是 'quake'，
- * 只看 kind 会把它们标成「code 551」（P2PQuake 的震度速报）——与 0.3.2 修过的
- * "气象条目被标成 code 551"是同一类错误。
- * 0.4.2 补两处兜底：① 数值 code 经 `strOr` 变成字符串后也能显示成 `code N`；
- * ② **旧历史**（0.4.1 之前写入）没有 code 字段，用 id 前缀（emsc: / usgs: / noaa:）认出来源。
+ * 历史条目「类型」行的来源标注：优先用 alert.code（全球地震的 kind 也是 'quake'）；旧历史没有 code
+ * 字段，用 id 前缀（emsc: / usgs: / noaa: / cenc: / nmc: / nws: / eccc:）认出来源。
  */
 function p2pCodeTextOf(kind, code, id) {
   const codeStr = String(code === undefined || code === null ? '' : code)
@@ -106,28 +87,18 @@ function p2pCodeTextOf(kind, code, id) {
   if (idStr.indexOf('usgs:') === 0) return 'USGS'
   if (idStr.indexOf('noaa:') === 0) return 'NOAA CAP'
   if (idStr.indexOf('cenc:') === 0) return t('sourceCode.cencMainland')
-  // 0.5.2：大陆气象源（新的历史条目走 code，这里兜住"更早写入的"这条路径）
   if (idStr.indexOf('nmc:') === 0) return t('sourceCode.nmc')
-  // 0.6.0：海外气象源同理（`code` 缺失的历史条目靠 id 前缀认出来源）
   if (idStr.indexOf('nws:') === 0) return 'NWS'
   if (idStr.indexOf('eccc:') === 0) return 'ECCC'
   const c = own(P2P_KIND_CODE, kind)
   if (c) return 'code ' + c
-  // 兜底：气象（kind='weather'）在 0.5.2 之前只有日本这一个来源。现在有了大陆气象源，
-  // 所以这里的兜底必须注明它是**日方**的，而不是把两者混起来（大陆那条在上面的 id / code 分支已拦下）。
+  // 兜底：气象（kind='weather'）在出现大陆气象源之前只有日本这一个来源，故这里必须注明是日方的。
   return kind === 'weather' ? t('sourceCode.jma') : '—'
 }
-// 灾种配色：气象灾害此前没有键，历史条目一律落到灰色兜底，与另外三类不一致
 const KIND_COLORS = { eew: '#e5484d', quake: '#3b82f6', tsunami: '#f76b15', weather: '#8b5cf6' }
 const kindColorOf = (kind) => own(KIND_COLORS, kind) || '#7c8494'
-/**
- * 下拉框的自绘箭头（data URI）。
- *
- * 为什么不用浏览器的原生箭头（0.8.1 修）：原生化箭头的**水平位置由浏览器决定**，而我们的
- * 下拉带 `min-width: 180px`——当选项文字比这短时（例如语言下拉只有"简体中文"），框比内容宽，
- * 箭头看上去就落在框中段而不是贴着右边缘（用户报告："下箭头不贴在框的右边而在中间"）。
- * 自绘的箭头位置由 `background-position` 固定，框多宽都贴右 8px；顺带也让各平台长相一致。
- */
+/** 下拉框的自绘箭头（data URI）：原生箭头的水平位置由浏览器决定，选项文字短于 `min-width: 180px` 时
+ *  它会落在框中段而不是贴着右边缘；自绘的位置由 `background-position` 固定，多宽都贴右 8px。 */
 const SELECT_ARROW = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236b7280' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E\")"
 const s = {
   section: (title, ...children) => h('div', { style: { padding: '14px 16px', borderBottom: '1px solid rgba(148,163,184,0.14)' } },
@@ -136,14 +107,8 @@ const s = {
   row: (...children) => h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', margin: '4px 0' } }, ...children),
   checkbox: (checked, onChange, text) => h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer', color: '#dfe3e8' } },
     h('input', { type: 'checkbox', checked, onChange: (e) => onChange(e.target.checked) }), text),
-  // `label`（第 5 参）渲染成 `aria-label`（0.5.4）。此前每个下拉旁边只有一个视觉上的 div
-  // 文字，两者在 DOM 里没有任何关联——读屏软件念到的是"组合框"，用户无法知道哪个是震度阈值。
-  // 全库此前只有历史条目与状态点两处 aria 属性（CHANGELOG 记过），而 DESIGN 从未把无障碍
-  // 记为"有意不做"，所以这是遗漏而不是取舍。
-  // `extra`（第 6 参）：调用方追加的样式（例如语言下拉要 `flex: 1` 撑满一行）。
-  // 合并顺序有讲究（0.8.2 review）：自绘箭头的三项**写在 `extra` 之后**。`background` 是简写，
-  // 调用方只要带上它就会把 `backgroundImage` 一起清掉、而且不报任何错（0.8.1 修过一次同一个坑），
-  // 所以关键样式最后落，任何 extra 都盖不掉。
+  // `label`（第 5 参）渲染成 `aria-label`：此前下拉的文字与控件在 DOM 里没有关联，读屏只能念"组合框"。
+  // `extra`（第 6 参）是调用方追加的样式；自绘箭头的三项写在 `extra` 之后——`background` 是简写，带上它会清掉 `backgroundImage`。
   select: (value, options, onChange, textOf, label, extra) => h('select', {
     value, onChange: (e) => onChange(e.target.value),
     'aria-label': label || undefined,
@@ -168,15 +133,8 @@ const s = {
 }
 
 /**
- * 折叠的次要说明（原生 `<details>`）。
- *
- * 0.8.1 起设置页只把**一句判据**留在主视野里，解释、边界与许可署名收进这里。
- * 此前它们平铺在选项旁边，一条就能占三五行——结果是"要找的开关被埋在说明里"，
- * 而真正需要这些细节的人（排查、合规核对）反而不介意多点一次。
- *
- * 信息一条都没少：`<details>` 的内容始终在 DOM 里（可搜索、可读屏、可复制），
- * 只是默认不占地方。用原生元素而不是 useState，是因为不必维护展开状态，
- * 而且浏览器自带键盘可达与"展开 / 收起"的语义。
+ * 折叠的次要说明（原生 `<details>`）：设置页只把一句判据留在主视野，解释、边界与许可署名收进这里。
+ * 内容始终在 DOM 里（可搜索、可读屏、可复制），用原生元素即自带键盘可达与展开语义。
  */
 const fold = (summary, ...children) => h('details', { style: { marginTop: 6 } },
   h('summary', { style: { fontSize: 11, color: '#8b93a1', cursor: 'pointer', width: 'fit-content' } }, summary),
@@ -188,36 +146,22 @@ const fold = (summary, ...children) => h('details', { style: { marginTop: 6 } },
   }, ...children))
 
 /**
- * 源的展示名（状态区块与详情共用）不用在这里定义：映射（源 id → 文案 key）与取词都在
- * `00f-source-labels.js` 的 `sourceLabelOf`。**单一来源是重点**——侧边栏的悬停提示
- * （07-store）与这里必须给同一个答案，各写一份迟早漂开。取词在调用时求值，所以切语言后
- * 这里立刻跟着变（写成模块级常量会把默认语言固化，理由见 00f 的文件头）。
- */
-/**
- * 源状态区块里的源顺序与分组。**一处维护**：此前同样的列表在三个地方各写一遍
- * （状态行、增量计数行、重试按钮），加一个源要改三处——漏掉任何一处就变成
- * "某个源坏了但界面上看不见"，而"让失败可见"正是这个区块存在的全部理由。
+ * 源的展示名（源 id → 文案 key）与取词都在 `00f-source-labels.js` 的 `sourceLabelOf`：单一来源是重点，
+ * 侧边栏的悬停提示（07-store）与这里必须给同一个答案。取词在调用时求值，所以切语言后立刻跟着变。
+ * 下面几组顺序表同理，**一处维护**：加一个源只改这里，漏掉就变成"某个源坏了但界面上看不见"。
  */
 const SOURCE_ORDER = ['p2pquake', 'emsc', 'cenc_eew', 'cenc_eqlist', 'jma', 'usgs', 'noaa', 'nmc_alarm', 'nws_alerts', 'eccc_alerts']
 /** 走 `/feed` 增量计数的源（feedStatsOf 有快照）。大陆地震源走 SSE，另有自己的计数与链路模式。 */
 const FEED_STAT_ORDER = ['jma', 'usgs', 'noaa', 'nmc_alarm']
-/** 走 SSE 的源（0.5.0）：状态从 cnStreamRegistry 实时读。 */
+/** 走 SSE 的源：状态从 cnStreamRegistry 实时读。 */
 const STREAM_ORDER = ['cenc_eew', 'cenc_eqlist']
-/**
- * 海外源（0.6.0）：Client 直连的 REST 轮询，计数从 `overseasStatsOf` 实时读。
- * 单独一张表而不是并进 FEED_STAT_ORDER——那边的字段是"增量 / 游标 / Host 计数"，
- * 语义不同，混在一起就得靠形状判断猜来源。
- */
+/** 海外源：Client 直连的 REST 轮询，计数从 `overseasStatsOf` 实时读。字段语义（轮次 / 请求 / 未覆盖）
+ *  与 FEED_STAT_ORDER 不同，故单独一张表。 */
 const OVERSEAS_STAT_ORDER = ['nws_alerts', 'eccc_alerts']
 /**
- * 源状态区块（0.4.1）。
- *
- * 拆成独立组件的理由：它显示"最近拉取 N 秒前"，需要自己走时钟；而此前这段逻辑挂在
- * 设置页主组件里，5 秒一次的 setState 会**重建整个设置页**——关注县较多时那意味着
- * 每次最多 47×200 个市町村按钮一起重建，输入明显卡顿。现在只有这一小块重渲。
- *
- * 内容也扩了：除本地的增量 / 失败计数，还显示 Host 侧的失败与放弃数（来自 /feed?stats=1）。
- * 只显示本地计数的话，「上游被墙」与「上游没有新闻」仍然不可区分。
+ * 源状态区块。拆成独立组件是因为它显示"最近拉取 N 秒前"、需要自己走时钟；挂在设置页主组件里会让 5 秒
+ * 一次的 setState 重建整个设置页（关注县较多时那意味着几千个市町村按钮一起重建）。内容含 Host 侧的失败
+ * 与放弃数（来自 /feed?stats=1）：只显示本地计数的话，「上游被墙」与「上游没有新闻」仍然不可区分。
  */
 function SourceStatusBlock() {
   const [, setTick] = useState(0)
@@ -260,9 +204,7 @@ function SourceStatusBlock() {
         t('settings.source.lastFetch', { ago }),
     }))
   }
-  // 海外源（0.6.0）：按关注点查询外部 REST。显示"查了几轮 / 发了多少请求 / 收到多少响应条目"，
-  // 以及几个只有这个形态才有的计数：**过老只记历史**（年龄闸门）、**被上游拒绝**（HTTP 400，
-  // 不替上游断言"这个点不在覆盖范围"）、**被分页上限截断的轮数**（ECCC 的 limit=200）。
+  // 海外源：只有这个形态才有的计数——年龄门槛（过老只记历史）、被上游拒绝（HTTP 400）、被分页上限截断。
   for (const id of OVERSEAS_STAT_ORDER) {
     const o = overseasStatsOf[id]
     const st = sources[id]
@@ -271,8 +213,7 @@ function SourceStatusBlock() {
       continue
     }
     const ago = o.lastAt ? t('settings.source.secondsAgo', { n: Math.max(0, Math.round((Date.now() - o.lastAt) / 1000)) }) : t('settings.source.dash')
-    // 「响应条目」而不是「收到 N 条」（0.6.1 review）：NWS 是按点的 5 个采样点各查一次，
-    // 同一批预警会被重复计入，写成"收到 35 条"会让用户以为收到了 35 条不同预警。
+    // 「响应条目」而不是「收到 N 条」：NWS 按点的 5 个采样点各查一次，同一批预警会被重复计入。
     rows.push(t('settings.source.keyValue', {
       k: sourceLabelOf(id),
       v: t('settings.source.polls', { n: o.polls || 0 }) +
@@ -287,8 +228,7 @@ function SourceStatusBlock() {
         t('settings.source.lastQuery', { ago }),
     }))
   }
-  // 大陆源（0.5.0）：走 SSE，状态从注册表**实时**读。**链路模式必须显示出来**——
-  // 降级到轮询意味着延迟从秒级变成最长 15 秒，用户有权知道自己在哪条路上。
+  // 大陆源走 SSE，状态从注册表实时读。链路模式必须显示出来——降级到轮询意味着延迟从秒级变成最长 15 秒。
   for (const id of STREAM_ORDER) {
     const reg = cnStreamRegistry[id]
     const st = sources[id]
@@ -315,8 +255,7 @@ function SourceStatusBlock() {
     }))
   }
   if (rows.length === 0) return null
-  // 数据格式异常（schema-error）：按 DESIGN 5.4 提供**手动重试**——源改版后字段可能又回来了，
-  // 用户不该为了清掉一个蓝点去重装插件。
+  // schema-error 提供手动重试：源改版后字段可能又回来了，用户不该为了清掉一个蓝点去重装插件。
   const retryRows = SOURCE_ORDER
     .filter((id) => sources[id] && sources[id].status === 'schema-error')
     .map((id) => h('div', { key: 'retry-' + id, style: { marginTop: 4 } },
@@ -327,14 +266,8 @@ function SourceStatusBlock() {
     retryRows)
 }
 
-/**
- * 设置页默认落在哪个「国家 / 地区」分支下（0.8.0 / DESIGN 9.3）。
- *
- * **由现有配置推断，而不是固定日本**：已经配了中国或海外关注点的用户打开设置页时，
- * 应当直接看到自己在用的那个分支——否则会先看到"日本：未选择"，以为配置丢了。
- * 优先级与 9.3 的展示顺序一致（日本 → 中国 → 其他国家）；三边都空时落在日本
- * （它是默认链路，也是"未选择 = 提醒全日本"唯一有含义的分支）。
- */
+/** 设置页默认落在哪个「国家 / 地区」分支：由现有配置推断，而不是固定日本——否则已配了中国或海外关注点的
+ *  用户打开设置页会先看到"日本：未选择"，以为配置丢了。三边都空时落在日本（默认链路）。 */
 function inferRegionTab(cfg) {
   const w = (cfg && cfg.watch) || {}
   const places = Array.isArray(w.places) ? w.places : []
@@ -343,31 +276,17 @@ function inferRegionTab(cfg) {
   if (places.length > 0) return 'global'
   return 'jp'
 }
-/**
- * 一级「国家 / 地区」的三个分支（0.8.0 / DESIGN 9.3：第一级收成一个唯一的选择器）。
- *
- * **label 存 key、渲染时取词**（0.9.0）：写在模块级对象里的 `t()` 会在模块加载那一刻求值，
- * 而那时配置还没读、语言还是默认值——用户切语言后标签不会跟着变。
- */
+/** 一级「国家 / 地区」的三个分支。**label 存 key、渲染时取词**：模块级对象里的 `t()` 会在模块加载那一刻
+ *  求值，那时语言还是默认值，用户切语言后标签不会跟着变。 */
 const REGION_TABS = [
   { v: 'jp', labelKey: 'settings.region.jp', icon: '🇯🇵' },
   { v: 'cn', labelKey: 'settings.region.cn', icon: '🇨🇳' },
   { v: 'global', labelKey: 'settings.region.global', icon: '🌐' },
 ]
 /**
- * 设置页的选项卡（0.8.1）。
- *
- * 九个区块串成一列时，"只想看一眼履历"要滚过全部设置——包括关注地区里那几千个市町村按钮。
- * 分页依据是**用户要做什么**，不是代码结构：
- *   · 地区 —— 我在乎哪里（配置一次，偶尔改）
- *   · 灾害 —— 哪些灾种、多强才提醒（配置一次）
- *   · 通知 —— 怎么提醒、什么时候别提醒（偶尔改）
- *   · 履历 —— 刚才发生了什么（最常回来的一页）
- *   · 其他 —— 链路、诊断、免责（排障时才来）
- * 每页只渲染自己能看到的区块，所以未选中的页连 DOM 都不产生。
- *
- * **labelKey 而不是 label**（0.9.0，与 REGION_TABS 同一条理由）：模块级求值会在加载那一刻
- * 把默认语言的文字固化下来，切语言就不跟着变。
+ * 设置页的选项卡：分页依据是用户要做什么——地区（我在乎哪里）/ 灾害（哪些灾种、多强）/ 通知（怎么提醒）/
+ * 履历（刚发生了什么）/ 其他（链路、诊断、免责）。每页只渲染自己的区块，未选中的页连 DOM 都不产生；
+ * `labelKey` 而不是 `label` 的理由同 REGION_TABS。
  */
 const SETTINGS_TABS = [
   { v: 'region', labelKey: 'settings.tab.region' },
@@ -385,22 +304,19 @@ function SettingsPanel(props) {
   const [expanded, setExpanded] = useState(null)
   const [cityQuery, setCityQuery] = useState({}) // 每个县的市町村搜索词
   const [weatherTestMsg, setWeatherTestMsg] = useState('') // 「发送测试气象警报」的结果提示
-  const [weatherTestSeq, setWeatherTestSeq] = useState(0) // 测试场景轮换游标
-  // 全球关注点的输入草稿与反馈（0.4.0）：校验失败必须给出文字原因，不能静默吞掉用户输入
-  // 半径默认值 0.5.0 起是 100（DESIGN 9.2）；**既有配置里的 radiusKm 不动**，只影响新建。
+  const [weatherTestSeq, setWeatherTestSeq] = useState(0) // 测试场景轮换序号
+  // 全球关注点的输入草稿与反馈：校验失败必须给出文字原因，不能静默吞掉用户输入。默认半径只影响新建的关注点。
   const [placeDraft, setPlaceDraft] = useState({ name: '', lat: '', lon: '', radiusKm: String(DEFAULT_PLACE_RADIUS_KM) })
   const [placeMsg, setPlaceMsg] = useState('')
-  // 中国大陆的三级级联（0.5.0）：省 → 地级市 → 半径。选完给出**表里的坐标**，
-  // 用户不需要知道经纬度（大陆源是坐标 + 半径匹配，见 DESIGN 8.3）。
+  // 中国大陆的三级级联：省 → 地级市 → 半径。选完给出表里的坐标，用户不需要知道经纬度。
   const [cnPick, setCnPick] = useState({ province: '', city: '', radiusKm: DEFAULT_PLACE_RADIUS_KM })
   const [cnMsg, setCnMsg] = useState('')
-  // 全球链路的测试（0.4.0）：场景轮换游标与结果提示
+  // 全球链路的测试：场景轮换序号与结果提示
   const [geTestSeq, setGeTestSeq] = useState(0)
   const [geTestMsg, setGeTestMsg] = useState('')
-  // 诊断快照（0.5.0）：{ text, msg } | null
+  // 诊断快照：{ text, msg } | null
   const [diag, setDiag] = useState(null)
-  // 配置导出导入（0.9.0）：一条结果提示、下载不可用时的回退文本、以及"能不能撤销"的依据。
-  // 备份时间从 localStorage 现读一次——它在导入那一刻才产生，读完由 setCfgIoBackupAt 更新。
+  // 配置导出导入：结果提示、下载不可用时的回退文本、以及"能不能撤销"的备份时间。
   const [cfgIoMsg, setCfgIoMsg] = useState('')
   const [cfgIoText, setCfgIoText] = useState('')
   const [cfgIoBackupAt, setCfgIoBackupAt] = useState(() => {
@@ -408,33 +324,28 @@ function SettingsPanel(props) {
     return b ? b.at : ''
   })
   const cfgIoFileRef = useRef(null)
-  // 「源状态」区块里的相对时间要自己走 —— 见 SourceStatusBlock（独立组件，避免每 5 秒
-  // 重渲整个设置页，尤其是关注县较多时那几千个市町村按钮）
-  // 音量滑块：拖动期间只改本地草稿，停手 300ms 后才落盘（避免每移动 1px 写一次 localStorage）
+  // 「源状态」区块的相对时间要自己走 —— 见 SourceStatusBlock（避免每 5 秒重渲整个设置页）
+  // 音量滑块：拖动期间只改本地草稿，停手 300ms 后才写入本地存储
   const [volDraft, setVolDraft] = useState(null)
-  // 选项卡（0.8.1）。默认「地区」——首次配置的起点。`props.initialTab` 只给回归测试用
-  //（宿主按 `h(SettingsPanel, { close })` 渲染，不会传它）。
+  // 选项卡。默认「地区」——首次配置的起点。`props.initialTab` 只给回归测试用。
   const [tab, setTab] = useState(() => {
     const want = props && props.initialTab
     return SETTINGS_TABS.some((tab) => tab.v === want) ? want : 'region'
   })
-  // 关注地区的当前分支（0.8.0 / DESIGN 9.3）：地址是"用户视角的一条路径"，不是三块并列。
+  // 关注地区的当前分支：地址是"用户视角的一条路径"，不是三块并列。
   const [regionTab, setRegionTab] = useState(() => inferRegionTab(currentCfg()))
   // 「其他国家 / 地区」分支：所选国家与城市搜索词（城市表按国家分包，见 04-city-table）
   const [country, setCountry] = useState('')
   const [worldCityQuery, setWorldCityQuery] = useState('')
   const volTimer = useRef(null)
-  const volPending = useRef(null) // 尚未落盘的草稿值：卸载时补写，拖完立刻关设置页也不丢改动
+  const volPending = useRef(null) // 尚未写入本地存储的草稿值：卸载时补写，拖完立刻关设置页也不丢改动
   const restartTimer = useRef(null) // 切换数据源后的重启延时（见下方）
   // store 变化（新预警、Host 配置同步）都要重新读一次当前配置
   useEffect(() => store.subscribe(() => { setTick((n) => n + 1); setCfgState(currentCfg()) }), [])
   useEffect(() => () => {
     if (volTimer.current) { clearTimeout(volTimer.current); volTimer.current = null }
-    // 0.9.4（C11②）：挂起的"切换数据源后重启"要**执行**，而不是丢弃。
-    // 此前直接 clearTimeout：用户切完数据源后 80ms 内关掉设置页 / 停用插件，那次 restart() 就
-    // 永远不会发生，连接要等下一次强制断线（约 10 分钟）才切到新地址。
-    // 清定时器仍然必要（不能让一个已无 fiber 归属的回调复活 socket），所以顺序是
-    // "清掉定时器 → 立刻执行同一动作"，`activeClient` 的复查照旧（插件停用时它是 null）。
+    // 挂起的"切换数据源后重启"要**执行**而不是丢弃：切完数据源 80ms 内关掉设置页，那次 restart() 就永远
+    // 不会发生，连接要等下一次强制断线才切到新地址。清定时器仍然必要（不能让已无 fiber 归属的回调复活 socket）。
     if (restartTimer.current) {
       clearTimeout(restartTimer.current)
       restartTimer.current = null
@@ -444,16 +355,13 @@ function SettingsPanel(props) {
     const v = volPending.current
     if (v !== null) {
       volPending.current = null
-      // 卸载中不能 setState，只补写盘。必须经 applyCfg 而不是 saveCfg：
-      // saveCfg 只写 localStorage 镜像，不改内存也不推 Host —— 有 Host settings 时
-      // 下次同步会被 Host 的旧值覆盖回来，音量改动照样丢（0.2.0 声称修过这个场景）。
+      // 卸载中不能 setState，只补写本地存储。必须经 applyCfg 而不是 saveCfg：后者只写 localStorage 镜像，有 Host
+      // settings 时下次同步会被 Host 的旧值覆盖回来。
       const cur = currentCfg()
       applyCfg({ ...cur, notify: { ...cur.notify, volume: v } })
     }
   }, [])
-  // 其它 DSH 标签页改了配置 → 由 15-entry 的常驻 storage 监听统一回读并 store.push()，
-  // 本组件通过下面的 store.subscribe 跟随。监听放在这里（组件内）的话，只有设置页打开着
-  // 才同步；没打开设置页的标签页会一直按旧配置提醒。
+  // 其它 DSH 标签页改了配置 → 由 15-entry 的常驻 storage 监听统一回读并 store.push()，本组件跟随。
 
   // 立即基于最新配置计算（内存 + localStorage 镜像 + Host），再 setState
   const setCfg = (fn) => { const next = applyCfg(fn(currentCfg())); setCfgState(next) }
@@ -474,9 +382,7 @@ function SettingsPanel(props) {
     return { ...c, watch: { ...c.watch, cities: next } }
   })
 
-  // ---------- 全球关注点（0.4.0）----------
-  // 全球源给的是震中坐标，没有都道府县，所以关注表达是「位置 + 半径」。
-  // 校验放在这里而不是只靠 normalizeCfg：用户需要看到"为什么没加上"，静默吞掉输入最糟。
+  // ---------- 全球关注点：全球源给的是震中坐标，没有都道府县，所以关注表达是「位置 + 半径」----------
   const addPlace = () => {
     const places = cfg.watch.places || []
     const lat = Number(String(placeDraft.lat).trim())
@@ -495,8 +401,7 @@ function SettingsPanel(props) {
       setPlaceMsg(t('settings.place.max', { n: MAX_WATCH_PLACES })); return
     }
     const name = String(placeDraft.name || '').trim() || (lat.toFixed(2) + ', ' + lon.toFixed(2))
-    // origin（0.8.0 / DESIGN 9.3）：手填坐标与「用我的位置」都归 'global' 分支——这个表单
-    // 不限定国家，而 origin 只做标注（不影响匹配范围），写一个猜出来的国家名反而是错的。
+    // origin：手填坐标与「用我的位置」都归 'global' 分支——origin 只做标注（不影响匹配范围）。
     setCfg((c) => ({ ...c, watch: { ...c.watch, places: (c.watch.places || []).concat([{ name, lat, lon, radiusKm, origin: 'global' }]) } }))
     setPlaceDraft({ name: '', lat: '', lon: '', radiusKm: String(radiusKm) })
     setPlaceMsg(t('settings.place.addedPrefix', { name }) + t('settings.place.addedDedupe'))
@@ -524,8 +429,7 @@ function SettingsPanel(props) {
       { timeout: 10000 },
     )
   }
-  /** 定位并**直接添加**一个关注点（大陆级联里的用法：半径已经在级联里选好了，
-   *  再让用户去另一个表单点一次「添加」是多余的一步）。 */
+  /** 定位并**直接添加**一个关注点（半径已在级联里选好，再让用户去另一个表单点「添加」是多余的一步）。 */
   const addMyLocationPlace = () => {
     const geo = (typeof navigator !== 'undefined') ? navigator.geolocation : null
     if (!geo || typeof geo.getCurrentPosition !== 'function') { setCnMsg(t('settings.place.geoUnsupportedCn')); return }
@@ -564,16 +468,11 @@ function SettingsPanel(props) {
     },
   }))
 
-  // ---------- 半径控件（0.5.0 / DESIGN 9.2）----------
+  // ---------- 半径控件 ----------
   /** 当前值是否正好是某个语义档。 */
   const isRadiusPreset = (km) => RADIUS_PRESETS.some((o) => o.v === Number(km))
-  /**
-   * 半径选择：三档**语义标签** + 一个始终可见的数字输入。
-   *
-   * 为什么两者都要：普通用户不必理解"公里"，语义档就够；而"想精确控制的人有出口"
-   * 是 DESIGN 9.2 的硬要求——把数字藏进"自定义…"分支会让改一次半径多两步。
-   * 数字框是真实值，下拉只是快捷键；填了 150 这种非档位值时下拉自动显示「自定义」。
-   */
+  /** 半径选择：三档语义标签 + 一个始终可见的数字输入（数字框是真实值，下拉只是快捷键；非档位值时下拉显示
+   *  「自定义」）。 */
   const radiusControl = (km, onChange, key) => h('div', {
     key: key || 'radius',
     style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#9aa0a6', flexWrap: 'wrap' },
@@ -617,7 +516,7 @@ function SettingsPanel(props) {
     setCfg((c) => ({ ...c, watch: { ...c.watch, places: (c.watch.places || []).concat([p]) } }))
     setCnMsg(t('settings.cn.added', { name: p.name, lat: p.lat, lon: p.lon, radius: p.radiusKm }))
   }
-  /** 数据表加载失败时的重试（0.9.4 / P2-18、P2-19）。表到位后 store.push 会触发重渲。 */
+  /** 数据表加载失败时的重试。表到位后 store.push 会触发重渲。 */
   const onRetryCityTable = () => {
     try {
       const p = retryCityTable()
@@ -627,9 +526,7 @@ function SettingsPanel(props) {
   /** 国家 / 地区级联的第一级（中国）——省的选项。 */
   const cnCascade = () => {
     if (provinces.length === 0) {
-      // 0.9.4（P2-19）：此前这里只看 cityTableState（它只反映**市町村表**），于是大陆表失败时
-      // 状态仍是 ready → 永远落在"正在加载…"那一支，用户等多久都不会知道是失败了。
-      // 现在按大陆表自己的状态区分"加载中"与"失败"，失败时给一个重试入口。
+      // 按大陆表自己的状态区分"加载中"与"失败"：只看 cityTableState 的话，大陆表失败时仍会显示"正在加载…"。
       const failed = cnAreasStateOf() === 'failed'
       return h('div', { style: { fontSize: 11, color: failed ? '#d9a406' : '#9aa0a6', marginTop: 6 } },
         failed ? t('settings.cn.tableFailed') : t('settings.cn.loading'),
@@ -654,15 +551,10 @@ function SettingsPanel(props) {
       cnMsg ? h('div', { role: 'status', style: { fontSize: 11, color: '#93c5fd', marginTop: 6 } }, cnMsg) : null,
     )
   }
-  // 全球源状态（0.4.0）：用户看不出"链路到底在不在拉"，这是最常见的困惑来源——
-  // 尤其全球地震本来就不频繁。feedStatsOf 不经过 store（见 12b 的注释），
-  // 所以由 SourceStatusBlock 自己每 5 秒重读（见文件下方）。
   // 市区町村选择器：数据表到位后，为每个已关注的县提供「搜索 + 多选」
   const cityPicker = () => {
     if (cityTableState === 'failed') {
-      // 0.9.4（P2-18）：失败要能重试。此前 loadCityTable 的唯一调用点是插件装载时那个
-      // ctx.effect，一次瞬时失败（Host 刚起来、一次 500、一次抖动）就让整场会话失去市町村表：
-      // 市级收窄失效（多报）、选不出市町村、pruneUnknownCities 不再运行，而用户只能刷新页面。
+      // 失败要能重试：一次瞬时失败就让整场会话失去市町村表（市级收窄失效、选不出市町村），用户只能刷新页面。
       return h('div', { style: { fontSize: 11, color: '#d9a406', marginTop: 10 } },
         t('settings.cities.failed'),
         h('span', { style: { marginLeft: 8 } },
@@ -697,8 +589,7 @@ function SettingsPanel(props) {
               const on = cfg.watch.cities.indexOf(city) !== -1
               return h('button', {
                 key: city, onClick: () => toggleCity(city),
-                // 0.9.4（P2-28）：选中态此前只靠颜色 / 边框表达（WCAG 4.1.2）。同文件的县按钮
-                // 与页签都有 aria-pressed，市町村这一层漏了——读屏用户无法知道选了哪些市町村。
+                // 选中态也要给 aria-pressed，否则读屏用户无法知道选了哪些市町村。
                 'aria-pressed': on ? 'true' : 'false',
                 style: {
                   fontSize: 11, padding: '2px 8px', borderRadius: 11, cursor: 'pointer',
@@ -715,17 +606,11 @@ function SettingsPanel(props) {
       }),
     )
   }
-  // ---------- 关注地区的统合（0.8.0 / DESIGN 9.3）----------
-  // 第一级从三个平铺区块收成一个**唯一的「国家 / 地区」选择器**，选中后只展开该国自己的
-  // 下级控件；代码里仍是三条各自合适的实现（"统合 UI，不统合模型"）：
-  //   · 日本     → 都道府县 + 市区町村（源按行政区名匹配，判据是"该地区观测到的震度"）
-  //   · 中国大陆 → 省 + 地级市 + 半径（源按"震中坐标 + 半径"匹配）
-  //   · 其他国家 → 坐标 + 半径（同坐标型；9.4 的城市表接入后这里多一条城市列表）
-  // 硬把日本改成坐标匹配会让"震中 150km 外、本地却到震度 5 弱"的地震漏掉——那是把日本这一路
-  // **降级**（9.3 明确否决）。所以数据模型一个字段都不动，只统合用户看到的路径。
-  // 县名的**显示名**统一走 01-constants 的 `prefLabelOf`（按当前语言给日文原名 / 中文名 / 罗马字）。
-  // 0.9.0 曾在这里自己写一份 `prefZhOf`（恒取中文名），于是英文 / 日文界面下"地区"页显示的是
-  // 中文县名——同一个能力两份实现，而**没有断言覆盖的那一份**正在界面上生效（11.8 教训 1、4）。
+  // ---------- 关注地区的统合 ----------
+  // 第一级从三个平铺区块收成一个唯一的「国家 / 地区」选择器，选中后只展开该国自己的下级控件；代码里仍是
+  // 三条各自合适的实现（"统合 UI，不统合模型"）：日本 → 都道府县 + 市区町村（源按行政区名匹配）；大陆 →
+  // 省 + 地级市 + 半径；其他国家 → 坐标 + 半径。硬把日本改成坐标匹配会让"震中 150km 外、本地却到震度 5
+  // 弱"的地震漏掉，所以数据模型一个字段都不动。县名的显示名统一走 01-constants 的 `prefLabelOf`。
   /** 按来源分支筛关注点（`origin` 见 02-storage 的 placeOriginOf）。 */
   const placesOfOrigin = (origin) => (cfg.watch.places || [])
     .filter((p) => (origin === 'cn' ? (p && p.origin === 'cn') : (p && p.origin !== 'cn')))
@@ -748,19 +633,15 @@ function SettingsPanel(props) {
     }))
 
   /**
-   * 已关注地区的**统一列表**（按来源分支分组）。
-   *
-   * 这是"统合 UI，不统合模型"真正的落点：配置里仍是 prefectures / cities / places 三份数据，
-   * 但用户看到的是一份"我关注了哪里"的清单——此前要滚过三个区块、把三处内容在脑子里拼起来
-   * 才知道自己到底关注了什么。
+   * 已关注地区的统一列表（按来源分支分组）：配置里仍是 prefectures / cities / places 三份数据，
+   * 但用户看到的是一份"我关注了哪里"的清单。
    */
   const watchList = () => {
     const w = cfg.watch || {}
     const places = w.places || []
     const jpRows = (w.prefectures || []).map((pref) => {
       const cities = (w.cities || []).filter((c) => citiesOfPref(pref).indexOf(c) !== -1)
-      // 显示名随语言：日文界面「東京都」、中文界面「东京」、英文界面「Tokyo」。
-      // 原名只在"显示名与它不同"时括注——同一种语言里不会出现「東京都（東京都）」。
+      // 显示名随语言（日文「東京都」/ 中文「东京」/ 英文「Tokyo」）；原名只在两者不同时括注。
       const label = prefLabelOf(pref)
       return h('div', { key: 'wl-jp-' + pref, style: { display: 'flex', alignItems: 'center', gap: 8, margin: '3px 0', fontSize: 12 } },
         h('span', { style: { flex: 1 } },
@@ -795,7 +676,7 @@ function SettingsPanel(props) {
     )
   }
 
-  /** 日本分支：都道府县 + 市区町村细化（交互与 0.5.0 完全一致）。 */
+  /** 日本分支：都道府县 + 市区町村细化。 */
   const jpBranch = () => h('div', null,
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 8 } },
       cfg.watch.prefectures.length === 0
@@ -820,12 +701,11 @@ function SettingsPanel(props) {
     cityPicker(),
   )
 
-  /** 中国大陆分支：省 → 地级市 → 半径（交互与 0.5.0 完全一致，说明文字随分支走）。 */
+  /** 中国大陆分支：省 → 地级市 → 半径（说明文字随分支走）。 */
   const cnBranch = () => h('div', null,
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 8 } },
       t('settings.cnBranch.hint')),
-    // 无取消机制是**安全相关**的缺口（DESIGN 8.3 / 10.2 要求 UI 如实说明，不得假装能处理）：
-    // 主视野只留这一行结论，完整边界收进折叠——信息不删，只是不再占地方。
+    // 无取消机制是安全相关的缺口：主视野只留这一行结论，完整边界收进折叠（信息不删，只是不再占地方）。
     h('div', { style: { fontSize: 11, color: '#d9a406', marginBottom: 8 } },
       t('settings.cnBranch.warning')),
     cnCascade(),
@@ -839,7 +719,7 @@ function SettingsPanel(props) {
   const addCityPlace = (c) => {
     const places = cfg.watch.places || []
     if (places.length >= MAX_WATCH_PLACES) { setPlaceMsg(t('settings.place.max', { n: MAX_WATCH_PLACES })); return }
-    // 按**坐标**判重（与 normalizePlaces 的去重口径一致）：否则同一个城市点两次会出现两行
+    // 按**坐标**判重（与 normalizePlaces 的口径一致）：否则同一个城市点两次会出现两行
     if (places.some((p) => p && Math.abs(p.lat - c.lat) < 0.02 && Math.abs(p.lon - c.lon) < 0.02)) {
       setPlaceMsg(t('settings.cn.exists', { name: c.name })); return
     }
@@ -854,7 +734,7 @@ function SettingsPanel(props) {
   const globalBranch = () => {
     const hint = { fontSize: 11, color: '#9aa0a6', lineHeight: 1.6 }
     const countries = worldCountriesOf()
-    // 国家名的取词与排序都跟着**当前界面语言**（0.9.4 / PD-3，见 countryNameOf）
+    // 国家名的取词与排序都跟着**当前界面语言**（见 countryNameOf）
     const lang = getLanguage()
     const pack = country ? countryPackOf(country) : null
     const cityList = (pack && pack.state === 'ready') ? pack.cities : []
@@ -914,14 +794,9 @@ function SettingsPanel(props) {
       s.row(s.select(country,
         [{ v: '', label: countries.length ? t('settings.global.countryAll') : t('settings.global.countryLoading') }]
           .concat(countries
-            // 0.9.4（PD-3）：国家名按**当前界面语言**取（数据里带四种语言的写法），并按该语言的
-            // 排序规则排——中文按拼音、日文按假名、英文按字母，跟着语言换。
-            //
-            // 0.9.4 修订：这里**只映射一次**。此前写成 map→sort→map，而第二次 map 的参数已经不是
-            // 国家条目、而是上一步造的 `{v, name, count}`，于是 `v: c.code` 全是 undefined——
-            // 浏览器里所有 option 的 value 相同，就只能停在第 1 个；onChange 收到字符串 "undefined"，
-            // 拉城市 404、城市列表永远空。排序改为排**原始条目**（按解析出的本地化名字），
-            // 从结构上避开这类"链到第二段时字段名变了"的错误。
+            // 国家名按当前界面语言取（数据里带四种语言的写法），并按该语言的排序规则排——中文按拼音、
+            // 日文按假名、英文按字母。这里**只映射一次**：排原始条目（按解析出的本地化名字），再 map 成
+            // `{v, label}`；链到第二段时字段名变了会让所有 option 的 value 相同。
             .slice()
             .sort((a, b) => countryNameOf(a, lang).localeCompare(countryNameOf(b, lang), lang))
             .map((c) => ({
@@ -930,8 +805,7 @@ function SettingsPanel(props) {
             }))),
         (v) => { setCountry(v); setWorldCityQuery(''); if (v) loadCountryCities(v) },
         (o) => o.label, t('settings.global.countryLabel'))),
-      // 半径是**共用**的一个旋钮：城市点选与手填坐标都按它新建关注点。
-      // 两处各放一个会让人以为"半径分两种"，而匹配层只认每个关注点自己的 radiusKm。
+      // 半径是**共用**的一个旋钮：城市点选与手填坐标都按它新建关注点（匹配层只认每个点自己的 radiusKm）。
       h('div', { style: { marginTop: 6 } },
         radiusControl(Number(placeDraft.radiusKm) || DEFAULT_PLACE_RADIUS_KM,
           (v) => setPlaceDraft((d) => ({ ...d, radiusKm: String(v) })), 'place-radius')),
@@ -956,14 +830,9 @@ function SettingsPanel(props) {
     watchList(),
   )
 
-  // ---------- 灾害类型与阈值（0.8.0 合并成按灾种的一张表）----------
-  // 0.7.0 及以前，开关在「灾害类型」、阈值在几屏之外的「提醒阈值」——用户想调海啸的强弱，
-  // 得在两个区块之间来回对照自己刚才开的是哪一个。0.8.0 把两者并成一张表：**一行就是一个灾种**，
-  // 它自己的开关与阈值并排。
-  //
-  // 开关的**共享关系如实呈现**（`disasters.earthquake` 一个字段管四行地震），不伪造四个开关：
-  // 那个字段从 0.1.0 起就在配置里，拆开会让老配置的语义漂移；用户的心智也是"要不要地震提醒"，
-  // 而不是"要不要日本实测震度"。
+  // ---------- 灾害类型与阈值（按灾种一张表）----------
+  // 一行就是一个灾种，它自己的开关与阈值并排。开关的共享关系如实呈现（`disasters.earthquake` 一个字段管
+  // 四行地震），不伪造四个开关：拆开会让老配置的语义漂移。
   /** 一行：灾种名 + 口径说明 | 开关 + 阈值。 */
   const disasterRow = (label, note, control) => h('div', {
     style: { display: 'flex', alignItems: 'flex-start', gap: 10, padding: '6px 0', borderBottom: '1px solid rgba(148,163,184,0.10)' },
@@ -977,8 +846,7 @@ function SettingsPanel(props) {
     (v) => setCfg((c) => ({ ...c, disasters: { ...c.disasters, [key]: v } })), text)
   const thSelect = (key, options, asNumber, label) => s.select(cfg.thresholds[key], options,
     (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, [key]: asNumber ? Number(v) : v } })),
-    // 选项文字是 `labelKey`（值的档位表在 01-constants，文字在文案表）：**渲染时取词**，
-    // 所以切语言后下拉里的话立刻跟着换。
+    // 选项文字是 `labelKey`（值的档位表在 01-constants，文字在文案表）：渲染时取词，切语言后跟着换。
     (o) => t(o.labelKey), label)
   /** 分组的标题行：一个开关管这一组的若干行（共享关系写在标题里，别让人以为漏了开关）。 */
   const disasterGroup = (title, switchKey, switchText, extra) => h('div', {
@@ -991,8 +859,6 @@ function SettingsPanel(props) {
   const fixedGate = (text) => h('span', { style: { fontSize: 11, color: '#9aa0a6' } }, text)
 
   const sectionDisasters = () => s.section(t('settings.section.disaster'),
-    // 一行就够。原来那句"开关 = 要不要提醒，阈值 = 多强才提醒"是在解释自己的界面——
-    // 开关和下拉就摆在眼前，用户不需要有人告诉他这是什么（0.8.1 去 AI 味时删掉）。
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 4 } },
       t('settings.disaster.hint')),
 
@@ -1006,29 +872,21 @@ function SettingsPanel(props) {
       h('div', null, t('settings.disaster.foldScale1')),
       h('div', null, t('settings.disaster.foldScale2'))),
 
-    // —— 海啸：日本 552 与 NOAA CAP 共用等级闸门 ——
+    // —— 海啸：日本 552 与 NOAA CAP 共用等级门槛 ——
     disasterGroup(t('settings.disaster.groupTsunami'), 'tsunami', t('settings.disaster.notifySwitch')),
-    // 0.8.2 review：note 要写清全球源看的是**关注点**（`places`），不是日本那 47 个都道府县。
-    // 0.8.1 瘦身时把这句删了，只留"按预警等级"——只配了日本县级关注的用户会以为这一行已经
-    // 覆盖 NOAA 海啸，实际匹配走的是「其他国家 / 地区」里的关注点半径。
+    // note 要写清全球源看的是**关注点**（`places`），不是日本那 47 个都道府县。
     disasterRow(t('settings.disaster.tsunamiJpLabel'), t('settings.disaster.tsunamiJpNote'), [thSelect('tsunamiGrade', TSUNAMI_OPTIONS, false, t('settings.disaster.tsunamiSelect'))]),
 
-    // —— 气象：三家的门槛都固定在该机构真正代表危险的那一档 ——
-    // L1/L2 要求的动作不是桌面弹窗能承载的，L3 面向老年人；L4（避難指示级）才真正涉及人身财产
-    // 损失，所以这里只有"开 / 关"、没有阈值（DESIGN 10.3）。
+    // —— 气象：门槛固定在该机构真正代表危险的那一档（L4 避難指示级才真正涉及人身财产损失）——
     disasterGroup(t('settings.disaster.groupWeatherJp'), 'weather', t('settings.disaster.notifySwitch')),
     disasterRow(t('settings.disaster.weatherJpLabel'), t('settings.disaster.weatherJpNote'), [fixedGate(t('settings.disaster.gateJma4'))]),
 
-    // 中国大陆气象灾害（0.5.2）：**两个灾种分开**。它们来自同一个源（中央气象台汇总的
-    // 预警信号列表），但产出差别很大——暴雨的橙 / 红常年可见，而地质灾害实测全是黄色
-    // （达不到播报门槛，只在历史里留痕）。合成一个开关会让"我只想要暴雨"的用户找不到出口。
-    // 两个开关名沿用解析层的灾害名（`NMC_KIND_TEXT` 的 '暴雨' / '地质灾害'）：那一层还没有
-    // 本地化（DESIGN 11.10 记为"尚未处理"），这里加"预警"两字只是同名的界面说法。
+    // 中国大陆气象灾害：两个灾种分开——它们同源但产出差别很大，合成一个开关会让"我只想要暴雨"的用户找不到出口。
     disasterGroup(t('settings.disaster.groupWeatherCn'), null, null,
       [switchOf('cnRainstorm', t('settings.disaster.cnRainstormSwitch')), switchOf('cnGeology', t('settings.disaster.cnGeologySwitch'))]),
     disasterRow(t('settings.disaster.weatherCnLabel'), t('settings.disaster.weatherCnNote'), [fixedGate(t('settings.disaster.gateOrange'))]),
 
-    // 海外气象灾害（0.6.0）：美国 NWS + 加拿大 ECCC。一个开关覆盖两个源（各自按关注点生效）。
+    // 海外气象灾害：美国 NWS + 加拿大 ECCC。一个开关覆盖两个源（各自按关注点生效）。
     disasterGroup(t('settings.disaster.groupWeatherOverseas'), 'overseasWeather', t('settings.disaster.notifySwitch')),
     disasterRow(t('settings.disaster.weatherOverseasLabel'), t('settings.disaster.weatherOverseasNote'), [fixedGate(t('settings.disaster.gateOverseas'))]),
 
@@ -1042,8 +900,7 @@ function SettingsPanel(props) {
       h('div', { style: { fontWeight: 600, color: '#c8ccd4', marginTop: 4 } }, t('settings.disaster.tradeoffOverseasTitle')),
       h('div', null, t('settings.disaster.tradeoffOverseas1')),
       h('div', null, t('settings.disaster.tradeoffOverseas2')),
-      // 措辞订正（0.6.1 review）：ECCC 的 wind warning 确实是 warning（只有霜冻 / 雾是 advisory）
-      // ——它被排除是因为**不在本插件的灾种范围内**，不是因为它不危险。
+      // ECCC 的 wind warning 确实是 warning，它被排除是因为**不在本插件的灾种范围内**，不是不危险。
       h('div', null, t('settings.disaster.tradeoffOverseas3')),
       h('div', null, t('settings.disaster.tradeoffOverseas4')),
       h('div', null, t('settings.disaster.tradeoffOverseas5'))),
@@ -1069,14 +926,8 @@ function SettingsPanel(props) {
   const volShown = volDraft === null ? cfg.notify.volume : volDraft
 
   const statusMeta = statusMetaOf(store.status, store.retries)
-  // 状态圆点。**不带外边距**：用它的唯一一处（statusStrip，位于页签之外，所以每个页签都能
-  // 看到）是 flex + gap 排的。
-  //
-  // 0.9.5（P3-45）：disabled（用户关掉了灾种 / 全部关掉）在这里也必须画**空心**，与侧边栏的
-  // StatusIndicator（14-ui-status.js:22-24）同一形态。此前这一处无条件实心，于是同一个
-  // "已关闭"在设置页是实心灰点、在侧边栏是空心灰圈——同一个状态两种画法。形状差异不只是
-  // 好看：DESIGN 5 节六态表要求把"已关闭"与 stale / 未启动 的实心灰分开，而颜色之外的
-  // 形状线索正是色觉障碍用户唯一能用的那个判据。
+  // 状态圆点，不带外边距（唯一用它的 statusStrip 是 flex + gap 排的）。disabled（用户关掉了灾种或全部
+  // 关掉）必须画空心，与 14-ui-status.js 的 StatusIndicator 同一形态：形状差异是色觉障碍用户唯一能用的判据。
   const dotStyle = store.status === 'disabled'
     ? { display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: 'transparent', border: '1.5px solid ' + statusMeta.color, flexShrink: 0 }
     : { display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: statusMeta.color, flexShrink: 0 }
@@ -1089,12 +940,7 @@ function SettingsPanel(props) {
     unsupported: t('settings.perm.unsupported'),
   }[perm] || ''
 
-  // ---------- 选项卡（0.8.1）----------
-  // 九个区块串成一列时，"只想看一眼履历"要滚过全部设置——包括关注地区里那几千个市町村按钮。
-  // 按用途分页后每页**只渲染自己能看到的区块**（未选中的页不产生 DOM），"滚到底"这件事直接消失。
-  //
-  // 分页依据是"用户要做什么"，不是代码结构：地区（我在乎哪里）/ 灾害（哪些灾种、多强）/
-  // 通知（怎么响、什么时候别响）/ 履历（刚才发生了什么）/ 其他（链路、诊断、免责）。
+  // ---------- 选项卡：每页只渲染自己的区块，未选中的页不产生 DOM ----------
   /** 选项卡角标：只有真的有内容时才显示数字，免得三个空数字占视线。 */
   const tabBadgeOf = (v) => {
     if (v === 'region') {
@@ -1111,9 +957,8 @@ function SettingsPanel(props) {
     return h('button', {
       key: tabDef.v,
       onClick: () => setTab(tabDef.v),
-      // `aria-current` 而不是 `aria-pressed`：这是"当前显示哪一页"，不是开关。
-      // 没有用 role="tablist"/"tab" 是因为那套 ARIA 还要求方向键导航与 tabpanel 关联，
-      // 只加一半会让读屏软件给出错误的交互预期（错误的 ARIA 比没有更糟）。
+      // `aria-current` 而不是 `aria-pressed`：这是"当前显示哪一页"，不是开关。不用 role="tablist" 是因为
+      // 那套 ARIA 还要求方向键导航与 tabpanel 关联，只加一半比没有更糟。
       'aria-current': on ? 'true' : undefined,
       style: {
         fontSize: 12, padding: '7px 13px', cursor: 'pointer', background: 'transparent',
@@ -1124,11 +969,7 @@ function SettingsPanel(props) {
   }))
 
   /**
-   * 常驻状态条（**在选项卡之外**，0.8.1）。
-   *
-   * 只回答两个问题：通不通、收到多少条。此前这里还跟着一行 `store.detail`（"已连接 EMSC
-   * （全球地震实时推送）"之类），而同一批逐源信息在「其他」页的「源状态」里**一字不差地**
-   * 躺着——同一件事写两遍，既占地方，又让人以为那是两套东西。细节留给那一页。
+   * 常驻状态条（**在选项卡之外**）：只回答"通不通、收到多少条"。逐源细节在「其他」页的「源状态」里。
    */
   const statusStrip = () => h('div', {
     style: {
@@ -1141,22 +982,12 @@ function SettingsPanel(props) {
     store.received > 0
       ? h('span', { style: { color: '#9aa0a6' } }, t('settings.strip.received', { n: store.received }))
       : null,
-    // 告诉用户"更细的在哪"，但已经在那一页时就不必再说。
-    // 颜色用 #9aa0a6 而不是更暗的灰（0.8.2 review）：11px 小字在深色底上要过 AA 4.5:1，
-    // 原 #6b7280 只有约 3.4:1，和其余次要文字同一档更稳（也让整页少一种灰）。
+    // 告诉用户"更细的在哪"，已经在那一页时就不必再说。颜色用 #9aa0a6 以保证 11px 小字过 AA 4.5:1。
     tab === 'misc' ? null : h('span', { style: { color: '#9aa0a6', fontSize: 11, marginLeft: 'auto' } }, t('settings.strip.more')))
 
-  /**
-   * 界面语言（0.8.1 立选项，0.9.0 落地本地化）。
-   *
-   * 0.9.0 起 zh-CN / ja / en 各有完整文案表（00a / 00b / 00c / 00e 面文件合并而来），
-   * 0.9.3 加上 zh-TW；选中即由 15-entry 写进配置并调 setLanguage —— 界面**当场**跟着换。
-   * 所以这里不再需要"目前只有简体中文"那种解释性说明（11.10 规则 1：界面不解释自己），
-   * 也不该再用文字解释"这个控件是干什么的"。
-   */
+  /** 界面语言：选中即由 15-entry 写进配置并调 setLanguage，界面**当场**跟着换。 */
   const sectionLanguage = () => s.section(t('settings.section.language'),
-    // `flex: 1`：这一行只有标签与一个短下拉（"简体中文" / "繁體中文"），不撑满的话右半边
-    // 空着、加上箭头的位置，观感就像"控件没对齐"。撑满后箭头正好落在行右边缘。
+    // `flex: 1`：这一行只有标签与一个短下拉，不撑满的话右半边空着、观感像"控件没对齐"。
     s.row(s.label(t('settings.language.label')), s.select(cfg.language, LANGUAGE_OPTIONS,
       (v) => setCfg((c) => ({ ...c, language: v })), (o) => o.label, t('settings.language.label'), { flex: 1 })),
   )
@@ -1169,9 +1000,8 @@ function SettingsPanel(props) {
         { v: 'sandbox', label: t('settings.source.sandbox') },
       ], (v) => {
         setCfg((c) => ({ ...c, source: v }))
-        // 延时用 ref 保存并在卸载时清理：否则"切换数据源后 80ms 内离开设置页 / 停用插件"
-        // 会在到点时复活一个已经没有任何 fiber 归属的 socket（它会继续上报状态并经
-        // handleAlert 响铃），直到用户刷新页面。执行前再复查一次 activeClient。
+        // 延时用 ref 保存并在卸载时清理：否则"切换数据源后 80ms 内离开设置页"会在到点时复活一个已无 fiber
+        // 归属的 socket（继续上报状态并响铃）。执行前再复查 activeClient。
         if (restartTimer.current) clearTimeout(restartTimer.current)
         restartTimer.current = setTimeout(() => {
           restartTimer.current = null
@@ -1184,8 +1014,7 @@ function SettingsPanel(props) {
       t('settings.source.config', { value: settingsSyncLabel() })),
   )
 
-  // 大陆源的链路选择（0.5.0）。这是一个**出口**：自动降级判不出的那几种网络
-  //（能连上、偶尔漏、整体像坏的）需要一个手动开关，否则用户只能重装或等更新。
+  // 大陆源的链路选择是一个出口：自动降级判不出的那几种网络（能连上、偶尔漏、整体像坏的）需要手动开关。
   const sectionCnTransport = () => s.section(t('settings.section.cnTransport'),
     s.row(s.label(t('settings.cnTransport.label')), s.select(cfg.cnTransport || 'auto', [
       { v: 'auto', label: t('settings.cnTransport.auto') },
@@ -1201,8 +1030,7 @@ function SettingsPanel(props) {
       s.checkbox(cfg.notify.sound !== false, (v) => setCfg((c) => ({ ...c, notify: { ...c.notify, sound: v } })), t('settings.notify.sound')),
       s.checkbox(cfg.notify.system !== false, (v) => setCfg((c) => ({ ...c, notify: { ...c.notify, system: v } })), t('settings.notify.system')),
     ),
-    // 0.9.4（C1）：分灾害音效开关。总开关关掉时这三个没有意义，所以**只在总开关打开时显示**
-    // （灰着不禁用更省事，但"显示却无效"正是要避免的那种界面）。默认全开 = 与旧行为一致。
+    // 分灾害音效开关：总开关关掉时这三个没有意义，所以**只在总开关打开时显示**（"显示却无效"是要避免的那种界面）。
     cfg.notify.sound !== false
       ? s.row(
         s.checkbox(cfg.notify.soundQuake !== false, (v) => setCfg((c) => ({ ...c, notify: { ...c.notify, soundQuake: v } })), t('settings.notify.soundQuake')),
@@ -1246,8 +1074,7 @@ function SettingsPanel(props) {
       s.btn(t('settings.notify.testToast'), () => showToast({ title: t('settings.notify.testTitle'), body: t('settings.notify.toastBody'), color: '#4ade80', ttlMs: 4000 })),
     ),
     h('div', { style: { color: '#9aa0a6', fontSize: 11, marginTop: 6 } }, permText),
-    // 提示音未解锁时必须**显式告知**：页面可见时通知路径只用页内 toast（不发系统通知），
-    // 于是"打开 DSH 后从未点过页面"的用户在设置里看到「提示音：开」，实际上一条声音都听不到。
+    // 提示音未解锁时必须**显式告知**：页面可见时通知路径只用页内 toast，用户会看到「提示音：开」却听不到声音。
     audioState() === 'suspended'
       ? h('div', { style: { color: '#d9a406', fontSize: 11, marginTop: 4 } },
           t('settings.notify.audioLocked'))
@@ -1257,7 +1084,7 @@ function SettingsPanel(props) {
     testMsg ? h('div', { role: 'status', style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, testMsg) : null,
   )
 
-  // 静默时段（0.2.0）
+  // 静默时段
   const sectionQuiet = () => s.section(t('settings.section.quiet'),
     s.row(s.checkbox(cfg.quietHours.enabled, (v) => setCfg((c) => ({ ...c, quietHours: { ...c.quietHours, enabled: v } })), t('settings.quiet.enable'))),
     s.row(
@@ -1278,14 +1105,11 @@ function SettingsPanel(props) {
     ),
     s.row(s.checkbox(cfg.quietHours.breakForSevere, (v) => setCfg((c) => ({ ...c, quietHours: { ...c.quietHours, breakForSevere: v } })), t('settings.quiet.breakForSevere'))),
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 6 } },
-      // 时区基准必须写出来（0.8.2 review 补回）：不写的话"23:00"是本地时间还是 JST 全靠猜，
-      // 而这个判定用的是**浏览器本地时间**（inQuietHours），跨时区用户猜错就会在半夜被响铃。
+      // 时区基准必须写出来：这个判定用的是**浏览器本地时间**（inQuietHours），跨时区用户猜错会在半夜被响铃。
       t('settings.quiet.hint')),
   )
 
-  // 测试与诊断（0.8.0 合并）：两类测试按钮都是"无灾情时验证整条链路"的入口，与源状态、
-  // 诊断快照同属排障面——此前它们散在「灾害类型」与「其他地区」两个区块里，用户要确认
-  // "这个源到底在不在拉"，得先滚到对应灾种那一节去找。
+  // 测试与诊断：两类测试按钮都是"无灾情时验证整条链路"的入口，与源状态、诊断快照同属排障面。
   const sectionDiagnostics = () => s.section(t('settings.section.diag'),
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 6 } },
       t('settings.diag.hint')),
@@ -1298,15 +1122,11 @@ function SettingsPanel(props) {
       const alert = parseJma(buildTestTelegram(pref, ms, sc.key, city), { id: 'test-weather-' + ms })
       setWeatherTestSeq(weatherTestSeq + 1)
       if (!alert) { setWeatherTestMsg(t('settings.diag.parseFailed')); return }
-      // 事件键改成**每次都不同**（0.5.4），否则同一场景第二次就静默：汇总型电文的事件键是
-      // 「灾种 + 官署」（刻意不含发布时刻，见 05b 的说明），于是连点两次会算出同一个键，
-      // 被 `isEventRepeat` 判成"同一事件的后续发布（强度未升级）"而只记历史——与按钮文案
-      // "可反复点击"直接矛盾。全球链路早就显式改写过事件键（05c 的 parseTestGlobalMessage），
-      // 气象这条漏了。语义上也成立：每次点击本来就是一次独立的演示。
+      // 事件键改成**每次都不同**，否则同一场景第二次就静默：汇总型电文的事件键是「灾种 + 官署」（不含发布时刻），
+      // 连点两次会算出同一个键而被 `isEventRepeat` 判成"强度未升级"、只记历史。
       alert.eventKey = 'test-weather:' + ms + ':' + sc.key
       const res = handleAlert(alert, currentCfg(), { skipQuietHours: true })
-      // 提示按**实际结果**生成，不写死"应看到弹窗"——开关关闭 / 未达 L4 / 静默 / 其它标签页
-      // 已提醒时，实际就是不会响，提示必须如实说明，否则会让人以为插件坏了。
+      // 提示按**实际结果**生成：开关关闭 / 未达 L4 / 静默 / 其它标签页已提醒时就是不会响，必须如实说明。
       const outcome = res && res.notified
         ? t('settings.diag.outcomeSent')
         : t('settings.diag.outcomeNotSent', { reason: (res && res.detail) || t('settings.diag.outcomeUnknown') })
@@ -1317,8 +1137,7 @@ function SettingsPanel(props) {
     weatherTestMsg
       ? h('div', { role: 'status', style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, weatherTestMsg)
       : null,
-    // 全球链路（0.4.0）：构造的是**源格式原文**（EMSC / USGS / NOAA 各一种），
-    // 因此解析器与匹配引擎都被真实走过。
+    // 全球链路：构造的是**源格式原文**（EMSC / USGS / NOAA 各一种），因此解析器与匹配引擎都被真实走过。
     s.row(s.btn(t('settings.diag.sendGlobal'), () => {
       const places = cfg.watch.places || []
       if (places.length === 0) { setGeTestMsg(t('settings.diag.needPlace')); return }
@@ -1329,8 +1148,7 @@ function SettingsPanel(props) {
       const alert = parseTestGlobalMessage(msg)
       if (!alert) { setGeTestMsg(t('settings.diag.parseFailed')); return }
       const res = handleAlert(alert, currentCfg(), { skipQuietHours: true })
-      // 提示按**实际结果**生成：开关关闭 / 半径外 / 静默 / 其它标签页已提醒时就是不会响，
-      // 必须如实说明，否则用户会以为插件坏了
+      // 提示按**实际结果**生成：开关关闭 / 半径外 / 静默 / 其它标签页已提醒时就是不会响，必须如实说明。
       const outcome = res && res.notified
         ? t('settings.diag.outcomeSent')
         : t('settings.diag.outcomeNotSent', { reason: (res && res.detail) || t('settings.diag.outcomeUnknown') })
@@ -1339,12 +1157,9 @@ function SettingsPanel(props) {
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4 } },
       t('settings.diag.globalScenarios', { list: TEST_GEO_SCENARIOS.map((x) => t('settings.diag.scenario.' + x.key)).join(' / ') })),
     geTestMsg ? h('div', { role: 'status', style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, geTestMsg) : null,
-    // 源状态：逐源的连接 / 增量 / 失败计数。放在这里而不是某个地区区块下面——它回答的是
-    // "哪条链路在动"，与关注了哪个国家无关。
+    // 源状态：逐源的连接 / 增量 / 失败计数。它回答的是"哪条链路在动"，与关注了哪个国家无关。
     h(SourceStatusBlock, { key: 'source-status' }),
-    // 诊断快照（0.5.0）：DESIGN 11.3 的交付物——让"运行时自己说话"。
-    // 界面上只做两件事：生成、以及**在剪贴板不可用时把文本显示出来**（沙箱 iframe 里
-    // navigator.clipboard 常常不可用，而"复制不了"不该成为诊断的第一步就卡住）。
+    // 诊断快照：界面上只做两件事——生成，以及在**剪贴板不可用时把文本显示出来**。
     h('div', { style: { marginTop: 12, borderTop: '1px solid rgba(148,163,184,0.18)', paddingTop: 10 } },
       h('div', { style: { fontSize: 11, color: '#9aa0a6' } },
         t('settings.diag.snapshotHint'))),
@@ -1372,11 +1187,8 @@ function SettingsPanel(props) {
       : null,
   )
 
-  // 免责（0.8.1）：核心一句留在主视野（它是安全相关声明），完整来源与免责收进折叠。
-  // ---------- 配置导出与导入（0.9.0） ----------
-  // 导入是**整体替换**：17-config-io 的 `importConfig` 会先把当前配置备份一份再写回；校验失败时
-  // 它什么都不写，这里只负责把**错误码**翻成当前语言的一句话（错误码→文案的映射放在这一层，
-  // 因为 17 不认识界面语言——那边返回拼好的中文句子的话，导入失败提示就永远是中文）。
+  // 导入是**整体替换**：17-config-io 的 `importConfig` 会先把当前配置备份一份再写回，校验失败什么都不写；
+  // 这里只负责把**错误码**翻成当前语言（17 不认识界面语言）。
   const cfgIoErrorText = (res) => {
     const map = {
       json: 'settings.configIo.errJson',
@@ -1396,8 +1208,7 @@ function SettingsPanel(props) {
       setCfgIoText('')
       setCfgIoMsg(t('settings.configIo.exported'))
     } else {
-      // 沙箱 iframe 里 `URL.createObjectURL` 可能不可用：退回"显示出来让用户自己复制"
-      // （同诊断快照的处理），而不是报一句"导出失败"就完了。
+      // 沙箱 iframe 里 `URL.createObjectURL` 可能不可用：退回"显示出来让用户自己复制"（同诊断快照）。
       setCfgIoText(text)
       setCfgIoMsg(t('settings.configIo.exportFallback'))
     }
@@ -1407,17 +1218,12 @@ function SettingsPanel(props) {
       if (!r.ok) { setCfgIoMsg(cfgIoErrorText(r)); return }
       const res = importConfig(r.text)
       if (!res.ok) { setCfgIoMsg(cfgIoErrorText(res)); return }
-      // 配置被**整体替换**了：组件里的 cfg 快照要跟着换，否则界面还显示导入前的关注点与阈值
-      // （语言同理——`applyCfg` 已经让 i18n 切过去了，这里只负责让 React 重渲染）。
+      // 配置被**整体替换**了：组件里的 cfg 快照要跟着换，否则界面还显示导入前的关注点与阈值。
       setCfgState(currentCfg())
-      // 导入是**整体替换**：地区页签要跟着新配置重算（0.9.2 修复）。`regionTab` 只在挂载时
-      // 推导过一次，此后只由页签按钮切换——不重算的话，导入一份"只有全球关注点"的配置后，
-      // 一级选择器仍高亮旧的日本分支，用户会以为关注点没导进来。
+      // 地区页签只在挂载时推导过一次，此后只由页签按钮切换——导入（整体替换）后必须重算。
       setRegionTab(inferRegionTab(currentCfg()))
       setCfgIoBackupAt(res.backupAt)
-      // 0.9.4（P1-6）：导入成功不等于"原样导入"。归一化会丢弃坐标非法的关注点、把非数值的
-      // 半径退回 300km，而此前这里无条件报"已导入配置。"——用户看不出少了几个点，
-      // 配置里、界面里、诊断里都没有痕迹。有账就如实补一句。
+      // 导入成功不等于"原样导入"：规整流程会丢弃坐标非法的关注点、把非数值的半径退回默认值，有账就如实补一句。
       const w = res.warnings || {}
       const parts = []
       if (w.dropped > 0) parts.push(t('settings.configIo.importedSkipped', { n: w.dropped }))
@@ -1426,9 +1232,7 @@ function SettingsPanel(props) {
         ? t('settings.configIo.imported') + ' ' + parts.join(' ')
         : t('settings.configIo.imported'))
     }).catch((err) => {
-      // 兜底：解析层的异常已经在 17-config-io 里转成错误码，但读文件（`file.text()` /
-      // FileReader）以及将来新增的任何一步仍可能抛。少了这个 catch，用户看到的是
-      // "点了没有任何反应"——那是最难归因的失败形态。
+      // 兜底：解析层的异常已在 17-config-io 转成错误码，但读文件仍可能抛；少了这个 catch，用户看到的是"点了没有任何反应"。
       setCfgIoMsg(t('settings.configIo.errUnexpected', { detail: String((err && err.message) || err) }))
     })
   }
@@ -1436,16 +1240,13 @@ function SettingsPanel(props) {
     const res = undoConfigImport()
     if (!res.ok) { setCfgIoMsg(t('settings.configIo.noBackup')); return }
     setCfgState(currentCfg())
-    // 0.9.4（P3-45）：撤销与导入一样是**整体替换**，地区页签必须跟着新配置重算。
-    // 此前只 setCfgState —— 导入这条路径 0.9.2 已经补了重算，撤销这条漏了：用户导入一份
-    // "只有全球关注点"的配置、再撤销回来，一级选择器仍高亮着导入后的分支，看起来像没恢复。
+    // 撤销与导入一样是**整体替换**，地区页签必须跟着重算（否则选择器仍高亮导入后的分支）。
     setRegionTab(inferRegionTab(currentCfg()))
-    // 撤销是一次性的：备份已被清掉（0.9.2），界面上的按钮与备份时间要跟着消失——否则按钮还挂着，
-    // 再点一次只会得到"没有可撤销的导入记录"。
+    // 撤销是一次性的：备份已被清掉，界面上的按钮与备份时间要跟着消失。
     setCfgIoBackupAt('')
     setCfgIoMsg(t('settings.configIo.undone'))
   }
-  /** 复制当前导出文本（0.9.4 / P3-43）：导出回退路径上的那一步。剪贴板不可用时如实说。 */
+  /** 复制当前导出文本（导出回退路径上的那一步）。剪贴板不可用时如实说。 */
   const onCopyCfg = () => {
     const text = cfgIoText || buildConfigExport(cfg)
     const ok = () => setCfgIoMsg(t('settings.configIo.copied'))
@@ -1463,13 +1264,10 @@ function SettingsPanel(props) {
     s.row(
       s.btn(t('settings.configIo.exportBtn'), onExportCfg),
       s.btn(t('settings.configIo.importBtn'), () => { if (cfgIoFileRef.current) cfgIoFileRef.current.click() }),
-      // 「撤销上次导入」只在真的有备份时出现：一个点了只会说"没有可撤销的记录"的按钮，
-      // 比没有这个按钮更容易让人以为出了问题。
+      // 「撤销上次导入」只在真的有备份时出现：一个点了只会说"没有可撤销的记录"的按钮比没有更让人以为出了问题。
       cfgIoBackupAt ? s.btn(t('settings.configIo.undoBtn'), onUndoCfg) : null,
     ),
-    // 备份时间要**看得见**（0.9.2 修复）：备份跨会话保留，而"撤销"会把导入之后的所有改动整体
-    // 回滚。此前按钮只说"撤销上次导入"、不显示备份时间，用户无从判断要恢复的是多久之前的快照，
-    // 陈旧备份一旦被误触就是一次静默的配置丢失。
+    // 备份时间要**看得见**：备份跨会话保留，而"撤销"会把导入之后的所有改动整体回滚，用户需要判断要恢复的是多久之前的快照。
     cfgIoBackupAt ? h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4 } },
       t('settings.configIo.undoAt', { at: formatIssuedLocal(cfgIoBackupAt) })) : null,
     h('input', {
@@ -1479,8 +1277,7 @@ function SettingsPanel(props) {
       style: { display: 'none' },
       onChange: (e) => {
         const f = e.target.files && e.target.files[0]
-        // 清空 value：否则连续导入**同一个文件**时 onChange 不会再触发（浏览器不会为同一个值
-        // 重复派发 change）。
+        // 清空 value：否则连续导入**同一个文件**时 onChange 不会再触发（浏览器不会为同一个值重复派发 change）。
         e.target.value = ''
         if (f) onImportCfg(f)
       },
@@ -1489,9 +1286,7 @@ function SettingsPanel(props) {
     cfgIoText
       ? h('div', null,
         h('div', { style: { fontSize: 11, color: '#d9a406', marginTop: 6 } }, t('settings.configIo.exportFallback')),
-        // 0.9.4（P3-43）：**把"复制"真的做出来**。此前文案说"请手动复制下面的文本"，却只有一个
-        // 只读文本框——而 `configIo.copied` / `copyFailed` 两条文案早就写在表里、没有任何消费者
-        // （诊断那一面有复制按钮，配置这一面只有回退）。现在两个键都用上了，用户少一步全选手抄。
+        // 把"复制"真的做出来：此前文案说"请手动复制下面的文本"，却只有一个只读文本框。
         s.row(s.btn(t('settings.configIo.copyBtn'), onCopyCfg, { fontSize: 11 })),
         h('textarea', {
           readOnly: true, value: cfgIoText, rows: 8,
@@ -1529,13 +1324,11 @@ function SettingsPanel(props) {
               ? t('settings.history.statusHit')
               : (e.suppressed ? t('settings.history.statusSuppressed')
                 : (e.pref ? t('settings.history.statusPrefHit', { pref: e.pref }) : t('settings.history.statusAlerted')))
-            // 气象电文来自気象庁防災情報XML，没有 P2PQuake 的 code：旧写法对 weather 落进
-            // 最后的 else 分支，展开详情时会把泥石流 / 洪水电文标成「code 551」（地震速报）。
+            // 气象电文来自気象庁防災情報XML，没有 P2PQuake 的 code；旧写法会把泥石流 / 洪水电文标成「code 551」。
             const codeText = p2pCodeTextOf(e.kind, e.code, e.id)
             return h('div', {
               key: itemKey,
-              // 可键盘操作（0.4.1）：详情是用户核对"插件到底看到了什么"的唯一入口，
-              // 只在 onClick 上可用等于把键盘 / 读屏用户挡在门外。
+              // 可键盘操作：详情是用户核对"插件到底看到了什么"的唯一入口，只在 onClick 上可用等于把键盘用户挡在门外。
               role: 'button',
               tabIndex: 0,
               'aria-expanded': open,
@@ -1565,8 +1358,7 @@ function SettingsPanel(props) {
                       h('span', { style: { color: '#e6e6e8' } }, t('settings.history.kindValue', { label: String(e.label || ''), code: codeText }))),
                     h('div', { style: { display: 'flex', gap: 6, marginTop: 2 } },
                       h('span', { style: { color: '#9aa0a6', width: 44 } }, t('settings.history.fieldTime')),
-                      // 按**本地时区**渲染（DESIGN 第 4 节）：解析层存的是带偏移的 ISO 8601，
-                      // 直接显示原文会让大陆用户看到一个差 1 小时且无标注的 JST 时间。
+                      // 按**本地时区**渲染：解析层存的是带偏移的 ISO 8601，直接显示原文会让大陆用户看到差 1 小时且无标注的 JST 时间。
                       h('span', { style: { color: '#e6e6e8' } }, formatIssuedLocal(e.issued) || '—')),
                     e.pref ? h('div', { style: { display: 'flex', gap: 6, marginTop: 2 } },
                       h('span', { style: { color: '#9aa0a6', width: 44 } }, t('settings.history.fieldPref')),
@@ -1577,9 +1369,7 @@ function SettingsPanel(props) {
                     h('div', { style: { display: 'flex', gap: 6, marginTop: 2 } },
                       h('span', { style: { color: '#9aa0a6', width: 44 } }, t('settings.history.fieldContent')),
                       h('span', { style: { color: '#e6e6e8', flex: 1, wordBreak: 'break-all' } }, head)),
-                    // 官方正文（0.6.1）：NWS 的 description + instruction、ECCC 的正文 + 署名。
-                    // 此前 alert.detail 在整条链路上**没有任何消费者**——用户看不到洪水预警里
-                    // "该怎么做"那一段，ECCC 许可要求的署名也进不了界面（见 05h 的文件头）。
+                    // 官方正文：NWS 的 description + instruction、ECCC 的正文 + 署名（许可要求署名）。
                     e.detail ? h('div', { style: { display: 'flex', gap: 6, marginTop: 4 } },
                       h('span', { style: { color: '#9aa0a6', width: 44, flexShrink: 0 } }, t('settings.history.fieldDetail')),
                       h('span', { style: { color: '#c8ccd4', flex: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, String(e.detail))) : null,
@@ -1590,13 +1380,9 @@ function SettingsPanel(props) {
     s.row(s.btn(t('settings.history.clear'), () => {
       store.push({ events: [] })
       saveJSON(HISTORY_KEY, [])
-      // 0.9.5（fresh review）：本页的"已播报"记忆也要清，而且要落盘。此前只清了历史列表，
-      // 于是同一条解除到达时本页仍会播「已解除」（记忆还在）、别的标签页却写「无对应提醒」——
-      // 同一条消息两个结论；而且刷新之后记忆会从 ALERTED_KEY 复活。
+      // 本页的"已播报"记忆也要清并写入本地存储：只清历史列表的话，同一条解除到达时本页仍会播「已解除」、别的标签页却写「无对应提醒」。
       forgetAllAlerted()
-      // 还要广播：其它标签页的内存副本不清的话，它们下一次 addEvent 会把整份记录（含刚被
-      // 清掉的条目）重新写回磁盘——用户以为清空了，实际只是本标签页看不见（若清空的动机
-      // 是隐私，这就是实际的信息泄露面）。
+      // 还要广播：其它标签页的内存副本不清的话，它们下一次 addEvent 会把整份记录（含刚被清掉的条目）重新写回磁盘。
       broadcastHistoryCleared()
     })),
   )

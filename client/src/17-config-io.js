@@ -1,21 +1,13 @@
 // ============================================================================
 // dsh-quake-alert · client/src/17-config-io.js
-//
-// 作用：配置的导出 / 导入 / 撤销（0.9.0，DESIGN 11.1 的第二半）。
+// 作用：配置的导出 / 导入 / 撤销。
 // 内容：导出文件格式与版本、导入校验、导入前自动备份、撤销上次导入、文件下载与读取。
-// 依赖：01-constants、02-storage（归一与存取）、03-settings-bridge（读写配置的唯一入口）。
-//
-// 定稿的语义（0.9.0 开工前拍定，写在 DESIGN 11.11）：
-//   · **只导出配置本身**：关注点、阈值、语言、数据源、静默时段……与 0.8.2 的配置契约
-//     一一对应。历史（履历）与源健康记录**不进文件**——前者含源侧原文、换机器后未必对应
-//     得上；后者是会话内的时效数据，导过去基本没用。
-//   · **导入是整体替换**，不是合并：语义最直白、可预测。所以导入前**自动把当前配置备份一份**
-//     （同一个 localStorage 里），并给出「撤销上次导入」这个出口——否则备份就是个没人用的文件。
-//   · **格式版本是唯一的契约**：文件里不写插件版本（那会诱使调用方按版本号做分支，而真正
-//     要判断的是结构是否兼容）。`formatVersion` 高于本版能读的就**拒绝**，而不是尽力解析
-//     ——半个配置比没有配置更危险。
-//   · 校验失败一律返回**错误码**（不是拼好的中文句子）：文案由 UI 层按当前界面语言翻，
-//     否则导入失败提示会固定成中文（本地化在这里最容易漏）。
+// 依赖：01-constants、02-storage（规整与存取）、03-settings-bridge（读写配置的唯一入口）。
+// 语义（对外契约）：
+//   · 只导出配置本身（关注点、阈值、语言、数据源、静默时段……）；历史与源健康记录**不进文件**。
+//   · **导入是整体替换**，不是合并，所以导入前**自动把当前配置备份一份**，并给出「撤销上次导入」出口。
+//   · **格式版本是唯一的契约**：文件里不写插件版本；`formatVersion` 高于本版能读的就**拒绝**。
+//   · 校验失败一律返回**错误码**（不是拼好的中文句子）：文案由 UI 层按当前界面语言翻。
 // ============================================================================
 
 import { normalizeCfg, isPlainObject, loadJSON, saveJSON } from './02-storage.js'
@@ -35,11 +27,7 @@ function configFileName(now) {
   return 'quake-alert-config-' + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '.json'
 }
 
-/**
- * 生成导出文件内容（缩进过的 JSON）。
- * @param {object} [cfg] 要导出的配置；省略时取当前生效的配置。
- * @param {Date} [now] 用于测试注入时间。
- */
+/** 生成导出文件内容（缩进过的 JSON）。cfg 省略时取当前生效的配置；now 用于测试注入时间。 */
 function buildConfigExport(cfg, now) {
   const at = now instanceof Date ? now : new Date()
   return JSON.stringify({
@@ -50,16 +38,11 @@ function buildConfigExport(cfg, now) {
   }, null, 2)
 }
 
-/**
- * 解析并校验一份导入文本。**不做任何写入**（纯函数，便于直接断言各种坏输入）。
- * @returns {{ok:true,cfg:object,formatVersion:number,warnings:object}|{ok:false,error:string,detail?:string}}
- *   error 取值：`json`（不是 JSON）/ `shape`（不是本插件配置的结构）/
- *   `format`（其它应用的 JSON）/ `version`（版本号缺失或非法）/ `newer`（版本高于本版能读的）
- */
+/** 解析并校验一份导入文本。**不做任何写入**（纯函数）。
+ *  @returns {{ok:true,cfg:object,formatVersion:number,warnings:object}|{ok:false,error:string,detail?:string}}
+ *  error 取值：`json`（不是 JSON）/ `shape`（结构不符）/ `format`（其它应用）/ `version`（非法）/ `newer`（版本更高） */
 function parseConfigImport(text) {
-  // 去掉 BOM：JSON 规范不允许它，但记事本、PowerShell 的 `Out-File -Encoding utf8` 之类都会加上，
-  // 而 `JSON.parse` 会因此在第一个字符上抛——对用户表现为"我导出后一个字没改，它却说不是有效的
-  // JSON"。只差这一个 replace。
+  // 去掉 BOM：记事本、PowerShell 的 `Out-File -Encoding utf8` 都会加上，而 JSON.parse 会因此在首字符上抛。
   const raw = String(text === undefined || text === null ? '' : text).replace(/^\uFEFF/, '')
   if (!raw.trim()) return { ok: false, error: 'shape' }
   let parsed
@@ -74,13 +57,9 @@ function parseConfigImport(text) {
   if (typeof v !== 'number' || !Number.isFinite(v) || v < 1) return { ok: false, error: 'version' }
   if (v > CONFIG_FORMAT_VERSION) return { ok: false, error: 'newer', detail: String(v) }
   if (!isPlainObject(parsed.config)) return { ok: false, error: 'shape' }
-  // 归一必须与"返回错误码"同一口径：畸形配置（例如某个字段是 `{toString: null, valueOf: null}`
-  // 这种**转不成字符串**的对象）会在归一里抛。让它抛出去的话，UI 那条 `.then` 链上没人接得住
-  // ——用户点「导入」之后界面毫无反应，而这是最难归因的一类失败（11.8 教训 4）。
+  // 规整出错也返回错误码：畸形配置（字段是转不成字符串的对象）会在规整里抛，抛出去 UI 那条 .then 链上没人接得住。
   let cfg
-  // 关注点体检账本（0.9.4）：归一化会**静默**丢弃坐标非法的关注点，而"导入"这个动作上静默
-  // 等于数据丢失无反馈——用户看到"已导入配置。"，实际少了几个点，界面上看不出来。
-  // 这里把账本一起交出去，由界面如实说明（见 13-ui-settings 的 onImportCfg）。
+  // 关注点检查清单：规整流程会**静默**丢弃坐标非法的关注点，这里把清单交出去，由界面如实说明少了什么。
   const audit = { total: 0, dropped: 0, radiusFixed: 0 }
   try {
     cfg = normalizeCfg(parsed.config, audit)
@@ -90,14 +69,8 @@ function parseConfigImport(text) {
   return { ok: true, cfg, formatVersion: v, warnings: audit }
 }
 
-/**
- * 把当前配置备份到 localStorage（覆盖上一次备份）。
- *
- * **返回备份时间；写不进去时返回空字符串**——返回值不是"操作成功"的同义词。`saveJSON` 是
- * 静默失败的（`try { setItem } catch {}`），而这份备份是"导入还能回滚"的**全部依据**：写不进去
- * 却照样返回时间戳，界面就会显示「撤销上次导入」，用户点下去才发现没有备份，而那时他原来的
- * 配置已经被替换掉了。所以写后**回读校验**，确认它真的落了盘。
- */
+/** 把当前配置备份到 localStorage（覆盖上一次备份）。**返回备份时间；写不进去时返回空字符串**——
+ *  saveJSON 是静默失败的，而这份备份是"导入还能回滚"的**全部依据**，所以写后**回读校验**、确认真的写进了本地存储。 */
 function backupCurrentConfig(now) {
   const at = now instanceof Date ? now : new Date()
   const payload = { at: at.toISOString(), config: normalizeCfg(currentCfg()) }
@@ -114,9 +87,7 @@ function loadConfigBackup() {
   try {
     cfg = normalizeCfg(b.config)
   } catch (err) {
-    // 0.9.5（fresh review）：备份同样是外部输入（用户在 localStorage 里就能改），而归一化会调
-    // i18n 取词、遇到字符串化不了的形状会抛 TypeError。调用方在**渲染期**（设置页要看"能不能撤销"），
-    // 所以这里按"没有可撤销的备份"处理——与上面那句契约一致。
+    // 备份同样是外部输入（用户能在 localStorage 里改），规整时可能抛；调用方在渲染期，按"没有可撤销的备份"处理。
     try { console.warn('[dsh-quake-alert] 备份配置归一化失败，视为无备份：' + String((err && err.message) || err)) } catch (e) { /* 忽略 */ }
     return null
   }
@@ -129,29 +100,19 @@ function clearConfigBackup() {
   } catch (err) { /* 存储不可用时忽略：清不掉备份不影响正确性 */ }
 }
 
-/**
- * 导入：**先备份当前配置，再整体替换**。校验失败时**什么都不写**（连备份都不做）。
- * @returns {{ok:true,cfg:object,backupAt:string}|{ok:false,error:string,detail?:string}}
- */
+/** 导入：**先备份当前配置，再整体替换**；校验失败时**什么都不写**（连备份都不做）。
+ *  @returns {{ok:true,cfg:object,backupAt:string}|{ok:false,error:string,detail?:string}} */
 function importConfig(text, now) {
   const parsed = parseConfigImport(text)
   if (!parsed.ok) return parsed
   const backupAt = backupCurrentConfig(now)
-  // 备份不成功就**不导入**：定稿承诺的是"导入后随时能撤销"，而做不到这一点时，"整体替换成
-  // 另一份配置"是不可逆的破坏性操作。宁可这次导入失败并如实说明，也不要在没有退路的情况下替换。
+  // 备份不成功就**不导入**：没有退路时"整体替换成另一份配置"是不可逆的破坏性操作。
   if (!backupAt) return { ok: false, error: 'backup-failed' }
   const next = applyCfg(parsed.cfg)
   return { ok: true, cfg: next, backupAt, warnings: parsed.warnings }
 }
 
-/**
- * 撤销上次导入：把备份写回去，**然后清掉备份**（0.9.2 起为一次性撤销）。
- *
- * 此前备份永久保留（原注释写"可以反复撤"），于是「撤销上次导入」按钮**跨会话一直存在**，
- * 而它回滚的是"导入之前"的整份配置——用户在几周后误触它，就是一次静默的配置丢失。而"反复撤"
- * 本身没有实际价值：第二次撤写的还是同一份备份。改为一次性：撤销成功即清掉快照，
- * 按钮随之消失（这也让 clearConfigBackup 第一次有了调用点）。
- */
+/** 撤销上次导入：把备份写回去，**然后清掉备份**——一次性撤销，撤销成功即清掉快照、按钮随之消失。 */
 function undoConfigImport() {
   const b = loadConfigBackup()
   if (!b) return { ok: false, error: 'no-backup' }
@@ -160,10 +121,8 @@ function undoConfigImport() {
   return { ok: true, at: b.at }
 }
 
-/**
- * 触发浏览器下载。**返回是否成功**——沙箱 iframe 里 `URL.createObjectURL` 可能不可用，
- * 那种情况下 UI 要退回"把文本显示出来让用户自己复制"（同诊断快照的处理）。
- */
+/** 触发浏览器下载。**返回是否成功**——沙箱 iframe 里 `URL.createObjectURL` 可能不可用，
+ *  那种情况下 UI 要退回"把文本显示出来让用户自己复制"（同诊断快照的处理）。 */
 function downloadConfigFile(text, filename) {
   try {
     if (typeof document === 'undefined' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') return false

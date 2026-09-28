@@ -1,11 +1,8 @@
 // ============================================================================
 // dsh-quake-alert · client/src/15-entry.js
-//
-// 作用：插件入口——apply 与单测钩子。
-// 内容：音效解锁监听、跨标签页通道、settings 绑定、市区町村表拉取、WebSocket 启停、
-//       设置页与状态指示两个 slot 的注册、exports.__test 导出面。
-// 依赖：全部前置文件。
-// 生命周期：所有副作用都包在 ctx.effect 内，插件停用即回收。
+// 作用：插件入口——apply 与单测钩子。注册音效解锁、跨标签页通道、settings 绑定、市区町村表、
+//       各源客户端的启停、设置页与状态指示两个 slot，并导出 exports.__test。
+// 依赖：全部前置文件。所有副作用都包在 ctx.effect 内，插件停用即回收。
 // ============================================================================
 
 import { requestNotificationPermission } from './09-notify.js'
@@ -19,7 +16,6 @@ import { parse, parseQuake, parseEew, parseTsunami, prefsOfArea, regionsOfArea, 
 import { parseJma, buildTestTelegram, TEST_SCENARIOS, maxLevelIn as jmaMaxLevelIn, itemsOf as jmaItemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf } from './05b-jma-parser.js'
 import { parseEmsc, parseUsgsFeature, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage } from './05c-global-parsers.js'
 import { parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseNmcAlarmResult, parseNwsAlertResult, parseEcccAlertResult, failResult, SOURCE_CONTRACTS } from './05d-source-contracts.js'
-// 0.5.3：健康状态（机制层）与契约（约定层）现在是两个模块，调用方分别 import。
 import { noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, resetConnHealth, pruneHealth, noteFreshness, noteStale, loadHealth, publishStatus, republishDataHealth, SCHEMA_ESCALATE_COUNT, SCHEMA_ESCALATE_CONSECUTIVE, SCHEMA_ESCALATE_WINDOW_MS, HEALTH_TTL_MS } from './05g-source-health.js'
 import { parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of } from './05e-cn-parsers.js'
 import { parseNmcAlarm, orgOf, NMC_KIND_TEXT, NMC_LEVEL_TEXT, NMC_LEVEL_RANK, NMC_BROADCAST_MIN_RANK } from './05f-nmc-parsers.js'
@@ -40,7 +36,6 @@ import { buildConfigExport, parseConfigImport, importConfig, undoConfigImport, l
 import { StatusIndicator } from './14-ui-status.js'
 import { buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION } from './16-diag.js'
 
-// ---------- 插件入口 ----------
 export const name = 'dsh-quake-alert'
 export const inject = ['slots']
 export function apply(ctx) {
@@ -56,34 +51,21 @@ export function apply(ctx) {
   }, 'dsh-quake-alert: audio unlock')
 
   // 跨标签页去重通道：必须在插件加载时就开始监听，否则会错过其它标签页的广播。
-  // 0.4.1 把它连同关闭一起放进 effect：原来 ensure 在外、close 在内，两代 fiber 会共享
-  // 同一条通道，停用 → 启用时旧 fiber 的 close 会把新 fiber 依赖的通道关掉。
-  // effect 体在 apply 时**同步执行**，所以"加载时就建立"的语义没有变。
+  // ensure 与 close 同处一个 effect（effect 体在 apply 时**同步执行**），两代 fiber 不能共享同一条通道。
   ctx.effect(() => {
     ensureAlertChannel()
     return () => { closeAlertChannel() }
   }, 'dsh-quake-alert: tab channel')
 
-  // 插件（重新）装载时清空上一代的**连接**状态：clearSources 此前定义了却没有任何调用点，
-  // 与它自己的注释"插件停用 / 重建时把源清空"不符，残留状态会把新会话显示成"已连接"。
-  //
-  // 0.5.3 起**不再清数据健康**（原先是 resetSourceHealth）：那一层已经落了盘，而它表达的是
-  // "上游改了字段、要等插件更新"——这件事与用户刷新页面 / 重新启用插件无关，清掉等于让蓝点
-  // 永远没人看见（DESIGN 11.9 A）。连接与新鲜度才是"重启即无意义"的那两层。
+  // 插件（重新）装载时清空上一代的**连接**状态：残留状态会把新会话显示成"已连接"。
+  // 数据健康不清（已写入本地存储，表达的是"上游改了字段、要等插件更新"，与刷新页面 / 重新启用无关）。
   store.clearSources()
   resetConnHealth()
-  // 立刻把已升级的数据健康重新发布出来（0.5.4）：store 刚被清空，而蓝点存在 localStorage 里。
-  // 不重发的话要等该源下一次上报（feed 首轮 3 秒 + 15 秒一轮）才显示，而"上游改了字段"这件事
-  // 与刷新页面无关——DESIGN 11.9 A 的"蓝点跨刷新存活"应当是立刻成立，而不是十几秒后。
+  // 立刻重新发布已升级的数据健康：store 刚被清空而蓝点存在 localStorage 里，不重发要等该源下一轮上报才显示。
   republishDataHealth()
 
-  // 健康探针（0.5.3 / DESIGN 11.9 B）：按**契约里的阈值**判定各源的数据新鲜度，并驱动蓝点的
-  // TTL 自愈。把它放进 effect 是因为它有一个定时器——定时器归 fiber，停用即回收。
-  // 阈值只从 SOURCE_CONTRACTS 来，这是机制层的全部意义（此前那个字段整个代码库里没人读）。
-  //
-  // 0.9.4（P2-17）：把「这个源现在开着吗」交进去。**开关的映射只有这一份**（与各客户端
-  // 自己的 enabled 同口径），否则探针会隔着一层猜：关掉的源不判 stale，界面才不会把
-  // "我已关闭"改写成"上游数据已过期"。
+  // 健康自检：按 SOURCE_CONTRACTS 里的阈值判定各源的数据新鲜度并驱动蓝点 TTL 自愈。放进 effect
+  // 是因为它有定时器（定时器归 fiber）。sourceEnabled 是「这个源现在开着吗」的唯一映射：关掉的源不判 stale。
   const sourceEnabled = (id) => {
     const d = (currentCfg().disasters) || {}
     if (id === 'jma') return d.weather !== false
@@ -99,15 +81,9 @@ export function apply(ctx) {
     return () => { try { probe.stop() } catch (err) { /* 已停 */ } }
   }, 'dsh-quake-alert: health probe')
 
-  // 机器级持久化：settings 服务可用时，配置交给 DSH 的机器级存储（0.1.7 起是 profile patch，
-  // 0.1.6 及以前是 settings.yaml）。服务缺席（或页面非 loopback）时保持 localStorage 路径。
-  //
-  // 0.7.0 适配：两代宿主的**读写入口是两个不同的服务**，而 03-settings-bridge 只认"快照 + 写入"
-  // 这个形状（两者的 getSnapshot/subscribe/mutate 面几乎同形），所以分派放在这里：
-  //   · 0.1.6 及以前：`ctx.settingsScope.bind({ namespace })` → scope
-  //   · 0.1.7 起：`ctx.configForms.get(entryId)` → ConfigForm（`settingsScope` 已被移除）
-  // 两者都 `ctx.inject` 等待，但各自只在服务真的出现时执行，因此同一份代码在两代宿主上都能绑上；
-  // 先到者胜（bound 守卫），都缺席就退回 localStorage。
+  // 机器级持久化：settings 服务可用时配置交给 DSH 的机器级存储，服务缺席（或页面非 loopback）时保持 localStorage。
+  // 两代宿主的读写入口是两个不同的服务（03-settings-bridge 只认"快照 + 写入"）：旧宿主走 settingsScope.bind({ namespace })，
+  // 新宿主走 configForms.get(entryId)；两者都 ctx.inject 等待，先到者胜（bound 守卫）。
   if (typeof ctx.inject === 'function') {
     let bound = false
     const bindHostSettings = (resolveScope, label) => {
@@ -119,20 +95,18 @@ export function apply(ctx) {
         unbind = bindSettingsScope(scope)
         bound = true
       } catch (err) { /* bind 失败 → 继续用 localStorage */ }
-      // 订阅必须随 fiber 释放（0.4.1）：否则同一页面内停用 → 启用 N 次会累积 N 个订阅，
-      // 此后 Host 的每一次配置变更都会触发 N 次写盘与 N 次重渲。
+      // 订阅必须随 fiber 释放：否则同一页面内停用 → 启用 N 次会累积 N 个订阅，此后 Host 每次配置变更都触发 N 次写入本地存储与重渲。
       if (bound && typeof unbind === 'function' && typeof ctx.effect === 'function') {
         ctx.effect(() => () => { try { unbind() } catch (err) { /* 忽略 */ } }, 'dsh-quake-alert: ' + label + ' unbind')
       }
     }
-    // 0.1.7：命名空间就是本插件在 profile 里的条目 id（与 cordis.patch.yml 的 `- id:` 一致），
-    // 与 Host 侧导出的 Config schema 同名——SETTINGS_NS 不需要改。
+    // 命名空间就是本插件在 profile 里的条目 id（与 cordis.patch.yml 的 `- id:` 一致），与 Host 侧 Config schema 同名。
     ctx.inject(['configForms'], (settingsCtx) => {
       const forms = settingsCtx.configForms
       if (!forms || typeof forms.get !== 'function') return
       bindHostSettings(() => forms.get(SETTINGS_NS), 'configForms')
     })
-    // 0.1.6 回退路径（0.1.7 下这个服务永远不出现，回调不会执行）。
+    // 旧宿主回退路径：新宿主下这个服务永远不出现，回调不会执行。
     ctx.inject(['settingsScope'], (settingsCtx) => {
       const scope = settingsCtx.settingsScope
       if (!scope || typeof scope.bind !== 'function') return
@@ -140,10 +114,8 @@ export function apply(ctx) {
     })
   }
 
-  // 跨标签页配置同步（0.3.2）：storage 事件只在「别的标签页写入」时触发。监听必须常驻——
-  // 原先写在设置页组件里，于是没打开设置页的标签页不会跟随，会一直按旧配置提醒。
-  // 回读走 03 的显式入口（跨模块不能直接给它的模块私有 runtimeCfg 赋值），再 store.push()
-  // 让设置页与状态指示一起刷新。
+  // 跨标签页配置同步：storage 事件只在「别的标签页写入」时触发，监听必须常驻（写在设置页组件里会让没打开
+  // 设置页的标签页不跟随）。回读走 03 的显式入口（跨模块不能直接给它私有的 runtimeCfg 赋值），再 store.push()。
   ctx.effect(() => {
     const onStorage = (e) => {
       if (!e || e.key === null || e.key === STORAGE_KEY) {
@@ -155,18 +127,14 @@ export function apply(ctx) {
     return () => window.removeEventListener('storage', onStorage)
   }, 'dsh-quake-alert: cross-tab config')
 
-  // 市区町村表：Host 路由提供，拉一次缓存。失败只影响市级细化，不影响任何提醒。
-  // 放进 effect：拉取是异步的，若插件在飞行中被停用，要中止请求并停止写 store / 配置。
+  // 市区町村表：Host 路由提供，拉一次缓存；失败只影响市级细化，不影响任何提醒。放进 effect 以便飞行中停用时中止请求。
   ctx.effect(() => {
     loadCityTable()
     return () => { try { abortCityTableLoad() } catch (err) {} }
   }, 'dsh-quake-alert: city table')
 
-  // WebSocket 常驻连接（与设置页是否打开无关）。
-  // start() 必须写在 effect 内：若同一 apply 后面的注册抛错，连接也要随 fiber 一起收掉，
-  // 否则会留下一条没有清理器的 socket，直到用户刷新页面。
-  //
-  // onRaw 走解析契约（0.4.1）：结构不符 / 值不可能 → 计入数据健康并**不播报**（蓝点），
+  // WebSocket 常驻连接（与设置页是否打开无关）。start() 必须写在 effect 内：若同一 apply 后面的注册抛错，连接也要
+  // 随 fiber 收掉，否则会留下没有清理器的 socket。onRaw 走解析契约：结构不符 / 值不可能 → 计入数据健康且**不播报**；
   // 与本插件无关的消息（其他 code）判为 empty、静静跳过。
   const client = createWsClient({
     onRaw: (raw, cfg) => {
@@ -182,32 +150,26 @@ export function apply(ctx) {
     client.start()
     return () => {
       try { client.stop() } catch (err) {}
-      // 置空：否则设置页里那个 80ms 后触发的 restart()（切换数据源）还能复活一个
-      // 已经没有任何 fiber 归属的 socket，它会继续上报状态并（经 handleAlert）响铃。
+      // 置空：否则设置页里 80ms 后触发的 restart() 还能复活一个已无 fiber 归属的 socket，它会继续上报状态并响铃。
       setActiveClient(null)
     }
   }, 'dsh-quake-alert: ws client')
 
-  /** 轮询源的状态上报：把每个源的连接 / 失败情况送进 store，参与整体状态聚合（0.4.1）。
-   *  经 publishStatus 合成（0.5.4）——12b 自己也算了一遍 effectiveStatusOf（它要用结果做去重键），
-   *  这里再过一次是幂等的，但保证了"写 store 的每一处都走同一个合成规则"。 */
+  /** 轮询源的状态上报：把每个源的连接 / 失败情况经 publishStatus 合成后送进 store（12b 自己也用结果做去重键）。 */
   const feedStatus = (sourceId) => (patch) => publishStatus(sourceId, patch)
   const feedError = (name) => (err) => {
-    // 措辞用"请求失败"而不是"增量拉取失败"（0.6.0 review C-5）：海外源是按点 / 按框查询，
-    // 没有"增量"这个概念，日志里出现"增量拉取失败"会把人引到错误的排查方向。
     try { console.warn('[dsh-quake-alert] ' + name + ' 请求失败：' + String((err && err.message) || err)) } catch (e) {}
   }
 
-  // 気象庁电文增量（0.3.0）：Host 侧负责轮询与去重，这里只拉本地增量并交给主链。
+  // 気象庁电文增量：Host 侧负责轮询与去重，这里只拉本地增量并交给主链。
   const feed = createFeedClient({
     id: 'jma',
     label: '気象庁',
     onStatus: feedStatus('jma'),
     onError: feedError('jma'),
   })
-  // 全球地震（USGS，0.4.0）：Host 轮询 GeoJSON（单级），Client 只拉本地增量。
-  // 与 EMSC 是互补关系——EMSC 是实时推送，USGS 目录更完整、还带修订版（updated 刷新）。
-  // 两者的同类地震靠 geoEventKey 归并，不会重复提醒。
+  // 全球地震（USGS）：Host 轮询 GeoJSON，Client 只拉本地增量。与 EMSC 互补（EMSC 是实时推送，USGS
+  // 目录更完整、还带修订版），两者的同类地震靠 geoEventKey 归并，不会重复提醒。
   const usgsFeed = createFeedClient({
     id: 'usgs',
     label: 'USGS',
@@ -230,7 +192,7 @@ export function apply(ctx) {
       return true
     },
   })
-  // 海啸（NOAA，0.4.0）：Host 拉事件列表再取 CAP 详情，Client 解析 CAP。
+  // 海啸（NOAA）：Host 拉事件列表再取 CAP 详情，Client 解析 CAP。
   const noaaFeed = createFeedClient({
     id: 'noaa',
     label: 'NOAA',
@@ -249,10 +211,8 @@ export function apply(ctx) {
       return true
     },
   })
-  // 大陆气象灾害（0.5.2）：中央气象台汇总的预警信号（暴雨 + 地质灾害），走 Host 的 `/feed` **轮询**。
-  // 为什么不是像 cenc 那样用 SSE：气象预警是"提前数十分钟到数小时发布"的警戒级信息，与 JMA 同一
-  // 性质——DESIGN 5.2 的 `/feed` + 15 秒本地拉取本来就是为这类信息设计的，延迟最坏 120+15 秒。
-  // 两个灾种各有开关，但**共用一个 Host 源**（同一个端点、同一份响应），所以只要有一个开着就继续拉。
+  // 大陆气象灾害（CMA）：中央气象台汇总的预警信号（暴雨 + 地质灾害），走 Host 的 `/feed` **轮询**，
+  // 延迟最坏 120+15 秒。两个灾种各有开关，但**共用一个 Host 源**（同端点、同响应），只要有一个开着就继续拉。
   const nmcFeed = createFeedClient({
     id: 'nmc_alarm',
     label: 'CMA',
@@ -286,11 +246,8 @@ export function apply(ctx) {
     return () => { for (const f of feeds) { try { f.stop() } catch (err) {} } }
   }, 'dsh-quake-alert: feed clients')
 
-  // 大陆源（0.5.0）：Wolfx 的 cenc_eew（预警）+ cenc_eqlist（速报），走 Host 的 **SSE 推送**。
-  // 为什么不是像上面几行那样用轮询：EEW 的价值在秒级，15 秒一轮等于把预警变成事后通知。
-  // 为什么还留降级：某些网络下长连接会被中间设备掐掉，而普通 HTTPS 轮询仍然通（DESIGN 11.5）；
-  // 12c 在"能证明这条路走不通"时会自动切到 `?source=` 轮询并把降级状态**说出来**。
-  // 两者都跟「地震」开关：预警与速报都是地震，DESIGN 8.4 只给速报单独一个**震级门槛**，不给单独开关。
+  // 大陆源：Wolfx 的 cenc_eew（预警）+ cenc_eqlist（速报），走 Host 的 **SSE 推送**（EEW 的价值在秒级）；
+  // 12c 在"能证明长连接走不通"时自动切到 `?source=` 轮询并把降级状态说出来。两者都跟「地震」开关，只有速报另有**震级门槛**。
   const cencApply = (sourceId, parseEntry) => (entry, cfg) => {
     let raw
     try {
@@ -329,10 +286,9 @@ export function apply(ctx) {
     return () => { for (const c of [cencEew, cencEqlist]) { try { c.stop() } catch (err) {} } }
   }, 'dsh-quake-alert: cn streams')
 
-  // 海外气象（0.6.0）：美国 NWS 与加拿大 ECCC，**Client 直连的外部 REST**（CORS 实测允许）。
-  // 与其它源的形态差别写在 12e 的文件头：按关注点查询、不判停更、年龄闸门在首轮生效。
-  // 两个源各自只对"落在对应国家包围盒内的关注点"发请求——没配那个国家的用户一个请求都不产生，
-  // 所以不需要额外的开关，灾种开关（overseasWeather）关掉时连请求都不发（12e 的 enabled 判定）。
+  // 海外气象：美国 NWS 与加拿大 ECCC，**Client 直连的外部 REST**（CORS 允许），按关注点查询、
+  // 不判停更、年龄门槛在首轮生效。两个源各自只对"落在对应国家包围盒内的关注点"发请求，不需要
+  // 额外开关；灾种开关（overseasWeather）关掉时连请求都不发。
   const nwsSource = createNwsSource({
     onStatus: feedStatus('nws_alerts'),
     onError: feedError('nws_alerts'),
@@ -342,25 +298,17 @@ export function apply(ctx) {
     onError: feedError('eccc_alerts'),
   })
   ctx.effect(() => {
-    // 清掉上一代的计数快照（0.6.0 review C-4）：`overseasStatsOf` 是模块级的，插件重建后
-    // 到首个轮询完成前，设置页与诊断会显示上一代的数字与 `running: true`。
+    // 清掉上一代的计数快照：overseasStatsOf 与 feedStatsOf 都是模块级的，插件重建后到首个轮询
+    // 完成前，设置页与诊断会显示上一代的数字与 `running: true`。
     for (const k of Object.keys(overseasStatsOf)) delete overseasStatsOf[k]
-    // 0.9.5（fresh review）：`feedStatsOf` 是同一形态，而当时只修了 overseas 那一半——
-    // 页面内「停用 → 启用」时，到新世代首个轮询完成前（首延迟 + 15 秒）设置页显示的是上一代的
-    // "已收到 N 条 / 最近拉取 N 秒前"，16-diag 的 `running` 还是 true。诊断快照的全部意义就是
-    // 消除"用户口述不可靠"，留着上一代的数字正好破坏它。
     for (const k of Object.keys(feedStatsOf)) delete feedStatsOf[k]
     nwsSource.start()
     ecccSource.start()
     return () => { for (const s of [nwsSource, ecccSource]) { try { s.stop() } catch (err) {} } }
   }, 'dsh-quake-alert: overseas pollers')
 
-  // 全球地震（0.4.0）：EMSC 的 WebSocket，复用与 P2PQuake 同一套连接管理（退避、建连看门狗、
-  // 生命周期归还 fiber）。「久无数据」判据从 0（关闭）改为 3 小时（0.4.1 修正）：
-  // 关掉之后就没有任何半开检测了——半开正是"没有 onclose"，而建连看门狗在 onopen 之后
-  // 就被撤销，连接可以永久停在绿色上（用户以为在被保护），与 DESIGN 5.1「两种静默失效
-  // 必须主动检测」冲突。3 小时远大于正常推送间隔（全球 M4+ 平均约 30 分钟一条，不会误判），
-  // 又能兜住真正的半开；页面从冻结中恢复时会重置计时（见 12-websocket 的 visibilitychange）。
+  // 全球地震：EMSC 的 WebSocket，复用与 P2PQuake 同一套连接管理（重试间隔递增、建连超时监控、生命周期归还 fiber）。
+  // staleAfterMs 取 3 小时（远大于正常推送间隔）：建连超时监控在 onopen 后即撤销，没有它连接可以永久停在绿色上。
   const emsc = createWsClient({
     sourceId: 'emsc',
     label: 'EMSC',
@@ -399,30 +347,26 @@ export function apply(ctx) {
 
 // 单测钩子（客户端宿主忽略额外导出）
 export const __test = {
-  // 0.9.0：本地化机制（语言清单 / BCP 47 回退链 / 取词 / 文案表）
+  // 本地化机制（语言清单 / BCP 47 回退链 / 取词 / 文案表）
   LANGS, DEFAULT_LANGUAGE, LANGUAGE_LABELS, resolveLang, setLanguage, getLanguage, t, tableOf,
-  // 0.9.0：配置导出导入（格式标识 / 校验 / 导入前备份 / 撤销）
+  // 配置导出导入（格式标识 / 校验 / 导入前备份 / 撤销）
   buildConfigExport, parseConfigImport, importConfig, undoConfigImport, loadConfigBackup, configFileName,
   CONFIG_FORMAT, CONFIG_FORMAT_VERSION,
-  // 0.5.3：机制层（统一健康记录 + 探针 + 升级阈值）
+  // 机制层（统一健康记录 + 自检 + 升级阈值）
   createHealthProbe, staleAfterOf, PROBE_INTERVAL_MS,
   resetConnHealth, pruneHealth, noteFreshness, noteStale, loadHealth, publishStatus, republishDataHealth,
   SCHEMA_ESCALATE_COUNT, SCHEMA_ESCALATE_CONSECUTIVE, SCHEMA_ESCALATE_WINDOW_MS, HEALTH_TTL_MS,
-  // 0.5.2：大陆气象源（nmc.cn）—— 解析层 / 契约 / 行政区层级匹配
+  // 大陆气象源（nmc.cn）：解析层 / 契约 / 行政区层级匹配
   parseNmcAlarm, orgOf, parseNmcAlarmResult, matchCnAreaAlert, cnPlaceParts, cnWatchPlaces, cnAreaOf, normAliases,
   NMC_KIND_TEXT, NMC_LEVEL_TEXT, NMC_LEVEL_RANK, NMC_BROADCAST_MIN_RANK,
-  // 0.6.0：海外气象源（美国 NWS / 加拿大 ECCC）—— 解析层 / 契约 / 事件键 / 白名单
+  // 海外气象源（美国 NWS / 加拿大 ECCC）：解析层 / 契约 / 事件键 / 白名单；取数器按关注点查询、查询即匹配、年龄门槛
   parseNwsAlert, parseEcccAlert, parseNwsAlertResult, parseEcccAlertResult,
   ecccKindTextOf, nwsEventKeyOf, nwsVtecKeyOf, ecccEventKeyOf, NWS_EVENT_WHITELIST, nwsKindTextOf, nwsKindTextMap,
   NWS_SEVERITY, NWS_SEV_RANK, ECCC_COLOUR_SEVERITY, ECCC_COLOUR_RANK, ECCC_INCLUDE, ECCC_EXCLUDE,
   OVERSEAS_BROADCAST_MIN_RANK,
-  // 0.6.0：取数器与匹配（按关注点查询 / 查询即匹配 / 年龄闸门）
   createNwsSource, createEcccSource, nwsSamplePoints, ecccBboxOf, placesInBoxes, US_BOXES, CA_BOX, defaultFetchText, matchOverseasAlert,
   NWS_ALERTS_BASE, ECCC_ALERTS_BASE, NWS_EVENT_QUERY,
   MIN_SAMPLE_RADIUS_KM, MAX_REQUESTS_PER_ROUND, OVERSEAS_FRESH_GATE_MS, OVERSEAS_GATE_RESET_MS,
   UNCOVERED_TTL_MS, OVERSEAS_MIN_BACKOFF_MS, OVERSEAS_MAX_BACKOFF_MS,
   overseasStatsOf, defaultFetchText,
   parse, parseQuake, parseEew, parseTsunami, parseJma, parseEmsc, parseUsgsFeature, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage, feedStatsOf, watchlessPoint, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn, jmaItemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf, matchAlert, matchPointAlert, distanceKm, validGeo, normalizePlaces, soundKindOf, soundAllowedFor, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, withinHistoryAge, handleRaw, handleCancelled, handleAlert, updateWeatherHint, WEATHER_EVENT_WINDOW_MINUTES, hitSeverityOf, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY, cnProductName, authorityOf, disclaimerOf, weatherActionHintOf, SOURCE_ORDER, sourceLabelOf, SOURCE_CODE_TEXT, SettingsPanel, statusMetaOf, buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION, inQuietHours, placeOriginOf, PLACE_ORIGINS, geoOfHypo, sourceIdOf, crossSourceCopyOf, noteAuthoritySuppressed, authorityStatsOf, SOURCE_RANK, sourceNameOf, SOURCE_AGENCY, agencyOf, CROSS_SOURCE_KINDS, rankOfSource, sourceZhOf, alertedEvents, isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, forgetAllAlerted, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, ensureAlertChannel, broadcastHistoryCleared, createWsClient, store, HISTORY_MAX, HISTORY_MAX_AGE_MS, LEGACY_PLACE_RADIUS_KM, requestNotificationPermission, PREFECTURES, prefLabelOf, PREF_EN, PREF_HANT, SCALE_OPTIONS, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, DEFAULT_CFG, STORAGE_KEY, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, pruneCitiesOfUnwatchedPrefs, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, cnAreasStateOf, retryCityTable, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, setWorldCountries, worldCountriesOf, countryNameOf, countryPackOf, loadCountryCities, resetWorldCities, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, p2pTimeToIso, cnTimeToIso, CN_TIME_RE, CN_REPORT_MAG_OPTIONS, LANGUAGE_OPTIONS, issuedToDate, formatIssuedLocal, audioState, SOURCE_CONTRACTS, parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of, failResult, noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, P2P_TIME_RE, MIGRATED_KEY }
-
-// activeClient 是 12-websocket 的模块级 let：给 12 用的赋值出口（跨模块不能写 imported binding）
-// 由 12-websocket 提供 setter；这里仅保留引用以便阅读

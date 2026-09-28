@@ -1,13 +1,9 @@
 // ============================================================================
 // dsh-quake-alert · client/src/09-notify.js
-//
-// 作用：用户可见提醒的两种呈现——系统通知与页面内 toast。
-// 内容：通知能力与权限判定、请求权限、系统通知发送、toast 渲染与自动消失。
-// 依赖：01-constants。
-// 约定：页面可见时只用 toast，后台才用系统通知（系统通知不可用时回退 toast）。
+// 作用：用户可见提醒的两种呈现——系统通知与页面内 toast（能力与权限判定、发送、toast 渲染）。
+// 依赖：01-constants。约定：页面可见时只用 toast，后台才用系统通知（系统通知不可用时回退 toast）。
 // ============================================================================
 
-// ---------- 通知：系统通知 + toast ----------
 function notificationSupported() { return typeof window !== 'undefined' && typeof window.Notification === 'function' }
 function notificationPermission() {
   if (!notificationSupported()) return 'unsupported'
@@ -16,10 +12,8 @@ function notificationPermission() {
 function requestNotificationPermission() {
   if (!notificationSupported()) return Promise.resolve('unsupported')
   try {
-    // 0.9.4（P3-46）：老浏览器（以及部分实现）的 `requestPermission` 是**回调式**的——它返回
-    // `undefined` 并把结果交给回调。此前 `Promise.resolve(undefined)` 会让界面显示"未获授权"，
-    // 而权限框其实弹出来了（用户点了允许也没用）。这里两种签名都接：返回 Promise 就直接用，
-    // 否则等回调（拿不到就按 'default' 收场，不假装成功）。
+    // 老实现的 `requestPermission` 是回调式：返回 `undefined` 并把结果交给回调。这里两种签名都接——
+    // 返回 Promise 就直接用，否则轮询等回调（30 秒无回应按 'default' 收场，不假装成功）。
     let cbResult = ''
     const ret = window.Notification.requestPermission((res) => { cbResult = String(res || '') })
     if (ret && typeof ret.then === 'function') return ret
@@ -49,14 +43,7 @@ function showSystemNotification(opts) {
   } catch (err) { return false }
 }
 let toastSeq = 0
-/**
- * 当前屏上的 toast（0.9.4 / P2-25）。它们此前各自 `position: fixed; top:16px; right:16px`，
- * 于是一批告警同时到达时完全重叠、互相遮挡，下层还点不到 —— 而"一次地震多条电文"正是常态。
- * 现在共用一个纵向排列的容器（自动堆叠），并有上限与去重：
- *   · 上限 `TOAST_MAX`：超出时立刻收掉最旧的一条，最新的一条永远看得见；
- *   · 去重：标题 + 正文 + 颜色都相同的**正在显示**的 toast 不再叠一条（同一场地震的多条副本
- *     会走到这里）。
- */
+// 当前屏上的 toast，共用一个纵向排列容器（自动堆叠）；超过 TOAST_MAX 条时收掉最旧的一条。
 const TOAST_MAX = 3
 let toastBox = null
 const liveToasts = [] // [{ el, key }]
@@ -67,7 +54,7 @@ function ensureToastBox(doc) {
   st.position = 'fixed'
   st.top = '16px'
   st.right = '16px'
-  // 高于 DSH 前端自身的层级（最高约 1100），但不再用 2^31-1 压住一切
+  // 高于 DSH 前端自身的层级（最高约 1100）
   st.zIndex = '2000'
   st.display = 'flex'
   st.flexDirection = 'column'
@@ -85,24 +72,21 @@ function dropToast(entry) {
   if (i !== -1) liveToasts.splice(i, 1)
   try { if (entry.el && entry.el.parentNode) entry.el.parentNode.removeChild(entry.el) } catch (err) { /* 已移除 */ }
 }
+/** 渲染一条 toast 并在 ttl 后淡出移除；dropToast 从界面与 liveToasts 里摘掉一条。 */
 function showToast(opts) {
   try {
     if (!window.document || !window.document.body) return
     const doc = window.document
     const color = opts.color || '#e5484d'
     const key = color + '|' + (opts.title || '') + '|' + (opts.body || '')
-    // 同一条（标题 + 正文 + 颜色）已经在屏上就不再叠一条：多源副本讲的是同一件事
-    // （参数名不用 `t`：那是 i18n 取词函数的名字，而 check-imports 会把裸 `t` 报成漏 import）
+    // 同一条已经在屏上就不再叠一条；参数名不用 `t`（那是 i18n 取词函数名）
     if (liveToasts.some((live) => live.key === key)) return
     const box = ensureToastBox(doc)
-    // 满了先收掉最旧的：一批告警同时到达时，用户最该看到的是**最新**那条
     while (liveToasts.length >= TOAST_MAX) dropToast(liveToasts[0])
     const el = doc.createElement('div')
     const id = 'quake-alert-toast-' + (++toastSeq)
     el.id = id
-    // role=alert（0.5.4）：页面可见时**只用 toast**（见 11-pipeline），而这正是读屏用户
-    // 唯一能收到警报的通道——没有 live region 语义，它就完全感知不到。
-    // 用 typeof 守卫：非浏览器的 DOM stub（回归测试）不一定实现 setAttribute。
+    // role=alert：页面可见时只用 toast，读屏用户全靠这个 live region 收到警报
     if (typeof el.setAttribute === 'function') el.setAttribute('role', 'alert')
     const style = el.style
     style.pointerEvents = 'auto'
@@ -121,7 +105,7 @@ function showToast(opts) {
     const title = doc.createElement('div')
     title.style.fontWeight = '700'
     title.style.color = color
-    // 0.9.4：标题也要能换行。此前只有正文有 wordBreak，长标题（含区域名与震级）会溢出 340px。
+    // 标题也要能换行，长标题（含区域名与震级）否则会溢出 340px
     title.style.wordBreak = 'break-word'
     title.textContent = opts.title || ''
     const body = doc.createElement('div')

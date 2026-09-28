@@ -4,16 +4,8 @@ var module = { exports: {} }; var exports = module.exports;
 /**
  * dsh-quake-alert client bundle —— 由 scripts/build-client.mjs (rollup) 从 client/src/*.js 打包生成。
  * 请勿直接编辑本文件：改 client/src/ 下的 ESM 模块（每个文件头部写了职责与依赖），再运行 pnpm build。
- *
- * 灾害预警：DSH 使用期间，P2PQuake WebSocket 实时推送日本地震 / 海啸信息，
- * 按「关注都道府县 / 市区町村 + 震度 / 海啸等级阈值」匹配命中后提醒：
- *   - 页面可见 → 页内 toast；页面后台 → 系统通知；命中时播放合成提示音
- *   - 设置页：设置 → 灾害预警（关注地区 / 阈值 / 音量 / 静默时段 / 测试）
- *   - 配置：Host 机器级存储（DSH 0.1.7 起为 profile patch，0.1.6 及以前为 settings.yaml）
- *     为主，localStorage 为镜像与回退
- *   - 免责：数据由 P2PQuake 转播，EEW 等仅供参考，请以气象厅官方发布为准
- *
- * DSH 客户端 bundle 必须是单文件（扁平模块图：一个 bundle = 一个模块节点）。
+ * 灾害预警：DSH 使用期间经 P2PQuake WebSocket 接收日本地震 / 海啸信息，按「关注地区 + 震度 / 海啸阈值」
+ * 命中后页内 toast、页面后台系统通知与提示音（设置 → 灾害预警）；数据由 P2PQuake 转播，仅供参考。
  */
 
 'use strict';
@@ -22,14 +14,10 @@ var React = require('react');
 
 // ============================================================================
 // dsh-quake-alert · client/src/09-notify.js
-//
-// 作用：用户可见提醒的两种呈现——系统通知与页面内 toast。
-// 内容：通知能力与权限判定、请求权限、系统通知发送、toast 渲染与自动消失。
-// 依赖：01-constants。
-// 约定：页面可见时只用 toast，后台才用系统通知（系统通知不可用时回退 toast）。
+// 作用：用户可见提醒的两种呈现——系统通知与页面内 toast（能力与权限判定、发送、toast 渲染）。
+// 依赖：01-constants。约定：页面可见时只用 toast，后台才用系统通知（系统通知不可用时回退 toast）。
 // ============================================================================
 
-// ---------- 通知：系统通知 + toast ----------
 function notificationSupported() { return typeof window !== 'undefined' && typeof window.Notification === 'function' }
 function notificationPermission() {
   if (!notificationSupported()) return 'unsupported'
@@ -38,10 +26,8 @@ function notificationPermission() {
 function requestNotificationPermission() {
   if (!notificationSupported()) return Promise.resolve('unsupported')
   try {
-    // 0.9.4（P3-46）：老浏览器（以及部分实现）的 `requestPermission` 是**回调式**的——它返回
-    // `undefined` 并把结果交给回调。此前 `Promise.resolve(undefined)` 会让界面显示"未获授权"，
-    // 而权限框其实弹出来了（用户点了允许也没用）。这里两种签名都接：返回 Promise 就直接用，
-    // 否则等回调（拿不到就按 'default' 收场，不假装成功）。
+    // 老实现的 `requestPermission` 是回调式：返回 `undefined` 并把结果交给回调。这里两种签名都接——
+    // 返回 Promise 就直接用，否则轮询等回调（30 秒无回应按 'default' 收场，不假装成功）。
     let cbResult = '';
     const ret = window.Notification.requestPermission((res) => { cbResult = String(res || ''); });
     if (ret && typeof ret.then === 'function') return ret
@@ -71,14 +57,7 @@ function showSystemNotification(opts) {
   } catch (err) { return false }
 }
 let toastSeq = 0;
-/**
- * 当前屏上的 toast（0.9.4 / P2-25）。它们此前各自 `position: fixed; top:16px; right:16px`，
- * 于是一批告警同时到达时完全重叠、互相遮挡，下层还点不到 —— 而"一次地震多条电文"正是常态。
- * 现在共用一个纵向排列的容器（自动堆叠），并有上限与去重：
- *   · 上限 `TOAST_MAX`：超出时立刻收掉最旧的一条，最新的一条永远看得见；
- *   · 去重：标题 + 正文 + 颜色都相同的**正在显示**的 toast 不再叠一条（同一场地震的多条副本
- *     会走到这里）。
- */
+// 当前屏上的 toast，共用一个纵向排列容器（自动堆叠）；超过 TOAST_MAX 条时收掉最旧的一条。
 const TOAST_MAX = 3;
 let toastBox = null;
 const liveToasts = []; // [{ el, key }]
@@ -89,7 +68,7 @@ function ensureToastBox(doc) {
   st.position = 'fixed';
   st.top = '16px';
   st.right = '16px';
-  // 高于 DSH 前端自身的层级（最高约 1100），但不再用 2^31-1 压住一切
+  // 高于 DSH 前端自身的层级（最高约 1100）
   st.zIndex = '2000';
   st.display = 'flex';
   st.flexDirection = 'column';
@@ -107,24 +86,21 @@ function dropToast(entry) {
   if (i !== -1) liveToasts.splice(i, 1);
   try { if (entry.el && entry.el.parentNode) entry.el.parentNode.removeChild(entry.el); } catch (err) { /* 已移除 */ }
 }
+/** 渲染一条 toast 并在 ttl 后淡出移除；dropToast 从界面与 liveToasts 里摘掉一条。 */
 function showToast(opts) {
   try {
     if (!window.document || !window.document.body) return
     const doc = window.document;
     const color = opts.color || '#e5484d';
     const key = color + '|' + (opts.title || '') + '|' + (opts.body || '');
-    // 同一条（标题 + 正文 + 颜色）已经在屏上就不再叠一条：多源副本讲的是同一件事
-    // （参数名不用 `t`：那是 i18n 取词函数的名字，而 check-imports 会把裸 `t` 报成漏 import）
+    // 同一条已经在屏上就不再叠一条；参数名不用 `t`（那是 i18n 取词函数名）
     if (liveToasts.some((live) => live.key === key)) return
     const box = ensureToastBox(doc);
-    // 满了先收掉最旧的：一批告警同时到达时，用户最该看到的是**最新**那条
     while (liveToasts.length >= TOAST_MAX) dropToast(liveToasts[0]);
     const el = doc.createElement('div');
     const id = 'quake-alert-toast-' + (++toastSeq);
     el.id = id;
-    // role=alert（0.5.4）：页面可见时**只用 toast**（见 11-pipeline），而这正是读屏用户
-    // 唯一能收到警报的通道——没有 live region 语义，它就完全感知不到。
-    // 用 typeof 守卫：非浏览器的 DOM stub（回归测试）不一定实现 setAttribute。
+    // role=alert：页面可见时只用 toast，读屏用户全靠这个 live region 收到警报
     if (typeof el.setAttribute === 'function') el.setAttribute('role', 'alert');
     const style = el.style;
     style.pointerEvents = 'auto';
@@ -143,7 +119,7 @@ function showToast(opts) {
     const title = doc.createElement('div');
     title.style.fontWeight = '700';
     title.style.color = color;
-    // 0.9.4：标题也要能换行。此前只有正文有 wordBreak，长标题（含区域名与震级）会溢出 340px。
+    // 标题也要能换行，长标题（含区域名与震级）否则会溢出 340px
     title.style.wordBreak = 'break-word';
     title.textContent = opts.title || '';
     const body = doc.createElement('div');
@@ -167,17 +143,10 @@ function showToast(opts) {
 
 // ============================================================================
 // dsh-quake-alert · client/src/00a-texts-core.js
-//
 // 作用：核心文案表（各语言并列）——通知、行动提示、免责行、机构名、状态条。
-// 内容：纯数据对象，**不 import 任何模块**（依赖方向：面文件 ← 00-i18n.js ← 其它）。
-// 依赖：无。
-//
-// key 命名：`面.子面.用途`，全小写驼峰段；插值写 `{name}`（由 t() 替换）。
-// zh-CN 一栏是**逐字现状**——0.9.0 的 i18n 只是把既有字符串搬进表里，
-// 默认语言下的输出必须与 0.8.2 完全一致（回归里有一条断言守这件事）。
-//
-// 范围（DESIGN 11.10）：只放**我们生成的文本**。源的 headline / detail / 地名 /
-// 解析层 kindLabel / 各源 reason 一律不进这里，它们原样透传。
+// 内容：纯数据对象，不 import 任何模块（依赖方向：文案文件 ← 00-i18n.js ← 其它）。
+// key 命名：`面.子面.用途`，全小写驼峰段；插值写 `{name}`（由 t() 替换）。只放我们生成的
+// 文本：源的 headline / detail / 地名 / 解析层 kindLabel / 各源 reason 一律原样透传。
 // ============================================================================
 
 const CORE = {
@@ -185,13 +154,12 @@ const CORE = {
     'app.name': '灾害预警',
     'app.statusPrefix': '灾害预警：',
 
-    // 大陆源的产品名与日本源的「緊急地震速報」是两家机构的不同产品（见 11-pipeline 的说明）。
     'product.cnEew': '大陆地震预警',
     'product.cnEqlist': '大陆地震速报',
     'product.jpEew': '紧急地震速报（警报）',
     'product.jpEewShort': '紧急地震速报',
 
-    // 免责声明里点名的机构（按源）。认不出时退回 disclaimer.generic，不硬编码任何一家。
+    // 依据源给免责声明点名的机构；认不出时退回 disclaimer.generic。
     'authority.emsc': '欧洲-地中海地震中心（EMSC）',
     'authority.usgs': '美国地质调查局（USGS）',
     'authority.noaa': '太平洋海啸警报中心（NOAA）',
@@ -209,30 +177,28 @@ const CORE = {
     'notify.cancelBody': '此前发出的警报已作废。',
     'notify.tsunamiLifted': '✅ 海啸预报已解除',
 
-    // 气象预警的行动提示：三家机构的处置口径不同，不能互相套用（见 11-pipeline 的说明）。
+    // 气象预警的行动提示：三家机构口径不同，不能互相套用。
     'action.generic': '请关注当地官方发布的指引',
     'action.overseas': '请关注当地官方发布的避难与撤离指引',
     'action.cnArea': '请关注当地气象台发布的防御指引',
     'action.jp': '请确认所在市町村的避难信息',
 
-    // 通知正文里的命中行。行政区的县名要跟着界面语言走（prefLabelOf），
-    // 所以这里只放"标签 + 占位符"，拼装仍在 11-pipeline。
+    // 通知正文里的命中行：县名跟着界面语言走（prefLabelOf），所以这里只有标签 + 占位符。
     'notify.hitPref': '命中地区：{pref}',
     'notify.hitPrefNamed': '命中地区：{pref}（{jp}）',
     'notify.hitPlaceDistance': '命中位置：{place}（距震中约 {km} km）',
     'notify.hitPlaceOfficial': '命中位置：{place}（按该点所在地的官方预警判定）',
-    // 海啸的行动提示：与气象的三家口径并列，单独一条（它不按机构分岔）。
+    // 海啸的行动提示：不按机构分岔，单独一条。
     'action.tsunami': '请立即远离海岸与河口',
 
-    // 源在状态区块里的显示名（短标签，与免责声明里点名的全称是两回事）。
+    // 源在状态区块里的短显示名，与免责声明里点名的全称是两回事。
     'status.emscConnected': '已连接 EMSC（全球地震实时推送）',
-    // 源状态摘要（07-store 拼的悬停提示 / 侧边栏 title）：源名与分隔符都要跟着语言走，
+    // 源状态摘要（07-store 拼的悬停提示 / 侧边栏 title）：源名与分隔符跟着语言走，
     // 状态码本身由 00f 的 statusTextOf 翻。
     'status.sourceDisabled': '{name}：已关闭',
     'status.sourceDetail': '{name}：{detail}',
 
-    // 取数层写给用户的**状态说明**（进 store.sources[id].detail：设置页的源状态区块、侧边栏
-    // 悬停提示、诊断快照）。它们不是源侧文本，而是我们自己写的降级 / 关闭 / 覆盖范围说明。
+    // 取数层写进 store.sources[id].detail 的降级 / 关闭 / 覆盖范围说明，不是源侧文本。
     'source.p2pConnected': '已连接 P2PQuake（约每 10 分钟自动重连）',
     'source.p2pSandbox': '沙箱源：回放 2023 年历史（约30秒/条）',
     'source.cnPollManual': '已按设置选择轮询',
@@ -372,8 +338,8 @@ const CORE = {
     'product.jpEew': 'Earthquake Early Warning (Alert)',
     'product.jpEewShort': 'Earthquake Early Warning',
 
-    // 英文的机构名前带 the：这些值只出现在 disclaimer.named 的 {authority} 位置，
-    // 单独展示机构名的位置（设置页 / 诊断）另有各自的表，不复用这一栏。
+    // 英文机构名带 the：只用在 disclaimer.named 的 {authority} 位置，单独展示机构名的位置
+    // （设置页 / 诊断）另有各自的表。
     'authority.emsc': 'the Euro-Mediterranean Seismological Centre (EMSC)',
     'authority.usgs': 'the U.S. Geological Survey (USGS)',
     'authority.noaa': 'the Pacific Tsunami Warning Center (NOAA)',
@@ -425,33 +391,25 @@ const CORE = {
 // ============================================================================
 // dsh-quake-alert · client/src/00b-texts-settings.js
 //
-// 作用：设置页文案表（各语言并列）——区块标题、选项卡、控件标签、按钮、说明、
-//       折叠区、状态提示、错误提示、测试结果模板、履历条目的徽标与字段名。
-// 内容：纯数据对象，**不 import 任何模块**（依赖方向：面文件 ← 00-i18n.js ← 其它）。
-// 依赖：无。
+// 作用：设置页文案表（各语言并列）——区块标题、选项卡、控件标签、按钮、说明、折叠区、
+//       状态提示、错误提示、测试结果模板、履历条目的徽标与字段名。
+// 内容：纯数据对象，不 import 任何模块（依赖方向：文案文件 ← 00-i18n.js ← 其它）。
+//       key 命名 `settings.子面.用途`，全小写驼峰段；插值写 `{name}`（由 t() 替换）。
 //
-// key 命名：`settings.子面.用途`，全小写驼峰段；插值写 `{name}`（由 t() 替换）。
-// zh-CN 一栏是**逐字现状**——0.9.0 的 i18n 只是把既有字符串搬进表里，
-// 默认语言下的输出必须与 0.8.2 完全一致（回归里有一条断言守这件事）。
+// 只放我们生成的文本，下面这些一律不进表、原样透传：
+// 源侧标签（`SOURCE_CODE_TEXT` / `p2pCodeTextOf` 的来源标注、`P2P_KIND_CODE`、
+// `store.sources[id].label`、`store.weatherHint.label`）、地名（`place.name` / `c.name` /
+// `c.admin`）、`alert.detail`、`e.headline`、`e.label`（解析层 kindLabel）、`res.detail`、
+// 语义标签里的专有名词原文（'気象庁' / '東京都' / 'Data Source: Environment and Climate
+// Change Canada'）、源文本里的固定枚举（'Flood / Flood Warning' / 'Watch' / 'Advisory' /
+// 'Statement' / 'warning' / 'advisory'）、单位与标识（'km' / '%' / 'EEW' / 'CENC' /
+// 'NOAA' / 'NWS' / 'ECCC' / 'SSE' / 'Web Audio' / 'settings.yaml' / 'localStorage' /
+// 'TROUBLESHOOTING.zh.md' / 'dsh web' / 'QuakeAlert' / 'AI'）、间隔符与破折号
+// （' · ' / ' / ' / '—' / '…' / '（' / '）'）。
 //
-// 范围（DESIGN 11.10）：只放**我们生成的文本**。设置页里这些一律不进表、原样透传：
-//   · 源侧标签：`SOURCE_CODE_TEXT` / `p2pCodeTextOf` 的来源标注（'JMA 电文' / '中央气象台' …）、
-//     `P2P_KIND_CODE`、`store.sources[id].label`、`store.weatherHint.label`、地名
-//     （`place.name` / `c.name` / `c.admin`）、`alert.detail`（正文）、`e.headline`、
-//     `e.label`（解析层的 kindLabel）、测试结果里的 `res.detail`；
-//   · **曾经列在这里、0.9.1 起已经进表的两项**——留在这里是为了下一轮 review 不再把它们当漏翻：
-//     `store.detail`（源状态摘要：源名与状态文字现在都走 `t()`，见 07-store）、
-//     都道府县名（现在走 `prefLabelOf`：日文原名 / 中文名 / 罗马字三分支，见 01-constants）；
-//   · 语义标签里的专有名词原文：'気象庁'、'東京都'、'Data Source: Environment and Climate Change Canada'；
-//   · 源文本里的固定枚举（'Flood / Flood Warning' / 'Watch' / 'Advisory' /
-//     'Statement' / 'warning' / 'advisory'）——它们描述的是上游规则，不是我们的说法；
-//   · 单位与标识：'km'、'%'、'EEW'、'CENC'、'NOAA'、'NWS'、'ECCC'、'SSE'、'Web Audio'、
-//     'settings.yaml'、'localStorage'、'TROUBLESHOOTING.zh.md'、'dsh web'、'QuakeAlert'、'AI'；
-//   · 间隔符与破折号：' · '、' / '、'—'、'…'、'（'、'）'、'%' 这些不是文案。
-//
-// **归属待定（别当成漏翻）**：`e.suppressedReason`——它是管道层（11-pipeline）拼的"为什么没播报"，
-// 进履历条目的「说明」字段（日常可见），但既不在 11.10 的"要翻"清单里，也不属于"解析层 reason
-// 不翻"那一类。0.9.1 未做，登记在 CHANGELOG 的「有意不做」里。
+// 另有 `store.detail`（源状态摘要，源名与状态文字都走 t()，见 07-store）与都道府县名
+// （走 `prefLabelOf` 的日文原名 / 中文名 / 罗马字三分支，见 01-constants）已经进表。
+// `e.suppressedReason`（11-pipeline 拼的「为什么没播报」，进履历条目的说明字段）尚未进表。
 // ============================================================================
 
 const SETTINGS = {
@@ -462,14 +420,13 @@ const SETTINGS = {
     'settings.status.open': '已连接',
     'settings.status.reconnecting': '重连中（第 {n} 次）',
     'settings.status.closed': '已停止',
-    // 0.4.1：轮询源与"消息处理失败"也需要自己的状态（此前只有 WebSocket 的五个状态，
-    // 于是上游被墙 / 路由 500 / 主链抛错时界面上与"没有新闻"完全不可区分）。
+    // 轮询源与"消息处理失败"也有自己的状态：上游被墙 / 路由 500 / 主链抛错时不能与"没有新闻"同形
     'settings.status.unreachable': '无法连接',
     'settings.status.degraded': '链路降级',
     'settings.status.stale': '数据已过期',
     'settings.status.schemaError': '数据格式异常',
     'settings.status.disabled': '已关闭',
-    // 认不出的状态码原样回显（配置 / 上游里出现一个我们没登记的状态时不该显示空白）
+    // 认不出的状态码原样回显（配置 / 上游里出现没登记的状态时不该显示空白）
     'settings.status.raw': '{status}',
 
     // ---------- 配置存储位置的人话说明（settingsSyncLabel） ----------
@@ -477,10 +434,8 @@ const SETTINGS = {
     'settings.storage.memory': '只保存在这个浏览器里',
     'settings.storage.local': '浏览器本地存储',
 
-    // ---------- 源状态区块（SourceStatusBlock） ----------
-    // ---------- 源名标签（00f-source-labels 的 SOURCE_LABEL_KEYS 指向这里） ----------
-    // 与 `settings.source.*` 分开：这些是**源的名字**，会被侧边栏的悬停提示、设置页的源状态
-    // 区块、重试按钮三处共用；`settings.source.*` 是那个区块自己的措辞。
+    // ---------- 源名标签（被 00f 的 SOURCE_LABEL_KEYS 与 statusTextOf 指向） ----------
+    // 与 `settings.source.*` 分开：这些是源的名字，侧边栏悬停提示、源状态区块、重试按钮三处共用。
     'settings.sourceLabels.p2pquake': 'P2PQuake（日本地震 / EEW / 海啸，实时推送）',
     'settings.sourceLabels.emsc': 'EMSC（全球地震，实时推送）',
     'settings.sourceLabels.cencEew': '大陆地震预警（CENC，SSE 推送）',
@@ -500,7 +455,7 @@ const SETTINGS = {
     'settings.source.receivedIncrements': '已收到 {n} 条增量',
     'settings.source.localErrors': '，本地失败 {n} 次',
     'settings.source.truncated': '，增量缺口 {n} 次',
-    'settings.source.resets': '，游标重置 {n} 次',
+    'settings.source.resets': '，读取位置重置 {n} 次',
     'settings.source.hostErrors': '，Host 失败 {n} 次',
     'settings.source.hostDetailDropped': '，Host 放弃详情 {n} 条',
     'settings.source.lastFetch': ' · 最近拉取 {ago}',
@@ -523,7 +478,7 @@ const SETTINGS = {
     'settings.source.received': ' · 已收到 {n} 条',
     'settings.source.broadcast': '，已播报 {n}',
     'settings.source.fallbacks': '，降级 {n} 次',
-    'settings.source.probeTimeouts': '，无首帧 {n} 次',
+    'settings.source.probeTimeouts': '，未收到数据 {n} 次',
     'settings.source.lastData': ' · 最近数据 {ago}',
     'settings.source.retry': '重试 {name} 的数据解析',
 
@@ -585,8 +540,7 @@ const SETTINGS = {
     'settings.cities.overLimit': '…共 {n} 个，请输入关键词',
 
     // ---------- 已关注地区列表 ----------
-    // 只是**后缀**（原名），显示名由调用方按语言拼（`prefLabelOf`）——0.9.0 这里一度写成完整
-    // 形式 `'{zh}（{jp}）'`，而调用方前面已经拼过一次名字，界面上就成了「东京东京（東京都）」。
+    // 只是后缀（原名），显示名由调用方按语言拼（`prefLabelOf`）。
     'settings.watch.prefMeta': '（{jp}）',
     'settings.watch.prefOrFull': ' · 全境',
     'settings.watch.prefDetail': ' · 已细化 {n} 个市区町村',
@@ -752,8 +706,8 @@ const SETTINGS = {
     'settings.diag.outcomeUnknown': '未知原因',
     'settings.diag.sentWeather': '已发送：{label}（{pref} / 警戒レベル{level}，{note}）',
     'settings.diag.scenarios': '每次点击换一个场景：{list}。',
-    // 测试场景的**显示名与说明**。场景数据本身（TEST_SCENARIOS / TEST_GEO_SCENARIOS）留在
-    // 05b / 05c 里保持纯数据，key 用它们的稳定标识（`sc.key`），所以那两个文件不必 import t()。
+    // 测试场景的显示名与说明：场景数据（TEST_SCENARIOS / TEST_GEO_SCENARIOS）留在 05b / 05c
+    // 保持纯数据，key 用它们的稳定标识（`sc.key`），那两个文件不必 import t()。
     'settings.diag.scenario.landslide': '泥石流警戒情报',
     'settings.diag.scenarioNote.landslide': '市町村级 / 电文本身即 L4',
     'settings.diag.scenario.flood': '指定河川洪水予報（氾濫危険情報）',
@@ -834,8 +788,7 @@ const SETTINGS = {
     'settings.storage.memory': '只儲存在這個瀏覽器裡',
     'settings.storage.local': '瀏覽器本機儲存',
 
-    // ---------- 源状态区块（SourceStatusBlock） ----------
-    // ---------- 源名标签（00f-source-labels 的 SOURCE_LABEL_KEYS 指向这里） ----------
+    // ---------- 源名标签（SOURCE_LABEL_KEYS 指向这里） ----------
     'settings.sourceLabels.p2pquake': 'P2PQuake（日本地震 / EEW / 海嘯，即時推送）',
     'settings.sourceLabels.emsc': 'EMSC（全球地震，即時推送）',
     'settings.sourceLabels.cencEew': '大陸地震預警（CENC，SSE 推送）',
@@ -855,7 +808,7 @@ const SETTINGS = {
     'settings.source.receivedIncrements': '已收到 {n} 筆增量',
     'settings.source.localErrors': '，本機失敗 {n} 次',
     'settings.source.truncated': '，增量缺口 {n} 次',
-    'settings.source.resets': '，游標重設 {n} 次',
+    'settings.source.resets': '，讀取位置重設 {n} 次',
     'settings.source.hostErrors': '，Host 失敗 {n} 次',
     'settings.source.hostDetailDropped': '，Host 捨棄詳情 {n} 筆',
     'settings.source.lastFetch': ' · 最近取得 {ago}',
@@ -878,7 +831,7 @@ const SETTINGS = {
     'settings.source.received': ' · 已收到 {n} 筆',
     'settings.source.broadcast': '，已播報 {n} 筆',
     'settings.source.fallbacks': '，降級 {n} 次',
-    'settings.source.probeTimeouts': '，無首幀 {n} 次',
+    'settings.source.probeTimeouts': '，未收到資料 {n} 次',
     'settings.source.lastData': ' · 最近資料 {ago}',
     'settings.source.retry': '重試 {name} 的資料解析',
 
@@ -1202,7 +1155,7 @@ const SETTINGS = {
     'settings.source.receivedIncrements': '受信 {n} 件',
     'settings.source.localErrors': '、ローカル失敗 {n} 回',
     'settings.source.truncated': '、欠落 {n} 回',
-    'settings.source.resets': '、カーソル初期化 {n} 回',
+    'settings.source.resets': '、読み取り位置の初期化 {n} 回',
     'settings.source.hostErrors': '、Host 失敗 {n} 回',
     'settings.source.hostDetailDropped': '、Host が詳細を破棄 {n} 件',
     'settings.source.lastFetch': ' · 最終取得 {ago}',
@@ -1225,7 +1178,7 @@ const SETTINGS = {
     'settings.source.received': ' · 受信 {n} 件',
     'settings.source.broadcast': '、通知 {n} 件',
     'settings.source.fallbacks': '、降格 {n} 回',
-    'settings.source.probeTimeouts': '、初回フレームなし {n} 回',
+    'settings.source.probeTimeouts': '、初回データなし {n} 回',
     'settings.source.lastData': ' · 最終データ {ago}',
     'settings.source.retry': '{name} のデータ解析を再試行',
 
@@ -1533,7 +1486,7 @@ const SETTINGS = {
     'settings.source.receivedIncrements': 'Received {n} updates',
     'settings.source.localErrors': ', {n} local failures',
     'settings.source.truncated': ', {n} gaps',
-    'settings.source.resets': ', {n} cursor resets',
+    'settings.source.resets': ', {n} position resets',
     'settings.source.hostErrors': ', {n} host failures',
     'settings.source.hostDetailDropped': ', {n} details dropped by host',
     'settings.source.lastFetch': ' · Last fetch {ago}',
@@ -1556,7 +1509,7 @@ const SETTINGS = {
     'settings.source.received': ' · {n} received',
     'settings.source.broadcast': ', {n} alerted',
     'settings.source.fallbacks': ', {n} fallbacks',
-    'settings.source.probeTimeouts': ', {n} with no first frame',
+    'settings.source.probeTimeouts': ', {n} with no data received',
     'settings.source.lastData': ' · Last data {ago}',
     'settings.source.retry': 'Retry parsing {name} data',
 
@@ -1832,13 +1785,8 @@ const SETTINGS = {
 // ============================================================================
 // dsh-quake-alert · client/src/00c-texts-configio.js
 //
-// 作用：配置导出 / 导入这一面的文案表（各语言并列）。
-// 内容：纯数据对象，不 import 任何模块（依赖方向：面文件 ← 00-i18n.js ← 其它）。
-// 依赖：无。
-//
-// 为什么单独一个面文件、而不并进设置页那一份：它的**错误码 → 文案**映射是一张独立的表
-// （导入失败有 5 种可区分的失败），与设置页的控件文案没有共同关注面；分开后 review
-// "导入失败会说什么"时不必翻 300 条设置文案。
+// 作用：配置导出 / 导入这一面的文案表（各语言并列），含「错误码 → 文案」映射。
+// 内容：纯数据对象，不 import 任何模块（依赖方向：文案文件 ← 00-i18n.js ← 其它）。
 // ============================================================================
 
 const CONFIG_IO = {
@@ -1959,20 +1907,11 @@ const CONFIG_IO = {
 // dsh-quake-alert · client/src/00e-texts-units.js
 //
 // 作用：量纲类展示文案表（各语言并列）——震度、海啸等级、震级档位、关注半径档位。
-// 内容：纯数据对象，不 import 任何模块。
-// 依赖：无。
+// 内容：纯数据对象，不 import 任何模块。01-constants 的对应常量只保存「值 + 文案 key」。
 //
-// 这些字符串此前住在 `01-constants.js` 的常量里（`SCALE_TEXT` / `SCALE_OPTIONS` /
-// `TSUNAMI_GRADE_TEXT` / `TSUNAMI_OPTIONS` / `GLOBAL_MAG_OPTIONS` /
-// `CN_REPORT_MAG_OPTIONS` / `RADIUS_PRESETS`）。搬到表里之后，那些常量保留为
-// **值 + 文案 key**，`zh-CN` 一栏逐字等于搬走之前的原文（含其中的空格）。
-//
-// 震度的日文写法有讲究：`5弱` / `5強` 里的「強」是日文汉字，中文简体写作「强」——
-// 两者在 zh-CN 与 ja 两栏里**故意不同**，照抄各自的通行写法，不要统一。
-//
-// 震级的档位文案由两个数组共用（`GLOBAL_MAG_OPTIONS` 与 `CN_REPORT_MAG_OPTIONS` 对同一个
-// 数值给的是同一句话）。**若将来两者的默认值分家，这里必须拆成两组 key**——共用是基于
-// "同值同文案"这个事实，不是约定。
+// 震度的日文写法分语种：`5弱` / `5強` 的「強」是日文汉字，中文简体写作「强」，
+// 两栏故意不同，不要统一。震级档位文案由 `GLOBAL_MAG_OPTIONS` 与 `CN_REPORT_MAG_OPTIONS`
+// 共用（同值同文案）；两者默认值一旦分家，这里必须拆成两组 key。
 // ============================================================================
 
 const UNITS = {
@@ -2056,25 +1995,13 @@ const UNITS = {
 // ============================================================================
 // dsh-quake-alert · client/src/00g-texts-events.js
 //
-// 作用：**解析层与提醒面自己拼出来的那些字**的四语文案——事件类型标签（`kindLabel`）、
-//       震度 / 海啸等级词、以及解析层拼 `headline` 时用的模板。
-// 内容：EVENTS（四种语言各一份，键集必须完全一致，见 00-i18n 的校验）。
-// 依赖：无（纯数据）。
+// 作用：解析层与提醒面自己拼出来的那些字的四语文案——事件类型标签（`kindLabel`）、
+//       震度 / 海啸等级词、解析层拼 `headline` 用的模板。
+// 内容：EVENTS（四种语言各一份，键集必须完全一致，见 00-i18n 的校验）。纯数据，无依赖。
 //
-// 为什么要有这个文件（0.9.4）：
-//   这些字此前是写死在解析器里的**简体中文字面量**（`大雨警报` / `海啸警报` /
-//   `紧急地震速报（警报）` …），0.9.0 起登记为"不翻"，理由是"属于源侧语义快照"。
-//   但用户实测看到的是：选英文 / 繁体 / 日文界面时，履历的「类型」「内容」行仍然是简体中文，
-//   而**这些字恰恰是我们自己拼的**（不是电文原文）——用户的判据很直接："电文原文是什么语言
-//   就用什么语言，但（未命中：…）这种明显不是电文内容的东西不该是中文"。
-//   于是本条"不翻"决定被撤销：**我们拼的字跟界面语言走，电文原文原样透传**。
-//
-// 两条硬约束（改动时别越界）：
-//   · **正则与匹配用的字不许动**：像 `/土砂災害警戒情報/`、`/（大雨）/` 这些是拿去匹配
-//     上游日文电文的，翻译了就永远匹配不上（那是最典型的静默漏报）。
-//     本文件只放**取词**，匹配表继续留在解析器里、保持日文原样。
-//   · 各语言的日文侧**用官方原词**：ja 的 `大雨警報` / `土砂災害警戒情報` / `津波警報`
-//     就是気象庁的写法；zh-CN / zh-TW / en 才需要译名（译名与既有文案保持一致）。
+// 电文原文不翻（原样透传），本文件只放**我们拼的字**；正则与匹配用的字也不在这里，
+// 它们留在解析器里保持日文原样（`/土砂災害警戒情報/` 这类翻译了就永远匹配不上上游电文）。
+// ja 一栏用官方原词（`大雨警報` / `土砂災害警戒情報` / `津波警報`），其余语言才是译名。
 // ============================================================================
 
 const EVENTS = {
@@ -2415,7 +2342,7 @@ const EVENTS = {
     'kind.tsunamiCleared': 'Tsunami forecast cleared',
     'kind.eewCancelledHeadline': 'This warning has been cancelled',
     'scale.prefixMax': 'max ',
-    'scale.prefixEewMax': 'predicted ', 
+    'scale.prefixEewMax': 'predicted ',
     'kind.jmaLandslideInfo': 'Debris-flow warning',
     'kind.jmaFloodForecast': 'River flood forecast',
     'kind.jmaHeavyRain': 'Heavy rain warning',
@@ -2460,23 +2387,13 @@ const EVENTS = {
 // ============================================================================
 // dsh-quake-alert · client/src/00h-texts-reasons.js
 //
-// 作用：**匹配层与流水线自己写下的原因文案**的四语表——「未命中：…」那一串、
-//       「本条为震源情报，无震度数据…」这类判不了时的说明、静默时段抑制说明等。
-// 内容：REASONS（四种语言各一份，键集必须完全一致）。
-// 依赖：无（纯数据）。
+// 作用：匹配层与流水线自己写下的原因文案的四语表——「未命中：…」那一串、判不了时的说明、
+//       静默时段抑制说明等，进履历条目的「说明」字段。
+// 内容：REASONS（四种语言各一份，键集必须完全一致，见 00-i18n 的校验）。纯数据，无依赖。
 //
-// 为什么要有这个文件（0.9.4）：
-//   用户实测的原话最能说明问题——"特别是（未命中：取消 / 解除消息，且此前未提醒过该事件）
-//   这句，或者说最主要的就是这句，这很明显不是电文内容吧"。
-//   这些字**全部是我们自己写的**（不是任何电文里的字），却写死在 06-matcher / 11-pipeline 里，
-//   0.9.0〜0.9.3 一直登记为"解析层不翻"。现在撤销那条决定：我们写的字跟界面语言走。
-//
-// 与本文件相邻的边界（别混进来）：
-//   · 上游电文原文（JMA 的 `注意報を解除します`、USGS 的地名、NWS 的官方事件名）**不翻**，
-//     它们由各自的解析器原样透传——用户明确要求"电文原文是什么语言就用什么语言"。
-//   · 取数层（12b〜12e / 05g）的连接与降级说明（「久无连接，正在重连」这类）是**另一批**，
-//     它们进的是侧边栏状态与诊断快照，本次未动（见 CHANGELOG 的同条说明）。
-//   · 正则匹配用的字不许动（`/注意報に切り替え/` 之类）；本文件只放**取词**。
+// 这些字全部是我们自己写的，跟界面语言走；上游电文原文（JMA 的 `注意報を解除します`、
+// USGS 的地名、NWS 的官方事件名）不翻，由各自的解析器原样透传。
+// 正则匹配用的字不许动（`/注意報に切り替え/` 之类），本文件只放取词。
 // ============================================================================
 
 const REASONS = {
@@ -2552,7 +2469,7 @@ const REASONS = {
     'reason.quietNoRedPierce': '（未开启红色等级穿透）',    'reason.quietHoursDetail': '当前处于静默时段',
     'reason.otherTab': '其它 DSH 标签页已提醒',
     'reason.otherTabDetail': '其它 DSH 标签页已提醒同一条',
-    'reason.authoritySuppressed': '{source} 已播报同一事件，本条（{mine}）按权威源规则只计数、不进历史',
+    'reason.authoritySuppressed': '{source} 已播报同一事件，本条（{mine}）按优先源规则只计数、不进历史',
     'reason.placeUnnamed': '未命名',
     // —— 历史条目上的后缀（用户点名的那一句就在这儿）——
     'hist.missSuffix': '（未命中：{reason}）',
@@ -2624,7 +2541,7 @@ const REASONS = {
     'reason.quietHoursDetail': '目前處於靜默時段',
     'reason.otherTab': '其它 DSH 分頁已提醒',
     'reason.otherTabDetail': '其它 DSH 分頁已提醒同一則',
-    'reason.authoritySuppressed': '{source} 已播報同一事件，本則（{mine}）依權威源規則只計數、不進歷史',
+    'reason.authoritySuppressed': '{source} 已播報同一事件，本則（{mine}）依優先源規則只計數、不進歷史',
     'reason.placeUnnamed': '未命名',
     'hist.missSuffix': '（未命中：{reason}）',
     'hist.hit': '已提醒',
@@ -2695,7 +2612,7 @@ const REASONS = {
     'reason.quietHoursDetail': '現在はサイレント時間帯です',
     'reason.otherTab': '他の DSH タブが通知済み',
     'reason.otherTabDetail': '他の DSH タブが同じ電文を通知済み',
-    'reason.authoritySuppressed': '{source} が同じ事象を通知済みのため、本件（{mine}）は権威源ルールにより計数のみで履歴に入れません',
+    'reason.authoritySuppressed': '{source} が同じ事象を通知済みのため、本件（{mine}）は優先ソースのルールにより計数のみで履歴に入れません',
     'reason.placeUnnamed': '名称未設定',
     'hist.missSuffix': '（未命中：{reason}）',
     'hist.hit': '通知済み',
@@ -2777,58 +2694,40 @@ const REASONS = {
 // ============================================================================
 // dsh-quake-alert · client/src/00-i18n.js
 //
-// 作用：界面语言的唯一入口（DESIGN 11.1 的 0.9.0 本地化）。
-// 内容：语言清单与显示名、BCP 47 回退链、文案表汇总与自校验、t() 取词、setLanguage。
-// 依赖：各 `00x-texts-*.js` 面文件（纯数据，不 import 任何模块）。
+// 作用：界面语言的唯一入口——语言清单与显示名、BCP 47 回退链、文案表汇总与自校验、t() 取词。
+// 依赖：各 `00x-texts-*.js` 文案文件（纯数据，不 import 任何模块）。
 //
-// 设计要点（DESIGN 11.9 / 11.10 的定稿）：
-//   · **值域是插件自己的 BCP 47 清单**（zh-CN / zh-TW / ja / en），不对齐宿主的 zh/en——
-//     宿主那份是界面语言包清单，且 zh 分不出简繁。Host 只校验 BCP 47 形状，白名单在这里。
-//   · **加一种语言 = 这里加一项 + 补一份文案表**。每份面文件都必须覆盖 LANGS 的全部语言，
-//     漏一份、漏一条 key 都会在**模块加载期**抛错（响亮的失败，而不是静默回退成中文）。
-//   · **只翻我们生成的文本**：源侧的 headline / detail / 地名 / kindLabel / 各源 reason
-//     一律原样透传（11.10）。所以 t() 里不该出现源的文本。
-//   · **zh-CN 一栏逐字等于 0.8.2 的界面文案**：默认语言下的输出与本地化之前完全一致，
-//     这样既有回归断言（大量以中文字符串为锚点）继续有效，用户可见行为也没变。
-//
-// t() 取不到 key 时**回显 key 本身**（例如 `settings.watch.title`）。宁可让界面上出现一个
-// 明显的占位符，也不要静默显示空白或退回中文——前者一眼能看出来并被抓进测试。
+// 语言值域是本文件自己的 BCP 47 清单，不对齐宿主的 zh / en（宿主只校验 BCP 47 形状）。
+// 加一种语言 = LANGS 加一项 + LANGUAGE_LABELS 加一项 + 每份文案文件补一栏，三者缺一不可；
+// 漏一份语言或漏一条 key 都在加载期抛错。只翻我们生成的文本，源侧 headline / detail /
+// 地名 / kindLabel / reason 一律原样透传。t() 取不到 key 时回显 key 本身。
 // ============================================================================
 
 
 // ---------- 语言清单（顺序即设置页下拉顺序） ----------
-/** 支持的语言，BCP 47 完整标识。加语言只改这一行 + 补一份表。 */
+/** 支持的语言，BCP 47 完整标识。加语言要同时改 LANGS、LANGUAGE_LABELS 与每份文案表。 */
 const LANGS = ['zh-CN', 'zh-TW', 'ja', 'en'];
 /** 默认语言。也是「配置里的值认不出」时的回退终点。 */
 const DEFAULT_LANGUAGE = 'zh-CN';
-/** 语言显示名：按**该语言自己**的写法（语言选择器不该出现"看不懂自己语言名"的情况）。 */
+/** 语言显示名：按该语言自己的写法（语言选择器里不出现用户看不懂的自己语言名）。 */
 const LANGUAGE_LABELS = { 'zh-CN': '简体中文', 'zh-TW': '繁體中文', ja: '日本語', en: 'English' };
 
 /**
- * 繁体侧的**地区**子标签（小写比较）。脚本子标签 `hant` / `hans` 在 resolveLang 里单独处理，
- * 且**优先于地区**——理由见那里的注释。
- *
- * 为什么要单独一张：中文的"地区变体"不能像 `ja-JP` 那样按主语言匹配——`zh-HK` / `zh-TW` 的
- * 用户要的是**繁体**，而按主语言匹配只会落到清单里第一个 `zh-*`（`zh-CN`）。
- * 那正是"加了繁体却仍然给简体"的静默失败：界面上看不出任何异常，用户只会觉得选错了。
+ * 繁体侧的地区子标签（小写比较）；脚本子标签 `hant` / `hans` 在 resolveLang 里单独处理。
+ * 中文的地区变体不能像 `ja-JP` 那样按主语言匹配：`zh-HK` / `zh-TW` 的用户要繁体，
+ * 而按主语言匹配只会落到清单里第一个 `zh-*`（`zh-CN`），界面上看不出异常。
  */
 const HANT_REGIONS = ['tw', 'hk', 'mo'];
 
 // ---------- 文案表汇总 ----------
-/** 全部面文件。新增一个面（如设置页）时加进来即可。 */
 const PARTS = [CORE, SETTINGS, CONFIG_IO, UNITS, EVENTS, REASONS];
 
 /**
- * 把面文件按语言合并成 `{ lang: { key: text } }`，并当场校验：
- *   ① 每份面文件覆盖了 LANGS 的每一种语言；
- *   ② 每份面文件内部，各语言的 key 集合完全相同（防「漏翻一条」）；
- *   ③ 不同面文件之间没有重复 key（防「后一份悄悄覆盖前一份」）。
- * 任一条不满足就抛错——bundle 装载即失败，比一条悄悄失效的断言更早、更明确。
+ * 把文案文件按语言合并成 `{ lang: { key: text } }`，并当场校验：每份文案文件覆盖 LANGS 的每一种语言、
+ * 内部各语言的 key 集合完全相同、不同文案文件之间没有重复 key。任一条不满足就抛错，装载即失败。
  */
 function mergeParts(parts) {
-  // 每个语言还得有**显示名**（语言下拉的 label）。漏了的话 `LANGUAGE_OPTIONS` 会产出
-  // `{ v: 'ko', label: undefined }`——"加一种语言漏一步"的沉默失败，装载期就把它拦住
-  // （加语言 = LANGS 加一项 + LANGUAGE_LABELS 加一项 + 每份面补一栏，三者缺一不可）。
+  // 每个语言还得有显示名（语言下拉的 label），否则 LANGUAGE_OPTIONS 会产出 label: undefined
   for (const lang of LANGS) {
     if (typeof LANGUAGE_LABELS[lang] !== 'string' || !LANGUAGE_LABELS[lang]) {
       throw new Error('i18n 语言缺显示名（LANGUAGE_LABELS）：' + lang)
@@ -2867,10 +2766,9 @@ const TABLES = mergeParts(PARTS);
 let currentLang = DEFAULT_LANGUAGE;
 
 /**
- * 把任意值解析成清单里的语言（BCP 47 惯例的逐级回退）：
- *   精确匹配（大小写不敏感） → 中文按**脚本 / 地区**分流（`zh-TW` / `zh-HK` / `zh-Hant` → `zh-TW`；
- *   `zh` / `zh-CN` / `zh-SG` / `zh-Hans` → `zh-CN`） → 其它主语言匹配（`ja-JP` → `ja`） → 默认语言。
- * 逐级回退的意义：`zh-HK` 的用户拿到繁体、`ja-JP` 的用户拿到日文，而不是双双掉到默认语言（简体）去。
+ * 把任意值解析成清单里的语言，逐级回退：精确匹配（大小写不敏感）→ 中文按脚本 / 地区分流
+ * （`zh-TW` / `zh-HK` / `zh-Hant` → `zh-TW`，`zh` / `zh-CN` / `zh-SG` / `zh-Hans` → `zh-CN`）
+ * → 其它主语言匹配（`ja-JP` → `ja`）→ 默认语言。
  */
 function resolveLang(value) {
   const raw = String(value === undefined || value === null ? '' : value).trim();
@@ -2879,11 +2777,8 @@ function resolveLang(value) {
   const exact = LANGS.find((l) => l.toLowerCase() === lower);
   if (exact) return exact
   const parts = lower.split('-');
-  // 中文这一支必须先看脚本与地区子标签，再看主语言：清单里有两个 `zh-*`，而主语言匹配只会
-  // 取到第一个（`zh-CN`），繁体用户于是永远拿不到繁体（见 HANT_REGIONS 的说明）。
-  // **脚本优先于地区**（BCP 47）：`zh-Hans-HK` 是"简体字形 + 香港地区"，字形由脚本决定，
-  // 判成繁体是错的（Windows 的「中文(简体, 中国香港特别行政区)」正是这一串）；反过来
-  // `zh-Hant-CN` / `zh-CN-Hant` 也按脚本判成繁体。
+  // 中文这一支必须先看脚本与地区子标签，再看主语言：清单里主语言匹配只取第一个 `zh-*`（简体）。
+  // 且脚本优先于地区：`zh-Hans-HK` 是简体字形 + 香港地区，判成繁体是错的；`zh-Hant-CN` 反之。
   if (parts[0] === 'zh') {
     const subs = parts.slice(1);
     if (subs.indexOf('hant') !== -1) return 'zh-TW'
@@ -2902,13 +2797,11 @@ function setLanguage(value) {
 
 function getLanguage() { return currentLang }
 
-/** 取词。params 用于替换 `{name}`；缺 key 时回显 key 本身（见文件头）。 */
+/** 取词。params 用于替换 `{name}`；缺 key 时回显 key 本身。 */
 function t(key, params) {
   const k = String(key);
   const table = TABLES[currentLang] || TABLES[DEFAULT_LANGUAGE];
-  // 用 `hasOwnProperty` 而不是直接 `table[k]`：key 恰好是 `constructor` / `toString` / `valueOf`
-  // 这类名字时，后者会命中原型链拿到一个函数——"缺 key 回显 key"的承诺不成立，而且带参数时
-  // 会在 `.replace` 上抛 TypeError。项目在 02-storage 的 `own()` 里立过同一条约定。
+  // 用 hasOwnProperty 而不是 `table[k]`：key 恰好叫 `constructor` / `toString` 时会命中原型链。
   let s = Object.prototype.hasOwnProperty.call(table, k) ? table[k] : undefined;
   if (s === undefined) {
     const def = TABLES[DEFAULT_LANGUAGE];
@@ -2931,26 +2824,12 @@ function tableOf(lang) {
 // ============================================================================
 // dsh-quake-alert · client/src/00d-texts-regions.js
 //
-// 作用：日本 47 都道府县的**显示名**表（英文罗马字 + 繁体中文）。
-// 内容：纯数据对象，不 import 任何模块。
-// 依赖：无。
+// 作用：日本 47 都道府县的显示名表（英文罗马字 + 繁体中文），键与 `PREFECTURES[].jp` 一一对应。
+// 内容：PREF_EN、PREF_HANT。纯数据对象，不 import 任何模块。
 //
-// 为什么要单独一份：`01-constants` 的 `PREFECTURES` 只有两个字段——`jp`（匹配用日文全称，
-// P2PQuake 的 pref 就是这个形状）与 `zh`（简体界面显示名）。**匹配永远用 `jp`**，而显示名
-// 是随界面语言变的：日文界面直接用 `jp` 原文，简体用 `zh`，繁体用这里的 `PREF_HANT`，
-// 英文用 `PREF_EN`。
-//
-// 为什么不把英文 / 繁体名塞进 `PREFECTURES`：那个数组的每一项都参与匹配（`PREF_SET` /
-// `PREF_SHORT` 都从它派生），往里加字段等于让"显示"渗进"匹配"的数据结构——0.8.0 把来源分支
-// 显式化时踩过一次同类问题（拿名字形状当判据）。
-//
-// 罗马字按**平文式**（Hepburn 以外交/地图惯用的通行拼法）：`Gifu` / `Hyogo` / `Kochi`，
-// 不使用 `Gihu` / `Hyôgo` 这类带长音的写法——县名在关注列表里要短、要能一眼认出。
-//
-// 繁体名与简体名同形的一条规则：**去掉「都 / 府 / 県」、保留「道」**（`東京都` → `東京`、
-// `京都府` → `京都`、`北海道` → `北海道`），与 `PREFECTURES[].zh` 的做法一致——名字在关注
-// 列表与命中行里出现，短名才读得顺。用字按繁体通行写法（`静岡` → `靜岡`、`広島` → `廣島`、
-// `沖縄` → `沖繩`），不照抄日文汉字：日文汉字是**匹配用**的那一份，不是给人看的那一份。
+// 匹配一律用 `01-constants` 的 `PREFECTURES[].jp`（日文全称），这里只供显示，不能反过来喂匹配。
+// 罗马字按平文式通行拼法（`Gifu` / `Hyogo` / `Kochi`）；繁体名去「都 / 府 / 県」、保留「道」，
+// 字形按繁体通行写法（`静岡` → `靜岡`、`広島` → `廣島`），不照抄日文汉字。
 // ============================================================================
 
 /** 都道府县（日文全称）→ 英文显示名。键与 `PREFECTURES[].jp` 一一对应。 */
@@ -3004,10 +2883,7 @@ const PREF_EN = {
   '沖縄県': 'Okinawa',
 };
 
-/**
- * 都道府县（日文全称）→ 繁体中文显示名。键与 `PREFECTURES[].jp` 一一对应。
- * 用字规则见文件头：去掉「都 / 府 / 県」、保留「道」，字形按繁体通行写法。
- */
+/** 都道府县（日文全称）→ 繁体中文显示名。用字规则见文件头。键与 `PREFECTURES[].jp` 一一对应。 */
 const PREF_HANT = {
   '北海道': '北海道',
   '青森県': '青森',
@@ -3060,12 +2936,8 @@ const PREF_HANT = {
 
 // ============================================================================
 // dsh-quake-alert · client/src/01-constants.js
-//
-// 作用：唯一的常量与默认配置来源（React 依赖也在这里引入）。
-// 内容：震度文案与档位、海啸等级与排序、47 都道府县表、简写→全称映射、
-//       默认配置 DEFAULT_CFG、存储 key、重连参数、历史上限等全部共享常量。
-// 依赖：00-i18n（语言清单与显示名）。
-// 新增常量请优先放这里，避免散落到各功能文件里。
+// 全仓库唯一的常量与默认配置来源：震度档位、海啸等级、47 都道府县表、DEFAULT_CFG、存储 key、
+// 重连参数、历史上限等。依赖 00-i18n、00d-texts-regions。新的共享常量放这里。
 // ============================================================================
 
 const h = React.createElement;
@@ -3074,44 +2946,20 @@ const { useState, useEffect, useRef } = React;
 // ---------- 常量 ----------
 const WS_URL = 'wss://api.p2pquake.net/v2/ws';
 const SANDBOX_URL = 'wss://api-realtime-sandbox.p2pquake.net/v2/ws';
-// 全球地震（0.4.0）：EMSC 的实时推送通道。它是少数提供 WebSocket 的全球地震源
-// （USGS / GDACS 都只有轮询），因此在全球链路上复用与 P2PQuake 相同的连接管理。
 const EMSC_WS_URL = 'wss://www.seismicportal.eu/standing_order/websocket';
 const STORAGE_KEY = 'dsh.quakeAlert.v1';
 const HISTORY_KEY = 'dsh.quakeAlert.history';
-// 源健康记录（0.5.3）：**唯一**一处跨刷新保留的运行时状态。它存的是"某个源的解析在什么时候
-// 因为什么失败了"——蓝点是"用户处理不了、等插件更新"的信号，刷新页面就消失会让它没人看见
-// （DESIGN 11.9 A）。连接状态不在这里：重启即重新建连，旧值没有意义。
+// 源健康记录：**唯一**一处跨刷新保留的运行时状态，存「某个源的解析在什么时候因为什么失败了」。 连接状态不在这里：重启即重新建连，旧值没有意义。
 const HEALTH_KEY = 'dsh.quakeAlert.health';
-/**
- * 「真正播报过的事件」记忆的落盘位置（0.9.4 / C6）。
- *
- * 这份记忆（eventKey → 时间戳，保留 24 小时）此前只在内存里，于是**刷新页面 / 重开标签页**就被
- * 清空：Host 重启后的冷启动回看（USGS 6 小时 / NOAA 24 小时）会把同一场地震重新投递一遍，而
- * 消息级去重（10 分钟）与事件级去重（3 小时）早已过期——同一场地震因此再响一次。同一份记忆
- * 也是"解除能找到此前提醒过的事件"的依据，清空还会让解除退化成无上下文的"某处已解除"。
- */
 const ALERTED_KEY = 'dsh.quakeAlert.alerted';
 const HISTORY_MAX = 30; // 「最近预警」保留条数（内存与设置页展示）
-/**
- * 「最近预警」的时间上限（0.9.4 / D-1）。
- *
- * 设计稿一直写的是「**上限：30 条 + 过去 5 天**，两个条件同时生效、取更严格的」，而代码只实现了
- * 30 条这一半：陈年条目会一直占着那 30 个位置，把它们挤掉的是"更久以前的事"而不是"更新的事"。
- * 5 天的取法：一场灾害的完整过程（预警 → 升级 → 解除）通常在一两天内结束，5 天足够回看；
- * 再久之前的记录对"我现在要不要担心"没有参考价值。时间认不出的条目**不据此丢弃**
- * （宁可留着，也不因为缺字段把用户的数据删掉）。
- */
+// 「最近预警」的时间上限，与 HISTORY_MAX 条数上限同时生效、取更严格的
 const HISTORY_MAX_AGE_MS = 5 * 24 * 60 * 60 * 1000;
 const MAX_WATCH_CITIES = 300; // 关注市区町村上限（防止配置与 UI 被撑爆）
-// 全球关注点上限：每个点带名字、经纬度与半径，几十个点就足够覆盖"我住哪、家人在哪"，
-// 再多说明用法不对（那是一张地图，不是一份关注列表）。
 const MAX_WATCH_PLACES = 20;
-const RECONNECT_BASE = 1000; // 指数退避起点 1s
+const RECONNECT_BASE = 1000; // 重连间隔递增的起点 1s
 const RECONNECT_MAX = 60000; // 封顶 60s
-// 用户可选的最低震度档位（值 = P2PQuake scale 数值）。
-// 选项的**文字**搬去了 `00e-texts-units.js`（各语言一套），这里只留「值 → 文案 key」：下拉在渲染时
-// 取词，而模块级常量里的文字会在加载那一刻被固化（切语言就不跟着变）。
+// 用户可选的最低震度档位（值 = P2PQuake scale）。labelKey 由渲染时的取词函数解析成各语言文案。
 const SCALE_OPTIONS = [
   { v: 10, labelKey: 'scaleOpt.10' }, { v: 20, labelKey: 'scaleOpt.20' }, { v: 30, labelKey: 'scaleOpt.30' },
   { v: 40, labelKey: 'scaleOpt.40' }, { v: 45, labelKey: 'scaleOpt.45' }, { v: 50, labelKey: 'scaleOpt.50' },
@@ -3123,44 +2971,29 @@ const TSUNAMI_OPTIONS = [
   { g: 'Warning', labelKey: 'tsunamiOpt.Warning' },
   { g: 'MajorWarning', labelKey: 'tsunamiOpt.MajorWarning' },
 ];
-// 全球源（EMSC / USGS）的最低震级。全球目录里 M2.5+ 每天近百条，而用户真正关心的是
-// "我这附近有没有明显晃动"——M4.5 是全球速报的常用门槛，默认取它。
+// 全球源（EMSC / USGS）的最低震级档位，默认取 M4.5
 const GLOBAL_MAG_OPTIONS = [
   { v: 3, labelKey: 'magOpt.3' }, { v: 3.5, labelKey: 'magOpt.3.5' }, { v: 4, labelKey: 'magOpt.4' },
   { v: 4.5, labelKey: 'magOpt.4.5' }, { v: 5, labelKey: 'magOpt.5' }, { v: 5.5, labelKey: 'magOpt.5.5' },
   { v: 6, labelKey: 'magOpt.6' }, { v: 6.5, labelKey: 'magOpt.6.5' }, { v: 7, labelKey: 'magOpt.7' },
 ];
-// 大陆**地震速报**（cenc_eqlist）的最低震级。与预警分开的原因见 DESIGN 8.4：速报覆盖低到 M2.5，
-// 用预警阈值播报会被小震频繁打扰；而它又是 EEW 稀少时的唯一补报通道，所以两把旋钮而不是一把。
-// 档位比 GLOBAL_MAG_OPTIONS 少一档低值（M3.0）——大陆速报的取舍区间在 3.5–6.0。
+// 大陆速报（cenc_eqlist）的独立门槛：速报覆盖低到 M2.5，不与预警共用
 const CN_REPORT_MAG_OPTIONS = [
   { v: 3.5, labelKey: 'magOpt.3.5' }, { v: 4, labelKey: 'magOpt.4' },
   { v: 4.5, labelKey: 'magOpt.4.5' }, { v: 5, labelKey: 'magOpt.5' },
   { v: 5.5, labelKey: 'magOpt.5.5' }, { v: 6, labelKey: 'magOpt.6' },
 ];
 
-// ---------- 关注点半径（0.5.0 / DESIGN 9.2） ----------
-// 用语义标签而不是裸数字：普通用户不必理解"公里"，想精确控制的人有「自定义」这个出口。
-// 「本市及周边 100km」是**新建关注点**的默认值（旧值 300km 是为震中距设计的，
-// 套在城市上会把邻省地震也算进来）。既有配置里的 radiusKm 一律不动——
-// 静默把用户配好的半径从 300 改成 100 会让提醒变窄，那是漏报方向的变化。
+// ---------- 关注点半径 ----------
 const RADIUS_PRESETS = [
   { v: 30, labelKey: 'radius.30' },
   { v: 100, labelKey: 'radius.100' },
   { v: 300, labelKey: 'radius.300' },
 ];
-/** 新建关注点的默认半径（既有配置不动，见上）。 */
+// 新建关注点的默认半径；既有配置里的 radiusKm 一律不动
 const DEFAULT_PLACE_RADIUS_KM = 100;
-/**
- * 缺半径时的兜底半径（0.9.4 / P3-37）：**比默认值宽**，而且是刻意的。
- *
- * 关注点来自旧配置 / 手工改过的 JSON 时可能没有 `radiusKm`。兜底取 100（界面上的默认值）看着
- * 更整齐，但那会把用户已经配好的监控范围**收窄**——收窄的直接后果是漏报，而本项目的取向一贯是
- * "宁可多响一次也不漏报"。所以这个值单独命名（`numOr` 的兜底不再是魔法数字 300），
- * 语义上它是"旧条目的兜底"，不是"新条目的默认"。
- */
+// 关注点缺 radiusKm 或值非法时的兜底：取比默认值宽的 300，避免收窄用户已配好的监控范围
 const LEGACY_PLACE_RADIUS_KM = 300;
-/** 半径上下限，与 Host schema / normalizeCfg 的 1–2000 保持一致。 */
 const MIN_PLACE_RADIUS_KM = 1;
 const MAX_PLACE_RADIUS_KM = 2000;
 
@@ -3180,10 +3013,7 @@ const PREFECTURES = [
   ['宮崎県', '宫崎'], ['鹿児島県', '鹿儿岛'], ['沖縄県', '冲绳'],
 ].map(([jp, zh]) => ({ jp, zh }));
 const PREF_SET = new Set(PREFECTURES.map((p) => p.jp));
-// 都道府県コード → 都道府県名。PREFECTURES 的顺序就是 JIS 码 01..47（01 北海道 … 47 沖縄県），
-// 気象庁电文里的区域码前两位正是都道府県码：细分区 宗谷北部=011011、市町村 北九州市=4010000。
-// 判县因此优先用 code 而不是名称——名称有 25 例同名跨县（伊達市 北海道/福島県、川崎町 宮城県/福岡県…），
-// 且已改制的旧名会把历史电文里的区域认到别的县（福岡県「那珂川町」曾落到栃木県那珂川町）。
+// PREFECTURES 的顺序就是 JIS 码 01..47，而気象庁电文的区域码前两位正是都道府県码。 判县优先用 code 而不是名称：名称有 25 例同名跨县（伊達市 北海道/福島県），已改制的旧名也会认错。
 const PREF_BY_CODE = {};
 PREFECTURES.forEach((p, i) => { PREF_BY_CODE[String(i + 1).padStart(2, '0')] = p.jp; });
 /** 区域码 → 都道府県名（取前两位；认不出返回空字符串）。 */
@@ -3193,18 +3023,12 @@ function prefOfCode(code) {
   const hit = PREF_BY_CODE[s.slice(0, 2)];
   return hit || ''
 }
-/** 都道府県名 → 2 位都道府県码（认不出返回空字符串）。测试电文按关注地区构造时用。 */
+/** 都道府県名 → 2 位都道府県码（认不出返回空字符串）。 */
 function prefCodeOf(pref) {
   const i = PREFECTURES.findIndex((p) => p.jp === pref);
   return i === -1 ? '' : String(i + 1).padStart(2, '0')
 }
-// 都道府県简写 → 全称：551 的 points[].pref 通常是全称，但实测直播数据里出现过「京都」
-// 这类简写，不归一就会与用户勾选的「京都府」永不相等（静默漏报）。
-//
-// 0.9.4（P3-38）：**北海道不能这样削后缀**。`/[都道府県]$/` 会把「北海道」削成「北海」——
-// 那不是一个地名，却成了一条简写映射；更糟的是 04-city-table 会用它给北海道的**每个**市町村
-// 造一个「北海○○市」的别名（"北海札幌市"这种根本不存在的写法），alias 索引里塞进上百条
-// 幻影条目。真正需要削后缀的只有 県 / 都 / 府（「北海道」是唯一的 道，本身就是全称）。
+// 都道府県简写 → 全称：源里的 pref 多半是全称，但出现过「京都」这类简写，不统一成全称就会与用户 勾选的「京都府」永不相等（静默漏报）。只削 県 / 都 / 府——「北海道」本身就是全称。
 const PREF_SHORT = {};
 for (const p of PREFECTURES) {
   const short = p.jp.replace(/[都府県]$/, '');
@@ -3216,17 +3040,7 @@ function normalizePref(raw) {
   return Object.prototype.hasOwnProperty.call(PREF_SHORT, s) ? PREF_SHORT[s] : s
 }
 
-/**
- * 都道府县的**显示名**（随界面语言变）。
- *
- * `PREFECTURES` 里的 `jp` 是**匹配用的**（P2PQuake 的 `pref` 就是这个形状，`PREF_SET` /
- * `PREF_SHORT` 都从它派生），所以显示不能复用它——`zh` 那一栏只是"简体界面用哪几个字"。
- * 这个函数负责挑出"给人看的那一份"：日文界面用原名，简体界面用 `zh`，繁体界面用 `PREF_HANT`，
- * 英文界面用罗马字（`PREF_EN`）。四种语言都不缺项时，同一条数据在四种语言下各有写法。
- *
- * 认不出的**原样返回**：调用方也会把源里的 `pref` 直接传进来，那里可能是简写或空值，
- * 不该被这里改写（简写归一由 normalizePref 负责，两件事分开）。
- */
+/** 都道府県的**显示名**（随界面语言变）：日文用原名，简体用 PREFECTURES[].zh，繁体用 PREF_HANT， 英文用 PREF_EN；`jp` 那一栏是匹配用的形状，显示不能复用它。认不出的原样返回。 */
 function prefLabelOf(pref) {
   const s = String(pref === undefined || pref === null ? '' : pref).trim();
   if (!s) return ''
@@ -3235,22 +3049,15 @@ function prefLabelOf(pref) {
   const lang = getLanguage();
   if (lang === 'ja') return hit.jp
   if (lang === 'en') return PREF_EN[hit.jp] || hit.jp
-  // 繁体缺项时回退到**日文原名**，与 en 分支同一形态：回退到 `hit.zh` 会在繁体界面里
-  // 静默显示简体县名（同一条列表里两种字形混杂），而原名是"我们没翻译"的显式形态，
-  // 一眼能看出并被抓进断言（0.9.3；当前 47 项齐全，这条只是防"加了县忘补表"）。
+  // 繁体缺项时回退到**日文原名**，与 en 分支同形：回退到 `hit.zh` 会在繁体界面里混进简体字形
   if (lang === 'zh-TW') return PREF_HANT[hit.jp] || hit.jp
   return hit.zh
 }
 
-// ---------- 时间：源时区 → 带偏移的 ISO 8601（DESIGN 第 4 节） ----------
-// 各源给的时间字符串**自己不带时区信息**——P2PQuake 是 JST（"2023/09/05 06:16:32"），
-// 单看字符串完全看不出这是哪里的本地时间。所以解析器负责把它转成带偏移的 ISO 8601
-// （"2023-09-05T06:16:32+09:00"），UI 只按**本地时区**渲染（Intl.DateTimeFormat）。
-// 不做这一步，大陆浏览器上会显示一个比本地时间早 1 小时、且没有任何标注的时间戳。
-// 其余源本身就是绝对时间，无需转换：JMA 的 ReportDateTime 带 +09:00、USGS 是 epoch 毫秒、
-// EMSC 的时间带 Z、NOAA CAP 的 <sent> 带偏移。
-// 历史记录里的**旧数据**没有偏移（0.4.1 之前写入的），一律按 JST 解释——旧数据只可能来自
-// P2PQuake 这一条链路（见 issuedToDate）。
+// ---------- 时间：源时区 → 带偏移的 ISO 8601 ----------
+// P2PQuake 与 Wolfx 给的时间串**自己不带时区**，解析器负责补成带偏移的 ISO 8601，UI 只按本地
+// 时区渲染；其余源本身是绝对时间（JMA 带 +09:00、USGS 是 epoch 毫秒、EMSC 带 Z、NOAA 的 <sent>
+// 带偏移）。历史里带不了偏移的旧数据一律按 JST 解释。
 const P2P_TZ_OFFSET = '+09:00';
 const P2P_TIME_RE = /^(\d{4})\/(\d{2})\/(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?$/;
 /** P2PQuake 的裸 JST 时间串 → 带 +09:00 偏移的 ISO 8601；认不出时**原样返回**（绝不丢信息）。 */
@@ -3263,10 +3070,7 @@ function p2pTimeToIso(raw) {
   return m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] +
     (ms ? '.' + ms : '') + P2P_TZ_OFFSET
 }
-// ---------- 大陆源：中国标准时间（CST，UTC+8，无夏令时） ----------
-// Wolfx 的 `cenc_eew` / `cenc_eqlist` 给的是裸北京时间，形如 `2026-09-18 20:50:23`——与 P2PQuake
-// 的 `2023/09/05 06:16:32` **只有分隔符不同**，光看字符串完全无法区分是 JST 还是 CST（DESIGN 4.5）。
-// 所以同样由解析器补偏移，UI 只按本地时区渲染。中国全境单一时区、无夏令时，偏移恒为 +08:00。
+// Wolfx 的 cenc_eew / cenc_eqlist 给的是裸北京时间，与中国全境单一时区、无夏令时，偏移恒为 +08:00
 const CN_TZ_OFFSET = '+08:00';
 const CN_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?$/;
 /** 大陆源的裸北京时间串 → 带 +08:00 偏移的 ISO 8601；认不出时**原样返回**（绝不丢信息）。 */
@@ -3279,9 +3083,7 @@ function cnTimeToIso(raw) {
   return m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] +
     (ms ? '.' + ms : '') + CN_TZ_OFFSET
 }
-/** 时间串 → Date：裸 JST（P2PQuake）/ 裸北京时间（Wolfx）分别按各自偏移解释，其余交给 Date。
- *  两个源的时间串**看起来只差分隔符**，所以这里是按各自的正则分别补偏移，不能只判一种。
- *  漏掉大陆源那一支会让历史详情里的时间差 1 小时（且没有任何标注）。 */
+/** 时间串 → Date。JST 串与北京串看起来只差分隔符，所以按各自的正则分别补偏移，不能只判一种。 */
 function issuedToDate(raw) {
   const s = String(raw === undefined || raw === null ? '' : raw).trim();
   if (!s) return null
@@ -3300,85 +3102,53 @@ function formatIssuedLocal(raw) {
   } catch (err) { return d.toISOString() }
 }
 
-// ---------- 界面语言（0.8.1 立契约，0.9.0 由 00-i18n 提供） ----------
-// 选项**从 00-i18n 的语言清单派生**，不在这里另写一份：加一种语言只改 00-i18n 的 LANGS
-// 与 LANGUAGE_LABELS、再补一份文案表，配置契约（DEFAULT_CFG → normalizeCfg → Host schema）
-// 一行都不用动。值用 BCP 47 的完整标识（zh-CN / zh-TW / ja / en）。
+// ---------- 界面语言 ----------
+// 选项从 00-i18n 的语言清单派生：加一种语言只改 00-i18n 与文案表，配置契约一行都不用动
 const LANGUAGE_OPTIONS = LANGS.map((v) => ({ v, label: LANGUAGE_LABELS[v] }));
 
 const DEFAULT_CFG = {
   version: 1,
   source: 'prod', // prod | sandbox（沙箱回放 2023 年历史，约30秒/条，测试用）
-  // 大陆源的**链路选择**（0.5.0）：auto = SSE 优先、走不通自动降级为轮询；
-  // poll = 用户强制轮询。给出口的理由见 DESIGN 11.5——某些网络下长连接会被中间设备掐掉，
-  // 而"自动降级"判不出的那几种（能连上、偶尔漏、但整体像坏的）需要一个手动出口。
+  // auto = SSE 优先、走不通自动降级为轮询；poll = 用户强制轮询
   cnTransport: 'auto',
-  // 两种关注模式并存：
-  //   · 行政区（prefectures / cities）——日本源（P2PQuake、気象庁）用，粒度到市区町村
-  //   · 坐标点（places）——全球源（EMSC / USGS / NOAA）用，判定方式是「震中距 ≤ radiusKm」
-  // 两者互不影响：日本用户不用配 places，全球用户不用配 prefectures。
+  // 两种关注模式并存，互不影响（日本用户不用配 places，全球用户不用配 prefectures）： · 行政区（prefectures / cities）——日本源用，粒度到市区町村 · 坐标点（places）——全球源用，判定「震中距 ≤ radiusKm」
   watch: { prefectures: [], cities: [], places: [] },
   disasters: { earthquake: true, tsunami: true, weather: true, cnRainstorm: true, cnGeology: true, overseasWeather: true }, // weather = 日本气象灾害（泥石流 / 洪水 / 大雨 / 高潮…），固定 L4 以上播报；cnRainstorm / cnGeology = 中国大陆气象灾害（0.5.2），固定橙色以上播报；overseasWeather = 海外气象灾害（0.6.0，美国 NWS + 加拿大 ECCC），一个开关覆盖两个"按关注点生效"的源
-  // globalMagnitude：全球源（EMSC / USGS）的最低震级。日本源用的是震度（quakeScale），
-  // 全球源只有震级——实测 EMSC 会推 M3.8 级别的事件，若沿用"来什么报什么"会明显吵闹。
-  // cnReportMagnitude：大陆**速报**（cenc_eqlist）的独立震级门槛。大陆地震预警（cenc_eew）与
-  // 全球源共用 globalMagnitude（DESIGN 8.4）——它同样是"只有震级、没有分区烈度"的坐标型源。
+  // globalMagnitude：全球源（EMSC / USGS）的最低震级；cnReportMagnitude：大陆速报的独立门槛 （大陆地震预警与全球源共用 globalMagnitude——同样是"只有震级、没有分区烈度"的坐标型源）
   thresholds: {
     quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch',
     globalMagnitude: 4.5, cnReportMagnitude: 4.5,
   },
   notify: { sound: true, system: true, volume: 0.7, soundQuake: true, soundTsunami: true, soundWeather: true },
   dedupe: { windowMinutes: 10 },
-  // 静默时段（0.2.0）：按浏览器本地时间判定；跨午夜用 start > end 表示（如 23:00–07:00）
+  // 静默时段：按浏览器本地时间判定；跨午夜用 start > end 表示（如 23:00–07:00）
   quietHours: { enabled: false, start: '23:00', end: '07:00', breakForSevere: true },
-  // 界面语言（0.8.1 先立字段，本地化在 0.9.0）。**放在末尾是有意的**：Host schema 的字段顺序
-  // 也要跟着一致——那条"Host 默认值与 Client DEFAULT_CFG 完全一致"的断言是 JSON.stringify
-  // 全量比较，顺序不同就会红。
+  // 界面语言。**必须留在末尾**：Host schema 的字段顺序要与此一致——"Host 默认值与 Client DEFAULT_CFG 完全一致"的断言是 JSON.stringify 全量比较，顺序不同就会红。
   language: 'zh-CN',
 };
 
 // ============================================================================
 // dsh-quake-alert · client/src/02-storage.js
-//
-// 作用：浏览器侧存储层——localStorage 读写与配置归一化。
-// 内容：JSON 安全读写、isPlainObject/numOr/boolOr/timeOr 等类型守卫、
-//       normalizeCfg（任何脏输入都归一成一份合法配置）、loadCfg/saveCfg、
-//       历史记录的字段规整（normalizeHistoryEntry / loadHistory）。
-// 依赖：01-constants。
+// 浏览器侧存储层：localStorage 读写、类型守卫（isPlainObject / numOr / boolOr / timeOr）、
+// 配置规整 normalizeCfg、loadCfg / saveCfg、历史记录规整。
+// 依赖 01-constants、00-i18n。读到的内容一律做类型校验，任何异常退回默认值。
 // ============================================================================
 
 
 // ---------- 存储（localStorage） ----------
-// 读入的数据可能被旧版本、其它脚本或用户手工改坏。所有读入都做类型校验，
-// 任何异常都退回默认值——一条脏数据绝不能把整个插件拖崩（曾因 history 非数组
-// 触发 loadJSON(...).slice is not a function，导致模块加载失败、设置页与连接全部消失）。
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
-/**
- * 历史条目是否还在「过去 5 天」里（0.9.4 / D-1，见 HISTORY_MAX_AGE_MS）。
- *
- * **以这条记录的写入时刻（`at`）为准**，不是电文的发布时刻（`issued`）。两个理由：
- *  ① 设计稿的用意是"防陈年条目占位"——占位的是**已经躺在列表里**的那些记录，所以计时从落笔开始；
- *  ② 用 `issued` 会让"历史里还有哪些条目"取决于今天几号，而本项目的回归明确要求断言不依赖当天
- *     日期（0.6.1 修过一条同类断言）。落笔时刻由我们自己写，测试可以注入，行为确定。
- * 老记录（0.9.4 之前写的）没有 `at`，退回按 `issued` 判一次——那正是这次要清掉的历史；
- * 两者都认不出时**保留**（宁可留一条说不清时间的记录，也不因为缺字段把用户的历史删掉）。
- */
+/** 历史条目是否还在「过去 5 天」里。判据是记录的**写入时刻**（`at`），不是电文的发布时刻
+ *（占位的是已经躺在列表里的记录，计时从落笔开始）；老记录没有 `at` 时退回按 `issued` 判一次，
+ *  两者都认不出时**保留**（不因为缺字段删用户的数据）。 */
 function withinHistoryAge(e, now) {
-  // `at > 0` 才算"有写入时刻"：归一化会给老条目补 `at: 0`（表示不知道），那一支要退回 issued
+  // `at > 0` 才算"有写入时刻"：规整时会给老条目补 `at: 0`（表示不知道），那一支要退回 issued
   const written = (e && typeof e.at === 'number' && Number.isFinite(e.at) && e.at > 0) ? e.at : NaN;
   if (Number.isFinite(written)) return (now - written) <= HISTORY_MAX_AGE_MS
   const issued = Date.parse(String((e && e.issued) || ''));
   if (Number.isFinite(issued)) return (now - issued) <= HISTORY_MAX_AGE_MS
   return true
 }
-/**
- * 数值归一：夹取到 [min,max]，类型不符时回退默认值。
- *
- * 0.9.4：**数字字符串也当数值**（`"100"` → 100）。此前只认 `typeof v === 'number'`，于是一份
- * 把数字写成字符串的配置（手工改过的 JSON、别的工具生成的）会让 `radiusKm: "100"` 静默变成
- * 默认的 **300 km** —— 不是"保守取值"而是把半径放大 3 倍，用户看到的是"提醒的区域莫名变大了"。
- * 夹取语义没变：越界仍然夹到边界。
- */
+/** 数值规整：夹取到 [min,max]，类型不符时回退 fallback。**数字字符串也当数值**（`"100"` → 100）， 否则把数字写成字符串的配置会让 `radiusKm: "100"` 静默退回兜底的 300 km，反而放大半径。 */
 function numOr(v, fallback, min, max) {
   let n = v;
   if (typeof n === 'string' && n.trim() !== '') n = Number(n);
@@ -3395,8 +3165,7 @@ const minutesOfTime = (v) => {
   const m = TIME_RE.exec(String(v === undefined || v === null ? '' : v).trim());
   return m ? Number(m[1]) * 60 + Number(m[2]) : null
 };
-// 静默时段判定。start > end 表示跨午夜（23:00–07:00）；start === end 视为「不静默」。
-// now 可注入，便于回归测试覆盖边界而不依赖运行时刻。
+// 静默时段判定：start > end 表示跨午夜（23:00–07:00），start === end 视为「不静默」。 now 可注入，便于测试覆盖边界而不依赖运行时刻。
 function inQuietHours(cfg, now) {
   const q = cfg && cfg.quietHours;
   if (!q || q.enabled !== true) return false
@@ -3421,41 +3190,29 @@ function loadJSON(key, fallback) {
 function saveJSON(key, value) {
   try { window.localStorage.setItem(key, JSON.stringify(value)); } catch (err) { /* 容量/隐私模式忽略 */ }
 }
-// 历史记录必须是「对象数组」，且每个字段必须是渲染层能直接交给 React 的基本类型：
-// 元素为 null 会抛错；字段是对象/数组则会让 React 抛「Objects are not valid as a React child」。
+// 历史记录必须是「对象数组」，且每个字段都必须是渲染层能直接交给 React 的基本类型： 元素为 null 会抛错，字段是对象/数组会让 React 抛「Objects are not valid as a React child」。
 const strOr = (v, fallback) => (typeof v === 'string' ? v : (typeof v === 'number' || typeof v === 'boolean' ? String(v) : fallback));
-/**
- * 历史条目里正文的保留上限（0.6.1）。
- *
- * `detail` 是解析层给出的官方正文（NWS 的 description + instruction；ECCC 的正文 + 署名），
- * 展开条目时给用户看"该怎么做"。必须截断：历史最多 30 条、写进 localStorage，
- * NWS 的 description + instruction 单条实测可达数 KB，不设上限会让这条 key 轻易撑爆配额
- *（超配额时 saveJSON 是**静默失败**的，整份历史会停止落盘）。
- */
+// 历史条目里 `detail` 正文的保留上限。正文是解析层给的官方长文（NWS 的 description + instruction、 ECCC 的正文 + 署名），单条可达数 KB； 历史最多 30 条且写进 localStorage，
+// 不截断会撑爆配额， 而超配额时 saveJSON 是**静默失败**的，整份历史会停止写入本地存储。
 const HISTORY_DETAIL_MAX = 1200;
 function normalizeHistoryEntry(e, i) {
   const key = strOr(e.key, '') || strOr(e.id, '');
   return {
     key: key || 'legacy-' + i, // 早期版本可能没有 key，补一个稳定兜底键，保证 React key 与去重都可用
     id: strOr(e.id, ''),
-    // code：区分来源用（'emsc'/'usgs'/'noaa'/'jma'/551…）。只看 kind 会把全球地震
-    // （kind 也是 'quake'）标成「code 551」——与 0.3.2 修过的"气象条目被标成 code 551"同类。
-    // 旧历史条目没有这个字段 → 空串，展示层回退到 kind 映射。
+    // code 是来源标识（'emsc'/'usgs'/'noaa'/'jma'/551…）：只看 kind 会把全球地震 （kind 也是 'quake'）标成「code 551」。旧条目没有它 → 空串，展示层回退到 kind 映射。
     code: strOr(e.code, ''),
     kind: strOr(e.kind, ''),
     label: strOr(e.label, ''),
     severity: strOr(e.severity, ''),
     issued: strOr(e.issued, ''),
     headline: strOr(e.headline, ''),
-    // 官方正文（0.6.1）：NWS 的 description + instruction / ECCC 的正文 + 署名。
-    // 旧条目没有这个字段 → 空串，展示层不渲染那一行。
     detail: strOr(e.detail, '').slice(0, HISTORY_DETAIL_MAX),
     pref: strOr(e.pref, ''),
     hit: e.hit === true,
     suppressed: e.suppressed === true,
     suppressedReason: strOr(e.suppressedReason, ''),
-    // 写入时刻（0.9.4 / D-1）：历史保留的"过去 5 天"以它为准（见 withinHistoryAge）。
-    // 老条目没有它 → 0（表示"不知道"，此时退回按 issued 判一次）。
+    // 写入时刻：历史保留的「过去 5 天」以它为准（见 withinHistoryAge）；老条目 → 0 表示不知道
     at: (typeof e.at === 'number' && Number.isFinite(e.at)) ? e.at : 0,
   }
 }
@@ -3468,54 +3225,29 @@ function loadHistory(nowMs) {
     .slice(0, HISTORY_MAX)
     .map(normalizeHistoryEntry)
 }
-// 每次都返回全新对象：避免调用方改动嵌套字段时污染 DEFAULT_CFG 常量。
-// 由 DEFAULT_CFG **深拷贝派生**（而不是手抄字段清单）：freshCfg 是 settingsOpsFor 判断
-// "某字段是否等于默认值"的唯一基准，手抄的话以后给 DEFAULT_CFG 加字段而漏改这里，
-// 新字段会被永久判为"非默认"，永远写进 settings.yaml 而永不 unset。
+// 每次都返回全新对象，避免调用方改动嵌套字段时污染 DEFAULT_CFG；深拷贝派生而不是手抄字段清单， 因为 freshCfg 是 settingsOpsFor 判断「某字段是否等于默认值」的唯一基准（漏抄的字段永不 unset）。
 const cloneCfg = (v) => (Array.isArray(v)
   ? v.map(cloneCfg)
   : (isPlainObject(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, cloneCfg(x)])) : v));
 const freshCfg = () => cloneCfg(DEFAULT_CFG);
-// 全球关注点：[{ name, lat, lon, radiusKm, origin }]。坐标必须落在合法范围——脏数据里的 NaN 或
-// 越界值会让距离计算得出无意义的结果，表现为"看起来配好了却永远不提醒"（静默漏报）。
-// 半径夹在 1–2000 km；同一个点重复添加是常见操作，按经纬度（三位小数）去重。
-/**
- * 关注点的**来源分支**（0.8.0 / DESIGN 9.3）。
- *
- * 取值 jp / cn / global。它回答"这个关注点是在哪个国家的分支下加的"，两个消费者：
- * ① 3.4 的跨源权威源据此判断权威源；② 06-matcher 的大陆气象（行政区层级）匹配据此挑出
- * 参与匹配的大陆关注点（0.8.2 / DESIGN 11.9 B——此前那边是"名字里有没有 `·`"，手填坐标
- * 只要名字带 `·` 就会被算成大陆点）。诊断快照里也要能看到（判错时第一个要核的就是
- * "这个点被算作了谁的分支"）。
- *
- * **老配置没有这个字段，不能因此判它非法**——那等于把用户攒下的关注点整条丢掉。缺失时按
- * **名称形状推导**：设置页的「中国大陆」级联产出的名字恒为「省·市」（见 04-city-table 的
- * cnPlaceOf，用 U+00B7 分隔以免两个省的"城区"撞名），其余（手填坐标、「用我的位置」、
- * 将来的全球城市）都是 'global'。推导只在字段缺失时发生，写回配置后即固定。
- */
+// 全球关注点：[{ name, lat, lon, radiusKm, origin }]。经纬度只接受合法范围——格式不合法的数据里的 NaN 或越界值 会让距离计算得出无意义的结果，表现为"看起来配好了却永远不提醒"。半径夹在 1–2000 km； 按经纬度（三位小数）去重。
+/** 关注点的**来源分支**：jp / cn / global，回答"这个点是在哪个国家的分支下加的"。消费者：跨源归并 判断优先源、大陆气象（行政区层级）匹配挑出大陆关注点、诊断快照。老配置没有这个字段，
+ *   缺失时按 **名称形状推导**（设置页「中国大陆」级联产出的名字恒为「省·市」，见 04-city-table 的 cnPlaceOf）， 其余为 'global'。 */
 const PLACE_ORIGINS = { jp: true, cn: true, global: true };
 function placeOriginOf(p, name) {
   const raw = String((p && p.origin) || '');
   if (own(PLACE_ORIGINS, raw)) return raw
   return String(name || '').indexOf('·') > 0 ? 'cn' : 'global'
 }
-/**
- * @param {object[]} list
- * @param {{ total?: number, dropped?: number, radiusFixed?: number }} [audit]
- *   0.9.4 加的**体检账本**（可选）：normalizePlaces 的契约是"任何脏输入都归一成合法配置"，
- *   也就是**静默**丢弃非法条目。那对 localStorage 里的历史数据是对的（不能因为一条脏数据
- *   就让整份配置失效），但对"导入一份配置"这个动作不对：用户看到"已导入配置。"，实际少了
- *   一半关注点，而配置里、界面里、诊断里都看不出来——数据丢失方向且无任何反馈。
- *   传了 audit 就顺手记下"总共几条 / 丢了几条 / 几条的半径不是数值"，供界面如实说明。
- */
+/** @param {{ total?: number, dropped?: number, radiusFixed?: number }} [audit] 可选的**检查清单**： 本函数的契约是静默丢弃非法条目（
+ *   对 localStorage 里的数据是对的），但"导入一份配置"时需要 如实说明少了什么，传了 audit 就记下"总共几条 / 丢了几条 / 几条的半径不是数值"。 */
 function normalizePlaces(list, audit) {
   const out = [];
   const seen = new Set();
   for (const p of list) {
     if (audit) audit.total += 1;
     if (!isPlainObject(p)) { if (audit) audit.dropped += 1; continue }
-    // 用显式范围判断而不是 numOr：numOr 对越界值是**夹取**，而经纬度越界意味着这份数据本身
-    // 是坏的（例如把半径填进了纬度列）。夹到边界会造出一个"看起来合法"的错误关注点。
+    // 用显式范围判断而不是 numOr：numOr 对越界值是**夹取**，而经纬度越界意味着数据本身是坏的 （例如把半径填进了纬度列），夹到边界会造出一个"看起来合法"的错误关注点。
     const lat = (typeof p.lat === 'number' && Number.isFinite(p.lat) && Math.abs(p.lat) <= 90) ? p.lat : null;
     const lon = (typeof p.lon === 'number' && Number.isFinite(p.lon) && Math.abs(p.lon) <= 180) ? p.lon : null;
     if (lat === null || lon === null) { if (audit) audit.dropped += 1; continue }
@@ -3524,8 +3256,7 @@ function normalizePlaces(list, audit) {
     seen.add(key);
     const name = strOr(p.name, '').slice(0, 30).trim() || (lat.toFixed(2) + ', ' + lon.toFixed(2));
     const origin = placeOriginOf(p, name);
-    // 半径"不是数值"（缺失 / null / true / 乱字符串）时 numOr 会退回 300；数字字符串是合法的
-    // （0.9.4 起 numOr 接受它），所以这里只在真正回退时记账。
+    // 半径"不是数值"（缺失 / null / true / 乱字符串）时 numOr 会退回兜底值；数字字符串是合法的， 所以只在真正回退时记账。
     const radiusOk = (typeof p.radiusKm === 'number' && Number.isFinite(p.radiusKm)) ||
       (typeof p.radiusKm === 'string' && p.radiusKm.trim() !== '' && Number.isFinite(Number(p.radiusKm)));
     if (audit && !radiusOk) audit.radiusFixed += 1;
@@ -3533,16 +3264,11 @@ function normalizePlaces(list, audit) {
       name,
       lat,
       lon,
-      // 半径用统一常量（0.9.4 / P3-37）：这里此前硬编码 `300, 1, 2000`，而 01-constants 已经导出了
-    // DEFAULT_PLACE_RADIUS_KM / MIN_PLACE_RADIUS_KM / MAX_PLACE_RADIUS_KM —— 设置页按常量渲染
-    // 档位、归一化按硬编码夹取，两边一改一不改就会出现"界面允许 100、存进去变成 300"这类错位。
-    // 注意默认值取 MIN/MAX 与默认半径三个常量，而不是"默认半径当兜底"：兜底值就是默认半径。
+    // 半径走 01-constants 的统一常量，与设置页渲染档位、Host schema 的 1–2000 保持一致
     radiusKm: numOr(p.radiusKm, LEGACY_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM),
       origin,
     };
-    // 大陆关注点的省 / 市（0.8.2 / DESIGN 11.9 B）：显式落在 place 上，matcher 与诊断不再从
-    // 「省·市」这个名字反推。老配置（0.8.1 及以前）只有名字，这里**迁移一次并固化**——名字形状
-    // 已经是 `placeOriginOf` 判 'cn' 的依据，所以这一步不会改变既有归属，只是把结论写下来。
+    // 大陆关注点的省 / 市：显式落在 place 上，matcher 与诊断不再从「省·市」这个名字反推； 老配置只有名字，这里从名字拆一次并固化。
     if (origin === 'cn') {
       let province = strOr(p.province, '').slice(0, 20).trim();
       let city = strOr(p.city, '').slice(0, 20).trim();
@@ -3563,21 +3289,11 @@ function normalizePlaces(list, audit) {
   }
   return out
 }
-// 逐字段校验 + 回退默认值：任何形状的输入都归一成一份合法配置
-// audit（0.9.4，可选）：关注点体检账本，见 normalizePlaces。只有导入路径会传它。
-/**
- * 数值归一 + **吸附到最近的合法档位**（0.9.4 / PD-2，产品决策）。
- *
- * 机器级配置（`settings.yaml` / profile 条目）可以被手工改成任意数字：`quakeScale: 42` 此前会
- * 原样进入配置，而界面上只有 5 的倍数档——下拉选不中它、显示会错位，用户也说不清当前阈值是多少。
- * Host schema 只校验范围（改成严格枚举会让脏值**注册失败**，比现状更糟，DESIGN 11.9 #2 已排除），
- * 所以"就近对齐"放在 Client 这一步：先按既有语义夹到 [min,max]，再吸附到最近的档位。
- * 档位清单直接取界面用的那份（SCALE_OPTIONS / *_MAG_OPTIONS），不另抄一套。
- */
+// 数值规整 + **吸附到最近的合法档位**：机器级配置可以被手工改成任意数字（`quakeScale: 42`），而界面
+// 下拉里只有固定档位（严格枚举会让脏值注册失败），所以"就近对齐"放在 Client：先夹到 [min,max] 再吸附。
 function snapOr(v, fallback, options, min, max) {
   const n = numOr(v, fallback, min, max);
-  // 0 在这两个字段上有明确含义（"来者不拒"，匹配层是 `scale >= threshold`），而它不是档位表里
-  // 的一项——按"最近档位"吸附会把它推到 10，等于**收窄**了用户的范围（漏报方向），所以保留它。
+  // 0 在这两个字段上有明确含义（"来者不拒"，匹配层是 `scale >= threshold`），而它不是档位表里的一项 ——按"最近档位"吸附会把它推到 10，等于**收窄**了用户的范围，所以保留它。
   if (n === 0) return 0
   const vals = (Array.isArray(options) ? options : [])
     .map((o) => (o && typeof o === 'object' ? o.v : o))
@@ -3588,9 +3304,9 @@ function snapOr(v, fallback, options, min, max) {
   return best
 }
 
+// 逐字段校验 + 回退默认值：任何形状的输入都规整成一份合法配置。audit 见 normalizePlaces， 只有导入路径会传它。
 function normalizeCfg(input, audit) {
-  // 兜底：调用方（loadCfg / sectionToCfg / applyCfg）都保证传对象，但归一化函数自己不该因为
-  // 传进 null/undefined 就抛错——它的契约是"任何脏输入都能归一成一份合法配置"。
+  // 调用方都保证传对象，但本函数的契约是"任何脏输入都能规整"，不该因为传进 null/undefined 就抛错
   const stored = isPlainObject(input) ? input : {};
   const w = isPlainObject(stored.watch) ? stored.watch : {};
   const d = isPlainObject(stored.disasters) ? stored.disasters : {};
@@ -3601,57 +3317,47 @@ function normalizeCfg(input, audit) {
   return {
     version: DEFAULT_CFG.version,
     source: stored.source === 'sandbox' ? 'sandbox' : 'prod',
-    // 大陆源的链路选择（0.5.0）：白名单，只认 'poll'，其余一律回 'auto'。
-    // 用白名单而不是"非 poll 即 auto"的等价写法，是为了让将来加第三种取值时不会静默错位。
+    // 白名单校验：只认 'poll'，其余一律回 'auto'（将来加第三种取值时不会静默错位）
     cnTransport: stored.cnTransport === 'poll' ? 'poll' : 'auto',
     watch: {
-      // 只保留 47 县中确实存在的名字，避免脏数据在设置页渲染出幽灵按钮
+      // 只保留 47 县中确实存在的名字，避免格式不合法的数据在设置页渲染出幽灵按钮
       prefectures: Array.isArray(w.prefectures)
         ? Array.from(new Set(w.prefectures.filter((p) => typeof p === 'string' && PREF_SET.has(p))))
         : [],
-      // 市区町村：这里只保证类型、去重与规模；名字是否真实存在由数据表加载后校验
-      // 上限用 MAX_WATCH_CITIES 常量（0.9.4 / P3-37，此前硬编码 300，与设置页的上限各说各话）
+      // 市区町村：这里只保证类型、去重与规模（上限与设置页同一常量），名字是否存在由数据表校验
       cities: Array.isArray(w.cities)
         ? Array.from(new Set(w.cities.filter((c) => typeof c === 'string' && c.length > 0 && c.length <= 30))).slice(0, MAX_WATCH_CITIES)
         : [],
-      // 全球关注点（0.4.0 新增）。旧配置没有这个字段 → 归一成空数组，不影响日本模式
+      // 旧配置没有这个字段 → 统一成空数组
       places: Array.isArray(w.places) ? normalizePlaces(w.places, audit) : [],
     },
     disasters: {
       earthquake: boolOr(d.earthquake, DEFAULT_CFG.disasters.earthquake),
       tsunami: boolOr(d.tsunami, DEFAULT_CFG.disasters.tsunami),
-      // 0.3.0 新增。旧配置没有这个字段 → 取默认值 true，不会被清空或误关
       weather: boolOr(d.weather, DEFAULT_CFG.disasters.weather),
-      // 大陆气象灾害的两类（0.5.2）。同样必须在这里同步——漏掉就会被 applyCfg 静默丢弃，
-      // 表现是"用户关掉了暴雨提醒，刷新后又自己开了"。
+      // 以下三个**必须在这里同步**，漏掉就会被 applyCfg 静默丢弃， 表现是"用户关掉了这类提醒，刷新之后它又自己开了"。
       cnRainstorm: boolOr(d.cnRainstorm, DEFAULT_CFG.disasters.cnRainstorm),
       cnGeology: boolOr(d.cnGeology, DEFAULT_CFG.disasters.cnGeology),
-      // 海外气象灾害（0.6.0）。同上：**必须在这里同步**，否则用户关掉之后刷新又自己开了。
       overseasWeather: boolOr(d.overseasWeather, DEFAULT_CFG.disasters.overseasWeather),
     },
     thresholds: {
-      // 0.9.4（PD-2）：夹取之后**吸附到界面上的合法档位**（手改的 42 → 40）。见 snapOr。
+      // 夹取之后吸附到界面上的合法档位（手改的 42 → 40），见 snapOr
       quakeScale: snapOr(t.quakeScale, DEFAULT_CFG.thresholds.quakeScale, SCALE_OPTIONS, 0, 70),
       eewScale: snapOr(t.eewScale, DEFAULT_CFG.thresholds.eewScale, SCALE_OPTIONS, 0, 70),
       // 白名单校验，同时避免 'constructor' 之类的原型链键被当成合法等级
       tsunamiGrade: TSUNAMI_OPTIONS.some((o) => o.g === t.tsunamiGrade)
         ? t.tsunamiGrade
         : DEFAULT_CFG.thresholds.tsunamiGrade,
-      // 全球源的最低震级（0.4.0）。0 是有意义的取值（来者不拒），所以下界是 0 而不是 1。
-      // **不吸附档位**（0.9.4 / PD-2 的边界）：下拉里那些 M3〜M7 只是常用预设，而 M6.7 这样的
-      // 自定义门槛是合法且有意义的——按预设吸附会把用户的实际门槛改掉（那是改语义，不是纠错）。
-      // 吸附只用于**震度档位**（10/20/…/70 这种离散阶梯，非档位值没有意义）。
+      // 全球源的最低震级：0 是有意义的取值（来者不拒），所以下界是 0。**不吸附档位**——下拉里那些 M3〜M7 只是常用预设，M6.7 这样的自定义门槛是合法且有意义的，吸附会改掉用户的实际门槛。
       globalMagnitude: numOr(t.globalMagnitude, DEFAULT_CFG.thresholds.globalMagnitude, 0, 10),
-      // 大陆速报的独立门槛（0.5.0）。新增字段必须在这里同步，否则 applyCfg 会**静默丢弃**它
-      // ——这正是 DESIGN 11.6 第 10 条那个"有保护的残留"：忘了同步时回归断言会失败。同上，不吸附。
+      // 大陆速报的独立门槛。新增字段**必须在这里同步**，否则 applyCfg 会静默丢弃它。同上，不吸附。
       cnReportMagnitude: numOr(t.cnReportMagnitude, DEFAULT_CFG.thresholds.cnReportMagnitude, 0, 10),
     },
     notify: {
       sound: boolOr(n.sound, DEFAULT_CFG.notify.sound),
       system: boolOr(n.system, DEFAULT_CFG.notify.system),
       volume: numOr(n.volume, DEFAULT_CFG.notify.volume, 0, 1),
-      // 分灾害音效开关（0.9.4 / C1）：**必须在这里同步**，否则 applyCfg 会静默丢弃它们，
-      // 表现是"关掉了海啸的声音，刷新之后它又自己开了"。
+      // 分灾害音效开关：**必须在这里同步**，否则 applyCfg 会静默丢弃它们
       soundQuake: boolOr(n.soundQuake, DEFAULT_CFG.notify.soundQuake),
       soundTsunami: boolOr(n.soundTsunami, DEFAULT_CFG.notify.soundTsunami),
       soundWeather: boolOr(n.soundWeather, DEFAULT_CFG.notify.soundWeather),
@@ -3665,11 +3371,7 @@ function normalizeCfg(input, audit) {
       end: timeOr(qh.end, DEFAULT_CFG.quietHours.end),
       breakForSevere: boolOr(qh.breakForSevere, DEFAULT_CFG.quietHours.breakForSevere),
     },
-    // 界面语言（0.8.1 立字段 / 0.9.0 真正生效 / 0.9.3 加繁体）：走 BCP 47 惯例的逐级回退，
-    // 认不出的一律落到默认语言（不是"原样放行"——手改配置写进一个没有语言包的代码，界面会进入
-    // 一个谁也说不清的半本地化状态）。回退顺序：精确匹配 → 中文按脚本 / 地区分流
-    // （zh-TW / zh-HK / zh-MO / zh-Hant → zh-TW；zh / zh-CN / zh-SG / zh-Hans → zh-CN）
-    // → 其它主语言（ja-JP → ja）→ 默认语言。
+    // 界面语言：走 BCP 47 惯例的逐级回退（精确匹配 → 中文按脚本 / 地区分流 → 其它主语言 → 默认语言）；认不出的一律落到默认语言，手改进来的无语言包代码不会把界面带进半本地化状态。
     language: resolveLang(stored.language),
   }
 }
@@ -3678,8 +3380,7 @@ function loadCfg() {
   if (!isPlainObject(stored)) {
     const fresh = freshCfg();
     saveJSON(STORAGE_KEY, fresh);
-    // 语言要在**任何界面文本被取用之前**生效：配置是启动最早读到的状态，而通知 / 状态条
-    // 的文案可能在第一帧就渲染。所以设置语言与"读配置"绑在一起，不留给调用方记得去做。
+    // 语言要在**任何界面文本被取用之前**生效：配置是启动最早读到的状态，而通知 / 状态条的文案 可能第一帧就渲染，所以设置语言与"读配置"绑在一起。
     setLanguage(fresh.language);
     return fresh
   }
@@ -3687,19 +3388,15 @@ function loadCfg() {
   try {
     cfg = normalizeCfg(stored);
   } catch (err) {
-    // 0.9.5（fresh review）：一条脏数据绝不能把整个插件拖崩——这正是本文件开头的承诺。
-    // 归一化会调 i18n 取词，而某些字符串化不了的形状（`{toString:null, valueOf:null}`，
-    // JSON / YAML 都造得出来）会让 `String(v)` 抛 TypeError。loadCfg 的调用方里有**渲染期**的
-    // （设置页 `useState(() => currentCfg())`），所以这里抛 = 整页白屏（插件没有 error boundary）。
-    // 退回默认配置，并留一条能查的日志。
+    // 一条格式不合法的数据绝不能把整个插件拖崩。规整流程会调 i18n 取词，而某些字符串化不了的形状 （`{toString:null, valueOf:null}`，JSON / YAML 都造得出来） 会让 `String(v)` 抛 TypeError；
+    // 调用方里有**渲染期**的（设置页 `useState(() => currentCfg())`），抛错 = 整页白屏。
     try { console.warn('[dsh-quake-alert] 配置归一化失败，本次改用默认配置：' + String((err && err.message) || err)); } catch (e) { /* 忽略 */ }
     const fresh = freshCfg();
     saveJSON(STORAGE_KEY, fresh);
     setLanguage(fresh.language);
     return fresh
   }
-  // 版本不同（插件升级 / 用户手改）时不再直接清空：按当前 schema 归一保留可识别字段，再写回当前版本号。
-  // 旧实现会在这里 saveJSON(默认值)，一次版本号变化就会静默丢掉用户选好的关注地区与阈值。
+  // 版本不同（插件升级 / 用户手改）时按当前 schema 统一保留可识别字段，再写回当前版本号； 不能写回默认值——一次版本号变化就会静默丢掉用户选好的关注地区与阈值。
   if (stored.version !== DEFAULT_CFG.version) saveJSON(STORAGE_KEY, cfg);
   setLanguage(cfg.language);
   return cfg
@@ -3711,33 +3408,24 @@ function saveCfg(cfg) {
 }
 
 
-// 安全字典查找：外部数据里的 'constructor'/'toString' 等键会命中原型链，
-// 例如 AREA_PREF['constructor'] 会返回 Object 构造函数并让 .slice() 抛错。
-// （原在 05-parser，因被 city-table / parser / matcher 共用而移到这里）
+// 安全字典查找：外部数据里的 'constructor'/'toString' 等键会命中原型链，例如 AREA_PREF['constructor'] 会返回 Object 构造函数并让 .slice() 抛错。04-city-table / 解析层共用。
 const own = (map, key) => (Object.prototype.hasOwnProperty.call(map, key) ? map[key] : undefined);
 
 // ============================================================================
 // dsh-quake-alert · client/src/00f-source-labels.js
 //
-// 作用：源 id ↔ 文案 key 的**单一映射**，以及"显示时求值"的两个取词助手。
-// 内容：SOURCE_LABEL_KEYS、STATUS_TEXT_KEYS、sourceLabelOf、statusTextOf。
+// 作用：源 id ↔ 文案 key 的单一映射（SOURCE_LABEL_KEYS、STATUS_TEXT_KEYS），
+//       以及「显示时求值」的两个取词助手 sourceLabelOf / statusTextOf。
 // 依赖：00-i18n。
 //
-// 为什么要有这个文件：
-//   · 源名此前在 13-ui-settings 的 `SOURCE_LABELS` 里写一份，而 15-entry 又通过
-//     `createFeedClient({ label })` 往 store 里塞了另一份（那份是中文字面量，进的是
-//     侧边栏悬停提示与诊断快照）。本地化之后两处必须给同一个答案，所以映射只有这一份。
-//   · 状态码（`open` / `schema-error` …）的文字由 13 的 `statusMetaOf` 提供，而 07-store
-//     拼状态摘要时也需要它。映射放这里，两边都从这里取。
-//
-// **取词必须在调用时求值**：`t()` 读的是"当前语言"，而当前语言由 `loadCfg` / `applyCfg`
-// 设置。模块级写 `const X = t('...')` 会在模块加载那一刻求值——那时配置还没读，
-// 于是常量被固化成默认语言，用户切语言后它不会变（界面表现是"一半跟着切、一半不切"）。
-// 所以这里导出的是**函数**，不是常量对象。
+// 这两个映射各有一份：13-ui-settings 的源名表 / statusMetaOf 与 07-store 的状态摘要
+// 必须给同一个答案，所以都从这里取。
+// **取词必须在调用时求值**：`t()` 读的是当前语言，而当前语言由 `loadCfg` / `applyCfg` 设置。
+// 模块级写 `const X = t('...')` 会固化成默认语言，用户切语言后它不会变，所以这里导出函数。
 // ============================================================================
 
 
-/** 源 id → 显示名 key。新增源时这里加一项（13 的 SOURCE_ORDER 是另一件事：那是排列顺序）。 */
+/** 源 id → 显示名 key。新增源时这里加一项（13 的 SOURCE_ORDER 是排列顺序，另一件事）。 */
 const SOURCE_LABEL_KEYS = {
   p2pquake: 'settings.sourceLabels.p2pquake',
   emsc: 'settings.sourceLabels.emsc',
@@ -3768,12 +3456,12 @@ const STATUS_TEXT_KEYS = {
 /** 源 id → 当前语言下的显示名。认不出的 id 原样返回（宁可显示 id，也不要显示空白）。 */
 function sourceLabelOf(id) {
   const raw = String(id === undefined || id === null ? '' : id);
-  // hasOwnProperty：`SOURCE_LABEL_KEYS['constructor']` 会命中原型链拿到一个函数（同 00-i18n 的 t）
+  // hasOwnProperty：直接取 `SOURCE_LABEL_KEYS['constructor']` 会命中原型链（同 00-i18n 的 t）
   const key = Object.prototype.hasOwnProperty.call(SOURCE_LABEL_KEYS, raw) ? SOURCE_LABEL_KEYS[raw] : '';
   return key ? t(key) : raw
 }
 
-/** 状态码 → 当前语言下的文字。`retries` 只被 reconnecting 用到（"重连中（第 N 次）"）。 */
+/** 状态码 → 当前语言下的文字。`retries` 只被 reconnecting 用到。 */
 function statusTextOf(status, retries) {
   const code = String(status === undefined || status === null ? '' : status);
   const key = Object.prototype.hasOwnProperty.call(STATUS_TEXT_KEYS, code) ? STATUS_TEXT_KEYS[code] : '';
@@ -3784,19 +3472,11 @@ function statusTextOf(status, retries) {
 
 // ============================================================================
 // dsh-quake-alert · client/src/07-store.js
-//
-// 作用：全局 store——连接状态 + 最近预警，供设置页与状态指示订阅。
-// 内容：store 对象（status/retries/detail/received/events + 订阅）、
-//       addEvent（写入历史并落盘，key 唯一化）。
-// 依赖：01-constants、02-storage、00-i18n、00f-source-labels（源名与状态文字的取词）。
-// 注意：store.push({}) 是各 UI 的重渲染信号，改变它会影响所有订阅方。
+// 全局 store：连接状态 + 最近预警，供设置页与状态指示订阅。含 store 对象与 addEvent。
+// store.push({}) 是各 UI 的重渲染信号，改变它会影响所有订阅方。
 // ============================================================================
 
 
-// ---------- 全局 store：连接状态 + 最近预警（设置页订阅） ----------
-// 0.4.0 起「连接状态」是**多源聚合**的：日本链路是 P2PQuake WebSocket，全球链路是 EMSC
-// WebSocket，将来还会有 Host 侧轮询的源。每个源各自汇报，主状态按
-// 「任一源红 → 红；否则任一源黄 → 黄；否则绿」聚合——只要有一条链路断了就不该显示成一切正常。
 const store = {
   status: 'idle', // idle | connecting | open | reconnecting | closed（多源聚合结果）
   retries: 0,
@@ -3804,9 +3484,7 @@ const store = {
   sources: {}, // { [id]: { label, status, retries, detail } }
   received: 0, // 收到并成功解析的推送条数（诊断用）
   events: loadHistory(), // 最近预警 [{kind,label,severity,issued,headline,pref}]
-  // 气象警报的「静默提示」（0.3.0）：L3 命中关注地区时只记一笔，由侧边栏状态点的悬停提示
-  // 显示出来，不弹窗、不响铃——弥补 L4 起播报带来的提前量损失（DESIGN 10.3）
-  weatherHint: null, // { level, area, pref, at } | null
+  weatherHint: null, // 气象警报的「静默提示」（L3 命中关注地区时只记一笔）：{ level, area, pref, at } | null
   listeners: new Set(),
   push(patch) {
     Object.assign(this, patch);
@@ -3827,15 +3505,12 @@ const store = {
     this.push({});
   },
   recomputeStatus() {
-    // 遍历 **id** 而不是值：源名要按语言现取（`sourceLabelOf(id)`），而 `sources[id].label`
-    // 是 15-entry 建连时塞进来的字符串——那份是"建连那一刻的语言"，切语言后不会变。
+    // 源名要按语言现取（`sourceLabelOf(id)`），不能沿用 `sources[id].label`——那是建连那一刻的语言
     const ids = Object.keys(this.sources);
     if (ids.length === 0) {
       this.status = 'idle'; this.retries = 0; this.detail = '';
       return
     }
-    // disabled（用户关掉了某个灾种）不参与聚合：它不该把整体拉成"异常"，
-    // 但全部源都关掉时要如实显示成"已关闭"而不是"未启动"。
     const activeIds = ids.filter((id) => this.sources[id].status !== 'disabled');
     if (activeIds.length === 0) {
       this.status = 'disabled'; this.retries = 0;
@@ -3843,19 +3518,14 @@ const store = {
       return
     }
     const pick = (s) => activeIds.filter((id) => this.sources[id].status === s)[0];
-    // 红优先：任一链路停了 / 不可达，整体就不是"正常"；其次蓝（数据格式异常，用户处理不了）、
-    // 黄（连接中 / 重连 / 降级）、中灰（数据过期），最后才是绿。
-    // 0.4.1 起 feed 源（JMA / USGS / NOAA）也上报状态——此前只有 WebSocket 源参与聚合，
-    // 于是气象 / 全球轮询链路整体死掉时侧边栏仍然是绿的（用户以为在被保护）。
+    // 主状态优先级：红（停了 / 不可达）→ 蓝（数据格式异常）→ 黄（连接中 / 重连 / 降级）→ 灰（过期）→ 绿
     const chosenId = pick('closed') || pick('unreachable') || pick('schema-error') ||
       pick('reconnecting') || pick('connecting') || pick('degraded') || pick('stale') ||
       pick('open') || activeIds[0];
     const chosen = this.sources[chosenId];
     this.status = chosen.status;
     this.retries = typeof chosen.retries === 'number' ? chosen.retries : 0;
-    // 详情优先列异常源（全部正常时才列全部）：源多了以后逐条列会挤爆悬停提示。
-    // `detail` 是取数层给的具体原因（原样透传）；没有原因时退回**状态文字**，而不是裸状态码
-    // （旧写法直接把 `open` / `closed` 这种码拼进提示里，那是给开发看的，不是给用户看的）。
+    // 没有具体原因时退回**状态文字**，裸状态码是给开发看的
     const badIds = activeIds.filter((id) => this.sources[id].status !== 'open');
     this.detail = (badIds.length ? badIds : activeIds)
       .map((id) => {
@@ -3868,16 +3538,14 @@ const store = {
   },
   subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn) },
 };
-let anonSeq = 0; // 兜底：无 id 消息用递增匿名 key，避免空 id 互相覆盖
+let anonSeq = 0; // 无 id 消息用递增匿名 key，避免空 id 互相覆盖
 function addEvent(ev) {
   const hasId = ev && ev.id && ev.id !== '';
   const key = hasId ? ev.id : ('anon-' + (++anonSeq));
-  // 写入时刻（0.9.4 / D-1）：历史保留的"过去 5 天"以它为准（见 withinHistoryAge）。
-  // 显式传入有限值时尊重它（测试要能注入）；否则取当前时刻。
+  // 写入时刻：历史保留的「过去 5 天」以它为准（见 withinHistoryAge）；有限值可注入以便测试
   const now = (ev && typeof ev.at === 'number' && Number.isFinite(ev.at) && ev.at > 0) ? ev.at : Date.now();
-  // 统一过一遍字段规整：写入侧也保证历史里不会出现对象/数组字段
   const item = normalizeHistoryEntry(Object.assign({}, ev, { key, at: now }), 0);
-  // 0.9.4（D-1）：条数与**时间**两个上限同时生效（设计稿一直是这么写的，此前只实现了条数）
+  // 条数与**时间**两个上限同时生效
   const fresh = store.events.filter((e) => withinHistoryAge(e, now));
   store.events = [item].concat(fresh.filter((e) => e.key !== key)).slice(0, HISTORY_MAX);
   saveJSON(HISTORY_KEY, store.events.slice(0, HISTORY_MAX));
@@ -3886,31 +3554,20 @@ function addEvent(ev) {
 
 // ============================================================================
 // dsh-quake-alert · client/src/03-settings-bridge.js
-//
-// 作用：机器级持久化桥——把配置交给 DSH 的 Host settings（settings.yaml）。
-// 内容：内存镜像 currentCfg、写入入口 applyCfg、差异计算 settingsOpsFor、
-//       异步推送 pushCfgToHost、首次迁移与降级 bindSettingsScope、
-//       本地镜像回读 reloadFromLocal（其它标签页改配置后），
-//       以及 Host section ⇄ 本地配置的转换（cfgToSection / sectionToCfg）。
-// 依赖：01-constants、02-storage、00-i18n（07-store 的 store.push 在运行时才用到）。
-// 降级：没有 settings 服务 / 页面非 loopback / Host 不持久化时自动退回 localStorage。
+// 机器级持久化桥：把配置交给 DSH Host settings（settings.yaml），localStorage 作回退与镜像。
+// 含 currentCfg / applyCfg / settingsOpsFor / pushCfgToHost / bindSettingsScope / reloadFromLocal。
+// 没有 settings 服务 / 页面非 loopback / Host 不持久化时，整条链路退化为纯 localStorage。
 // ============================================================================
 
 
-// ---------- 机器级持久化（0.2.0）：Host 存储为主，localStorage 为回退与镜像 ----------
-// 本模块只认一个**形状**（两代宿主都提供它），不关心它来自哪个服务：
-//   · DSH 0.1.6 及以前：`ctx.settingsScope.bind({ namespace })` 返回的 scope
-//   · DSH 0.1.7 起：`ctx.configForms.get('quake-alert')` 返回的 ConfigForm
-//     （`settingsScope` 已被移除；表单由 Host 侧导出的 Config schema 派生）
-// 用到的成员两边同名同义：`getSnapshot()` / `subscribe(fn)` / `mutate(ops)`，快照字段
-// `status / value / user / writable / mode` 也一一对应；`mutate` 接收的
-// `{op:'set'|'unset', path, value}` 就是 settings 服务自己的 SettingsPathOp。
-// 分派在 client/src/15-entry.js（哪个服务出现就用哪个）。
-// scope 快照是**同步**可读的，所以内部读取（WebSocket 重连、handleRaw）仍然同步；写入先更新
-// 内存与 localStorage 镜像，再异步推给 Host。没有对应服务、页面非 loopback、或 Host 只做进程内
-// 存储时，整条链路自动退化为 M1 的 localStorage 行为。
+// ---------- 机器级持久化：Host 存储为主，localStorage 为回退与镜像 ----------
+// 本模块只认一个**形状**（两代宿主都提供它），不关心它来自哪个服务：DSH 0.1.6 及以前是
+// `ctx.settingsScope.bind({ namespace })` 返回的 scope，0.1.7 起是 `ctx.configForms.get('quake-alert')`
+// 返回的 ConfigForm。两边同名同义：`getSnapshot()` / `subscribe(fn)` / `mutate(ops)`，快照字段
+// `status / value / user / writable / mode` 一一对应。分派在 15-entry.js。scope 快照是**同步**可读的，
+// 所以内部读取（重连、handleRaw）仍然同步；写入先更新内存与 localStorage 镜像，再异步推给 Host。
 const SETTINGS_NS = 'quake-alert';
-/** 「本地配置已迁移到 Host」的落盘标记：迁移只能发生一次，见 bindSettingsScope。 */
+/** 「本地配置已迁移到 Host」写在本地的标记：迁移只能发生一次，见 bindSettingsScope。 */
 const MIGRATED_KEY = 'dsh.quakeAlert.hostMigrated';
 let runtimeCfg = null; // 内存中的当前配置
 let settingsScope = null; // bind 成功后的 scope handle
@@ -3926,29 +3583,20 @@ function sectionToCfg(section) {
   try {
     return normalizeCfg(Object.assign({ version: DEFAULT_CFG.version }, isPlainObject(section) ? section : {}))
   } catch (err) {
-    // 同 loadCfg 的理由（0.9.5 / fresh review）：Host 下发的 section 也是外部输入
-    // （settings.yaml / profile 都能手写），归一化抛错不该让调用方的渲染期炸掉。
+    // 与 loadCfg 同理：Host 下发的 section 也是外部输入（settings.yaml / profile 都能手写），
+    // 规整的过程抛错不该让调用方的渲染期炸掉。
     try { console.warn('[dsh-quake-alert] Host section 归一化失败，本次改用默认配置：' + String((err && err.message) || err)); } catch (e) { /* 忽略 */ }
     return freshCfg()
   }
 }
-// 同步读取入口：保持 M1 的同步语义，调用方无需感知 Host 的存在
+// 同步读取入口：调用方无需感知 Host 的存在
 function currentCfg() {
   if (runtimeCfg === null) runtimeCfg = loadCfg();
   return runtimeCfg
 }
 // 本地镜像被**其它 DSH 标签页**改写后（storage 事件），把 localStorage 重新读回内存副本。
-// 跨模块不能直接给本模块私有的 runtimeCfg 赋值：拆分前它同处一个作用域，拆分后就成了
-// 自由变量，打包进 'use strict' 的 bundle 会抛 ReferenceError（0.2.1 拆分时漏改过一处），
-// 所以这里给出显式入口。
-/**
- * 语言变化后，**由语言派生出来的文本**要重算，并让订阅者重渲染。
- *
- * `store.detail` 是 `recomputeStatus` 拼好的一个字符串（源名 + 状态文字），而切语言只改 i18n 的
- * 当前值——不重算的话，侧边栏悬停提示、状态点的读屏标签、诊断快照里的状态摘要会一直停在旧语言，
- * 直到下一次源状态汇报（ws 事件 / 15 秒的 feed / 30 秒的探针）；而状态点本身只订阅 store，
- * 收不到通知就不会重渲染。两件事一起做才完整（0.9.0 review 的 A-1 / A-2）。
- */
+// 跨模块不能直接给本模块私有的 runtimeCfg 赋值（打包进 'use strict' 的 bundle 会抛 ReferenceError）。
+/** 语言变化后，**由语言派生出来的文本**要重算，并让订阅者重渲染：`store.detail` 是 `recomputeStatus` 拼好的字符串（源名 + 状态文字），而状态点只订阅 store，不通知就不会重渲染。 */
 function syncDerivedTextAfterLanguageChange() {
   try {
     store.recomputeStatus();
@@ -3960,27 +3608,21 @@ function syncDerivedTextAfterLanguageChange() {
 function reloadFromLocal() {
   const prevLang = getLanguage();
   runtimeCfg = loadCfg();
-  // 别的标签页可能只改了关注点、也可能改了语言——只在语言真的变了时才做重算与通知。
   if (getLanguage() !== prevLang) syncDerivedTextAfterLanguageChange();
   return runtimeCfg
 }
 // 写入入口：内存立即生效 → localStorage 镜像 → Host（可用时异步持久化）
 function applyCfg(cfg) {
   const prevLang = getLanguage();
-  // 写入路径也归一（0.4.1）：此前只有读取路径（loadCfg / sectionToCfg）归一，于是
-  // 「坐标相同的关注点自动合并」「name 截断到 30 字」这类不变量在内存与 localStorage 里
-  // 都不成立——同一次会话里重复添加同一个点会真的存两份，直到下次加载才被悄悄合并。
+  // 写入路径也要规整，否则「坐标相同的关注点自动合并」「name 截断到 30 字」这类不变量在内存与 localStorage 里都不成立——同一次会话里重复添加同一个点会真的存两份。
   runtimeCfg = saveCfg(normalizeCfg(cfg));
-  // 语言在**写入路径**也要生效：用户在设置页切换语言时走的就是这里，而设置页是用
-  // setCfgState(next) 触发重渲染的——语言若不在此刻落到 i18n 的当前值，界面会等到
-  // 下一次配置加载才切换（表现为"改了语言当场没反应"）。
+  // 语言在**写入路径**也要生效：设置页切换语言走的就是这里，语言不在此刻落到 i18n 的当前值， 界面会等下一次配置加载才切换。
   setLanguage(runtimeCfg.language);
   if (getLanguage() !== prevLang) syncDerivedTextAfterLanguageChange();
   pushCfgToHost(runtimeCfg);
   return runtimeCfg
 }
-// 只提交与默认值不同的字段；等于默认值的字段用 unset 交还 schema 默认层，
-// 这样 settings.yaml 里只留下用户真正改过的东西。
+// 只提交与默认值不同的字段；等于默认值的字段用 unset 交还 schema 默认层， 这样 settings.yaml 里只留下用户真正改过的东西。
 function settingsOpsFor(cfg) {
   const cur = cfgToSection(cfg);
   const def = cfgToSection(freshCfg());
@@ -3998,10 +3640,7 @@ function settingsOpsFor(cfg) {
   walk(cur, def, []);
   return ops
 }
-/**
- * 把配置推给 Host。返回 `scope.mutate()` 的 pending（没有真正发出写请求时返回 null），
- * 调用方据此判断"Host 是否确认接收"——迁移标记要靠它，见 bindSettingsScope。
- */
+/** 把配置推给 Host。返回 `scope.mutate()` 的 pending（没有真正发出写请求时返回 null）， 调用方据此判断"Host 是否确认接收"——迁移标记要靠它，见 bindSettingsScope。 */
 function pushCfgToHost(cfg) {
   const scope = settingsScope;
   if (!scope || settingsSync !== 'host') return null
@@ -4015,15 +3654,9 @@ function pushCfgToHost(cfg) {
     return (pending && typeof pending.then === 'function') ? pending : null
   } catch (err) { return null }
 }
-// 绑定 Host settings。三种来源的优先关系：
-//   ① Host 用户层已有内容 → 以 Host 为准（机器级配置是 source of truth）
-//   ② Host 为空、本地已有非默认配置 → 一次性把本地配置迁移到 Host
-//   ③ Host 不可用 → 保持 localStorage（settingsSync 停留在 local / memory）
-/**
- * 迁移的尝试上限（0.5.4）。Host 持续拒绝写入时（revision 冲突等），不设上限会变成
- * "每来一次 sync 就写一次"的循环；用尽之后保留本地镜像、交由用户下一次改配置时经
- * `applyCfg` 直接写入 Host。
- */
+// 绑定 Host settings。三种来源的优先关系：① Host 用户层已有内容 → 以 Host 为准（机器级配置是 source of truth）；② Host 为空、本地已有非默认配置 → 一次性迁移到 Host；
+// ③ Host 不可用 → 保持 localStorage。
+/** 迁移的尝试上限。Host 持续拒绝写入时（revision 冲突等）不设上限会变成"每来一次 sync 就写一次" 的循环；用尽之后保留本地镜像，用户下一次改配置时经 applyCfg 直接写进 Host。 */
 const MIGRATE_MAX_ATTEMPTS = 3;
 
 function bindSettingsScope(scope) {
@@ -4038,27 +3671,20 @@ function bindSettingsScope(scope) {
     const user = isPlainObject(snap.user) ? snap.user : {};
     const claimed = loadJSON(MIGRATED_KEY, null) === 1;
     if (Object.keys(user).length === 0 && !claimed) {
-      // 迁移**只能发生一次**，而且这个"一次"必须落盘（0.4.1 修正）。原来只在本次 bind 里记
-      // 一个局部标志，于是每次重载页面 / Host settings 重建都会重新判断，结果是"用户显式清空
-      // Host"会被本地镜像静默恢复——Host 作为 source of truth 的优先级被本地反超
-      // （实测可复现：清空 Host 后重新 bind，Host 又变回 {quakeScale:55}）。
+      // 迁移**只能发生一次**，而且这个"一次"必须写入本地存储：只在本次 bind 里记局部标志的话，每次重载 页面都会重新判断，"用户显式清空 Host"会被本地镜像静默恢复。
       const local = loadCfg();
       if (JSON.stringify(cfgToSection(local)) !== JSON.stringify(cfgToSection(freshCfg()))) {
         if (migrateAttempts >= MIGRATE_MAX_ATTEMPTS) {
-          // 重试用尽：**不落标记、也不用 Host 的空值覆盖本地镜像**——那等于把用户配置丢掉。
-          // 本地镜像保持原样，用户下一次改配置会经 applyCfg 直接写进 Host。
+          // 重试用尽：**不落标记、也不用 Host 的空值覆盖本地镜像**（那等于丢掉用户配置）， 用户下一次改配置会经 applyCfg 直接写进 Host。
           store.push({});
           return
         }
         migrateAttempts += 1;
         runtimeCfg = saveCfg(local);
         const pending = pushCfgToHost(runtimeCfg);
-        // **等 Host 真的接收之后再落"已认领"标记**。两点都不能省（0.5.4）：
-        //  ① 先落标记再写的话，写入失败（磁盘 / 权限 / 瞬时冲突）会让本地配置既没进 Host、
-        //     又因为标记而不再重试，随后被 Host 的空值覆盖——永久且静默地丢配置；
-        //  ② **不能把 `pending` 的 resolve 当成功**：平台的 mutate 在 Host 拒绝时（`!response.ok`）
-        //     也是 resolve（它内部 recover 并重新推送）。所以 settle 之后回读一次：迁移的字段
-        //     确实出现在 Host 用户层里，才算迁移完成；否则不落标记，下一次 sync 重试。
+        // **等 Host 真的接收之后再落"已完成迁移"标记**：先落标记再写的话，写入失败会让本地配置既没进
+        // Host、又因为标记而不再重试，随后被 Host 的空值覆盖；也不能把 `pending` 的 resolve 当成功
+        //（平台的 mutate 在 Host 拒绝时也是 resolve），所以 settle 之后回读一次才算完成。
         if (pending) {
           pending.then(() => {
             let landed = false;
@@ -4073,25 +3699,16 @@ function bindSettingsScope(scope) {
         store.push({});
         return
       }
-      // 本地就是默认值：Host 为空与本地等价，直接认领
+      // 本地就是默认值：Host 为空与本地等价，直接标记为已处理
       saveJSON(MIGRATED_KEY, 1);
     } else if (!claimed) {
-      // 走到这里说明"以 Host 为准"（Host 用户层已有内容）。**认领标记也必须在这一条路径上落**
-      // （0.5.4）：此前它只在"Host 为空 + 本地非默认"那条分支里写，于是"首次 bind 时 Host 已非空"
-      //（第二个浏览器 / 另一台配置 / 手写过 settings.yaml——settings.yaml 是机器级共享的）
-      // 永远不落标记。此后 Host 一旦变空（用户在别处恢复默认），本浏览器会把**过期**的本地镜像
-      // 重新迁回 Host，静默复活旧配置。实测：fresh localStorage + Host 非空 → 标记未落；
-      // 再把 Host 置空 → 本地旧值被写回 Host。
+      // **这个标记也要在这一条路径上写**：只在上一条分支里写的话，"首次 bind 时 Host 已非空" （第二个浏览器 / 手写过 settings.yaml）就永远不落标记，此后 Host 一旦变空，
+      // 本浏览器会把 **过期**的本地镜像重新迁回 Host，静默复活旧配置。
       saveJSON(MIGRATED_KEY, 1);
     }
     const next = sectionToCfg(snap.value);
     runtimeCfg = saveCfg(next); // localStorage 保持为镜像：Host 掉线时仍能工作
-    // **语言也必须在这条路径上落地**（0.9.3 修）。Host 是配置的权威源，而 `loadCfg` 读的是
-    // localStorage 镜像：在"另一个浏览器 / 清过 localStorage / 手改过 settings.yaml"这条路径上，
-    // runtimeCfg（语言下拉显示的值）与诊断快照都已经是 Host 的值，界面却仍停在启动时镜像解析出的
-    // 语言——而且**不会自愈**，因为 sync 是"值没变就不重算"的幂等路径。表现是下拉写着「繁體中文」、
-    // 整页还是简体中文，排查时 `config.language` 恰好给出与界面相反的答案。
-    // 与 applyCfg 同一形态（同值不动，所以两条路径不会互相打架）。
+    // **语言也必须在这条路径上落地**：Host 是优先源而 `loadCfg` 读的是 localStorage 镜像，这条路径上 runtimeCfg 已是 Host 的值，界面却仍停在启动时的语言，且不会自愈（sync 是"值没变就不重算"的幂等路径）。
     if (getLanguage() !== runtimeCfg.language) {
       setLanguage(runtimeCfg.language);
       syncDerivedTextAfterLanguageChange();
@@ -4101,8 +3718,7 @@ function bindSettingsScope(scope) {
   let disposer = null;
   try { disposer = scope.subscribe(sync); } catch (err) { /* 订阅失败只是失去实时同步 */ }
   sync();
-  // 返回解除函数（0.4.1）：调用方要把它注册进 ctx.effect，否则同一页面内停用 → 启用 N 次
-  // 会累积 N 个订阅，此后 Host 每一次配置变更都会触发 N 次写盘与 N 次重渲。
+  // 返回解除函数：调用方要把它注册进 ctx.effect，否则同一页面内停用 → 启用 N 次会累积 N 个订阅。
   return () => {
     try { if (typeof disposer === 'function') disposer(); } catch (err) { /* 忽略 */ }
     if (settingsScope === scope) settingsScope = null;
@@ -4110,46 +3726,29 @@ function bindSettingsScope(scope) {
 }
 
 
-// 供单测钩子与 UI 读取：模块作用域的私有状态不直接对外暴露写入口
 const settingsState = () => ({ sync: settingsSync, bound: settingsScope !== null, runtime: runtimeCfg });
 const resetSettings = () => { runtimeCfg = null; settingsScope = null; settingsSync = 'local'; };
 
 // ============================================================================
 // dsh-quake-alert · client/src/04-city-table.js
-//
-// 作用：市区町村表与「观测点 addr → 市町村」归一。
-// 内容：表的注入与规整（setCityTable/citiesOfPref/pruneUnknownCities、
-//       pruneCitiesOfUnwatchedPrefs）、
-//       地名假名归一（normKana）与规范写法反查（canonicalCityOf）、
-//       从 Host 只读路由拉表（loadCityTable）、写法变体展开（cityAliases）、
-//       前缀索引（buildAddrIndex）与查询（lookupAddrCity）。
-// 依赖：01-constants、02-storage、03-settings-bridge（两个 prune 都会写配置）。
-// 要点：気象庁/P2PQuake 的观测点名用短名与消歧写法（大阪北区茶屋町、福島伊達市、
-//       渡島北斗市），必须先归一到市町村全称再比对，否则会大面积漏报；
-//       河川区域表与 JMA 电文还可能与本表假名写法不同（南アルプス市 / 南あるぷす市），
-//       所以「比对」与「反查」一律经 normKana，显示仍用本表写法。
+// 市区町村表与「观测点 addr → 市町村」的对应：表的注入与规整、假名写法对齐、规范写法反查、拉表与查询。
+// 要点：気象庁/P2PQuake 的观测点名用短名与消歧写法，必须先统一到市町村全称再比对；假名写法不
+// 同时一律经 normKana 比对与反查，显示仍用本表写法。
 // ============================================================================
 
 
-// ---------- 市区町村表（0.2.0）：Host 路由提供，Client 拉一次并缓存 ----------
-// 全国约 1700+ 个市町村，体积不适合内联进 client bundle。Host 侧在
-// /dsh-quake-alert/areas 返回 { prefectures: { "<都道府県>": ["市町村全称", ...] } }。
-// 拉取失败时表保持为空，功能退化为「只能按都道府县关注」——不影响 M1 的任何行为。
+// ---------- 市区町村表：Host 路由提供，Client 拉一次并缓存 ----------
+// /dsh-quake-alert/areas 返回 { prefectures: {...} }（全国 1700+ 条，不内联进 bundle）。
 const AREAS_PATH = '/dsh-quake-alert/areas';
 let cityTable = null;
 let cityTableState = 'idle'; // idle | loading | ready | failed
 let cityNameSet = null; // 全部市町村名（校验配置用）
-let cityPrefIndex = null; // Map<归一市町村名, { name: 规范写法, prefs: 都道府県[] }>：JMA 电文只给市町村名，要反查所属县
+let cityPrefIndex = null; // Map<统一后的市町村名, { name: 规范写法, prefs: 都道府県[] }>：JMA 电文只给市町村名，要反查所属县
 let riverAreas = null; // Map<河川予報区域コード, { name, cities }>：指定河川洪水予報用
 
-// ---------- 地名假名归一 ----------
-// 気象庁的不同数据源对同一个市町村写法不一致，实测三类（0.3.2）：
-//   ① 小写法不同：総務省コード表「金け崎町 / 六ゖ所村」↔ 河川区域 CSV「金ケ崎町 / 六ヶ所村」
-//   ② 假名种类不同：総務省コード表「南あるぷす市」↔ 河川区域 CSV「南アルプス市」
-//   ③ 旧写法：P2PQuake 观测点「龍ケ崎市」↔ 本表「龍け崎市」
-// 归一步骤：先「平假名 → 片假名」（け→ケ、ゖ→ヶ），再把「ケ → ヶ」（小写化）。
-// 两步都要：只做第一步的话「ケ」与「ヶ」会变得不相等，反而破坏既有的ケ/ヶ 等价。
-// 结果只用于比较与反查，绝不用于显示——界面上一律用本表的规范写法。
+// ---------- 地名假名写法对齐 ----------
+// 不同数据源对同一市町村的写法不一致（金け崎町 ↔ 金ケ崎町、南あるぷす市 ↔ 南アルプス市）。
+// 对齐步骤：先「平假名 → 片假名」，再把「ケ → ヶ」——两步都要。结果只用于比较与反查。
 const KANA_HIRA_MIN = 0x3041;
 const KANA_HIRA_MAX = 0x3096;
 const KANA_KE_RE = /\u30b1/g;
@@ -4179,7 +3778,7 @@ function setCityTable(table) {
   if (Object.keys(clean).length === 0) return false
   cityTable = clean;
   cityNameSet = names;
-  // 索引键走假名归一：外部写法（河川区域表 / JMA 电文）与本表写法不同时也要能查到
+  // 索引键走假名写法对齐：外部写法（河川区域表 / JMA 电文）与本表写法不同时也要能查到
   cityPrefIndex = new Map();
   for (const pref of Object.keys(clean)) {
     for (const c of clean[pref]) {
@@ -4194,29 +3793,22 @@ function setCityTable(table) {
   return true
 }
 const citiesOfPref = (pref) => (cityTable && own(cityTable, pref)) || [];
-/** 市町村名 → 所属都道府県（写法差异已归一；重名时返回多个；表未加载或未收录时返回空数组）。 */
+/** 市町村名 → 所属都道府県（写法差异已对齐；重名时返回多个；表未加载或未收录时返回空数组）。 */
 const prefsOfCity = (name) => {
   if (!cityPrefIndex) return []
   const hit = cityPrefIndex.get(normKana(name));
   return hit ? hit.prefs.slice() : []
 };
-/**
- * 市町村名 → 本表里的规范写法（写法差异已归一；表未加载或未收录时返回空字符串）。
- *
- * 为什么需要：用户勾选的市町村名来自本表（citiesOfPref），而 JMA 电文、河川区域表给的是
- * 外部写法。把外部写法直接写进 region.city，再与用户勾选的名字比对（indexOf）就会漏报；
- * 所以比对前先取规范名。表未加载时返回空串，调用方回退用原写法（宁可多报绝不漏报）。
- */
+/** 市町村名 → 本表里的规范写法（表未加载或未收录时返回空字符串）。JMA 电文、河川区域表给的是
+ *  外部写法，直接与用户勾选名比对会漏报，所以比对前先取规范名。 */
 const canonicalCityOf = (name) => {
   if (!cityPrefIndex) return ''
   const hit = cityPrefIndex.get(normKana(name));
   return hit ? hit.name : ''
 };
 
-/**
- * 河川予報区域表（0.3.0-a 由 scripts/build-areas.mjs 生成，Host 随 /areas 一起下发）。
- * 指定河川洪水予報的电文区域是河川名（「天塩川」），必须先映射到市町村才能与用户关注比对。
- */
+/** 河川予報区域表（scripts/build-areas.mjs 生成，Host 随 /areas 下发）。指定河川洪水予報的电文
+ *  区域是河川名（「天塩川」），必须先映射到市町村才能与用户关注比对。 */
 function setRiverAreas(list) {
   if (!Array.isArray(list)) return false
   const idx = new Map();
@@ -4235,28 +3827,13 @@ const riverAreaCities = (code) => {
   return hit ? hit.cities.slice() : []
 };
 
-// ---------- 中国行政区划表（0.5.0）：Host 随 /areas 一起下发 ----------
-// 与市区町村表同一理由：省 34 + 地级 384 共约 21KB，不内联进 client bundle。
-// 用途是设置页的三级级联（中国 → 省 → 地级市）与**关注点坐标填充**：
-// 大陆源（cenc_eew / cenc_eqlist）是坐标 + 半径匹配（DESIGN 8.3），
-// 让用户手填经纬度不现实，由这张表按所选城市给出坐标。
-// 表由 scripts/build-cn-areas.mjs 从 GeoNames 生成（含 TW/HK/MO），头部记着已知取舍。
+// ---------- 中国行政区划表：Host 随 /areas 一起下发 ----------
+// 省 34 + 地级 384 共约 21KB。设置页的三级级联与**关注点坐标填充**都用它（大陆源是坐标 + 半径匹配）。
 let cnAreas = null; // [{ code, name, aliases, lat, lon, cities:[{name,aliases,lat,lon}] }]
-/**
- * 大陆行政区划表的加载结果（0.9.4 / P2-19）：空串 = 还没失败，非空 = 失败原因。
- *
- * 为什么必须单独记一笔：设置页那个分支此前只看 `cityTableState`（它只反映**市町村表**），
- * 于是 `setCnAreas` 失败时状态仍是 ready、`cnAreas` 仍是 null、province 列表为空——
- * 界面永远落在"正在加载…"那一支，用户无论等多久都不会知道是失败了，也没有重试入口。
- */
+/** 大陆行政区划表的加载结果：空串 = 还没失败，非空 = 失败原因。设置页据此区分"加载中"与"失败"。 */
 let cnAreasFailed = '';
-/**
- * 别名的规整：只留**有意义**的候选。
- *
- * 丢掉单字别名（"丽"这类会匹配到半个中国）与和显示名重复的项；上限 8 条，因为候选是长尾的
- * （个别条目有几十个历史名 / 罗马字音译），而匹配是**最长命中**，砍掉短名不影响建制全名。
- * 缺失 `aliases` 字段（Host 未升级 / 手写的旧数据）时返回空数组——**别名是增强，不是前提**。
- */
+/** 别名的规整：丢掉单字别名（"丽"这类会匹配到半个中国）与和显示名重复的项，上限 8 条（匹配是
+ *  **最长命中**，砍掉短名不影响建制全名）。缺失 `aliases` 字段时返回空数组——别名是增强，不是前提。 */
 function normAliases(list, name) {
   if (!Array.isArray(list)) return []
   const out = [];
@@ -4271,11 +3848,8 @@ function normAliases(list, name) {
   }
   return out
 }
-/**
- * 注入并规整行政区划表。**逐字段校验**：表来自 Host 的 JSON，与 localStorage 一样属于
- * "不可信的输入"——一个坏条目会让级联渲染出幽灵选项，或把用户带到错误的坐标上
- *（后者在预警产品里是"该响的地方没响"）。规整失败的整体拒绝，不做部分接受。
- */
+/** 注入并规整行政区划表。**逐字段校验**：表来自 Host 的 JSON，与 localStorage 一样属于不可信输入
+ *  ——一个坏条目会让级联渲染出幽灵选项，或把用户带到错误的坐标上。整体规整失败就整体拒绝。 */
 function setCnAreas(list) {
   if (!Array.isArray(list)) { cnAreasFailed = '响应里没有 cnAreas'; return false }
   const out = [];
@@ -4295,7 +3869,7 @@ function setCnAreas(list) {
       seenCity.add(cn2);
       cities.push({ name: cn2, aliases: normAliases(c.aliases, cn2), lat: c.lat, lon: c.lon });
     }
-    // 没有下级的省级项在级联里是死路：直接丢弃，避免用户选中后按钮没反应
+    // 没有下级的省级项在级联里是死路：直接丢弃
     if (cities.length === 0) continue
     seenProv.add(name);
     out.push({ code: typeof p.code === 'string' ? p.code : '', name, aliases: normAliases(p.aliases, name), lat: p.lat, lon: p.lon, cities });
@@ -4317,17 +3891,8 @@ const cnCitiesOf = (province) => {
   const hit = cnAreas.find((p) => p.name === province);
   return hit ? hit.cities.slice() : []
 };
-/**
- * 「省 + 市 + 半径」→ 一个关注点（表里查不到时返回 null）。
- *
- * 抽成纯函数是为了能直接断言级联的产物：用户点「添加」之后配置里到底会多出什么，
- * 比"界面上出现了两个下拉框"重要得多。名称取「省·市」以免两个省的"城区"撞名。
- *
- * `origin: 'cn'`（0.8.0 / DESIGN 9.3）：**关注点的来源分支**——用户在哪个国家的分支下加的
- * 点，那个国家的源就是该点的权威源（3.4 的跨源归并据此判断，诊断里也要能看到）。
- * 它只做标注，**不限制匹配范围**：一个坐标点对所有坐标型源（EMSC / USGS / NOAA）依然有效
- * （DESIGN 9.3 的"不锁死机制"：差异只能来自源本身，不能人为裁剪用户能关注哪里）。
- */
+/** 「省 + 市 + 半径」→ 一个关注点（表里查不到时返回 null）。名称取「省·市」以免两个省的"城区"撞名；
+ *  `origin: 'cn'` 是**来源分支**，只做标注、**不限制匹配范围**：坐标点对所有坐标型源依然有效。 */
 function cnPlaceOf(province, city, radiusKm) {
   if (!cnAreas) return null
   const p = cnAreas.find((x) => x.name === province);
@@ -4336,25 +3901,18 @@ function cnPlaceOf(province, city, radiusKm) {
   if (!c) return null
   const r = Number(radiusKm);
   if (!Number.isFinite(r) || r < 1 || r > 2000) return null
-  // province / city 显式落在关注点上（0.8.2 / DESIGN 11.9 B）：matcher 按行政区匹配时不再需要
-  // 从「省·市」这个名字反推。名字仍然保留——它是界面上给人看的标签，不是判据。
+  // province / city 显式落在关注点上，matcher 不再从「省·市」这个名字反推；名字是给人看的标签
   return { name: province + '·' + city, lat: c.lat, lon: c.lon, radiusKm: r, origin: 'cn', province, city }
 }
 
-// ---------- 全球主要城市表（0.8.0 / DESIGN 9.4：按国家分包，展开某国时才拉） ----------
-// 为什么不内联：整表 5224 条城市约 375KB 源码。用户只会关注一两个国家，所以 Host 按
-// `?country=XX` **分包下发**，这里按需拉取并缓存——同一国家只拉一次。
+// ---------- 全球主要城市表：按国家分包，展开某国时才拉 ----------
+// 整表 5224 条城市约 375KB 源码。Host 按 `?country=XX` **分包下发**，这里按需拉取并缓存。
 let worldCountries = null; // [{ code, count, names: { 'zh-CN', 'zh-TW', ja, en } }]
 const worldCityPacks = new Map(); // code -> { state: 'loading'|'ready'|'failed', cities, error }
 /** 界面语言清单（与 00-i18n 的 LANGS 同一批）：国家名的四条名字就按这个顺序兜底。 */
 const COUNTRY_NAME_LANGS = ['zh-CN', 'zh-TW', 'ja', 'en'];
-/**
- * 国家名的本地化四条（0.9.4 / PD-3）。
- *
- * 此前 `/areas` 下发的 `name` 是**写死的中文**（生成脚本只算了 zh-CN），于是把界面语言切成
- * 日本語 / English 时国家下拉仍是简体中文。现在数据里带四种语言，取词时按当前语言解析，
- * 认不出该语言时逐级退回（zh-CN → en → code），最坏情况显示 ISO 码而不是空白。
- */
+/** 国家名的本地化四条：取词时按当前语言解析，认不出该语言时逐级退回（zh-CN → en → code），
+ *  最坏情况显示 ISO 码而不是空白。 */
 function setWorldCountries(list) {
   if (!Array.isArray(list)) return false
   const out = [];
@@ -4369,7 +3927,7 @@ function setWorldCountries(list) {
       const v = isPlainObject(c.names) ? c.names[lang] : undefined;
       if (typeof v === 'string' && v.trim()) { names[lang] = v.trim(); any = true; }
     }
-    // 老 Host（或别处塞进来的）只给 `name`：当作默认语言那一份，照常可用
+    // 旧 Host（或别处塞进来的）只给 `name`：当作默认语言那一份，照常可用
     if (!any && typeof c.name === 'string' && c.name.trim()) { names['zh-CN'] = c.name.trim(); any = true; }
     if (!any) continue
     seen.add(code);
@@ -4387,13 +3945,9 @@ function countryNameOf(entry, lang) {
 }
 const worldCountriesOf = () => (worldCountries ? worldCountries.map((c) => Object.assign({}, c)) : []);
 const countryPackOf = (code) => worldCityPacks.get(String(code === undefined || code === null ? '' : code).trim().toUpperCase()) || null;
-/**
- * 拉某个国家的城市包。
- *
- * 同一国家的并发调用共用同一条在途请求（Map 里先落 `loading`）。三种失败要能分开说，
- * 因为出路不同：`failed`（拉不到 → 重试 / 重启 dsh web）、`error: 'not-covered'`
- *（Host 明确答 404：这个国家不在表里 → 用手填坐标）、以及正常但为空。
- */
+/** 拉某个国家的城市包。同一国家的并发调用共用同一条在途请求（Map 里先落 `loading`）。三种失败要能
+ *  分开说，因为出路不同：`failed`（拉不到 → 重试）、`error: 'not-covered'`（Host 答 404：这个国家不在
+ *  表里 → 用手填坐标）、以及正常但为空。 */
 async function loadCountryCities(code) {
   const cc = String(code === undefined || code === null ? '' : code).trim().toUpperCase();
   if (!cc) return null
@@ -4427,27 +3981,13 @@ function resetWorldCities() {
   worldCityPacks.clear();
 }
 
-/**
- * 发布机构名 → 行政区归属（0.5.2，大陆气象源用）。
- *
- * 输入是气象台的机构名（`气象台` 后缀已去掉或未去掉都可以），例如
- * `云南省丽江市宁蒗彝族自治县气象台`。输出 `{ province, city, matched }`。
- *
- * 三条规则，全部由 238 条真实样本定出来（见 DESIGN 8.5 的实测记录）：
- *  ① **省名必须出现在机构名的开头**，取最长命中。不能改成"全局搜索"：省别名里有
- *     「海南」，而青海省的机构名是「青海省海南藏族自治州共和县气象台」——全局搜会把
- *     一条青海的预警归到海南省，那是最难查的一类错误（名字看着对、地方错了几百公里）。
- *     实测 238 条**全部**以省名开头，所以这个约束不损失覆盖。
- *  ② 市级在**省名之后的那一段**里找最长命中，用 `aliases`（GeoNames 的全部中文候选）而不是
- *     只认显示名——实测显示名会挑到旧名（「毕节地区」对应气象台的「毕节市」、
- *     「思茅市」对应「普洱市」），只认显示名会让这些预警退化成"仅省"。
- *  ③ 市级找不到时，若该省下**只有一个可选条目**（直辖市 / 港澳），就用它：
- *     「上海市浦东新区气象台」的省名之后不含"上海市"，但上海市的关注点确实该响。
- *     其余情况返回 `city: ''`——由调用方走**省级兜底**（宁可多报，绝不漏报，DESIGN 8.5）。
- *
- * @param {unknown} org 机构名
- * @returns {{ province: string, city: string, matched: boolean }|null} 表未加载时返回 null
- */
+/** 发布机构名 → 行政区归属（大陆气象源用）：输入气象台的机构名（`气象台` 后缀去没去掉都可以），
+ *  输出 `{ province, city, matched }`。三条规则：① **省名必须出现在机构名的开头**并取最长命中——
+ *  不能全局搜索，省别名里有「海南」，而青海省的机构名是「青海省海南藏族自治州共和县气象台」，
+ *  全局搜会把一条青海的预警归到海南省；② 市级在**省名之后的那一段**里找最长命中，用 `aliases`
+ *  而不是只认显示名（显示名会挑到旧名，「毕节地区」对应气象台的「毕节市」）；③ 市级找不到时，
+ *  若该省下**只有一个可选条目**（直辖市 / 港澳）就用它，否则返回 `city: ''` 由调用方走省级兜底。
+ *  @returns {{ province: string, city: string, matched: boolean }|null} 表未加载时返回 null */
 function cnAreaOf(org) {
   if (!cnAreas || cnAreas.length === 0) return null
   const s = String(org === undefined || org === null ? '' : org).trim();
@@ -4472,31 +4012,20 @@ function cnAreaOf(org) {
   return { province: prov.name, city: city ? city.name : '', matched: true }
 }
 
-// ---------- addr → 市町村归一 ----------
-// 気象庁 / P2PQuake 的观测点名（551 的 points[].addr）与市町村全称有一批写法差异，
-// 匹配前先把 addr 归一到它所属的市町村全称；归一不了的（机场、区域名、未收录点）返回 null，
-// 调用方据此放行——宁可多提醒一次，也绝不因为写法差异漏报。
-//
-// 已覆盖的差异（均来自实测的直播 addr）：
-//   ① 政令市短名：大阪北区茶屋町       ← 大阪市北区
-//   ② 特别区加县短名：東京千代田区大手町 ← 千代田区
-//   ③ 重名消歧前缀：福島伊達市          ← 伊達市（福島県）
-//   ④ 北海道支庁名：渡島北斗市 / 日高地方日高町 ← 北斗市 / 日高町
-//   ⑤ 仮名表记：龍ケ崎市 ↔ 龍け崎市（归一函数见文件上方 normKana：平假名→片假名 + ケ→ヶ）
+// ---------- addr → 市町村对应 ----------
+// 551 的 points[].addr 与市町村全称有一批写法差异（政令市短名、重名消歧前缀、北海道支庁名、仮名表记），
+// 匹配前先统一到所属市町村全称；认不出的返回 null，调用方据此放行。
 const HOKKAIDO_BRANCHES = [
   '石狩', '後志', '空知', '渡島', '檜山', '胆振', '日高', '上川', '留萌', '宗谷',
   '網走', '北見', '紋別', '十勝', '釧路', '根室',
 ];
-// 展开一个市町村全称的全部书写变体
 function cityAliases(city, pref) {
   const out = [city];
   const m = /^(.+市)(.+区)$/.exec(city);
   if (m) out.push(m[1].slice(0, -1) + m[2]);
   else if (/区$/.test(city)) out.push('東京' + city);
   if (pref) {
-    // 0.9.4（P3-38）：只削 県 / 都 / 府。「北海道」削出来是「北海」——那不是地名，
-    // 而且会给北海道的每个市町村造一条「北海○○市」的幻影别名（下面那一段才是北海道该走的路：
-    // 振興局名 + 「地方」变体）。
+    // 只削 県 / 都 / 府：「北海道」削出来是「北海」，会给北海道的每个市町村造一条幻影别名
     const short = String(pref).replace(/[都府県]$/, '');
     if (short && short !== pref) out.push(short + city);
   }
@@ -4505,7 +4034,7 @@ function cityAliases(city, pref) {
   }
   return out
 }
-let addrAliasIndex = null; // Map<归一后的别名, 市町村全称>
+let addrAliasIndex = null; // Map<统一后的别名, 市町村全称>
 let addrAliasMax = 0;
 function buildAddrIndex() {
   const idx = new Map();
@@ -4524,7 +4053,7 @@ function buildAddrIndex() {
   addrAliasIndex = idx;
   addrAliasMax = max;
 }
-// addr → 市町村全称（最长前缀命中）；无法归一返回 null
+// addr → 市町村全称（最长前缀命中）；认不出返回 null
 function lookupAddrCity(area) {
   if (!addrAliasIndex || addrAliasIndex.size === 0) return null
   const a = normKana(area);
@@ -4542,22 +4071,10 @@ function pruneUnknownCities() {
   if (kept.length === cur.watch.cities.length) return
   applyCfg(Object.assign({}, cur, { watch: Object.assign({}, cur.watch, { cities: kept }) }));
 }
-/**
- * 清掉「所属都道府县已经不在关注列表里」的市町村（0.9.5 / C11①）。
- *
- * 为什么需要它：设置页取消关注某个县时，`togglePref` 会顺手清掉该县下的市町村
- * （13-ui-settings.js 的 togglePref）。那个清理**依赖市町村表**（`citiesOfPref`），
- * 而表是异步取的：表未就绪时 `citiesOfPref` 返回空数组，于是"该县下的市町村"一个都
- * 匹配不到，清理静默失效。后果**基本**不是误报：匹配层先看县，`regionInWatch` 对不在关注
- * 列表里的县直接返回 false。**但有一个窄口子**——县归不出来（`region.pref === ''`）且整条
- * 消息没有任何区域能归到县时，它会落到市级比对（`lookupAddrCity` → `watch.cities`），残留的
- * 市町村仍可能在那里命中一次（多报方向，构造得出但罕见）。所以这条清理不只是"收拾界面"，
- * 它同时关掉了那个口子（此前留下的条目会在下一次装载时被清掉）。
- *
- * 表就绪后补这一次清理，所以无论表什么时候到（包括 P2-18 的「重试」之后），残留都能收敛。
- * 两个保守边界：**关注列表为空 = 全日本**，此时所有市町村都有效，不清；
- * 归属认不出的条目保留（宁可留着用户的选择，也不擅自删他勾过的东西）。
- */
+/** 清掉「所属都道府县已经不在关注列表里」的市町村。设置页取消关注某个县时的清理**依赖市町村表**
+ *（表未就绪时 `citiesOfPref` 返回空数组，清理会悄悄失灵）；县归不出来且整条消息没有任何区域能归到县
+ *  时会落到市级比对，残留条目仍可能多报一次，表就绪后补做这一次清理即可消除。两个保守边界：
+ *  **关注列表为空 = 全日本**（不清）；归属认不出的条目保留。 */
 function pruneCitiesOfUnwatchedPrefs() {
   if (!cityPrefIndex) return
   const cur = currentCfg();
@@ -4578,7 +4095,6 @@ async function loadCityTable() {
   if (typeof window === 'undefined' || typeof window.fetch !== 'function') { cityTableState = 'failed'; return cityTableState }
   cityTableState = 'loading';
   store.push({});
-  // 经 window 取 AbortController：浏览器里就是它，沙箱测试也只需注入 window 上的实现
   const AC = (typeof window !== 'undefined' && window) ? window.AbortController : undefined;
   cityTableAbort = typeof AC === 'function' ? new AC() : null;
   try {
@@ -4589,22 +4105,15 @@ async function loadCityTable() {
     const data = await res.json();
     const payload = isPlainObject(data) && isPlainObject(data.prefectures) ? data.prefectures : data;
     if (!setCityTable(payload)) throw new Error('payload 不含市町村表')
-    // 0.3.0：河川予報区域表随同一份响应下发；缺失只影响洪水，不影响泥石流与既有功能
+    // 河川予報区域表随同一份响应下发；缺失只影响洪水，不影响既有功能
     if (isPlainObject(data) && Array.isArray(data.riverAreas)) setRiverAreas(data.riverAreas);
-    // 0.5.0：中国行政区划表（省 → 地级市 + 坐标），供设置页的三级级联。
-    // 缺失只影响大陆源的"选城市"这条路径（仍可手填坐标），不影响日本链路与既有功能。
-    // 0.9.4（P2-19）：缺失 / 被拒时记下原因，界面据此显示"失败 + 重试"而不是永远"加载中"。
+    // 中国行政区划表供设置页的三级级联；缺失只影响大陆源的"选城市"路径，被拒时记原因以便显示重试
     if (isPlainObject(data) && Array.isArray(data.cnAreas)) setCnAreas(data.cnAreas);
     else cnAreasFailed = '响应里没有 cnAreas';
-    // 0.8.0：全球国家清单（城市本体按 `?country=` 分包另取，见 loadCountryCities）。
-    // 缺失只影响「其他国家 / 地区」分支的城市列表，手填坐标那条路照常可用。
+    // 全球国家清单（城市本体按 `?country=` 分包另取）；缺失只影响「其他国家 / 地区」分支的城市列表
     if (isPlainObject(data) && Array.isArray(data.worldCountries)) setWorldCountries(data.worldCountries);
-    // 0.3.0 起就在的清理：配置里残留了表里不存在的市町村名（手工改过配置 / 数据表更新）→ 清掉。
-    // **不能省**：C11① 那次补修一度把这一行挤掉了（改成只调下面那个），而回归里 pruneUnknownCities
-    // 是**直接调用**的，所以没有任何断言会红——补修引入的回归正好落在测试盲区里。
     pruneUnknownCities();
-    // 0.9.5（C11①）：再把"所属县已不在关注列表里"的市町村清掉
-    //（取消关注时那次清理依赖本表，表没到位就静默失效了——见函数说明）。
+    // 再把"所属县已不在关注列表里"的市町村清掉（见该函数说明）
     pruneCitiesOfUnwatchedPrefs();
   } catch (err) {
     // 插件卸载造成的中止不算"失败"：下次装载应当能重试
@@ -4619,21 +4128,13 @@ async function loadCityTable() {
 function abortCityTableLoad() {
   if (cityTableAbort) {
     try { cityTableAbort.abort(); } catch (err) { /* 已结束等忽略 */ }
-    // 故意不在这里置空：loadCityTable 的 catch 要靠它的 signal 区分「被中止」与「真失败」，
-    // 置空由 loadCityTable 收尾时统一做（abort 幂等，重复调用无害）。
+    // 故意不在这里置空：loadCityTable 的 catch 要靠它的 signal 区分「被中止」与「真失败」
   }
 }
 
-/**
- * 重试加载行政区划表（0.9.4 / P2-18）。
- *
- * 为什么需要它：`loadCityTable` 的守卫会把 `loading` / `ready` 直接挡回去，而全仓库唯一的
- * 调用点是 15-entry 里那个 `ctx.effect`——只在插件装载时执行一次。于是**一次瞬时失败**
- * （Host 刚起来还没注册路由、一次 500、一次网络抖动）就让整场会话失去市町村表：
- * 市级收窄失效（`lookupAddrCity` 索引为空 → `regionInWatch` 一律放行 → 多报）、设置页选不出
- * 市町村、`pruneUnknownCities` 不再运行，而用户只能刷新页面或停用再启用插件。
- * 这里把状态复位后重跑一次，供设置页的「重试」按钮使用。
- */
+/** 重试加载行政区划表，供设置页的「重试」按钮使用：`loadCityTable` 的守卫会把 `loading` / `ready`
+ *  挡回去，而唯一的调用点是 15-entry 的 `ctx.effect`（只在插件装载时执行一次），一次瞬时失败就会让
+ *  整场会话失去市町村表（市级收窄失效 → 多报、设置页选不出市町村、prune 不再运行）。 */
 async function retryCityTable() {
   if (cityTableState === 'loading') return cityTableState
   cityTableState = 'idle';
@@ -4642,7 +4143,7 @@ async function retryCityTable() {
 }
 
 
-// 供单测钩子重置表状态
+// 供测试钩子重置表状态
 const resetCityTable = () => {
   abortCityTableLoad();
   cityTable = null; cityNameSet = null; cityTableState = 'idle';
@@ -4651,41 +4152,22 @@ const resetCityTable = () => {
   cnAreasFailed = '';
 };
 
-/** 大陆表的状态（0.9.4 / P2-19）：'idle' | 'ready' | 'failed'。设置页据此区分"加载中"与"失败"。 */
+/** 大陆表的状态：'idle' | 'ready' | 'failed'。设置页据此区分"加载中"与"失败"。 */
 const cnAreasStateOf = () => (cnAreas ? 'ready' : (cnAreasFailed ? 'failed' : 'idle'));
 
 // ============================================================================
 // dsh-quake-alert · client/src/05-parser.js
-//
-// 作用：把 P2PQuake 的原始消息解析成统一 Alert（适配器层）。
-// 内容：code 551/552/556 的字段映射、区域名归一 prefsOfArea（显式表 → 47 县前缀 →
-//       府県予報区兜底）、跨县区域展开、震度/海啸文案、headline 组装。
-// 依赖：01-constants、02-storage（归一化相关工具）。
-// 注意：551 的 points[].pref 实测存在「京都」这类简写，已在常量层归一为全称。
-// ============================================================================
+// 作用：P2PQuake 原始消息（code 551/552/556）→ 统一 Alert：字段映射、区域名对齐 prefsOfArea、
+//       跨县区域展开、震度/海啸文案与 headline 组装。依赖 01-constants、02-storage、00-i18n。
 
 
 // ---------- 解析器：P2PQuake code → Alert ----------
-// Alert = { id, code, kind, kindLabel, severity, issued, headline, maxScale, hypo, geo,
-//           regions:[{pref, area, scale?, grade?}], cancelled, eventKey, strength }
-//           eventKey 归并同一地震的多次发布，strength 用于强度升级判定
-//           geo（0.8.0）= 震中坐标，**只服务跨源事件归并**，不参与匹配（理由见 geoOfHypo）
+// Alert 字段：id/code/kind/kindLabel/severity/issued/headline/maxScale/hypo/geo/cancelled/raw，
+// 加 regions:[{pref, area, scale?, grade?}]、eventKey（归并同一地震的多次发布）、strength（判强度升级）。
 
-/**
- * 电文里的震中坐标（0.8.0 / DESIGN 3.4）。
- *
- * `earthquake.hypocenter` 一直带着 latitude / longitude，此前只取了 name / magnitude。
- * 补它的唯一目的是**跨源权威源**：同一场地震会被 P2PQuake 与 USGS / EMSC / 大陆源各报一次，
- * 判"这几条是不是同一事件"需要震中（判据是「±2 分钟 + 50km + 跨源」，见 10-dedupe）。
- *
- * **不设 `locator: 'point'`**：那会让 06-matcher 把它送进 matchPointAlert，于是日本这一路
- * 从"该地区观测到的震度是否达阈值"降级成"震中距 ≤ 半径"——一场震中在 150km 外、却让本地
- * 达到震度 5 弱的地震会被漏掉。DESIGN 9.3 明确否决这种"为了模型统一而降级匹配"。
- * 坐标在这里与匹配完全解耦：有它只是让事件能被归并，没有它链路照常。
- *
- * 缺一个 / 越界 / 非有限数一律不产出 geo：**半个坐标比没有坐标更糟**——跨源归并会把
- * 两场不相关的地震并成一个，那是漏报方向（DESIGN 3.4 的"时间或震中缺一不可判时一律不归并"）。
- */
+// 电文里的震中坐标 → { lat, lon }；缺一个 / 越界 / 非有限数一律返回 null（半个坐标会让跨源归并把
+// 两场不相关的地震并成一个，属漏报方向）。只服务跨源事件归并（±2 分钟 + 50km，见 10-dedupe）：
+// **不设 locator:'point'**，否则 06-matcher 按"震中距 ≤ 半径"匹配，漏掉震中远而本地震度达阈值的。
 function geoOfHypo(hypo) {
   const lat = hypo ? hypo.latitude : null;
   const lon = hypo ? hypo.longitude : null;
@@ -4694,17 +4176,11 @@ function geoOfHypo(hypo) {
   if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null
   return { lat, lon }
 }
-// 区域名 → 都道府县全称。
-// 551 的 points[].pref 本身就是县全称，可直接用；但 556 的 areas[].name 与 552 的
-// areas[].name 是「区域名」，其中一部分不含都道府县名（北海道用地方名、东京都用岛屿名、
-// 海啸予報区用海域/群岛名），必须显式映射，否则关注对应县的用户会静默漏报。
-// 数据来源：気象庁「緊急地震速報や震度情報で用いる区域の名称」区域名一覧、
-//          「津波予報区について」境界一覧（全 66 区）。
+// 区域名 → 都道府县全称。551 的 points[].pref 本身是县全称（偶有「京都」这类简写，由 normalizePref 统一为全称）；
+// 556/552 的 areas[].name 是「区域名」，一部分不含都道府县名（北海道用地方名、东京都用岛屿名、海啸予報区用海域名），不映射就会静默漏报。
 const AREA_PREF = {
-  // —— 紧急地震速报区域名：东京都岛屿（名称不含「東京」）——
   '伊豆大島': ['東京都'], '新島': ['東京都'], '神津島': ['東京都'],
   '三宅島': ['東京都'], '八丈島': ['東京都'], '小笠原': ['東京都'],
-  // —— 海啸予報区：名称不含都道府县（66 区中的 17 个）——
   'オホーツク海沿岸': ['北海道'],
   '陸奥湾': ['青森県'],
   '東京湾内湾': ['千葉県', '東京都', '神奈川県'],
@@ -4723,8 +4199,7 @@ const AREA_PREF = {
   '大東島地方': ['沖縄県'],
   '宮古島・八重山地方': ['沖縄県'],
 };
-// 556 的 areas[].pref 是府県予報区名（简写："茨城"/"東京"/"北海道道北"/"宮古島"…），
-// 仅作为区域名归一失败时的兜底。
+// 556 的 areas[].pref 是府県予報区名（简写："茨城"/"東京"/"北海道道北"…），仅作区域名对不上时的兜底。
 const FORECAST_PREF = {
   '伊豆諸島': ['東京都'], '小笠原': ['東京都'], '奄美群島': ['鹿児島県'],
   '沖縄本島': ['沖縄県'], '大東島': ['沖縄県'], '宮古島': ['沖縄県'], '八重山': ['沖縄県'],
@@ -4738,10 +4213,9 @@ const HOKKAIDO_AREA_PREFIX = [
 // 县名按长度降序：保证「京都府」先于「京都」被匹配（否则京都府会被截成京都）
 const PREF_BY_LENGTH = PREFECTURES.map((p) => p.jp).sort((a, b) => b.length - a.length);
 const startsWith = (s, p) => s.lastIndexOf(p, 0) === 0;
-// 安全字典查找 own() 见 02-storage：外部数据里的 'constructor' / 'toString' 等键会命中原型链，
-// 例如 AREA_PREF['constructor'] 会返回 Object 构造函数并让 .slice() 抛错。
+// 字典查找一律用 own()（见 02-storage）：外部键会命中原型链，AREA_PREF['constructor'] 会让 .slice() 抛错。
 
-// 归一区域名，返回它可能覆盖的全部都道府县（海啸「有明・八代海」等跨多个县）
+// 对齐区域名，返回它可能覆盖的全部都道府县（海啸「有明・八代海」等跨多个县）
 function prefsOfArea(name, forecastPref) {
   const s = String(name || '');
   const exact = own(AREA_PREF, s);
@@ -4757,7 +4231,7 @@ function prefsOfArea(name, forecastPref) {
   }
   return []
 }
-// 把一个区域展开成 region 条目；跨县区域展开为多条，无法归一时 pref='' 并标记
+// 把一个区域展开成 region 条目；跨县区域展开为多条，对不上时 pref='' 并标记
 function regionsOfArea(name, forecastPref, value, valueKey) {
   const area = name || '';
   const prefs = prefsOfArea(area, forecastPref);
@@ -4772,8 +4246,7 @@ function regionsOfArea(name, forecastPref, value, valueKey) {
     return region
   })
 }
-// 震度 / 海啸等级的文字：**按当前界面语言取词**（0.9.4 起，见 00g-texts-events）。
-// 取不到该档位的键时退回数字形态（`震度N` 也走文案，别在这里写死中文）。
+// 震度 / 海啸等级文字：按界面语言取词；取不到该档位的键时退回数字形态（别在这里写死中文）。
 const scaleText = (v) => {
   const key = 'scale.' + v;
   const own1 = (typeof v === 'number') ? t(key) : '';
@@ -4781,14 +4254,10 @@ const scaleText = (v) => {
   if (typeof v === 'number' && v > 0) return t('scale.number', { n: Math.floor(v / 10) })
   return t('scale.unknown')
 };
-// 震度后缀：只在有效震度时追加，避免「最大震度未公布」这类噪音。
-// 震度是用户判断严重性的关键信息（阈值也是按震度设的），必须出现在 headline 里。
-// prefix 例：'最大' → 「最大震度3」；'预测最大' → 「预测最大震度5强」。
-// 注意：prefix 与 scaleText 之间**不留空格**——日语与中文都不该有，英文靠 scaleText 自带
-// （`Intensity 3`）读得通，所以这里保持原样拼接。
+// 震度后缀：只在有效震度（>0）时追加；震度是用户判断严重性的关键信息（阈值也按震度设），必须出现在
+// headline 里。prefix 例：'最大' → 「最大震度3」。prefix 与 scaleText 之间不留空格（英文靠 scaleText 自带空格）。
 const scaleSuffix = (v, prefix) => (typeof v === 'number' && v > 0 ? ' · ' + prefix + scaleText(v) : '');
-// severity → 颜色。'yellow' 必须显式处理：默认阈值 40 下最常见的命中（震度4）就是它，
-// 落到默认分支会显示成"信息蓝"，与「中等严重度」的语义不符。
+// severity → 颜色。'yellow'（默认阈值 40 下最常见的命中，震度4）必须显式处理，否则落到默认的"信息蓝"。
 const sevColor = (s) => (
   s === 'red' ? '#e5484d'
     : (s === 'orange' ? '#f76b15'
@@ -4804,7 +4273,7 @@ const severityOfScale = (v) => {
 
 function parseQuake(raw) {
   const type = (raw.issue && raw.issue.type) || '';
-  // 分类名是**我们给起的**（不是电文原文）→ 取词按界面语言（0.9.4 起，见 00g-texts-events）
+  // 分类名是我们给起的（不是电文原文）→ 按界面语言取词
   const labelMap = {
     ScalePrompt: 'kind.quakeScale', Destination: 'kind.quakeHypo', ScaleAndDestination: 'kind.quakeScaleHypo',
     DetailScale: 'kind.quakeDetail', Foreign: 'kind.quakeForeign', Other: 'kind.quakeInfo',
@@ -4814,7 +4283,7 @@ function parseQuake(raw) {
   const hypo = eq.hypocenter || {};
   const pts = raw.points || [];
   const hasHypo = typeof hypo.name === 'string' && hypo.name !== '';
-  // 有震源名时用模板拼（`震源 {name} · M{mag}`）；**震源名与机构名是上游原文，原样透传**。
+  // 有震源名时用模板拼（`震源 {name} · M{mag}`）；震源名与机构名是上游原文，原样透传。
   const headBase = hasHypo
     ? t('kind.quakeHeadline', { name: hypo.name, mag: (typeof hypo.magnitude === 'number' ? hypo.magnitude : '—') })
     : t(labelKeyOf());
@@ -4823,9 +4292,8 @@ function parseQuake(raw) {
     id: String(raw.id || raw._id || ''), code: 551, kind: 'quake',
     kindLabel: t(labelKeyOf()),
     severity: severityOfScale(eq.maxScale),
-    // 时间统一转成**带偏移**的 ISO 8601（源时区见 DESIGN 第 4 节 / 05d 的 SOURCE_CONTRACTS）。
-    // P2PQuake 的时间是裸 JST（"2026/09/07 23:25:14"），不补偏移的话大陆浏览器上会显示成
-    // 一个差 1 小时、且没有任何标注的时间；旧历史数据没有偏移，由 formatIssuedLocal 按 JST 解释。
+    // 时间统一转成带偏移的 ISO 8601。P2PQuake 给的是裸 JST（"2026/09/07 23:25:14"），不补偏移
+    // 在其它时区会差 1 小时且无标注；旧历史数据没有偏移，由 formatIssuedLocal 按 JST 解释。
     issued: p2pTimeToIso((raw.issue && raw.issue.time) || raw.time || ''),
     headline,
     maxScale: typeof eq.maxScale === 'number' ? eq.maxScale : -1,
@@ -4833,14 +4301,13 @@ function parseQuake(raw) {
     eventKey: eq.time ? 'quake:' + eq.time : '',
     strength: typeof eq.maxScale === 'number' ? eq.maxScale : -1,
     hypo: { name: hypo.name || '', magnitude: typeof hypo.magnitude === 'number' ? hypo.magnitude : null },
-    // 震中坐标（0.8.0）：只给跨源事件归并用，**不参与匹配**（见 geoOfHypo）
+    // 震中坐标：只给跨源事件归并用，不参与匹配（见 geoOfHypo）
     geo: geoOfHypo(hypo),
     regions: pts.map((p) => ({
       pref: normalizePref(p.pref),
       area: p.addr || '',
       scale: typeof p.scale === 'number' ? p.scale : -1,
-      // isArea=true 的条目是区域名（如「熊本県天草・芦北」），无法对应到具体市区町村；
-      // false/缺省才是观测点（如「白河市新白河」），可以做市级收窄。
+      // isArea=true 是区域名（无法对应到具体市区町村），false/缺省才是观测点，可做市级收窄。
       cityKnown: p.isArea !== true,
     })),
     cancelled: false,
@@ -4868,8 +4335,7 @@ function parseEew(raw) {
     eventKey: (raw.issue && raw.issue.eventId) ? 'eew:' + raw.issue.eventId : '',
     strength: maxTo,
     hypo: { name: hypo.name || '', magnitude: typeof hypo.magnitude === 'number' ? hypo.magnitude : null },
-    // 震中坐标（0.8.0）：同 551（见 geoOfHypo）。EEW 是秒级信息，它是"日本这一路先播"的
-    // 主要来源，因此跨源归并恰恰最依赖它带坐标。
+    // 震中坐标：同 551（见 geoOfHypo）。EEW 是日本这一路最先播出的来源，跨源归并最依赖它带坐标。
     geo: geoOfHypo(hypo),
     regions: areas.flatMap((a) => regionsOfArea(a.name, a.pref, typeof a.scaleTo === 'number' ? a.scaleTo : -1, 'scale')),
     cancelled,
@@ -4880,8 +4346,7 @@ function parseEew(raw) {
 function parseTsunami(raw) {
   const cancelled = raw.cancelled === true;
   const areas = raw.areas || [];
-  // 两侧的分隔符与「高さ」前缀都是**我们拼的** → 模板化（`{area}：{grade}{height}`）。
-  // 预报区名与浪高描述是电文原文，原样透传。
+  // 两侧分隔符与「高さ」前缀是我们拼的，走模板（`{area}：{grade}{height}`）；预报区名与浪高描述是电文原文。
   const gradeKeyOf = (grade) => {
     const k = 'tsunami.' + grade;
     const got = grade ? t(k) : '';
@@ -4903,11 +4368,9 @@ function parseTsunami(raw) {
     issued: p2pTimeToIso((raw.issue && raw.issue.time) || raw.time || ''),
     headline: cancelled ? t('kind.tsunamiCleared') : lines.join('；'),
     maxScale: worst,
-    // 海啸预报没有可归并的事件 id（issue 只有 source/time/type），但**绝不能留空**：
-    // cancelKeyOf 会退回 kind（'tsunami'），于是任意海域的解除都被当成"此前提醒过的事件"，
-    // 播出一条与用户无关的「海啸预报已解除 …此前发出的警报已作废」——海啸域的**假安全**
-    // 是最危险的误报。用「预报区名集合」当事件键：只有针对同一批预报区的发布与解除
-    // 才归并为同一个事件（区域不一致时匹配不上 → 不提示，安全侧）。
+    // 事件键用「预报区名集合」。海啸预报没有可归并的 id（issue 只有 source/time/type），绝不能留空：
+    // cancelKeyOf 会退回 kind（'tsunami'），任意海域的解除都被当成"此前提醒过的事件"，播出一条无关的
+    // 「海啸预报已解除」（海啸域的假安全）。区域不一致时匹配不上 → 不提示（安全侧）。
     eventKey: areas.length ? 'tsunami:' + areas.map((a) => String(a.name || '')).sort().join(',') : '',
     strength: worst,
     regions: areas.flatMap((a) => regionsOfArea(a.name, a.pref, a.grade || '', 'grade')),
@@ -4926,52 +4389,27 @@ function parse(raw) {
 
 // ============================================================================
 // dsh-quake-alert · client/src/05b-jma-parser.js
-//
-// 作用：把気象庁防災情報XML 的电文解析成与 P2PQuake 同一套内部模型（Alert），
-//       让 551/552/556 之外的气象警报（泥石流 / 洪水 / 大雨 / 高潮…）能走同一条主链。
-// 内容：Report 结构提取、警戒レベル判定、区域展开（市町村 / 河川予報区域 / 府県予報区）、
-//       中文灾害标签、解除判定、事件键。
-// 依赖：01-constants、02-storage（own）、04-city-table（市町村反查 / 河川区域表）、
-//       05-parser（prefsOfArea）。
-//
-// 关键事实（均来自 JMA 官方样本实测，样本见 samples/jma-*.xml）：
-//   · 警戒レベル写在 <Kind><Name> 里（「レベル４大雨危険警報」「レベル２土砂災害注意報」），
-//     或写在 <Head><Headline><Text> 里（「【警戒レベル２相当情報［洪水］】」）——是读出来的，不是推算的。
-//   · 指定河川洪水予報（VXKO）的 Kind 名称不带数字（「氾濫注意情報」「氾濫危険情報」），
-//     等级要按名称映射；它的区域是**河川予報区域**（12 位代码），必须先经 river-areas 表
-//     映射到市町村才能与用户关注比对。
-//   · 土砂災害警戒情報（VXWW50）本身就是警戒レベル4 相当，Kind 只有 警戒 / 解除 / なし。
-//   · 解除与发布共用同一条电文类型，靠 <Kind> 的 Status / Condition 区分。
+// 作用：気象庁防災情報XML 电文 → 与 P2PQuake 同套 Alert，让气象警报（泥石流 / 洪水 / 大雨 / 高潮…）走同一条主链；
+//       依赖 01-constants、02-storage（own）、04-city-table（市町村反查 / 河川区域表）、05-parser（prefsOfArea）、00-i18n。
+// 契约：警戒レベル是**读**出来的（<Kind><Name>「レベル４大雨危険警報」或 <Headline><Text>「【警戒レベル２相当情報［洪水］】」），不推算。
 // ============================================================================
 
 
 const LEVEL_DIGITS = { '１': 1, '２': 2, '３': 3, '４': 4, '５': 5, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5 };
-// 指定河川洪水予報：Kind 名称 → 警戒レベル（新体系的四个等级）
+// 指定河川洪水予報（VXKO）：Kind 名称不带级别数字（「氾濫注意情報」…），等级按名称映射
 const FLOOD_KIND_LEVEL = {
   '氾濫注意情報': 2, '氾濫注意報': 2,
   '氾濫警報': 3,
   '氾濫危険情報': 4,
   '氾濫発生情報': 5,
 };
-// 解除 / 无内容：这些 Kind 不代表"正在发布某种警报"
+// 解除 / 无内容：这些 Kind 不代表"正在发布某种警报"；解除与发布共用同一条电文类型，靠 Name / Status 区分
 const INACTIVE_KIND = /^(解除|なし|発表警報・注意報はなし)$/;
 
-/**
- * 旧格式电文的 Kind 名称 → 警戒レベル（0.4.0 修复漏报）。
- *
- * R06 新格式把级别写在名称里（「レベル４大雨危険警報」），旧格式只写名称
- * （「大雨特別警報」「大雨警報」「大雨注意報」）。此前 levelOf() 只认「レベルＮ」字样，
- * 于是**不带级别数字的旧格式电文被整体丢弃**（parseJma 返回 null）——包括最高级别的特别警报。
- * 实测证据（2026-09-07 東京都「大雨特別警報」，见 samples/jma-vpww53-tokyo-special-20260907.xml）：
- * 同一事件的三条电文 VPWW53 / VPWW54 / VPNO50 全部返回 null，插件该事件完全静默；
- * 而同一时刻的 R06 电文只有「その他注意報 / 暴風 / 波浪」，不含这条特别警报。
- * 也就是说：旧格式不是"迟早会被 R06 覆盖的副本"，它是部分时刻唯一的内容载体。
- *
- * 语义依据：気象庁的警报体系里 特別警報 > 危険警報(=L4) > 警報(=L3) > 注意報(=L2)。
- * 注意報级（2）**刻意不返回**：同一次发布往往同时以 VPWW53 与（Ｈ２７）两份副本出现，
- * 把 L2 也抬升等于让历史被同一份注意報的两份副本刷屏；而 L2 本就不播报。
- * R06 的「レベル２」仍照旧解析（但 0.9.4 / PD-1 起不再进历史：未达档位一律不留痕）。
- */
+// 旧格式（R06 前）电文的 Kind 名称 → 警戒レベル：特別警報 5 / 危険警報 4 / 警報 3，注意報一律 0。
+// 旧格式不带「レベルＮ」字样，只认数字会把最高级的特別警報整条丢掉（parseJma 返回 null），所以必须按
+// 名称语义兜底。注意報返回 0 是电文级的刻意取值：L2 本就不播报，抬成 2 会让同一份注意報的两份副本
+// （VPWW53 与（Ｈ２７））把历史刷屏；逐区级别另算（见 regionKindLevel）。
 function legacyKindLevel(name) {
   const s = String(name || '');
   if (!s) return 0
@@ -4980,15 +4418,8 @@ function legacyKindLevel(name) {
   if (/警報/.test(s) && !/注意報/.test(s)) return 3
   return 0
 }
-/**
- * **地区级**级别：与 legacyKindLevel 的唯一差别是注意報给出 2（而不是 0）。
- *
- * 为什么必须拆成两个函数：电文级不能把「注意報」抬成 2——同一次发布常有 VPWW53 与（Ｈ２７）
- * 两份副本，抬升会让历史被同一份注意報刷屏（而 L2 本来就不播报）；但地区级必须给出 2，
- * 否则该地区会**回退到电文最大值**：一条含危険警報（L4）的电文里，只到「大雨注意報」的
- * 西脇市会被播成「警戒レベル4（避难指示级）」——实测 2026-09-14 兵庫県就是这样，
- * 同一电文里姫路市是 L4 危険警報、相生市是 L3 大雨警報、西脇市是 L2 大雨注意報。
- */
+// **地区级**级别：与 legacyKindLevel 的唯一差别是注意報给 2。地区级必须给出 2，否则该地区会**回退到
+// 电文最大值**——一条含危険警報（L4）的电文里，只到「大雨注意報」的市町村会被播成「警戒レベル4」。
 function regionKindLevel(name) {
   const s = String(name || '');
   if (!s) return 0
@@ -5008,9 +4439,8 @@ function itemLevelOf(it) {
     regionKindLevel(it.kindName),
   )
 }
-// 电文标题 → **我们给起的标签 key**（0.9.4 起按界面语言取词，见 00g-texts-events）。
-// 左边是拿去匹配上游日文电文的正则——**永远保持日文原样**（翻译了就再也匹配不上）。
-// **特别警报不在这个表里**：它不能只看标题，理由见 kindLabelOf（那是一个真实的文案缺陷）。
+// 电文标题 → 我们给起的标签 key（按界面语言取词）。左边正则拿去匹配上游**日文原文**，永远保持日文原样。
+// 特别警报不在这个表里：它不能只看标题，见 kindLabelOf。
 const KIND_LABELS = [
   [/土砂災害警戒情報/, 'kind.jmaLandslideInfo'],
   [/指定河川洪水予報/, 'kind.jmaFloodForecast'],
@@ -5026,7 +4456,7 @@ const KIND_LABELS = [
   [/（なだれ）/, 'kind.jmaAvalanche'],
 ];
 
-// ---------- 最小 XML 取值工具（与 05-parser 的正则风格一致，不引依赖） ----------
+// ---------- 最小 XML 取值工具（纯正则，不引依赖） ----------
 const decode = (s) => String(s)
   .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
   .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
@@ -5056,23 +4486,16 @@ const attrOf = (attrs, name) => {
   return m ? m[1] : ''
 };
 
-/**
- * 区域类型判定：优先看 codeType，缺失或不可辨时按**代码位数**兜底。
- * 实测位数：市町村 7 位（北九州市 4010000）／府県予報区・細分区域 6 位（宗谷地方 011000）／
- * 河川予報区域 12 位（天塩川 810101000100）。
- * 这条兜底是必需的：気象庁在 Body 的 <Warning> 里常把区域写成**裸 <Area>**（不带
- * <Areas codeType="..."> 包裹），VXWW50 就是这样——只认 codeType 会一个区域都取不到，
- * 表现为"解析成功但 regions 为空"，等于静默漏报。
- */
+// 区域类型判定：优先看 codeType，缺失或不可辨时按**代码位数**兜底（实测：市町村 7 位／府県予報区・
+// 細分区域 6 位／河川予報区域 12 位）。兜底是必需的：気象庁在 Body 的 <Warning> 里常把区域写成
+// **裸 <Area>**（VXWW50 就是），只认 codeType 会一个区域都取不到，表现为"解析成功但 regions 为空"。
 function regionKindOf(codeType, code) {
   const ct = String(codeType || '');
   if (/市町村/.test(ct)) return 'city'
   if (/予報区域/.test(ct)) return 'river'
   if (/府県予報区|細分区域/.test(ct)) return 'pref'
-  // 显式给出 codeType 但不在上面的集合里 → 判**未知**，不再退回按码位数猜（0.4.2）。
-  // 放宽 <Area> 匹配之后会摄入 `水位観測所` 这类非行政区域，位数兜底会把码长恰好 6/7 位的
-  // 它们变成幻影的府県予報区 / 市町村区域。位数兜底只服务于"根本没给 codeType"的裸 <Area>
-  // （实测 VXWW50 的 Body 就是这种形态）。
+  // 显式给出 codeType 但不在上面的集合里 → 判未知，不按位数猜：放宽 <Area> 匹配后会摄入 `水位観測所`
+  // 这类非行政区域，位数兜底会把码长恰好 6/7 位的它们变成幻影的府県予報区 / 市町村区域。
   if (ct) return ''
   const c = String(code || '');
   if (/^\d{12}$/.test(c)) return 'river'
@@ -5081,12 +4504,9 @@ function regionKindOf(codeType, code) {
   return ''
 }
 
-/**
- * 提取电文里的 (Kind, 区域) 条目。
- * 按 <Warning type="…"> / <Information type="…"> 容器切块，块内 Item 继承该 type 作为 codeType；
- * 容器内的 <Areas codeType="…"> 优先，没有则退回 Item 里的裸 <Area>。
- * 传入**全文**（而不是只传 Body）：市町村清单常只出现在 Head 的 <Information> 里。
- */
+// 提取电文里的 (Kind, 区域) 条目：按 <Warning type> / <Information type> 容器切块，块内 Item 继承该
+// type 作为 codeType；容器内的 <Areas codeType> 优先，没有则退回 Item 里的裸 <Area>。
+// 传入**全文**（而不是只传 Body）：市町村清单常只出现在 Head 的 <Information> 里。
 function itemsOf(scope) {
   const out = [];
   const containers = [];
@@ -5094,11 +4514,9 @@ function itemsOf(scope) {
     containers.push({ type: attrOf(m[2], 'type'), body: m[3] });
   }
   if (containers.length === 0) containers.push({ type: '', body: String(scope) });
-  // 宽松的 <Area> 匹配（0.4.1）：原写法要求 `<Area>` 后紧跟 `<Name>` 再 `<Code>`，
-  // 于是 ①带属性的 `<Area codeType="…">`（实测 jma-vxko-flood.xml 里就有）、
-  // ②Name/Code 之间插了其它子元素、③只有 Name 没有 Code 的条目，都会被**静默丢弃**。
-  // 表现是"解析成功但 regions 为空"——而 regions 为空就直接不播报，等于静默漏报。
-  // 改为按块取、块内各自取值；codeType 先看 <Area> 自身的属性，再退回容器/外层。
+  // 按块取 <Area>（属性可有可无、Name/Code 可缺一）：原写法要求 <Area> 紧跟 <Name> 再 <Code>，带属性的
+  // <Area codeType="…">、子元素顺序不同或只有 Name 的条目都会被静默丢弃 → regions 为空 → 不播报。
+  // codeType 先看 <Area> 自身的属性，再退回容器 / 外层。
   const AREA = /<Area(\s[^>]*)?>([\s\S]*?)<\/Area>/g;
   const areasIn = (blockText, fallbackType) => {
     const list = [];
@@ -5136,18 +4554,14 @@ function itemsOf(scope) {
   return out
 }
 
-/**
- * 判定电文整体的警戒レベル：取自 Kind 名称、Headline 文本、标题，三者取最大。
- * 指定河川洪水予報另按 Kind 名称映射；土砂災害警戒情報固定为 4（它本身就是 L4 相当）。
- */
+// 判定电文整体的警戒レベル：Kind 名称、Headline 文本、标题三者取最大。指定河川洪水予報另按 Kind 名称
+// 映射；土砂災害警戒情報固定 4（它本身就是 L4 相当）。
 function levelOf({ title, headTitle, headlineText, notice, items, inactiveScope }) {
   let level = 0;
   for (const it of items) {
-    // 用 isInactiveItem（Name **或** Status 任一命中即算解除）：只看 Name 会把
-    // "Status=解除、Name 仍是灾种名"的条目算进级别，让解除电文的文案出现「警戒レベル3」。
+    // 用 isInactiveItem（Name 或 Status 任一命中即算解除）：只看 Name 会把"Status=解除、Name 仍是灾种名"的条目算进级别。
     if (isInactiveItem(it)) continue
-    // 电文级**刻意不含注意報的 2**：同一次发布常有 VPWW53 与（Ｈ２７）两份副本，
-    // 把 L2 也抬升等于让历史被同一份注意報刷屏（而 L2 本来就不播报）。逐区级别另算（见 itemLevelOf）。
+    // 电文级刻意不含注意報的 2（理由见 legacyKindLevel）；逐区级别另算（见 itemLevelOf）。
     const inName = maxLevelIn(it.kindName);
     if (inName > level) level = inName;
     const mapped = own(FLOOD_KIND_LEVEL, it.kindName) || 0;
@@ -5155,44 +4569,32 @@ function levelOf({ title, headTitle, headlineText, notice, items, inactiveScope 
     const legacy = legacyKindLevel(it.kindName);
     if (legacy > level) level = legacy;
   }
-  // 除标题与主文之外还必须读 **<Body><Notice>**：Ｒ０６ 的総合副本（VPWW53/54）把多灾种
-  // 多级别合并成一条电文，Kind 只写灾种名（「大雨警報」），地区级级别只出现在 Notice 里：
-  //   ［危険警報・氾濫特別警報の発表状況］〈レベル４大雨危険警報〉姫路市　たつの市　多可町＊
-  // 实测 2026-09-14 兵庫県：不读 Notice 时整条被判成 L3，一条真实存在的 L4 危険警報完全不播报。
+  // 除标题与主文之外还必须读 **<Body><Notice>**：Ｒ０６ 総合副本（VPWW53/54）把多灾种多级别合并成一条，
+  // Kind 只写灾种名，地区级级别只出现在 Notice 里（［危険警報・氾濫特別警報の発表状況］〈レベル４大雨危険警報〉姫路市…）；
+  // 不读它，整条真实存在的 L4 危険警報会被判成 L3 而不播报。
   for (const s of [headlineText, notice, headTitle, title]) {
     const n = maxLevelIn(s);
     if (n > level) level = n;
   }
-  // 有些电文只在主文里写〈危険警報（大雨、土砂災害）〉而不带「レベルＮ」字样。
-  // 「危険警報」在気象庁体系里固定是 L4 相当，所以按语义兜底 —— 但**必须要求它出现在〈…〉条目里**。
-  //
-  // 0.4.2 修正：Notice 的栏目名固定写作「［危険警報・氾濫特別警報の発表状況］」，没有内容时正文是
-  // 「なし」。用裸 `/危険警報/` 匹配会把**每一条**带这个 Notice 的电文都抬成 L4 ——
-  // 实测 live：同一发布的総合副本被判 level=4（文案/配色夸大成"避难指示级"），
-  // 而 Ｒ０６ 的大雨分灾种副本只有 level=2。要求 `〈…危険警報` 就把"栏目名"排除掉了。
+  // 有些电文只在主文里写〈危険警報（大雨、土砂災害）〉而不带「レベルＮ」：危険警報固定是 L4 相当，
+  // 按语义兜底。**必须要求它出现在〈…〉条目里**：Notice 的栏目名固定写作「［危険警報・氾濫特別警報の
+  // 発表状況］」，用裸 /危険警報/ 会把每一条带该 Notice 的电文都抬成 L4。
   const dangerItem = /〈[^〉]*危険警報/.test(String(headlineText || '') + ' ' + String(notice || ''));
   if (level < 4 && dangerItem) level = 4;
   if (level === 0 && /土砂災害警戒情報/.test(title)) level = 4;
-  // 「気象特別警報報知」是气象厅为特別警報专发的最高优先级报知电文；正常情况它的 Kind 名称
-  // 就是「大雨特別警報」（已被上面的映射接住），这里只是 Kind 缺失时的兜底。
-  // 必须排除"整条电文都是解除"的情况：解除报知的 Kind 是「解除」（循环里被 continue 跳过），
-  // 若不排除，标题兜底会把一条解除消息抬成 L5，headline 会显示成「警戒レベル5（已解除）」。
-  // 判定必须与 cancelled 用同一个口径（只看 Body 副本，见 parseJma）：
-  // JMA 常把解除写在 <Status> 里而 Name 为空，且 Head 的摘要副本根本没有 Status。
+  // 「気象特別警報報知」是特別警報的报知电文，Kind 缺失时按标题兜底为 L5；**必须排除整条都是解除**的
+  // 情况（解除报知的 Kind 是「解除」，循环里被跳过），否则一条解除消息会被抬成 L5，headline 显示成
+  // 「警戒レベル5（已解除）」。口径必须与 cancelled 相同——只看 Body 副本（见 parseJma）：JMA 常把
+  // 解除写在 <Status> 里而 Name 为空，且 Head 的摘要副本根本没有 Status。
   const scope = inactiveScope || items;
   const allInactive = scope.length > 0 && scope.every(isInactiveItem);
   if (level === 0 && !allInactive && /気象特別警報報知/.test(title)) level = 5;
   return level
 }
 
-/**
- * 从 <Body><Notice> 里解析「级别 → 地区名列表」。
- *
- * 格式（实测 2026-09-14 兵庫県 VPWW53）：`〈レベル４大雨危険警報〉姫路市　たつの市　多可町＊`
- * ——全角空格分隔，`＊` 表示"此外还有"（列表不完整）。所以这里只做**精确提升**：
- * 列出的地区提升到该级别，没列出的仍按自己的 Kind 判定（R06 分灾种副本通常同时存在，
- * 它带精确的逐区级别，会照常播报那些地区）。解析不出来就返回空表，调用方回退电文级别。
- */
+// 从 <Body><Notice> 解析「级别 → 地区名列表」：〈レベル４大雨危険警報〉姫路市　たつの市　多可町＊
+// ——全角空格分隔，`＊` 表示列表不完整，所以只做**精确提升**：列出的地区提升到该级别，没列出的仍按
+// 自己的 Kind 判定（R06 分灾种副本带精确的逐区级别，会照常播报那些地区）。解析不出来返回空表，调用方回退电文级别。
 function noticeAreaLevels(notice) {
   const text = String(notice || '');
   if (!text || text.indexOf('レベル') === -1) return []
@@ -5202,24 +4604,20 @@ function noticeAreaLevels(notice) {
     if (level <= 0) return
     const names = String(listText)
       .split(/[\s\u3000、,，]+/)
-      // 去掉尾随的省略标记：**半角的 `*` 也会粘在最后一个地区名上**（只排除全角 `＊`
-      // 会让"只列一个市町村"的 Notice 把那个唯一的 L4 城市漏掉 → 整条 L4 电文不播报）。
+      // 去掉尾随的省略标记：半角的 `*` 也会粘在最后一个地区名上，只排除全角 `＊` 会漏掉那个唯一的 L4 城市。
       .map((s) => s.replace(/[*＊※…]+$/g, '').trim())
       .filter(Boolean);
     if (names.length) out.push({ level, names });
   };
-  // 形态 A：〈レベル４大雨危険警報〉姫路市　たつの市　多可町＊
-  //  `[^〉\n]{0,40}〉` 把"级别标记到 〉"限在同一行、限长 40 字：原来的 `[^〉]*` 会跨段一直吃到
-  //  后面某段的 `〉`，把级别错配到别的市町村（实测构造：正文先出现「レベル4」、之后才有另一个
-  //  〈…〉时，后一段的地区被抬成 L4，而真正的 L4 地区保持 L3 —— 误报与漏报同时发生）。
+  // 形态 A：〈レベル４大雨危険警報〉姫路市　たつの市　多可町＊ —— 级别标记到 〉限在同一行、限长 40 字：
+  // 原来的 `[^〉]*` 会跨段一直吃到后面某段的 〉，把级别错配到别的市町村（误报与漏报同时发生）。
   // 地区列表用 `[\s\S]{0,300}?` + 前瞻到 `〈` / `］` / 结尾：允许跨行，但不会吞进下一段。
   for (const m of text.matchAll(/レベル\s*([１-５1-5])[^〉\n]{0,40}〉([\s\S]{0,300}?)(?=〈|］|$)/g)) push(m[1], m[2]);
-  // 形态 B：［警戒レベル４相当情報の発表状況］\n姫路市　たつの市 —— 级别写在**栏目名**里，
-  // 地区列表紧随其后（指定河川洪水予報的主文就是这种写法）。
+  // 形态 B：［警戒レベル４相当情報の発表状況］\n姫路市　たつの市 —— 级别写在**栏目名**里，地区列表紧随其后。
   for (const m of text.matchAll(/［[^］\n]*レベル\s*([１-５1-5])[^］]*］([\s\S]{0,300}?)(?=〈|［|$)/g)) push(m[1], m[2]);
   return out
 }
-/** 把 Notice 里的地区级级别套到 regions 上（名称经假名归一比较写法差异）。只在更高时提升。 */
+/** 把 Notice 里的地区级级别套到 regions 上（名称经假名写法对齐后比较差异）。只在更高时提升。 */
 function applyNoticeLevels(regions, notice) {
   const pairs = noticeAreaLevels(notice);
   if (pairs.length === 0) return regions
@@ -5238,13 +4636,9 @@ function applyNoticeLevels(regions, notice) {
   return regions
 }
 
-/**
- * 区域展开：一律归到「都道府県 + 市町村」两层，查不到归属县就标记 prefUnknown（放行）。
- *
- * 市町村名必须换成**本表的规范写法**（canonicalCityOf）再放进 region.city：用户勾选的
- * 市町村名来自市区町村表，而电文与河川区域表给的是外部写法（「南アルプス市」vs 本表
- * 「南あるぷす市」、「金ケ崎町」vs「金け崎町」），直接比对会漏报。取不到规范名时回退原写法。
- */
+// 区域展开：一律归到「都道府県 + 市町村」两层，查不到归属县就标记 prefUnknown（放行）。市町村名必须换成
+// 本表的规范写法（canonicalCityOf）：用户勾选的名字来自市区町村表，而电文与河川区域表给的是外部写法
+// （「南アルプス市」vs 本表「南あるぷす市」、「金ケ崎町」vs「金け崎町」），直接比对会漏报；取不到规范名时回退原写法。
 function regionsOf(items, notice, opts) {
   const includeInactive = !!(opts && opts.includeInactive);
   const out = [];
@@ -5261,8 +4655,7 @@ function regionsOf(items, notice, opts) {
   };
   for (const it of items) {
     if (!includeInactive && isInactiveItem(it)) continue
-    // 逐区级别：由这条 Item 自己的 Kind 决定。**不能用电文最大值**——同一次发布里
-    // 姫路市可以是 L4 危険警報、相生市 L3 大雨警報、西脇市 L2 大雨注意報（2026-09-14 兵庫県）。
+    // 逐区级别由这条 Item 自己的 Kind 决定，**不能用电文最大值**（同一次发布里各区级别可以不同）。
     const lv = itemLevelOf(it);
     for (const a of it.areas) {
       const kind = regionKindOf(a.codeType, a.code);
@@ -5297,24 +4690,14 @@ function regionsOf(items, notice, opts) {
   return applyNoticeLevels(out, notice)
 }
 
-/**
- * 电文标题 → 中文标签。**特别警报必须结合级别判**（0.5.4）。
- *
- * 「気象特別警報・警報・注意報」是 VPWW53 的**产品名**（総括副本），它只说明"这份电文覆盖
- * 特別警報／警報／注意報三类"，与这一条里到底有没有特別警報无关——实测 2026-09-14 兵庫県的
- * 同名产品名承载的是「危険警報（大雨・土砂災害）」（L4），而特別警報是気象庁的**最高级别**
- * （L5，命を守る行動）。只看标题就会把一条 L4 显示成「气象特别警报」，把官方等级说高一级
- *（与 0.4.2 修过的"文案夸大成避难指示级"同形，方向相反）。反过来 VPWW54 的
- *「気象警報・注意報（Ｈ２７）」在 L5 时只会显示成「气象警报」，是低估。
- * 所以这一族（SUMMARY_TITLE 里的四种产品名）按**级别**取标签；带灾种名的分灾种副本
- *（（大雨）／（土砂）…）仍按标题。
- */
+// 电文标题 → 标签。**特别警报必须结合级别判**：「気象特別警報・警報・注意報」是 VPWW53 的**产品名**
+// （総括副本），只说明这份电文覆盖特別警報／警報／注意報三类，与这一条里有没有特別警報无关——只看标题
+// 会把 L4 显示成「气象特别警报」（把官方等级说高一级），而 VPWW54 在 L5 时又会低估成「气象警报」。
+// 所以汇总族（SUMMARY_TITLE 的四种产品名）按级别取标签；带灾种名的分灾种副本（（大雨）／（土砂）…）仍按标题。
 function kindLabelOf(title, level) {
-  // 局部变量**不能叫 `t`**：那是 00-i18n 的取词函数，遮蔽之后本函数里的 t('…') 会变成调用字符串
-  // （0.9.4 踩过这个坑，check-imports 也会报「缺少 import：t」）。
+  // 局部变量不能叫 `t`（那是 00-i18n 的取词函数，遮蔽之后本函数里的 t('…') 会变成调用字符串）。
   const src = String(title || '');
-  // ① 先按**灾种**匹配：带灾种名的副本（（大雨）／（土砂）／指定河川洪水予報…）给出的是具体
-  // 灾种，比"气象警报"这种概括标签有信息量，所以它们的优先级高于下面的汇总族。
+  // ① 先按**灾种**匹配：带灾种名的副本给出的是具体灾种，比"气象警报"这类概括标签有信息量。
   for (const [re, labelKey] of KIND_LABELS) if (re.test(src)) return t(labelKey)
   // ② 汇总族（SUMMARY_TITLE 的四种产品名）与概括名「気象警報・注意報」本身不含灾种 → 按级别取。
   if (SUMMARY_TITLE.test(src) || /気象警報・注意報/.test(src)) {
@@ -5324,15 +4707,10 @@ function kindLabelOf(title, level) {
   return src || t('kind.jmaWeather')
 }
 
-/**
- * 汇总型电文：同一次发布会有 2〜3 份**不同格式的副本**同时出现在 feed 里
- * （实测 2026-09-07 東京都特別警報：VPWW53「気象特別警報・警報・注意報」、
- * VPWW54「気象警報・注意報（Ｈ２７）」、VPNO50「気象特別警報報知」，时间戳 13:57:52〜54）。
- * 它们的 title / headTitle 各不相同，而気象警報・注意報 的 EventID 又是空的——
- * 若沿用「标题」做事件键，同一条警报会被当成三个事件、连响三次铃。
- */
+// 汇总型电文：同一次发布会有 2〜3 份**不同格式的副本**同时出现在 feed 里（VPWW53、VPWW54（Ｈ２７）、
+// VPNO50），title / headTitle 各不相同且気象警報・注意報 的 EventID 为空——沿用标题做事件键会当成三个事件。
 const SUMMARY_TITLE = /気象特別警報・警報・注意報|気象警報・注意報（Ｈ２７）|気象警報・注意報（Ｒ０６）|気象特別警報報知/;
-// 灾种关键词（顺序 = 优先级无关，按最高级别的 Kind 名称匹配具体灾种）
+// 灾种关键词（按最高级别的 Kind 名称匹配具体灾种）
 const HAZARD_KEYS = [
   [/大雨|浸水/, '大雨'], [/土砂/, '土砂'], [/洪水|氾濫/, '洪水'], [/高潮/, '高潮'],
   [/暴風/, '暴風'], [/波浪/, '波浪'], [/雷/, '雷'], [/濃霧/, '濃霧'],
@@ -5353,37 +4731,26 @@ function hazardKeyOf(items, fallbackText) {
     const lv = itemLevelOf(it);
     if (lv > best) { best = lv; name = it.kindName; }
   }
-  // 活跃条目：先用灾种关键词；没有关键词的灾种（「竜巻注意報」这类）**直接用 Kind 名称当键**
-  // ——把它们归一到未知标记会让两个不同灾种共用一把钥匙，一次发布被当成另一次的重复而静默。
+  // 先用灾种关键词；没有关键词的灾种（「竜巻注意報」这类）直接用 Kind 名称当键——统一到未知标记会让两个不同灾种共用一把钥匙。
   const activeKey = hazardWordOf(name) || String(name || '');
   if (activeKey) return activeKey
-  // 0.9.4：解除电文里"被解除的那一项"本身往往就写着灾种（「大雨警報」+ Status=解除）。
-  // 此前无条件跳过 inactive 条目，灾种于是从唯一的来源里被丢掉，键退化成中性值——
-  // 而发布电文算出的键是 `jma:summary:大雨:<office>`，两边永远不相等：handleCancelled 里
-  // `wasRecentlyAlerted` 恒为 false，**解除提示从未生效**（DESIGN 11.9 #5 记的正是这条）。
+  // 再退到 inactive 条目：解除电文里"被解除的那一项"往往就写着灾种（「大雨警報」+ Status=解除），
+  // 无条件跳过会让键退化，而发布电文算出的键是 `jma:summary:大雨:<office>` → 两边永不相等，解除提示从未生效。
   for (const it of items) {
     const hit = hazardWordOf(it.kindName);
     if (hit) return hit
   }
   for (const [re, key] of HAZARD_KEYS) if (re.test(String(fallbackText || ''))) return key
-  // 认不出灾种（实测 VPNO50「東京都の特別警報を警報に切り替えました」这类报知电文通篇不带灾种）
-  // → 用**显式未知标记**。旧写法退回「气象」：那看起来像一个具体灾种，既不表达"认不出"，
-  // 又会与将来真叫「气象」的键撞车。`?` 不可能与任何真实灾种相等。
+  // 认不出灾种（VPNO50「東京都の特別警報を警報に切り替えました」这类报知电文通篇不带灾种）→ 用**显式
+  // 未知标记** `?`：退回「气象」看起来像一个具体灾种，又会与将来真叫「气象」的键撞车。
   return '?'
 }
 
-/**
- * 解析一条 JMA 电文。返回 null 表示这条电文与本插件无关（天气预报、地震火山、观测资料等）。
- * @param {string} xml 详情电文原文
- * @param {{ id?: string }} [entry] Host 侧 feed 条目（用于给 Alert 一个稳定 id）
- * @returns {object|null} Alert
- */
+// 解析一条 JMA 电文 → Alert；返回 null 表示这条电文与本插件无关（天气预报、地震火山、观测资料等）。
+// xml 是详情电文原文；entry 是 Host 侧 feed 条目（给 Alert 一个稳定 id）。
 function parseJma(xml, entry) {
-  // 先剥掉 XML 注释（0.4.2）：注释里完全可能出现 `<Body>` / `<Notice>` / 「レベル４」这类字样
-  // （我们自己的回归 fixture 就写过），而 block()/tag() 的正则只认标签、不认注释——
-  // 于是 block(text,'Body') 会从注释内部开始，notice 变成"注释文本 + 末尾真正的 Notice"。
-  // 注释在 XML 语义里不参与文档结构，先去掉最省事也最正确。
-  // indexOf 早退：未闭合的 `<!--` 会让惰性量词退化成 O(n²) 回溯。
+  // 先剥掉 XML 注释：注释里可能出现 `<Body>` / `<Notice>` / 「レベル４」这类字样，而 block()/tag() 只认
+  // 标签，会让 notice 变成"注释文本 + 末尾真正的 Notice"。indexOf 早退：未闭合的 `<!--` 会退化成 O(n²) 回溯。
   let text = String(xml || '');
   if (text.indexOf('<!--') !== -1 && text.indexOf('-->') !== -1) text = text.replace(/<!--[\s\S]*?-->/g, '');
   if (!text || text.indexOf('<Report') === -1) return null
@@ -5398,23 +4765,19 @@ function parseJma(xml, entry) {
   const notice = tag(body, 'Notice');
   const reportTime = tag(head, 'ReportDateTime') || tag(control, 'DateTime');
   const eventId = tag(head, 'EventID');
-  // 用**全文**提取条目：市町村清单常只出现在 Head 的 <Information> 里（Body 的 <Warning>
-  // 反而只有摘要），只看 Body 会取不到区域。重复条目由 regionsOf 去重兜住。
+  // 用**全文**提取条目：市町村清单常只出现在 Head 的 <Information> 里（Body 的 <Warning> 反而只有摘要），
+  // 只看 Body 会取不到区域；重复条目由 regionsOf 去重兜底。
   const items = itemsOf(text);
-  // 解除判定只看 **Body** 副本（0.4.2）：Head 的 <Information> 摘要项通常**没有 <Status>**
-  // （实测 live 电文：Head 的 Kind 只有 Name/Code/Condition，Body 的 Kind 才有 Status），
-  // 而 every() 是跨两份副本聚合的——Head 里那条同名 Item 会把"Status=解除"稀释成"发布"，
-  // 于是真实的解除电文被当成一次新发布。Body 缺失时退回全部 items（兼容只给 Head 的构造电文）。
+  // 解除判定只看 **Body** 副本：Head 的摘要项通常**没有 <Status>**（Head 的 Kind 只有 Name/Code/Condition），
+  // 而 every() 跨两份副本聚合，Head 里那条同名 Item 会把"Status=解除"稀释成"发布"。Body 缺失时退回全部 items。
   const bodyItems = itemsOf(body);
   const inactiveScope = bodyItems.length > 0 ? bodyItems : items;
 
   const level = levelOf({ title, headTitle, headlineText, notice, items, inactiveScope });
   const cancelled = inactiveScope.length > 0 && inactiveScope.every(isInactiveItem);
-  // 0.9.4（DESIGN 11.9 #5）：把「特別警報 → 警報」的**降级**从"解除"里分出来。
-  // 「…を警報に切り替えました」既不是解除也不是新发布：特別警報结束了，但**警報仍然有效**。
-  // 按解除处理会让历史里写下「气象警报（已解除）」——事实相反，用户以为危险过去了，
-  // 而警報还在（假安全方向）。降级成一个正常的 L4 警报（由关注地区 / 阈值 / 静默时段照常裁决），
-  // 它的键与随后的真解除是同一个，所以"降级之后再解除"这条链也能走通。
+  // 把「特別警報 → 警報」的**降级**从"解除"里分出来：「…を警報に切り替えました」既不是解除也不是新发布，
+  // 特別警報结束了但**警報仍然有效**。按解除处理会让历史写下「气象警报（已解除）」（假安全方向）；
+  // 降级成一个正常的 L4 警报，交给关注地区 / 阈值 / 静默时段照常裁决，它的键与随后的真解除相同。
   const downgradeTo = cancelled
     ? (/注意報に切り替え/.test(headlineText || '') ? 2 : (/警報に切り替え/.test(headlineText || '') ? 4 : 0))
     : 0;
@@ -5424,34 +4787,21 @@ function parseJma(xml, entry) {
   if (level === 0 && !cancels && !downgraded) return null
 
   const effLevel = downgraded ? downgradeTo : level;
-  // 降级电文要**保留区域**（解除才清空）：regionsOf 默认跳过 inactive 条目，而降级电文里
-  // 唯一的条目就是「解除」那一项——不放开这个开关，降级就连"哪个地区降级了"都说不出来，
-  // 只能进历史。区域级别由降级后的档位补上（0.9.4）。
+  // 降级电文要**保留区域**（解除才清空）：regionsOf 默认跳过 inactive 条目，而降级电文里唯一的条目就是
+  // 「解除」那一项；区域级别由降级后的档位补上。
   const regions = cancels ? [] : regionsOf(items, notice, { includeInactive: downgraded });
   if (downgraded) for (const r of regions) if (typeof r.level !== 'number') r.level = effLevel;
-  // 解除电文若展开不出区域，至少保留一个空区域条目，让事件键与提示仍可工作
   const kindLabel = kindLabelOf(title, effLevel);
   const first = String(headlineText || '').split(/[。\n]/)[0].trim();
   const levelText = effLevel > 0 ? t('kind.levelSuffix', { level: effLevel }) : '';
   const headline = (kindLabel + levelText + (first ? ' · ' + first : '')).slice(0, 180);
-  // 事件键：优先 EventID，其次 Head 标题。汇总型电文（同时存在多份格式副本）改用**内容指纹**
-  // ——「灾种 + 編集官署名コード」——否则同一条警报会因副本标题不同而被当成三个事件、连响三次。
-  //
-  // 指纹里**刻意不含发布时刻**。原因有两层，都是实测出来的：
-  //   ① 同一次发布的副本会跨分钟：2026-09-14 兵庫県，Ｒ０６ 分灾种副本（VPWW55/56）在 11:30:33，
-  //      総合副本（VPWW53/54）在 11:31:10——按分钟切片后两者永远算不出同一个键；
-  //   ② 更致命的是**解除**：解除报知的发布时间必然晚于发布（实测相差 5 小时），
-  //      指纹含时刻就注定让解除与发布算出不同的键，handleCancelled 于是永远找不到"此前提醒过的事件"，
-  //      0.1.3 加入的解除链路实际从未生效。去掉时刻后，同一官署 + 同一灾种在事件窗口内共用一个键，
-  //      重复与升级由去重层判定（strength 升级仍会再次提醒，解除时清掉该键，见 10-dedupe）。
-  //
-  // 官署名碼取电文 id 的后缀（編集官署名コード：130000=気象庁、280000=神戸地方気象台…），
-  // 而不是 regions[0]：解除电文的 regions 恒为空，用 regions 同样会让两边算不出同一个键。
-  //
-  // **取不到后缀时退回 <EditorialOffice> 文本，绝不留空**（0.4.2）：留空会让所有官署的同一灾种
-  // 共用一个键（实测 entry.id 为 `vxww50` 这类不含 6 位后缀的形态时，兵庫与東京的电文都算出
-  // `jma:summary:大雨:`），一次发布会被当成另一次发布的重复而静默。真实 feed 的 id 带后缀，
-  // 但"源改文件名格式"不该变成静默漏报。
+  // 事件键：优先 EventID，其次 Head 标题；汇总型电文改用**内容指纹**「灾种 + 編集官署名コード」，否则同一条
+  // 警报会因副本标题不同被当成三个事件。指纹**刻意不含发布时刻**：同一次发布的副本会跨分钟（分灾种副本
+  // 11:30:33 / 総合副本 11:31:10），而解除的发布时间必然晚于发布，含时刻就注定让解除与发布算出不同的键、
+  // 解除链路失效；同一官署 + 同一灾种在事件窗口内共用一键，重复与升级由去重层判定（见 10-dedupe）。
+  // 官署名碼取电文 id 的后缀（編集官署名コード：130000=気象庁、280000=神戸地方気象台…），不能用 regions[0]
+  // ——解除电文的 regions 恒为空。**取不到后缀时退回 <EditorialOffice> 文本，绝不留空**：留空会让所有官署
+  // 的同一灾种共用一个键（`jma:summary:大雨:`），一次发布会被当成另一次发布的重复而静默。
   const idSuffix = /([0-9]{6})\.xml$/.exec(String((entry && entry.id) || ''));
   const officeKey = (idSuffix ? idSuffix[1] : '') ||
     tag(control, 'EditorialOffice') || tag(control, 'PublishingOffice') || 'unknown';
@@ -5476,19 +4826,14 @@ function parseJma(xml, entry) {
     eventKey,
     strength: effLevel,
     cancelled: cancels,
-    // 降级为警报 / 注意报（0.9.4）。cancelled 为 false 是**有意的**：警報仍然有效。
+    // 降级为警报 / 注意报：cancelled 为 false 是有意的——警報仍然有效。
     downgraded,
     raw: { title, headTitle, eventId, infoType: tag(head, 'InfoType'), serial: tag(head, 'Serial') },
   }
 }
 
-/**
- * 测试电文场景。按顺序轮换，覆盖链路上不同的分支：
- *   · 级别落点不同：Kind 名称里（大雨 / 高潮 / L3 土砂）／电文标题本身即 L4（土砂災害警戒情報）／
- *     Headline 主文里（指定河川洪水予報）
- *   · 区域粒度不同：市町村级 / 府県予報区级
- *   · 边界两侧：L4（播报）与 L3（不播报、不进历史，只在侧边栏提示里留一行）
- */
+// 测试电文场景，按顺序轮换，覆盖链路上不同分支：级别落点（Kind 名称 / 标题本身即 L4 的土砂災害警戒情報 /
+// Headline 主文里的指定河川洪水予報）、区域粒度（市町村 / 府県予報区）、边界两侧（L4 播报、L3 不播报）。
 const TEST_SCENARIOS = [
   { key: 'landslide' },
   { key: 'flood' },
@@ -5514,22 +4859,13 @@ function testXml(o) {
     '</Areas></Item></Information></Headline></Head><Body/></Report>'
 }
 
-/**
- * 构造一条**测试用**电文（不联网、不经过 Host 轮询）——设置页的「发送测试气象警报」
- * 按钮用它走完整链路，让用户在无灾情时也能确认提醒与音效长什么样。
- *
- * 区域挂在"用户关注的第一个都道府县"下：若写死一个县，关注别处的用户点下去会被匹配挡掉、
- * 什么都不发生，反而以为插件坏了；用关注列表首项才能保证走通。没选任何县（全日本模式）时
- * 退回東京都。判县只看区域码前两位，所以这里用县码拼出的码就足够。
- *
- * id 与 EventID 都带时间戳与场景名：否则第二条会被消息级去重挡住，或被事件级去重当成
- * "强度未升级的重复发布"而只记历史、不播报——连点两次就没反应了。
- *
- * @param {string} pref 都道府县名（关注列表首项）
- * @param {number} nowMs 时间戳
- * @param {string} [key] TEST_SCENARIOS 里的 key，默认 landslide
- * @param {string} [cityName] 市町村级场景用的市町村名（表未加载时可省略，退回县名）
- */
+// 构造一条**测试用**电文（不联网）：设置页的「发送测试气象警报」按钮用它走完整链路。
+// 区域挂在"用户关注的第一个都道府县"下——写死一个县会让关注别处的用户点下去被匹配挡掉、什么都不发生；
+// 没选任何县（全日本模式）时退回東京都。判县只看区域码前两位，用县码拼出的码就够。
+// id 与 EventID 都带时间戳与场景名：否则第二条会被消息级去重挡住，或被事件级去重当成"强度未升级的重复
+// 发布"而只记历史、不播报。
+// @param pref 都道府县名（关注列表首项）；@param nowMs 时间戳；@param key TEST_SCENARIOS 里的 key（默认
+// landslide）；@param cityName 市町村级场景用的市町村名（表未加载时可省略，退回县名）。
 function buildTestTelegram(pref, nowMs, key, cityName) {
   const p = pref || '東京都';
   const pc = prefCodeOf(p) || '13';
@@ -5575,7 +4911,7 @@ function buildTestTelegram(pref, nowMs, key, cityName) {
       areaName: p, areaCode: pc + '0000',
     }))
   }
-  // 默认：土砂災害警戒情報（电文本身就是警戒レベル4 相当，区域是市町村）
+  // 默认：土砂災害警戒情報（电文本身就是警戒レベル4 相当）
   return testXml(Object.assign(base, {
     controlTitle: '土砂災害警戒情報',
     headTitle: p + '土砂災害警戒情報（テスト）',
@@ -5590,31 +4926,19 @@ function buildTestTelegram(pref, nowMs, key, cityName) {
 
 // ============================================================================
 // dsh-quake-alert · client/src/05c-global-parsers.js
-//
-// 作用：把三个全球源的消息解析成与日本源同一套内部模型（Alert）。
-// 内容：EMSC standing_order WebSocket（GeoJSON Feature）、USGS summary feed
-//       （FeatureCollection）、NOAA tsunami.gov 的 CAP 1.2 电文。
-// 依赖：02-storage（isPlainObject）。
-//
-// 与日本源的差别，也是本文件引入的新字段：
-//   · 全球源只给「震中坐标 + 震级」，没有都道府县 / 市町村 → `locator: 'point'`、
-//     `regions` 恒为空数组，匹配交给 06-matcher 的 matchPointAlert 用 Haversine 距离完成。
-//   · 震级（M）与日本的震度是两套不可换算的体系，所以阈值也是独立旋钮
-//     （thresholds.globalMagnitude），而不是复用 quakeScale。
-//
-// 字段差异全部来自实测样本（见 samples/global/），踩过的坑写在各自函数上方：
-//   · EMSC：顶层 { action, data }，data 是 GeoJSON **Feature**（不是 FeatureCollection）；
-//     区域字段叫 flynn_region（没有 region）；time 是 ISO8601 字符串；lat/lon 在 properties 里。
-//   · USGS：FeatureCollection；geometry.coordinates = [lon, lat, depthKm]；time/updated 是 epoch 毫秒。
-//   · NOAA CAP：alert > info > area > circle "lat,lon 半径"；震级与位置同时也在 info 的
-//     parameter 里（EventPreliminaryMagnitude / EventLatLon）。
+// 作用：三个全球源 → 与日本源同套 Alert：EMSC standing_order WebSocket（顶层 { action, data }，data 是
+//       GeoJSON **Feature** 而非 FeatureCollection）、USGS summary feed、NOAA tsunami.gov 的 CAP 1.2。
+// 依赖：02-storage（isPlainObject）、00-i18n（t）。
+// 契约：全球源只给「震中坐标 + 震级」，没有都道府县 / 市町村 → locator:'point'、regions 恒为空数组，匹配交给
+//       06-matcher 的 matchPointAlert（Haversine 距离）；震级阈值是独立旋钮 thresholds.globalMagnitude（与
+//       日本的震度不可换算）。EMSC 的区域字段叫 flynn_region、time 是 ISO 字符串、lat/lon 在 properties 里；
+//       USGS 的 geometry.coordinates = [lon, lat, depthKm]、time/updated 是 epoch 毫秒；NOAA 的 circle 是
+//       "lat,lon 半径"，震级与震中另有 parameter（EventPreliminaryMagnitude / EventLatLon）。
 // ============================================================================
 
 
-/** 取第一个可用数值（全球源的坐标/震级可能同时存在于两三个地方，按优先级回退）。
- *  经 toNumOrNull 归一，所以**数字字符串也算**：源侧类型并不稳定（CAP 的 parameter 里全是字符串，
- * 而 EMSC/USGS 某次改版也可能把 mag 序列化成 "5.6"）。只认 typeof number 的话，
- * `magnitude` 会变成 null → 震级闸门被整个跳过 → 低于阈值的地震照常响铃（误报）。 */
+// 取第一个可用数值（全球源的坐标 / 震级可能同时存在于两三个地方，按优先级回退），经 toNumOrNull 规整，
+// 所以**数字字符串也算**（CAP 的 parameter 全是字符串）：只认 typeof number 会让 magnitude 变 null、震级门槛被整个跳过。
 function firstNumber(...vals) {
   for (const v of vals) {
     const n = toNumOrNull(v);
@@ -5622,8 +4946,7 @@ function firstNumber(...vals) {
   }
   return null
 }
-/** 字符串（CAP 的 parameter 里全是字符串）→ 数值；空串与垃圾值一律给 null。
- *  注意不能用 Number('')——它等于 0，会把"没有震级"变成"震级 0"。 */
+// 字符串 → 数值；空串与垃圾值一律给 null。不能用 Number('')——它等于 0，会把"没有震级"变成"震级 0"。
 function toNumOrNull(v) {
   if (typeof v === 'number') return Number.isFinite(v) ? v : null
   const s = String(v === undefined || v === null ? '' : v).trim();
@@ -5643,11 +4966,8 @@ function tagText(scope, name) {
   return m ? decodeXml(m[1]).trim() : ''
 }
 
-/**
- * 震级 → severity。日本源按震度分级（10..70），全球源只有震级，所以这里单独一套边界。
- * 取值依据：M7 以上是「需要跨区域响应」的大地震，M6 以上可能造成局部破坏，
- * M5 以上普遍有感——与 EMSC/USGS 的公众提示口径一致。
- */
+// 震级 → severity，与日本源按震度分级（10..70）是两套独立边界：M7 以上是需跨区域响应的大地震，
+// M6 以上可能造成局部破坏，M5 以上普遍有感。
 function severityOfMagnitude(mag) {
   if (typeof mag !== 'number' || !Number.isFinite(mag)) return 'info'
   if (mag >= 7) return 'red'
@@ -5656,16 +4976,9 @@ function severityOfMagnitude(mag) {
   return 'info'
 }
 
-/**
- * 事件键里的「发震时刻（分钟）」必须先**归一到 UTC**再取分钟。
- *
- * 各源给的 ISO 字符串偏移不同：EMSC 是 `…Z`、USGS 经 toIso 也是 `…Z`，而 0.5.0 新接的大陆源是
- * `+08:00`。直接切字符串前 16 位的话，同一场地震在两边会落进**相隔 8 小时**的两个桶里——
- * 键永远不相等，跨源归并彻底失效，同一场地震响两次（实测样本里 cenc_eqlist 含境外地震，
- * 福克斯群岛 M6.5 这类事件 USGS / EMSC 也会推，所以这条路径是走得到的，不是理论问题）。
- *
- * 无法解析时返回 null（0.9.4 改，见 geoEventKey）。
- */
+// 事件键里的「发震时刻（分钟）」必须先**换算到 UTC** 再取分钟：各源给的 ISO 偏移不同（EMSC 是 `…Z`、
+// USGS 经 toIso 也是 `…Z`，大陆源是 `+08:00`），直接切字符串前 16 位会让同一场地震落进相隔 8 小时的
+// 两个桶，键永远不相等、跨源归并失效，同一场地震响两次。无法解析时返回 null（见 geoEventKey）。
 function minuteKeyOf(timeIso) {
   const s = String(timeIso === undefined || timeIso === null ? '' : timeIso);
   // 局部变量不叫 `t`（那是 00-i18n 的取词函数，遮蔽了本函数里的 t('key') 会去调 Date.parse）
@@ -5674,41 +4987,25 @@ function minuteKeyOf(timeIso) {
   return new Date(ms).toISOString().slice(0, 16)
 }
 
-/**
- * 跨源事件键：同一场地震 EMSC 与 USGS 都会推，两边机构、编号、震级都可能不同，
- * 但「发震时刻（分钟）+ 震中（0.1 度 ≈ 11km）」是一致的。用它把两个全球源的同一次地震
- * 归并成一个事件，避免同一场地震因为接了第二个源而响两次。
- * 代价：跨分钟边界（两边测定的发震时刻差过一分钟）时归并会失败——宁可多响一次，不漏报。
- * 0.5.0 起大陆源（cenc_eew / cenc_eqlist）也走同一把钥匙：它们的 **EventID 与 EEW 完全不同格式**
- * （EEW 是 `b4kybfnuqayyy` 这类随机串，速报是 `CD.20260918205536.056`；0.5.4 按样本修正，
- * 此处原写 EEW 是 `202609182050.0001`），归并只能靠时间 + 震中。
- */
-/**
- * 0.1° 桶的字符串化。**必须把 "-0.0" 归一成 "0.0"**：`(-0.02).toFixed(1)` 得到 "-0.0"，
- * 而 `(0.02).toFixed(1)` 得到 "0.0" —— 赤道与本初子午线两侧的震中会落进两个不同的桶，
- * 事件键永远不相等 → 跨源归并失败、同一场地震响两次。近似归并（±2 分钟 + 50km）通常还能
- * 兜住，所以它表现为概率性重复而不是稳定故障（0.5.1 修）。
- */
+// 跨源事件键：同一场地震 EMSC 与 USGS 都会推，两边机构、编号、震级都可能不同，但「发震时刻（分钟）+
+// 震中（0.1 度 ≈ 11km）」是一致的，用它把两个全球源的同一次地震归并成一个事件。跨分钟边界（两边测定的
+// 发震时刻差过一分钟）时归并会失败——宁可多响一次，不漏报。大陆源（cenc_eew / cenc_eqlist）走同一把钥匙：
+// 它们的 **EventID 与 EEW 格式完全不同**（EEW 是 `b4kybfnuqayyy` 这类随机串，速报是 `CD.20260918205536.056`），归并只能靠时间 + 震中。
+// 0.1° 桶的字符串化。**必须把 "-0.0" 统一成 "0.0"**：`(-0.02).toFixed(1)` 得 "-0.0" 而 `(0.02).toFixed(1)`
+// 得 "0.0"，赤道与本初子午线两侧的震中会落进两个不同的桶，事件键永远不相等 → 跨源归并失败、同一场地震响两次。
 function oneDp(n) {
   if (typeof n !== 'number' || !Number.isFinite(n)) return '?'
   const s = n.toFixed(1);
   return s === '-0.0' ? '0.0' : s
 }
 
-/**
- * 时间不可解析时的事件键序号。**只增不减**，且带调用序号，所以两段时间不可解析的事件
- * 永远不会得到同一个键（见 geoEventKey 的说明）。
- */
+// 时间不可解析时的事件键序号，**只增不减**：两段时间不可解析的事件永远不会得到同一个键（见 geoEventKey）。
 let unknownTimeSeq = 0;
 
 function geoEventKey(timeIso, lat, lon) {
   const min = minuteKeyOf(timeIso);
-  // 0.9.4 修：此前时间不可解析时回退 `String(timeIso).slice(0, 16)`，而**空串会切片成空串**
-  // —— 于是键退化成 `geo:@30.9,99.9`，该震中之后**所有**事件共用这一个键：isEventRepeat 先由
-  // eventSeen 精确命中，再按"强度未升级"判重复 → 后续地震全部静默（漏报）。
-  // 触发前提是源侧改时间格式或字段改名，而那正是解析层最该保守的地方。
-  // 现在给一个**不可能与其它事件相同**的键：代价是同一事件也可能多响一次（消息级 id 去重仍在，
-  // 事件级归并失效），方向与全项目一致——宁可多响一次，也不让不同事件互相吃掉。
+  // 时间不可解析时**不能**退回 `String(timeIso).slice(0, 16)`：空串会切片成空串，键退化成 `geo:@30.9,99.9`，
+  // 该震中之后**所有**事件共用这一个键，后续地震全部被判重复而静默（漏报）。给一个不可能与其它事件相同的键。
   const at = min === null ? ('!t' + (++unknownTimeSeq)) : min;
   return 'geo:' + at + '@' + oneDp(lat) + ',' + oneDp(lon)
 }
@@ -5722,11 +5019,8 @@ function toIso(v) {
   return typeof v === 'string' ? v : ''
 }
 
-/**
- * EMSC standing_order WebSocket 消息 → Alert。
- * 消息形如 { action: 'create'|'update'|'delete', data: Feature }；非地震事件（爆炸等）由
- * properties.evtype 区分，实测 'ke' = known earthquake。
- */
+// EMSC standing_order WebSocket 消息 → Alert。消息形如 { action: 'create'|'update'|'delete', data: Feature }；
+// 非地震事件（爆炸等）由 properties.evtype 区分，实测 'ke' = known earthquake。
 function parseEmsc(raw) {
   if (!isPlainObject(raw)) return null
   const d = isPlainObject(raw.data) ? raw.data : null;
@@ -5774,9 +5068,7 @@ function parseUsgsFeature(f) {
   const coords = (isPlainObject(f.geometry) && Array.isArray(f.geometry.coordinates)) ? f.geometry.coordinates : [];
   const lon = firstNumber(coords[0], p.lon);
   const lat = firstNumber(coords[1], p.lat);
-  // 0.9.4（P3-30）：坐标不完整时**不造事件对象**。此前缺 geometry 时 geo 是
-  // `{lat: null, lon: null}`、id 是 `'usgs:null,null,<time>'`——matcher 虽然会被 validGeo 挡下，
-  // 但这个"看起来有效"的对象仍会进历史与诊断，而且**不同地震的 id 会撞在一起**（同一个 null 组合）。
+  // 坐标不完整时**不造事件对象**：null 组合会让不同地震的 id 撞在一起（`usgs:null,null,<time>`），并进历史与诊断。
   if (typeof lat !== 'number' || !Number.isFinite(lat) ||
       typeof lon !== 'number' || !Number.isFinite(lon)) return null
   const depth = firstNumber(coords[2], null);
@@ -5800,8 +5092,7 @@ function parseUsgsFeature(f) {
     geo: { lat, lon, depthKm: depth },
     magnitude: mag,
     magType: String(p.magType || ''),
-    // USGS 的 alert 字段（green/yellow/orange/red）是 PAGER 的损失评估，11 条实测里全是 null；
-    // 这里不做映射，severity 统一按震级判定，避免"两个源对同一地震给出不同颜色"。
+    // USGS 的 alert 字段（green/yellow/orange/red）是 PAGER 的损失评估，实测全为 null：不做映射，severity 统一按震级判，避免两个源对同一地震给出不同颜色。
     hypo: { name: place, magnitude: mag },
     regions: [],
     eventKey: geoEventKey(time, lat, lon),
@@ -5811,32 +5102,14 @@ function parseUsgsFeature(f) {
   }
 }
 
-// 0.9.4（P3-42）：**删掉了 `parseUsgsFeed`（整文件 FeatureCollection → Alert[]）**。
-// 它在生产路径上没有调用点：Host 把每条 entry 的原文交给 Client，Client 逐条走
-// `parseUsgsFeature`（`scripts/check-contracts.mjs` 也是取 `features[0]`）。留着一个只有测试
-// 用的整文件映射器，会让下一个人以为存在"整包解析"这条路。回归里改成由测试自己 map
-// 真实样本的每个 feature —— 覆盖面不变，形状的错觉没有了。
-
-// NOAA tsunami.gov 的事件分级。CAP 的 <severity>（Minor/Moderate/…）对海啸不够具体，
-// 真正决定行动的是 <event> 名称，实测样本是 "Tsunami Information"（Minor）。
-// 第三项是**等级**，与日本 552 的 TSUNAMI_RANK（Watch=1/Warning=2/MajorWarning=3）同一把尺，
-// 由 matchPointAlert 用 thresholds.tsunamiGrade 做闸门；第四项是颜色。
-//
-// **等级与标签必须同口径**（0.9.2 修）：Advisory / Watch 的等级是 2（对应日本的「海啸警報」档），
-// 而标签曾写作「注意报」——于是把阈值收紧到「警报及以上」的用户，会在**警报档**收到一条显示为
-// **注意报**的提醒，两边互相打脸。NOAA 的官方定义是"对近水的人有危险"而非"可能有事"，归到警报档
-// 是对的，**错的是标签**，所以改标签、不降等级：降等级会让这条在「警报及以上」下静默，而海啸
-// 恰恰是这里最不能漏的一类。
-// 「Tsunami Information」= 0：它在语义上低于日本的「津波注意報」，是"没有破坏性海啸"的信息类
-// 电文——按 1 处理会让它在半径内直接响铃（全球海啸无法用等级收敛）。
-// 0.9.4（P2-11）：改为**整串锚定**匹配，并去掉"什么都能匹配"的兜底。
-// 此前用 `/Tsunami Warning/i` 这样的子串匹配，于是 "Not a Tsunami Warning"、
-// "Tsunami Warning Cancellation" 这类 event 也会被抬到最高档（3）并通过等级闸门 ——
-// 误报方向，而海啸的误报会直接让用户按"大海啸"行动。event 名是**受控词表**（CAP 里由发布
-// 机构填写），所以锚定整串是安全的；大小写与多余空格先归一。
-// 兜底那一项原本是 `[/./, '海啸信息（NOAA）', 0, 'info']`：任何新 event 都会被静默归成
-// "信息类"。等级 0 确实不会响铃（安全方向），但它把"上游加了新 event 名"这件事藏了起来。
-// 现在未识别的 event 用**如实标签**（带原始 event 名）落历史，等级仍是 0。
+// NOAA tsunami.gov 的事件分级。CAP 的 <severity>（Minor/Moderate/…）对海啸不够具体，真正决定行动的是
+// <event> 名称。第三项是**等级**，与日本 552 的 TSUNAMI_RANK（Watch=1/Warning=2/MajorWarning=3）同一把尺，
+// 由 matchPointAlert 用 thresholds.tsunamiGrade 做门槛；第四项是颜色。**等级与标签必须同口径**：Advisory /
+// Watch 的等级是 2（对应日本的「海啸警報」档，NOAA 的官方定义是"对近水的人有危险"），标签不能写成「注意报」。
+// 「Tsunami Information」= 0：语义上低于日本的「津波注意報」，按 1 处理会让它在半径内直接响铃。
+// event 名是**受控词表**（CAP 里由发布机构填写），所以**整串锚定**匹配（大小写与多余空格先统一）：子串匹配会把
+// "Not a Tsunami Warning" / "Tsunami Warning Cancellation" 抬到最高档 3（误报方向）。未识别的 event 用如实
+// 标签落历史，等级仍是 0（不会响铃，但能看出上游加了新 event 名）。
 const NOAA_EVENT_RULES = [
   [/^tsunami warning$/, 'kind.noaaMajorWarning', 3, 'red'],
   [/^tsunami advisory$/, 'kind.noaaWarning', 2, 'orange'],
@@ -5844,13 +5117,9 @@ const NOAA_EVENT_RULES = [
   [/^tsunami information( statement)?$/, 'kind.noaaInfo', 0, 'info'],
 ];
 
-/**
- * NOAA tsunami.gov 的 CAP 1.2 电文 → Alert。
- * 结构：alert > info > area > circle（"纬度,经度 半径"），震级与震中另有 parameter 备份。
- * msgType=Cancel 表示解除——走与日本源相同的取消 / 解除链路。
- * @param {string} xml CAP 原文
- * @param {{ id?: string }} [entry] 事件列表里的条目（用于给 Alert 一个稳定 id）
- */
+// NOAA tsunami.gov 的 CAP 1.2 电文 → Alert。结构：alert > info > area > circle（"纬度,经度 半径"），
+// 震级与震中另有 parameter 备份；msgType=Cancel 是解除，走与日本源相同的取消 / 解除链路。
+// xml 是 CAP 原文；entry 是事件列表里的条目（用于给 Alert 一个稳定 id）。
 function parseNoaaCap(xml, entry) {
   const text = String(xml || '');
   if (text.indexOf('<alert') === -1) return null
@@ -5867,9 +5136,8 @@ function parseNoaaCap(xml, entry) {
     const n = tagText(m[1], 'valueName');
     if (n) params[n] = tagText(m[1], 'value');
   }
-  // 震中优先取 area 的 circle（"纬,经 半径"），它才是配信覆盖范围；EventLatLon 只是备份。
-  // CAP 允许一个 info 下**多个 <area>**，各有自己的 circle——全部收集。
-  // 只看第一个 circle 会让其余海域的沿海用户漏报，而多区域海啸恰恰是最常见的形态。
+  // 震中优先取 area 的 circle（"纬,经 半径"），它才是配信覆盖范围，EventLatLon 只是备份。CAP 允许一个
+  // info 下**多个 <area>**，各有自己的 circle——全部收集：只看第一个会让其余海域的沿海用户漏报。
   const geoList = [];
   for (const m of text.matchAll(/<circle>([\s\S]*?)<\/circle>/g)) {
     const cm = /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/.exec(m[1]);
@@ -5881,12 +5149,11 @@ function parseNoaaCap(xml, entry) {
   }
   const geo = geoList.length ? geoList[0] : { lat: null, lon: null };
   const mag = toNumOrNull(params.EventPreliminaryMagnitude);
-  // 整串锚定匹配（0.9.4，见 NOAA_EVENT_RULES）。认不出时**如实标注**而不是冒充"海啸信息"：
-  // 等级仍是 0（不会响铃），但历史与诊断里能看出"上游加了一个我们不认识的事件名"。
+  // 认不出时**如实标注**而不是冒充"海啸信息"：等级仍是 0（不会响铃），但历史里能看出上游加了新 event 名。
   const eventNorm = String(event || '').trim().toLowerCase().replace(/\s+/g, ' ');
   const matched = NOAA_EVENT_RULES.find(([re]) => re.test(eventNorm));
-  // 匹配到时 rule[1] 是**文案 key**（要取词）；没匹配到时已经是取好词的句子，	() 对不存在的
-  // key 会原样回显，所以下面统一过一遍 t() 是安全的。
+  // 匹配到时 rule[1] 是**文案 key**（要取词）；没匹配到时已经是取好词的句子，t() 对不存在的 key 原样回显，
+  // 所以下面统一过一遍 t() 是安全的。
   const rule = matched || [null, t('kind.noaaUnrecognized', { event: String(event || '—').slice(0, 40) }), 0, 'info'];
   const ruleLabel = t(rule[1]);
   const cancelled = msgType === 'Cancel';
@@ -5907,7 +5174,7 @@ function parseNoaaCap(xml, entry) {
     issued: sent || origin,
     headline,
     maxScale: rule[2],
-    // 与日本 552 的等级共用同一把尺，供 matchPointAlert 做 tsunamiGrade 闸门
+    // 与日本 552 的等级共用同一把尺，供 matchPointAlert 做 tsunamiGrade 门槛
     tsunamiRank: rule[2],
     level: 0,
     geo,
@@ -5925,23 +5192,14 @@ function parseNoaaCap(xml, entry) {
 }
 
 
-/**
- * 测试场景（0.4.0）。全球源的地震不是随时都有，用户没法"等一条"来验证链路——
- * 日本气象链路早有「发送测试气象警报」按钮，这里补上对应的东西。
- *
- * 与气象按钮同样的做法：**构造源格式的原文**（EMSC 的 WebSocket 帧、USGS 的 GeoJSON feature、
- * NOAA 的 CAP 电文），再交给真正的解析器与匹配引擎。因此点一次就同时验证了
- * 「解析器 → 坐标匹配 → 通知 → 历史」整条链路，而且不发任何网络请求。
- *
- * 四个场景覆盖两个维度：三个源各自的解析路径，以及"半径内命中 / 半径外不命中"。
- */
+// 测试场景。全球源的地震不是随时都有，用户没法"等一条"来验证链路——与气象按钮同样的做法：**构造源格式的
+// 原文**（EMSC 的 WebSocket 帧、USGS 的 GeoJSON feature、NOAA 的 CAP 电文）再交给真正的解析器与匹配引擎，
+// 点一次就验证「解析器 → 坐标匹配 → 通知 → 历史」整条链路，且不发任何网络请求。
 const TEST_GEO_SCENARIOS = [
   { key: 'emsc', source: 'emsc' },
   { key: 'usgs', source: 'usgs' },
   { key: 'noaa', source: 'noaa' },
-  // 半径是可配的（1–2000km，新建默认 100km），所以这里**不能承诺"一定不命中"**：
-  // 旧的「超出默认 300km 半径，刻意不命中」既是 0.4.0 的旧默认值（0.5.0 起新建默认 100km），
-  // 也把半径 ≥556km 的用户引向相反的事实——那条测试会真的响铃（0.5.4 修正文案）。
+  // 半径是可配的（1–2000km，新建默认 100km），所以这里**不能承诺"一定不命中"**：半径 ≥556km 的用户会真的响铃。
   { key: 'emsc-far', source: 'emsc' },
 ];
 
@@ -5962,13 +5220,9 @@ function capTestXml(identifier, event, headline, name, lat, lon, mag, stamp) {
     '</info></alert>'
 }
 
-/**
- * 按场景构造一条**测试用**的源原文。
- * @param {{name?: string, lat: number, lon: number}} place 用户的第一个全球关注点
- * @param {number} nowMs 时间戳（id 里带上它，连点两次不会被消息级去重吞掉）
- * @param {string} key TEST_GEO_SCENARIOS 里的 key
- * @returns {{ source: string, payload: object|string, label: string, note: string }}
- */
+// 按场景构造一条**测试用**的源原文。
+// @param place 用户的第一个全球关注点 { name?, lat, lon }；@param nowMs 时间戳（id 里带上它，连点两次不会被
+// 消息级去重吞掉）；@param key TEST_GEO_SCENARIOS 里的 key。返回 { source, payload, label, note }。
 function buildTestGlobalMessage(place, nowMs, key) {
   const ms = nowMs || Date.now();
   const p = place || {};
@@ -6041,9 +5295,8 @@ function parseTestGlobalMessage(msg) {
     alert = parseEmsc(msg.payload);
   }
   if (!alert) return null
-  // 测试消息的事件键必须每次不同，否则第二次点击会被判成"同一场地震的重复发布"而静默——
-  // 用户会以为按钮坏了。生产的事件键按「分钟 + 震中」归并（那是为了让同一场地震只响一次），
-  // 连点两次必然落在同一分钟；这里换成带毫秒的 id，语义也成立：每次点击本来就是一次独立演示。
+  // 测试消息的事件键必须每次不同，否则第二次点击会被判成"同一场地震的重复发布"而静默（用户会以为按钮坏了）。
+  // 生产的事件键按「分钟 + 震中」归并，连点两次必然落在同一分钟；这里换成带毫秒的 id。
   alert.eventKey = 'test:' + alert.id;
   return alert
 }
@@ -6051,47 +5304,23 @@ function parseTestGlobalMessage(msg) {
 // ============================================================================
 // dsh-quake-alert · client/src/05e-cn-parsers.js
 //
-// 作用：把 Wolfx 转播的中国大陆地震源解析成与日本源 / 全球源同一套内部模型（Alert）。
-// 内容：`cenc_eew`（中国地震预警，秒级抢发）与 `cenc_eqlist`（中国地震速报，分钟级确认 / 补报）。
+// 作用：把 Wolfx 转播的中国大陆地震源（`cenc_eew` 预警 / `cenc_eqlist` 速报）解析成内部模型（Alert）。
 // 依赖：01-constants（cnTimeToIso）、02-storage（isPlainObject）、05c-global-parsers（severityOfMagnitude、geoEventKey）。
 //
-// 为什么与全球源同路径而不是与日本源同路径（DESIGN 8.2 / 8.5）：
-//   · 大陆源**没有分区烈度表**——官方渠道是小程序 / OS 内置，第三方中继只给震中坐标 + 震级。
-//     所以只能走 `locator:'point'`（坐标 + 半径），与 EMSC / USGS 完全同一条匹配路径，
-//     也因此**不需要中国行政区划表**。这是数据源能力的客观差异，不是功能裁剪。
+// 大陆源没有分区烈度表（中继只给震中坐标 + 震级），所以走 `locator:'point'`，与 EMSC / USGS 同一条
+// 匹配路径。实测字段：`cenc_eew` 10 个字段全是 number；`cenc_eqlist` 是 50 条整表（No1…No50 + md5）
+// 且**所有字段都是字符串**。两源的 EventID 格式互不相干 → 归并只能靠「发震时刻 + 震中」（geoEventKey）。
 //
-// 实测字段（samples/cn/，2026-09-18 真实数据）与踩过的坑：
-//   · `cenc_eew` 全部字段只有 10 个（加 WS 包裹的 type 共 11 个），数值都是 **number**。
-//   · `cenc_eqlist` 是一整张 50 条的**列表**（No1…No50 + md5），而且**所有字段都是字符串**
-//     （"magnitude":"3.7"、"latitude":"41.14"）——同一个上游的两种序列化风格，不能假定其一。
-//   · `MaxIntensity`（EEW，实测 5.8/5.9 连续小数）与 `intensity`（速报，实测 3…8 整数）是
-//     **中国地震烈度**（GB/T 17742-2020），不是日本震度、也不是震级。它是**震中附近的最大值**，
-//     不是用户所在地的烈度 —— **只入库、不上 UI**，否则会被读成后者的承诺。
-//     **0.9.5（P3-42）把这条差异写死在这里**：两条链路都把这个值写进 Alert 的**同一个**
-//     `intensity` 字段，而它们的**取值域不同**（EEW 是连续小数、速报是整数档）。今天无害
-//     ——全项目没有任何读取点（只入库），所以先保留上游的键名、不分裂字段；但**将来若要按
-//     `intensity` 分档，必须先分裂字段名**（例如 `maxIntensity` / `intensityGrade`），
-//     否则同一条"烈度 5.8"会在两条链路上被判成两个不同的档位。回归里有一条断言钉住
-//     "两个解析器写的是同一个字段名"（改名的当天它会红，提醒改的人同时处理另一条链路）。
-//   · `cenc_eqlist` 里**混有境外地震**（实测福克斯群岛 M6.5、印尼爪哇岛 M6.5、南桑威奇群岛 M6.2、
-//     台湾花莲县…）。所以它会与全球链路（EMSC / USGS）撞车——靠 geoEventKey 同一把钥匙归并。
-//   · 两个源的 **EventID 格式互不相干**：EEW 是随机串（仓库样本 `samples/cn/cenc-eew-last.json`
-//     实测 `b4kybfnuqayyy`），速报是 `CD.20260918205536.056` 这类带时刻的编号。
-//     （0.5.4 修正：此处原写 EEW 是 `202609182050.0001`，与样本不符。）
-//     同一场地震（实测四川甘孜州新龙县：EEW 20:50:23 M4.2 / 速报 20:50:24 M3.2）两边 ID 毫无关系，
-//     所以**归并只能靠「发震时刻 + 震中」**，绝不能靠 ID。这正是 geoEventKey 的用武之地。
-//   · **无取消 / 最终报标志**（既无 isCancel 也无 isFinal）。现有「取消只在此前提醒过时补一条」的
-//     链路对大陆源**失效**——这是安全相关的缺口，UI 必须如实说明（DESIGN 8.3 / 10.2），
-//     代码里不得假装能处理：cancelled 恒为 false。
+// 取值域事实：`MaxIntensity`（EEW，实测连续小数 5.8）与 `intensity`（速报，实测整数 3…8）都是
+// 中国地震烈度（GB/T 17742-2020），是震中附近的最大值、不是用户所在地的烈度——两条链路写进 Alert
+// 的同一个 `intensity` 字段但**取值域不同**，下游若要按它分档必须先分裂字段名。
+//
+// 大陆源**没有取消 / 最终报标志**，cancelled 恒为 false，代码里不得假装能处理。
 // ============================================================================
 
 
-/**
- * 字符串或数字 → 有限数值；空串 / 垃圾值 / 缺失一律 null。
- * **不能用 Number('')**——它等于 0，会把"没有震级"变成"震级 0"（震级 0 会让阈值闸门放行一个
- * 根本不知道多大的事件，在大陆速报这种每条都要判阈值的链路上就是误报）。
- * 速报整表字段全是字符串，所以这个转换是必需的而不是防御性的。
- */
+/** 字符串或数字 → 有限数值；空串 / 垃圾值 / 缺失一律 null。
+ *  不能用 `Number('')`——它等于 0，会把"没有震级"变成"震级 0"并放行一个不知道多大的事件。 */
 function numOrNull(v) {
   if (typeof v === 'number') return Number.isFinite(v) ? v : null
   const s = String(v === undefined || v === null ? '' : v).trim();
@@ -6111,10 +5340,7 @@ function placeText(name, depthKm) {
 }
 
 /**
- * 大陆地震预警（`cenc_eew`）→ Alert。
- *
- * @param {object} raw WS 推送包（含 `type:'cenc_eew'`）或 REST 快照（无 type）——**两种都接受**：
- *   实测 REST 与 WS 的差别就是多一个 type 字段，其余 10 个字段完全一致。
+ * 大陆地震预警（`cenc_eew`）→ Alert。WS 推送包（含 `type`）与 REST 快照（无 type）都接受。
  * @returns {object|null} 结构不对时返回 null（由契约层的 schema 判据负责分类）
  */
 function parseCencEew(raw) {
@@ -6127,28 +5353,25 @@ function parseCencEew(raw) {
   const mag = numOrNull(raw.Magnitude);
   const depth = numOrNull(raw.Depth);
   const place = String(raw.HypoCenter === undefined || raw.HypoCenter === null ? '' : raw.HypoCenter).trim();
-  // OriginTime 是发震时刻，ReportTime 是发布时刻。实测两者**完全相同**——这是上游的填充习惯，
-  // **不能据此判定它"不是实时预警"**（DESIGN 8.3）。事件键用 OriginTime（与其它源同一口径）。
+  // OriginTime 是发震时刻，ReportTime 是发布时刻（实测两者相同，是上游的填充习惯，不能据此判定
+  // 它"不是实时预警"）。事件键用 OriginTime（与其它源同一口径）。
   const originIso = cnTimeToIso(raw.OriginTime);
   const reportIso = cnTimeToIso(raw.ReportTime);
   const reportNum = numOrNull(raw.ReportNum);
   const headline = magText(mag) + placeText(place, depth) +
     (reportNum !== null && reportNum > 1 ? t('kind.cencReportNo', { n: reportNum }) : '');
   return {
-    // id 前缀 cenc: ——与速报的 EventID 是两套命名空间，实测不会撞（EEW 是 b4kybfnuqayyy 这类）
+    // id 前缀 cenc: ——与速报的 EventID 是两套命名空间
     id: 'cenc:' + id,
     code: 'cenc_eew',
     kind: 'eew',
     kindLabel: t('kind.cencEew'),
     source: 'cenc_eew',
-    // 无分区烈度 → 坐标 + 半径匹配（DESIGN 8.3）；
-    // 震级闸门共用 thresholds.globalMagnitude（DESIGN 8.4：它不是速报，与预警同档）
+    // 无分区烈度 → 坐标 + 半径匹配；震级门槛共用 thresholds.globalMagnitude（与预警同档）
     locator: 'point',
     speedReport: false,
-    // **恒 red，与日本 556 同口径**（DESIGN 2 节：「EEW → red（警报本质）」）。severity 决定两件事：
-    // 通知配色，以及**静默时段能否穿透**（只有 red 穿透）。按震级分档会让一场 M4.2 的预警在夜间
-    // 被静默掉（severityOfMagnitude 给 info），而同配置下的日本 EEW 照常穿透——那是漏报方向。
-    // 速报（分钟级确认，不是警报）仍按震级分档。
+    // **恒 red，与日本 556 同口径**（EEW 本质是警报）。severity 决定配色与**静默时段能否穿透**
+    // （只有 red 穿透）：按震级分档会让 M4.2 的预警在夜间被静默掉，那是漏报方向。
     severity: 'red',
     issued: originIso,
     reportTime: reportIso,
@@ -6162,20 +5385,16 @@ function parseCencEew(raw) {
     regions: [],
     eventKey: geoEventKey(originIso, lat, lon),
     strength: mag === null ? 0 : mag,
-    // 中国地震烈度（震中附近最大值）：只入库、不上 UI。详见文件头。
-    // **注意取值域**（P3-42）：这里是 EEW 的 `MaxIntensity`，实测是**连续小数**（5.8），
-    // 与速报那条整数档共用同一个字段名——下游若要按它分档，先分裂字段（见文件头）。
+    // 中国地震烈度（震中附近最大值，只入库、不上 UI）。**取值域**：EEW 的 `MaxIntensity` 是连续
+    // 小数（5.8），与速报那条整数档共用同一个字段名——下游若要按它分档，先分裂字段（见文件头）。
     intensity: numOrNull(raw.MaxIntensity),
     reportNum,
-    cancelled: false, // 大陆源不提供取消 / 最终报标志——见文件头，不得假装能处理
+    cancelled: false, // 大陆源不提供取消 / 最终报标志，不得假装能处理
     raw,
   }
 }
 
-/**
- * 速报整表里的单项（`NoN`）→ Alert。
- * 所有字段都是字符串（实测）；`location` 与 `placeName` 实测总是一样，取 placeName 优先、location 回退。
- */
+/** 速报整表里的单项（`NoN`）→ Alert。所有字段都是字符串（实测）；地名取 placeName 优先。 */
 function parseCencEqlistItem(item) {
   if (!isPlainObject(item)) return null
   const eventId = String(item.EventID === undefined || item.EventID === null ? '' : item.EventID).trim();
@@ -6189,7 +5408,7 @@ function parseCencEqlistItem(item) {
     (item.placeName === undefined || item.placeName === null ? '' : item.placeName) ||
     (item.location === undefined || item.location === null ? '' : item.location)
   ).trim();
-  // time 是发震时刻，ReportTime 是发布时刻。实测 lag 209–1643 秒（DESIGN 8.3 记为 240–1608）。
+  // time 是发震时刻，ReportTime 是发布时刻。实测 lag 209–1643 秒。
   const originIso = cnTimeToIso(item.time);
   const reportIso = cnTimeToIso(item.ReportTime);
   const headline = magText(mag) + placeText(place, depth);
@@ -6200,8 +5419,7 @@ function parseCencEqlistItem(item) {
     kindLabel: t('kind.cencEqlist'),
     source: 'cenc_eqlist',
     locator: 'point',
-    // 速报不是预警：它管分钟级确认与补报，用**独立**的震级门槛（thresholds.cnReportMagnitude），
-    // 否则会被 M2.5–M3.8 的小震频繁打扰（DESIGN 8.4）。
+    // 速报不是预警：用**独立**的震级门槛（thresholds.cnReportMagnitude），否则会被小震频繁打扰。
     speedReport: true,
     severity: severityOfMagnitude(mag),
     issued: originIso,
@@ -6216,11 +5434,9 @@ function parseCencEqlistItem(item) {
     regions: [],
     eventKey: geoEventKey(originIso, lat, lon),
     strength: mag === null ? 0 : mag,
-    // 中国地震烈度（整数档）：只入库、不上 UI。与上面 EEW 那条**同名不同域**（P3-42）：
-    // 速报实测是 3…8 的整数，而 EEW 是 5.8 这样的连续小数——见文件头。
+    // 中国地震烈度（整数档，只入库、不上 UI）：与上面 EEW 那条**同名不同域**（速报 3…8 整数）。
     intensity: numOrNull(item.intensity),
-    // 实测全是 "reviewed"。不认识的取值**不丢弃**——它仍然是同一场真实地震，
-    // 丢弃等于漏报；原样带上供诊断，是否收窄由将来的实测决定（那时才知道有哪些取值）。
+    // 实测全是 "reviewed"。不认识的取值**不丢弃**——它仍是同一场真实地震，原样带上供诊断。
     reportType: String(item.type === undefined || item.type === null ? '' : item.type).trim(),
     cancelled: false,
     raw: item,
@@ -6228,9 +5444,8 @@ function parseCencEqlistItem(item) {
 }
 
 /**
- * 速报整表 → 按 `No1…NoN` **数值序**（不是字典序，否则 No10 会排到 No2 前面）的条目数组。
- * 实测 No1 是最新一条。非 `NoN` 键（type / md5）原样跳过。
- * @param {object} json WS / REST 的整表载荷
+ * 速报整表 → 按 `No1…NoN` **数值序**（不是字典序，否则 No10 会排到 No2 前面）；实测 No1 最新。
+ * 非 `NoN` 键（type / md5）原样跳过。
  * @returns {object[]} 原始条目（未解析），供逐条过契约
  */
 function cencEqlistItems(json) {
@@ -6242,7 +5457,7 @@ function cencEqlistItems(json) {
   return keys.map((e) => json[e.k]).filter(isPlainObject)
 }
 
-/** 速报整表的变更指纹。实测存在；缺失时返回空串（**不**据此判 schema——见契约层的说明）。 */
+/** 速报整表的变更指纹。实测存在；缺失时返回空串（**不**据此判 schema）。 */
 function cencEqlistMd5Of(json) {
   if (!isPlainObject(json)) return ''
   const v = json.md5;
@@ -6257,35 +5472,16 @@ function parseCencEqlist(json) {
 // ============================================================================
 // dsh-quake-alert · client/src/05f-nmc-parsers.js
 //
-// 作用：把 Host 转来的 nmc.cn 预警（JSON）解析成与日本源 / 全球源同一套内部模型（Alert）。
-// 内容：`nmc_alarm`——中央气象台汇总的**暴雨**与**地质灾害**预警信号。
-// 依赖：02-storage（isPlainObject）、04-city-table（cnAreaOf）。
+// 作用：把 Host 转来的 nmc.cn 预警（JSON）解析成内部模型（Alert）——暴雨与地质灾害预警信号。
+// 依赖：02-storage（isPlainObject / own）、00-i18n（t）、04-city-table（cnAreaOf）。
 //
-// 与其它源的三处结构性差异（都是实测决定的，不是风格选择）：
+// 三处结构性差异：① 匹配走**行政区层级**（locator:'area'）：把机构名解析成「省 + 市」再与用户
+// 关注的市比对，不用半径（"选丽江市 + 100km"会漏掉辖下较远的县）。② 机构名每条都以省名开头，
+// 自带完整层级链 → 不需要县表，由 cnAreaOf 在「省 + 市」这一层做最长匹配。
+// ③ 等级与灾种**只认 `pic` 图标编码**（Host 已解成 kind / level），不做中文匹配。
 //
-// ① **匹配走行政区层级，不走半径**（DESIGN 8.5）。
-//    预警的粒度到县（「云南省丽江市宁蒗彝族自治县气象台发布地质灾害黄色预警信号」），
-//    而设置页只让用户选到地级市。所以 locator 是 `'area'`：把机构名解析成「省 + 市」，
-//    再与用户关注的市比对。**不用半径**——"选丽江市 + 100km"会漏掉辖下较远的县，
-//    而漏报正是这套系统最不想要的（DESIGN 8.5 明确否决了"县名换坐标 + 半径"）。
-//
-// ② **机构名自带完整层级链，不需要县表**。
-//    0.5.0 曾预留"省 → 市 → 县"三级表（2900 条）用于"从县名向上找地级市"。开工前实测
-//    238 条真实预警：**每一条的机构名都以省名开头**，226 条能直接定位到地级市，剩下 12 条
-//    是海南省直辖县 / 上海市辖区（本就不属于任何地级市，县表也救不了）。所以县表不建，
-//    改由 04-city-table 的 cnAreaOf 在「省 + 市」这一层做最长匹配（DESIGN 8.5 已按实测更正）。
-//
-// ③ **等级与灾种只认图标编码，不认中文**。
-//    Host 已经把 `pic` 的编码解成 `kind` / `level` 两个词（见 lib/nmc-source.js），
-//    这一层不做任何中文匹配——`title` 的措辞会随上游改（样本里"预警信号"与"预警"两种都有），
-//    而图标文件名是程序契约。
-//
-// 三条已知缺口（与大陆地震源同类，UI 与文档必须如实说明，代码里不得假装能处理）：
-//   · **没有"解除"电文**。列表是"当前生效集合"，预警过期就从列表消失，我们看不到"解除"这个
-//     动作，因此 cancelled 恒为 false——"没收到取消"不等于"警报仍然有效"。
-//   · **没有取消 / 最终报标志**。
-//   · **机构名可能带错字**。实测「黑龙江省齐哈尔市克山县气象台」（少了"齐"）——市名对不上时
-//     按省级兜底放行（见 06-matcher），而不是丢弃这条预警。
+// 已知缺口：**没有"解除"电文**（列表是当前生效集合，过期即消失，cancelled 恒为 false）；机构名
+// 可能带错字（市名对不上时按省级兜底放行，而不是丢弃这条预警）。
 // ============================================================================
 
 
@@ -6293,37 +5489,24 @@ function parseCencEqlist(json) {
 const NMC_KIND_TEXT = { rainstorm: 'kind.cnRainstorm', geology: 'kind.cnGeology' };
 /** 等级 → 中文（与图标编码 `001`..`004` 的对应关系见 lib/nmc-source.js）。 */
 const NMC_LEVEL_TEXT = { red: 'kind.cnLevelRed', orange: 'kind.cnLevelOrange', yellow: 'kind.cnLevelYellow', blue: 'kind.cnLevelBlue' };
-/**
- * 等级 → severity（DESIGN 2 节的配色语义）：红 → red、橙 → orange、黄 → yellow、蓝 → info。
- *
- * **忠实映射，不做"警报恒 red"那种拔高**（0.5.1 对 `cenc_eew` 的修正不适用这里）：
- * 那条修正是因为日本 EEW 本身就是警报、按震级分档纯属把警报降级；而气象预警的四个颜色
- * **本身就是等级**，拔高橙色会让"橙色"这个用户能看见的官方等级失去意义。
- * 后果要如实写进文档：静默时段（默认只放行 red）**不会**放行橙色预警——夜里发布的橙色
- * 暴雨预警只在历史里留痕。这是取舍，不是遗漏。
- */
+/** 等级 → severity。**忠实映射，不拔高**：四色本身就是官方等级；后果是静默时段（只放行 red）
+ *  **不会**放行橙色预警。 */
 const NMC_LEVEL_SEVERITY = { red: 'red', orange: 'orange', yellow: 'yellow', blue: 'info' };
-/** 等级序（越大越重），与 Host 的 NMC_LEVEL_RANK 一致。 */
+/** 等级序（越大越重），与 Host 的 NMC_LEVEL_RANK 一致；播报门槛为橙色及以上，低于它的条目仍然
+ *  解析，但不进历史、不打扰。 */
 const NMC_LEVEL_RANK = { red: 4, orange: 3, yellow: 2, blue: 1 };
-/** 播报门槛：橙色及以上（DESIGN 8.4）。低于它的条目仍然解析，但 0.9.4（PD-1）起不再进历史，只是不打扰。 */
 const NMC_BROADCAST_MIN_RANK = 3;
 
-/**
- * 从 `title` 里取出发布机构名（`…气象台发布…`）。
- * 认不出返回空串——那说明上游换了措辞，届时由契约层的 schema 判据兜住（见 05d）。
- * @param {unknown} title
- */
+/** 从 `title` 里取出发布机构名（`…气象台发布…`）；认不出返回空串，届时由契约层判 schema。
+ *  @param {unknown} title */
 function orgOf(title) {
   const m = /^(.*?(?:气象台|气象局|预警中心))发布/.exec(String(title === undefined || title === null ? '' : title));
   return m ? m[1] : ''
 }
 
 /**
- * nmc.cn 预警（Host 的 JSON 载荷）→ Alert。
- *
- * **结构不符返回 null**（由契约层分类成 schema / empty），而不是在这里抛错或编一个空对象：
- * 后者会让"上游改版"在 UI 上长成"这条预警没有内容"。
- *
+ * nmc.cn 预警（Host 的 JSON 载荷）→ Alert。结构不符返回 null（由契约层分类成 schema / empty），
+ * 而不是编一个空对象——后者会让"上游改版"在 UI 上长成"这条预警没有内容"。
  * @param {object} raw `{ alertid, title, issued, kind, level, detail }`
  * @returns {object|null}
  */
@@ -6342,23 +5525,19 @@ function parseNmcAlarm(raw) {
   const area = org ? cnAreaOf(org) : null;
   // 机构名去掉表示发布主体的后缀即"发布地"：「云南省丽江市宁蒗彝族自治县气象台」→ 该县。
   const place = org.replace(/(?:气象台|气象局|预警中心)$/, '');
-  // 查表一律走 own()（0.5.4）：上面两处白名单已经限定了取值，但这里同样是"外部数据当键"，
-  // 直查会让 'constructor' 这类键命中原型链返回函数对象（severity 变成函数、headline 里
-  // 嵌进函数源码）。契约层（05d）已同步改成 own()，两处是同一个约定。
+  // 查表一律走 own()：外部数据当键时，直查会让 'constructor' 这类键命中原型链返回函数对象，值域
+  // 就更没保证。契约层（05d）用的是同一个约定。
   const rank = own(NMC_LEVEL_RANK, level) || 0;
-  // 灾种名与等级词都是**我们给起的**（电文原文只有编码）→ 按界面语言取词（0.9.4）。
-  // 表里存的是 key，取词在这里做；`kind.cnLabel` / `kind.cnHeadline` 是模板。
+  // 灾种名与等级词都是**我们给起的**（电文原文只有编码）→ 按界面语言取词，表里存的是 i18n key。
   const kindKey = own(NMC_KIND_TEXT, kind);
   const levelKey = own(NMC_LEVEL_TEXT, level);
   const kindText = kindKey ? t(kindKey) : '';
   const levelText = levelKey ? t(levelKey) : '';
   return {
-    // 前缀 nmc: ——与其它源的 id 命名空间分开（alertid 是纯数字串，不加前缀会与
-    // P2PQuake 的数字 eventId 撞在同一个集合里，去重表可以按 id 建索引）。
+    // 前缀 nmc: ——与其它源的 id 命名空间分开（alertid 是纯数字串，不加前缀会与 P2PQuake 撞车）。
     id: 'nmc:' + alertid,
     code: 'nmc_alarm',
-    // kind 复用 'weather'：它是气象灾害，与日本气象电文共用"进历史 / 配色 / 文案"的整条链路。
-    // 真正区分两者的是 locator（'area' = 走行政区层级匹配，见 06-matcher）。
+    // kind 复用 'weather'：与日本气象电文共用整条链路；真正区分两者的是 locator（'area'）。
     kind: 'weather',
     kindLabel: t('kind.cnLabel', { kind: kindText, level: levelText }),
     source: 'nmc_alarm',
@@ -6366,18 +5545,16 @@ function parseNmcAlarm(raw) {
     severity: own(NMC_LEVEL_SEVERITY, level),
     issued,
     reportTime: issued,
-    // 文案用**发布地 + 灾种 + 等级**，不用行政区表里的名字：表里的名字是 GeoNames 的显示名，
-    // 实测会挑到旧名（「思茅市」而气象台写「普洱市」），照搬会让用户对不上号。
+    // 文案用**发布地 + 灾种 + 等级**，不用行政区表里的名字（那是 GeoNames 显示名，实测会挑到旧名
+    // 「思茅市」而气象台写「普洱市」，照搬会让用户对不上号）。
     headline: t('kind.cnHeadline', { place: (place ? place + ' · ' : ''), kind: kindText, level: levelText }),
     maxScale: -1,
     level: 0,
-    // regions 是日本源的概念（都道府县 + 市町村）。大陆源不用它——归属放在 cnArea 里，
-    // 留空数组是为了让 06-matcher 的"未携带可判定区域"分支不会误伤（那条分支只看 regions）。
+    // regions 是日本源的概念，大陆源不用它——归属放在 cnArea 里，留空数组是为了不让 06-matcher 的
+    // "未携带可判定区域"分支（只看 regions）误伤。
     regions: [],
-    // 事件键取 alertid：nmc.cn 的 alertid 是**每条预警唯一**的，升级（黄→橙）会换新的 alertid
-    // ——那正是应该再响一次的情形。所以这里不做"同机构同灾种归并"：那会把升级吞掉，
-    // 而升级恰恰是用户最需要知道的那一次（与 DESIGN 11.7 第 6 条对日本官署的取舍不同：
-    // 那边是同一官署管多县导致的**误归并**，这边的键本来就是唯一的）。
+    // 事件键取 alertid：它每条唯一，升级（黄→橙）会换新的 alertid——那正是应该再响一次的情形，
+    // 所以不做"同机构同灾种归并"（那会把升级吞掉）。
     eventKey: 'nmc:' + alertid,
     strength: rank,
     // 行政区归属：city 为空 = 只能定位到省（省直辖县 / 省台发布），由 matcher 走省级兜底。
@@ -6391,7 +5568,7 @@ function parseNmcAlarm(raw) {
     cnLevel: level,
     cnRank: rank,
     detail,
-    cancelled: false, // 列表里没有"解除"这种形态——见文件头，不得假装能处理
+    cancelled: false, // 列表里没有"解除"这种形态，不得假装能处理
     raw,
   }
 }
@@ -6399,64 +5576,33 @@ function parseNmcAlarm(raw) {
 // ============================================================================
 // dsh-quake-alert · client/src/05h-overseas-parsers.js
 //
-// 作用：把**海外气象源**（美国 NWS、加拿大 ECCC）的预警解析成与日本源 / 全球源 /
-// 大陆源同一套内部模型（Alert）。设计与实测依据见 DESIGN 4.7。
-// 内容：`nws_alerts`——NWS 的洪水类预警（8 种 event）；`eccc_alerts`——ECCC 的
-//       降雨 / 洪水 / 风暴潮类 warning。
-// 依赖：02-storage（isPlainObject / own）。
+// 作用：把**海外气象源**（美国 NWS、加拿大 ECCC）的预警解析成内部模型（Alert）。
+// 内容：`nws_alerts`——NWS 的洪水类预警（8 种 event）；`eccc_alerts`——ECCC 的降雨 / 洪水 / 风暴潮 warning。
+// 依赖：02-storage（isPlainObject / own）、00-i18n（t）。
 //
-// 与其它源的结构性差异（都是实测决定的）：
+// 与其它源的结构性差异：
+// ① **`locator: 'overseas'`**：取数器是**按关注点查询**的（NWS 用 `?point=`、ECCC 用 `?bbox=`），
+//    "这条预警属于哪个关注点"在取数时已确定，由取数器通过 opts.place 传进来（记成 alert.originPlace），
+//    匹配层因此不做距离计算——与全球地震源（`locator:'point'`）是两种形态。
+// ② **NWS 的播报门槛按 `event` 名，不按 severity**：实测 `Flood Watch` 的 severity 也是 `Severe`，
+//    区分不了"警告"与"警戒"；而 event 名本身有层级，所以门槛取 `Warning` 结尾（见白名单的 rank）。
+// ③ **ECCC 只接 `alert_type === 'warning'`**：advisory 按 ECCC 的定义是「generally not considered
+//    hazardous」（实测 116 条里 114 条是 frost advisory）。
+// ④ **ECCC 的白名单按 `alert_name_en` 关键词，不按 CAP 的 `<event>`**：CAP XML 归档里法语办公室的
+//    `<event>` 是法语，而 OGC API 通道（我们走的这条）给的是固定英文名，没有语言变体问题；API 里也
+//    没有 CAP 的 eventCode（只有三字母 `alert_code`，其码表无官方枚举）。降雨类当前季节**没有样本**，
+//    这份白名单**未被证实** → 白名单外的新类型判 `empty`（向前兼容）。
+// ⑤ **事件键按"事件链"取，不是按消息取**：NWS 的 CAP identifier 在 Update / Cancel 时会换一条新的
+//    → 键落在 **VTEC 的事件追踪号**上（见 nwsEventKeyOf）；ECCC 没有稳定的 alert id → 事件键 =
+//    码 + 区域 + **发布日**：同一天内的更新同键，跨天的新过程换键。
 //
-// ① **`locator: 'overseas'`**（新值）。取数器是**按关注点查询**的（NWS 用 `?point=`、
-//    ECCC 用 `?bbox=`），也就是"这条预警属于哪个关注点"在**取数时就已经确定**，
-//    由取数器通过 opts.place 传进来（记成 alert.originPlace）。匹配层因此不做距离计算
-//    ——这与全球地震源（`locator:'point'`，靠震中坐标算距离）是两种形态。
-//
-// ② **NWS 的播报门槛按 `event` 名，不按 severity**。实测：`Flood Watch` 的 severity 也是
-//    `Severe`（与 `Flood Warning` 同级），而 `Coastal Flood Watch` 是 `Moderate`
-//    ——severity 区分不了"警告"与"警戒"。而 NWS 的 event 名本身有层级
-//    （Warning = 正在或即将发生 / Watch = 条件有利 / Advisory = 轻微 / Statement = 说明），
-//    所以门槛取 `Warning` 结尾（见 NWS_EVENT_WHITELIST 的 rank）。
-//
-// ③ **ECCC 只接 `alert_type === 'warning'`**。advisory 按 ECCC 自己的定义是
-//    「generally not considered hazardous」，霜冻 / 雾 / 高温都在里面——实测当前 116 条
-//    里 114 条是 frost advisory，不排除它这个源就是噪声源。
-//
-// ④ **ECCC 的白名单按 `alert_name_en` 关键词，不按 CAP 的 `<event>`**。
-//    实测：CAP **XML 归档**里法语办公室（CWUL 魁北克）的 `<event>` 是法语 `"gel"`，
-//    但 OGC API 通道（我们走的就是这条）给的是固定英文 `alert_name_en`（`"frost advisory"`）
-//    与双语字段，**没有语言变体问题**；API 里也没有 CAP 的 `eventCode`（只有三字母
-//    `alert_code`，其码表无官方枚举），所以白名单只能落在英文名上。
-//    ECCC 的降雨类当前季节**没有样本**（DESIGN 4.6.3 的缺口），这份白名单**未被证实**，
-//    因此白名单外的新类型判 `empty`（向前兼容）而不是 schema：旧 Client 静默跳过，
-//    不会点亮一个用户处理不了的蓝点（与 nmc 的 empty 判据同一手法）。
-//
-// ⑤ **事件键（eventKey）按"事件链"取，不是按消息取**。两个源的 id 语义不同：
-//    · NWS 的 CAP identifier 实测形如 `urn:oid:2.49.0.1.840.0.<40hex>.<serial>.<version>`，
-//      而 Update / Cancel 会**换一条新的 identifier**（2026-09-22 实测过去 7 天 500 条：
-//      11 个多消息事件组里 **0 组**是"同一 serial 只递增 version"，Cancel 的 identifier
-//      与它引用的原消息连 40 位 hash 都不同）。
-//      → 事件键落在 **VTEC 的事件追踪号**上：`<office>.<phenom>.<sig>.<ETN>`。它是 NWS 官方的
-//      事件标识，从 NEW → EXT → CON → CAN 全程不变（只改 ACTION 段），实测 80/80 条洪水类电文
-//      都有标准 7 段 VTEC。**0.6.0 曾改用 CAP 的 `references`，0.6.1 review 证伪并撤回**：
-//      实测的链是逐版串联的（每条只引用上一版），"取 sent 最早的一条"只能回溯一步，
-//      8 条真实链里 7 条每个版本各得一个不同的键 → 同一场洪水随每次 Update 重复响铃。
-//      证据与回归数据：`samples/nws/nws-event-chain.geojson`、`nws-cancel-chain.geojson`。
-//      见 nwsEventKeyOf（VTEC → references → 自身 identifier 三级兜底）。
-//    · ECCC 的 API **没有稳定的 alert id**（只有 `alert_code` + `feature_id`），
-//      → 事件键 = 码 + 区域 + **发布日**：同一天内的更新同键（不重复响），跨天的新过程换键。
-//    消息级 id 仍保留完整信息（含版本 / 发布时刻），供"同一条消息重复到达"去重。
-//
-// 两条共同的已知缺口（UI 与文档必须如实说明）：
-//   · **没有可靠的"解除"表达**。NWS 有 `messageType: 'Cancel'`（可用）；ECCC 的
-//     `status_en` 实测有 `ended` 与 `continued`，但一条刚发布的霜冻也是 `ended`
-//     ——含义未证实，所以 ECCC 的 cancelled **恒为 false**（宁可多说一次，不假装能处理）。
-//   · **上游停更看不见**：两个源都是"按点 / 框查询"，空响应是常态，契约里 `staleAfterMs`
-//     只能是 null（DESIGN 4.7.7 第 2 条）。
+// 两条共同的已知缺口：**ECCC 没有可靠的"解除"表达**（`status_en` 的 ended 连刚发布的霜冻都有，
+// 含义未证实，所以 cancelled 恒为 false；NWS 有 CAP 的 Cancel 可用）；**上游停更看不见**（按点 /
+// 框查询的空响应是常态，`staleAfterMs` 只能 null）。
 // ============================================================================
 
 
-/** NWS 的 `event` → 内部灾种与播报档位。白名单是**精确匹配**（见文件头 ②）。 */
+/** NWS 的 `event` → 内部灾种与播报档位。白名单是**精确匹配**。 */
 const NWS_EVENT_WHITELIST = {
   'Flood Warning': { kind: 'flood', text: 'kind.nwsFlood', rank: 3 },
   'Flash Flood Warning': { kind: 'flashFlood', text: 'kind.nwsFlashFlood', rank: 3 },
@@ -6467,26 +5613,23 @@ const NWS_EVENT_WHITELIST = {
   'Coastal Flood Advisory': { kind: 'coastalFlood', text: 'kind.nwsCoastalAdvisory', rank: 1 },
   'Coastal Flood Statement': { kind: 'coastalFlood', text: 'kind.nwsCoastalStatement', rank: 1 },
 };
-/** NWS 的 severity → 配色（忠实映射，不拔高；与 nmc 的"四色即等级"同一口径）。 */
+/** NWS 的 severity → 配色（忠实映射，不拔高）。 */
 const NWS_SEVERITY = { Extreme: 'red', Severe: 'orange', Moderate: 'yellow', Minor: 'info' };
 /** NWS 的 severity → 强度序（用于"同一事件的后续发布是否升级"）。 */
 const NWS_SEV_RANK = { Extreme: 4, Severe: 3, Moderate: 2, Minor: 1 };
 
-/** ECCC 的 `risk_colour_en` → 配色。ECCC 的三色与 nmc 的四色同源，可直接对应。 */
+/** ECCC 的 `risk_colour_en` → 配色（三色与 nmc 的四色同源，可直接对应）。 */
 const ECCC_COLOUR_SEVERITY = { red: 'red', orange: 'orange', yellow: 'yellow' };
-/** ECCC 的三色 → 强度序。**没有 info 档**：只有 warning 进来，而黄色 warning 按 ECCC 的
- *  定义已经是"hazardous weather may cause damage, disruption, or health impacts"。 */
+/** ECCC 的三色 → 强度序。**没有 info 档**：只有 warning 进来，黄色 warning 按 ECCC 的定义已经
+ *  属于 hazardous。 */
 const ECCC_COLOUR_RANK = { red: 4, orange: 3, yellow: 2 };
 
-/** ECCC 的灾种白名单：**先看排除名单，再看包含名单**（见文件头 ④）。 */
+/** ECCC 的灾种白名单：**先看排除名单，再看包含名单**。 */
 const ECCC_EXCLUDE = /frost|fog|freez|snow|blizzard|ice\b|icing|wind|gale|heat|cold|thunderstorm|tornado|hurricane|tropical|air quality|humidex|visibility/i;
 const ECCC_INCLUDE = /rain|flood|surge|hydrolog|water|precipitation/i;
 
-/**
- * ECCC 的英文名 → 中文灾种标签。
- * **按名称关键词映射，不查未知的三字母码表**——`alert_code` 的取值没有官方枚举，
- * 猜码正是 4.6.3 踩过的坑（把 `CFW` 当成洪水，实际是 storm surge warning）。
- */
+/** ECCC 的英文名 → 中文灾种标签。**按名称关键词映射，不查三字母码表**——`alert_code` 没有官方
+ *  枚举，猜码踩过坑（把 `CFW` 当成洪水，实际是 storm surge warning）。 */
 function ecccKindTextOf(nameEn) {
   const s = String(nameEn || '');
   if (/storm surge|surge/i.test(s)) return t('kind.caStormSurge')
@@ -6497,31 +5640,24 @@ function ecccKindTextOf(nameEn) {
   return t('kind.caWeather')
 }
 
-/** 播报门槛（两个源共用）：`overseasRank >= 3` 才打扰用户；未达档位的 0.9.4（PD-1）起也不进历史。 */
+/** 播报门槛（两个源共用）：`overseasRank >= 3` 才打扰用户；未达档位的也不进历史。 */
 const OVERSEAS_BROADCAST_MIN_RANK = 3;
 
-/** NWS 的 `event` → 中文（供 UI / 测试使用）。 */
-/** NWS 的 event → **当前界面语言**的灾种名（供 UI / 测试使用）。
- *  **必须是函数**：写成模块级常量会在加载时求值，把语言冻在那一刻（切语言后不跟着变）。 */
+/** NWS 的 event → **当前界面语言**的灾种名（供 UI / 测试使用）。**必须是函数**：写成模块级常量会在
+ *  加载时求值，把语言冻在那一刻（切语言后不跟着变）。 */
 function nwsKindTextOf(ev) {
   const rule = own(NWS_EVENT_WHITELIST, String(ev || ''));
   return rule ? t(rule.text) : ''
 }
-/** 兼容既有调用方：整张表（按当前语言求值）。 */
+/** 整张表（按当前语言求值）。 */
 const nwsKindTextMap = () => Object.fromEntries(
   Object.entries(NWS_EVENT_WHITELIST).map(([ev, v]) => [ev, t(v.text)]),
 );
 
 /**
- * NWS 的 **VTEC 事件追踪键**：`<office>.<phenom>.<significance>.<ETN>`。
- *
- * VTEC 是 NWS 官方的事件追踪机制，段位是
- * `/O.<ACTION>.<OFFICE>.<PHENOM>.<SIG>.<ETN>.<BEGIN>-<END>/`
- * （实测 2026-09-22 的 80 条活跃洪水类电文：**80/80 都有 VTEC，且都是标准 7 段**）。
- *
- * 关键在于 **ACTION 之外的四段是事件级的、跨版本稳定**：同一次洪水从
- * `NEW` → `EXT` → `CON` → `CAN` 只改 ACTION 段，`OFFICE / PHENOM / SIG / ETN` 全程不变。
- * 所以键**必须剔除 ACTION 段**，否则每次 Update 都会换键。
+ * NWS 的 **VTEC 事件追踪键**：`<office>.<phenom>.<significance>.<ETN>`。VTEC 段位是
+ * `/O.<ACTION>.<OFFICE>.<PHENOM>.<SIG>.<ETN>.<BEGIN>-<END>/`；**ACTION 之外的四段跨版本稳定**
+ * （同一次洪水从 `NEW` → `EXT` → `CON` → `CAN` 只改 ACTION），所以键必须剔除 ACTION。
  *
  * @param {unknown} vtecList `properties.parameters.VTEC`（字符串数组）
  * @returns {string} 解析不出来时返回 ''（调用方退到兜底）
@@ -6530,11 +5666,9 @@ function nwsVtecKeyOf(vtecList) {
   if (!Array.isArray(vtecList)) return ''
   for (const raw of vtecList) {
     // 不在行首锚定：实测存在一条字符串里带多段 VTEC 的产品，取第一段即可。
-    // 0.9.4（P2-12）：ETN 段由 `\d{4}` 放宽到 `\d{4,6}`。NWS 规范写的是 4 位事件追踪号，
-    // 但实测样本里出现过 `/O.NEW.KRLX.FA.W.01370.…/`（5 位）——写死 4 位会让整段失配，
-    // 而失配的后果不是"少一个键"：调用方会退回 0.6.1 已证伪的 references 兜底
-    // （逐版串联 → 每次 Update 各得一键 → 重复响铃），且没有任何地方能看出这件事。
-    // 5/6 位是**上界放宽**，不会把两个不同事件并成一个（ETN 本身仍要求 ≥4 位数字）。
+    // ETN 段放宽到 `\d{4,6}`：NWS 规范写 4 位，但实测出现过 5 位（`/O.NEW.KRLX.FA.W.01370.…/`），
+    // 写死 4 位会让整段失配，调用方就退回 references 兜底（每次 Update 各得一键 → 重复响铃）。
+    // 放宽是上界，不会把两个不同事件并成一个（ETN 仍要求 ≥4 位数字）。
     const m = /\/O\.[A-Z]{3}\.([A-Z0-9]{4})\.([A-Z]{2})\.([A-Z])\.(\d{4,6})\./.exec(String(raw || ''));
     if (m) return m[1] + '.' + m[2] + '.' + m[3] + '.' + m[4]
   }
@@ -6542,23 +5676,12 @@ function nwsVtecKeyOf(vtecList) {
 }
 
 /**
- * NWS 的事件键。**首选 VTEC 的事件追踪号**（0.6.1 修正；0.6.0 用的是 references，已证伪）。
+ * NWS 的事件键。**首选 VTEC 的事件追踪号**。
  *
- * 为什么不能用 CAP 的 `references`（0.6.0 的做法）：CAP 的 `<references>` 指向的是
- * **被本条取代的那条消息**，而 NWS 实测是**逐版串联**的链——每条只引用紧邻的上一版
- * （见 `samples/nws/nws-event-chain.geojson`：第 N 版 → 第 N-1 版 → … → 原始 Alert）。
- * 于是"取 references 里 sent 最早的一条"**只能回溯一步**，算出的键每版都不同：
- * 实测追 8 条真实事件链（2026-09-22 的活跃 Flood Warning），**7 条链上每个版本各得一个不同的键**
- * → `isEventRepeat` 永远认为"这是新事件" → 同一场洪水随每次 Update 重复响铃
- * （每次 Update 都在 24 小时"已播报"记忆里留下新键，`looksReplayed` 也拦不住）。
- * 它唯一看起来成立的场景是 Cancel：Cancel 引用的正是上一版，于是与"最后一次播报的那一版"
- * 偶然同键 —— 那是巧合，不是归并（原始 `Alert` 版从未被记住过）。
- *
- * 兜底顺序（VTEC 缺失时按序退让，**都不判 schema**，见契约的 tolerant）：
- *   ① VTEC 追踪号；
- *   ② references 里 `sent` 最早的一条（去掉末尾 `.<version>`）——保留给没有 VTEC 的产品，
- *      例如部分非 VTEC 的海事 / 特殊电文；
- *   ③ 自身 identifier（去掉末尾 `.<version>`）。
+ * 不能用 CAP 的 `references`：它指向**被本条取代的那条消息**，而 NWS 实测是**逐版串联**的链
+ * （每条只引用紧邻的上一版），"取 sent 最早的一条"**只能回溯一步**，算出的键每版都不同 → 同一场
+ * 洪水随每次 Update 重复响铃。兜底顺序（**都不判 schema**）：① VTEC 追踪号；② references 里
+ * `sent` 最早的一条（保留给没有 VTEC 的海事 / 特殊电文）；③ 自身 identifier。后两者去掉末尾版本段。
  */
 function nwsEventKeyOf(id, references, vtecList) {
   const vtec = nwsVtecKeyOf(vtecList);
@@ -6585,8 +5708,6 @@ function ecccEventKeyOf(code, areaKey, published) {
 
 /**
  * NWS 的预警体（一条 GeoJSON feature）→ Alert。
- *
- * @param {object} feature `{ id, type, geometry, properties }`
  * @param {{ place?: object }} [opts] `place` 是取数器查这条时用的关注点（记成 originPlace）
  * @returns {object|null} 结构不符或不在白名单时返回 null（由契约层分类成 schema / empty）
  */
@@ -6597,13 +5718,11 @@ function parseNwsAlert(feature, opts) {
   const event = typeof p.event === 'string' ? p.event : '';
   const rule = own(NWS_EVENT_WHITELIST, event);
   if (!rule) return null
-  // id 优先取 properties.id（CAP identifier）；缺了才退回外层 id。两者都缺就没法做去重，
-  // 判 null 由契约层归成 schema（见契约的 required）。
+  // id 优先取 properties.id（CAP identifier），缺了才退回外层 id；两者都缺就设法去重，判 null。
   const rawId = String(p.id || feature.id || '').trim();
   if (!rawId) return null
-  // GeoJSON 外层的 `feature.id` 是**完整 URL**（`https://api.weather.gov/alerts/urn:oid:…`）。
-  // 抽出 `urn:oid:` 段再用（0.6.0 review 修正）：否则事件键里带着 URL 前缀，末尾版本段的
-  // 归并（以及取消消息的 references 匹配）都会失效——同一场洪水会随每次更新重复响铃。
+  // GeoJSON 外层的 `feature.id` 是**完整 URL**（`https://api.weather.gov/alerts/urn:oid:…`），抽出
+  // `urn:oid:` 段再用：否则事件键带着 URL 前缀，末尾版本段的归并与取消消息的匹配都会失效。
   const idMatch = /(urn:oid:[\s\S]+)$/.exec(rawId);
   const id = idMatch ? idMatch[1] : rawId;
   const sent = typeof p.sent === 'string' ? p.sent : '';
@@ -6611,20 +5730,17 @@ function parseNwsAlert(feature, opts) {
   const sev = typeof p.severity === 'string' && own(NWS_SEVERITY, p.severity) ? p.severity : '';
   const areaDesc = String(p.areaDesc || '').trim();
   const headline = String(p.headline || '').trim();
-  // 正文原样保留：NWS 没有"不得改写"的条款，但改写官方正文对任何源都不合适，
-  // 而 instruction 是"该怎么做"——截断它才是真的危险。
+  // 正文原样保留：改写官方正文对任何源都不合适，而 instruction 是"该怎么做"——截断它才危险。
   const description = String(p.description || '').trim();
   const instruction = String(p.instruction || '').trim();
   const detail = [description, instruction].filter(Boolean).join('\n\n');
   const place = opts && isPlainObject(opts.place) ? opts.place : null;
-  // 事件键的来源（见 nwsEventKeyOf）：VTEC 优先，references / 自身 identifier 兜底。
   const vtecList = isPlainObject(p.parameters) ? own(p.parameters, 'VTEC') : null;
   const vtecKey = nwsVtecKeyOf(vtecList);
   return {
     id: 'nws:' + id,
     code: 'nws_alerts',
-    // kind 复用 'weather'：与日本气象电文 / 大陆气象预警共用"进历史 / 配色 / 文案"整条链路。
-    // 真正区分三者的是 locator（overseas / area / regions）。
+    // kind 复用 'weather'：与日本气象电文 / 大陆气象预警共用整条链路；真正区分三者的是 locator。
     kind: 'weather',
     kindLabel: t('kind.usHazard', { hazard: t(rule.text) }) + '（' + (String(p.senderName || '').trim() || 'NWS') + '）',
     source: 'nws_alerts',
@@ -6638,27 +5754,27 @@ function parseNwsAlert(feature, opts) {
     regions: [],
     eventKey: nwsEventKeyOf(id, p.references, vtecList),
     strength: (sev && own(NWS_SEV_RANK, sev)) || 0,
-    // 海外源特有：这条预警属于哪个关注点（取数时确定），以及供 UI / 诊断用的原始标签。
+    // 海外源特有：这条预警属于哪个关注点（取数时确定）。
     originPlace: place,
     overseas: {
       country: 'us',
       event,
-      // NWS 的 eventCode 是对象（`{SAME:['FLW'], NationalWeatherService:['FLW']}`），
-      // **不能当白名单键**（实测 Flood Warning 的 SAME 给的是 FLS）。这里只留一份供诊断。
+      // NWS 的 eventCode 是对象（`{SAME:['FLW'],…}`），**不能当白名单键**（Flood Warning 的 SAME
+      // 实测给的是 FLS）。这里只留一份供诊断。
       eventCode: isPlainObject(p.eventCode) ? p.eventCode : null,
       areaDesc,
       messageType: String(p.messageType || ''),
       senderName: String(p.senderName || ''),
       ends: String(p.ends || p.expires || ''),
       ugc: isPlainObject(p.geocode) && Array.isArray(p.geocode.UGC) ? p.geocode.UGC : [],
-      // 事件键的来源（供设置页 / 诊断核对"这条属于哪一次事件"），解析不出来时为空串。
+      // 事件键的来源（供诊断核对"这条属于哪一次事件"）。
       vtecKey,
     },
     // 播报档位：Warning 类 = 3，Watch / Advisory / Statement = 1（见文件头 ②）。
     overseasRank: rule.rank,
     nwsEvent: event,
     detail,
-    // NWS 有真正的取消语义（CAP 的 messageType），这条比 nmc 强。
+    // NWS 有真正的取消语义（CAP messageType）。
     cancelled: String(p.messageType || '') === 'Cancel',
     raw: feature,
   }
@@ -6666,8 +5782,6 @@ function parseNwsAlert(feature, opts) {
 
 /**
  * ECCC 的预警体（一条 GeoJSON feature）→ Alert。
- *
- * @param {object} feature `{ type, geometry, properties }`
  * @param {{ place?: object }} [opts]
  * @returns {object|null} 结构不符 / 不是 warning / 不在白名单时返回 null
  */
@@ -6679,8 +5793,7 @@ function parseEcccAlert(feature, opts) {
   if (alertType !== 'warning') return null
   const code = typeof p.alert_code === 'string' ? p.alert_code.trim() : '';
   const nameEn = typeof p.alert_name_en === 'string' ? p.alert_name_en.trim() : '';
-  // 白名单：先排除、再包含。ECCC_EXCLUDE 里有 wind、ECCC_INCLUDE 里有 surge——
-  // "storm surge warning" 两边都不冲突，但把顺序写死能避免将来加词时互相打架。
+  // 白名单：先排除、再包含——顺序写死能避免将来加词时互相打架（"storm surge warning" 两边都不冲突）。
   if (!nameEn || ECCC_EXCLUDE.test(nameEn) || !ECCC_INCLUDE.test(nameEn)) return null
   if (!code) return null
   const published = typeof p.publication_datetime === 'string' ? p.publication_datetime : '';
@@ -6692,10 +5805,10 @@ function parseEcccAlert(feature, opts) {
   const province = String(p.province || '').trim();
   const place = opts && isPlainObject(opts.place) ? opts.place : null;
   const textZh = ecccKindTextOf(nameEn);
-  // 区域键：feature_id 优先（稳定），缺了退回区域名（见文件头 ⑤ 的事件键说明）。
+  // 区域键：feature_id 优先（稳定），缺了退回区域名。
   const areaKey = String(p.feature_id || area || province || 'unknown');
-  // 署名是 ECCC 许可（End-use Licence v2.1.1）的硬要求，且正文**不得改写**
-  // ——所以正文原样保留，署名作为末行一起进历史与通知。
+  // 署名是 ECCC 许可（End-use Licence v2.1.1）的硬要求，正文**不得改写**——所以正文原样保留，
+  // 署名作为末行一起进历史与通知。
   const ATTRIBUTION = 'Data Source: Environment and Climate Change Canada';
   return {
     id: 'eccc:' + code + ':' + areaKey + ':' + published,
@@ -6731,8 +5844,8 @@ function parseEcccAlert(feature, opts) {
     overseasRank: 3,
     ecccCode: code,
     detail: text ? text + '\n\n' + ATTRIBUTION : ATTRIBUTION,
-    // ECCC 的 `status_en` 实测有 ended / continued，但一条刚发布的霜冻也是 `ended`
-    // ——含义未证实，所以**不据此判取消**（DESIGN 4.7.7 第 6 条）。宁可多说一次。
+    // ECCC 的 `status_en` 实测有 ended / continued，但一条刚发布的霜冻也是 `ended`——含义未证实，
+    // 所以**不据此判取消**，宁可多说一次。
     cancelled: false,
     raw: feature,
   }
@@ -6741,29 +5854,15 @@ function parseEcccAlert(feature, opts) {
 // ============================================================================
 // dsh-quake-alert · client/src/05d-source-contracts.js
 //
-// 作用：**解析契约**与**每源校验约定**（0.4.1 的交付物之一，对应 DESIGN 4.5 与 11.1）。
-// 内容：① 统一的解析返回形态 { ok, alert } | { ok:false, kind:'empty'|'schema'|'value', detail }
-//       ② 五个源各自填写的内容：必需字段清单与类型（schema 判据）、源时区、
-//          新鲜度阈值（stale 判据）、empty 判据
-//       ③ 健康状态记录**已迁出**（0.5.3）：存 / 升级阈值 / 自愈在 05g-source-health.js，
-//          探针调度在 12d-health-probe.js。本文件从此只做"约定"这一层。
+// 作用：**解析契约**与**每源校验约定**——统一返回形态 + 每源的 schema / stale / empty 判据。
 // 依赖：01-constants、02-storage、05/05b/05c（各源的解析器）、07-store（状态上报）。
+// 健康记录（存 / 升级阈值 / 自愈）在 05g-source-health.js，自检调度在 12d-health-probe.js。
 //
-// 三层划分（DESIGN 11.1）：本文件是**约定层**——解析失败的返回形态与"UI 如何表示数据格式异常"，
-// 随源走，所以 0.4.1 一次补齐已有 5 源、0.5.0 / 0.5.2 随新源同步制作。
-// **机制层**（健康数据结构、升级阈值、探针调度、CI 契约测试）已在 0.5.3 落地到
-// `05g-source-health.js`（存与升级 / 自愈）与 `12d-health-probe.js`（探针）；本文件末尾只
-// re-export 那几个入口，让调用方不必改 import 来源。
-//
-// 三类失败的语义与处置（DESIGN 4.5）：
-//   empty  —— 源正常，当前没有与本插件相关的数据。**不计失败**、不显示异常。
-//   schema —— 结构不符（字段缺失 / 类型错误 / 顶层不是预期结构）。计入健康状态、停止播报该源。
-//   value  —— 结构正确但值客观不可能（坐标越界、时间在 100 年后等）。同上，但只查硬边界。
-// 核心原则：解析层严格，匹配层宽松。结构不符时任何"智能猜测"都可能把垃圾数据变成误报。
+// 三类失败：empty 源正常但无相关数据（不计失败）；schema 结构不符；value 值客观不可能。
+// 后两类计入健康状态并停止播报该源。解析层严格，匹配层宽松。
 // ============================================================================
 
 
-// ---------------------------------------------------------------- 返回形态
 /** 解析成功。 */
 const okResult = (alert) => ({ ok: true, alert });
 /** 解析失败 / 无关。kind ∈ 'empty' | 'schema' | 'value'。 */
@@ -6781,25 +5880,21 @@ const timeMsOf = (v) => {
   const t = Date.parse(String(v === undefined || v === null ? '' : v));
   return Number.isFinite(t) ? t : null
 };
-/** 时间戳是否客观不可能：1970 年以前、或 100 年以后（DESIGN 4.5 的 value 判据）。
- *  **缺失 / 不可解析不算"不可能"**——存在性由各源的 schema 判据负责。传 null 时若返回 true，
- *  会让"没给时间"的地震情报整条被丢掉（parseQuake 本来容忍缺 time，只让 eventKey 留空）。 */
+/** 时间戳是否客观不可能：1970 年以前、或 100 年以后。
+ *  缺失 / 不可解析不算"不可能"——存在性由各源的 schema 判据负责。 */
 const timeIsImpossible = (ms, now) => {
   if (typeof ms !== 'number' || !Number.isFinite(ms)) return false
   return ms < 0 || ms > (Date.now()) + 100 * 365 * 24 * 3600 * 1000
 };
 
-// ---------------------------------------------------------------- 每源约定
 /**
- * 五个源的校验约定（0.4.1 补齐）。字段含义：
- *   required    —— 必需字段与类型（schema 判据）。缺一个即判 schema，**不猜、不兜底**。
- *   timezone    —— 源时区。契约要求解析器把时间转成**带偏移**的 ISO 8601（DESIGN 第 4 节）。
- *   staleAfterMs—— 新鲜度阈值（stale 判据）；null = 这条链路不适用，理由写在 staleReason。
+ * 每源校验约定。字段含义：
+ *   required    —— 必需字段与类型（schema 判据）。缺一个即判 schema，不猜、不兜底。
+ *   timezone    —— 源时区。解析器把时间转成带偏移的 ISO 8601。
+ *   staleAfterMs—— 新鲜度阈值（stale 判据）；null = 不适用，理由在 staleReason。
  *   empty       —— 什么形态算"源正常但当前无数据"（不计失败）。
- *   tolerant    —— 可选：**明确不判 schema** 的字段范围。它与 required 是一对——required 只该列
- *                  实现里真的会拦下的字段，否则契约就变成"比实现严"的文档，后来者按它写测试会
- *                  误判"某字段必需"（0.5.1 修正）。
- *   pollMs      —— 传输层的轮询 / 推送周期（诊断文档引用）。
+ *   tolerant    —— 明确**不判 schema** 的字段范围；与 required 互补，required 只列实现真会拦下的字段。
+ *   pollMs      —— 传输层的轮询 / 推送周期。
  */
 const SOURCE_CONTRACTS = {
   p2pquake: {
@@ -6811,9 +5906,6 @@ const SOURCE_CONTRACTS = {
     pollMs: null,
     timezone: 'Asia/Tokyo（+09:00）—— issue.time / earthquake.time / areas[].arrivalTime 都是裸 JST，由 p2pTimeToIso 补偏移',
     required: [
-      // 0.9.4（C2 / P3-41）：这一份此前比实现严——把"实现会容忍的东西"也写成了必需。
-      // 逐条核对过 parseEpspResult（05d）与三个解析器（05-parser）之后改成"实现真的会拦下的"。
-      // 判据本身没变，改的是这份说明：按旧的写法写 fixture 会以为某个字段必需，写出假断言。
       'code：必须是 551 / 552 / 556 之一（其它 code 判 empty，不算故障）',
       '每条都要：id（或 _id）string、issue.time string',
       '551：earthquake 是对象、earthquake.maxScale 是 number、points 是数组，且 points[] 每一项是对象；' +
@@ -6829,7 +5921,7 @@ const SOURCE_CONTRACTS = {
     empty: 'code 不是 551/552/556（P2PQuake 还会推火山、其他情报等与本插件无关的消息）',
     staleAfterMs: null,
     staleReason: '推送源没有"数据新鲜度"概念：日本可能数小时没有有感地震。活性由连接层负责' +
-      '（建连看门狗 15 秒 + 半开检测 20 分钟，见 12-websocket）。',
+      '（建连超时监控 15 秒 + 连接假死检测 20 分钟，见 12-websocket）。',
   },
   jma: {
     label: '気象庁 防災情報XML',
@@ -6841,15 +5933,10 @@ const SOURCE_CONTRACTS = {
     timezone: 'Asia/Tokyo（+09:00）—— Head/ReportDateTime 带 +09:00；Control/DateTime 是 UTC（Z）。' +
       '两者都带偏移，解析器优先取 ReportDateTime',
     required: [
-      // 0.9.4（C2 / P3-41）：实现真正判 schema 的只有下面三条（parseJmaResult）。
       '电文非空',
       '不是 HTML（返回 `<!DOCTYPE html>` / `<html` 判 schema：拦截页或地址失效最常见）',
       '<Report> 根元素（防災情報XML 的标志）',
     ],
-    // 此前这几条被写在 required 里，但它们**不判 schema**——缺 Items、缺 Area、缺 ReportDateTime
-    // 都会被解析成"与本插件无关 / 区域判不了"，按 empty 归类。P1-8 的实验也印证了这条：
-    // 未知 codeType 的电文仍会在历史里留痕，但那由**匹配层**的 cannotJudge 负责（见 11-pipeline），
-    // 不是在这里判源故障。写在这里而不是删掉：它是读电文结构的人最需要知道的事。
     tolerant: '电文结构本身（Item / Kind、Area / Name / Code、ReportDateTime、Control/Title）' +
       '**不作 schema 判据**：缺 Items、缺 Area、只有注意報或"なし"的电文一律归 empty，' +
       '由匹配层的 cannotJudge 决定要不要留痕。',
@@ -6877,7 +5964,7 @@ const SOURCE_CONTRACTS = {
     empty: 'action === "delete"（事件被撤回），或 properties.evtype 不是 "ke"（非地震事件，如爆炸）',
     staleAfterMs: null,
     staleReason: '全球 M4+ 平均约 30 分钟一条，稀疏是常态，不能用消息间隔判死。活性由连接层负责' +
-      '（建连看门狗 15 秒 + 3 小时无消息的半开检测，见 15-entry 的 staleAfterMs）。',
+      '（建连超时监控 15 秒 + 3 小时无消息的连接假死检测，见 15-entry 的 staleAfterMs）。',
   },
   usgs: {
     label: 'USGS',
@@ -6888,7 +5975,6 @@ const SOURCE_CONTRACTS = {
     pollMs: 120 * 1000,
     timezone: 'UTC（properties.time/updated 是 epoch 毫秒，经 toIso 转成带 Z 的 ISO）',
     required: [
-      // 0.9.4（C2 / P3-41）：逐条核对 parseUsgsResult（05d）与 Host 侧的取数层后的写法。
       '顶层 GeoJSON：features[] 数组（**Host 侧校验**：lib/global-sources.js 的 parseUsgsEntries）',
       '每个 feature：properties 是对象、mag 是 number、time 是 number（epoch 毫秒或可解析的时间）',
       '震中坐标：geometry.coordinates[0..1] **或** properties.lat/lon（解析器两条都认，' +
@@ -6922,11 +6008,9 @@ const SOURCE_CONTRACTS = {
     staleAfterMs: null,
     staleReason: '事件列表只在有海啸时才有内容，"列表为空"是绝大多数时间的正常形态，不能据此判 stale。',
   },
-  // ---- 中国大陆源（0.5.0）----
-  // 与其它源的两处结构性差异，写在契约里而不是埋在解析器里：
-  //   ① 传输是 **Host 单点常连**（Wolfx 限 5–7 连接/IP），不是 Client 直连——见 DESIGN 5.3。
-  //   ② cenc_eqlist 的字段**全是字符串**，而 cenc_eew 的字段是 number；两个源来自同一上游，
-  //      所以不能按"同一家的风格"写解析，只能按实测样本写。
+  // ---- 中国大陆源 ----
+  // 两处结构性差异：① 传输是 **Host 单点常连**（Wolfx 限 5–7 连接/IP），不是 Client 直连。
+  // ② cenc_eqlist 的字段**全是字符串**，cenc_eew 的字段是 number，同一上游两种序列化风格。
   cenc_eew: {
     label: 'Wolfx CENC EEW',
     region: 'cn',
@@ -6963,7 +6047,6 @@ const SOURCE_CONTRACTS = {
     pollMs: null,
     timezone: 'Asia/Shanghai（+08:00，无夏令时）—— time / ReportTime 是裸北京时间，由 cnTimeToIso 补偏移',
     required: [
-      // 0.9.4（C2 / P3-41）：核对 parseCencEqlistItemResult / parseCencEqlistResult 之后的写法。
       '整表载荷：No1…NoN（数值序，No1 最新）；**md5 不是判据**——它只作诊断读数与' +
       '（P3-31 之前）的整表短路，缺了照常逐条比对',
       '每项：EventID string 非空',
@@ -6980,11 +6063,10 @@ const SOURCE_CONTRACTS = {
       '所以"超过 48 小时没有新批次"即判中继异常（fj_eew 那种连接正常但停更 4 个月的形态，' +
       '靠连接检测完全发现不了）。实测发布 lag 209–1643 秒，阈值不能贴着 lag 取留出余量。',
   },
-  // ---- 中国大陆气象源（0.5.2）----
-  // 一条 Host 源（`nmc_alarm`）承载**两个灾种**（暴雨 / 地质灾害）。契约按"一个端点 + 一种载荷"
-  // 划分，而这两个灾种来自同一个 `rest/findAlarm` 响应、只有 `pic` 编码不同，所以是一条契约。
-  // 与其它源的差异：匹配走**行政区层级**（locator:'area'），因此"title 能解析出机构名"是
-  // **必需字段**——解析不出就等于这条预警无法归属，而不是"少了一个可选字段"。
+  // ---- 中国大陆气象源 ----
+  // 一条 Host 源（`nmc_alarm`）承载**两个灾种**（暴雨 / 地质灾害）：两者来自同一个
+  // `rest/findAlarm` 响应、只有 `pic` 编码不同，所以是一条契约。匹配走**行政区层级**
+  // （locator:'area'），因此"title 能解析出机构名"是**必需字段**——解析不出就归不了属。
   nmc_alarm: {
     label: 'CMA warning signals (nmc.cn)',
     region: 'cn',
@@ -7017,11 +6099,9 @@ const SOURCE_CONTRACTS = {
       '拿到缓存。与 JMA 同档；实测 40 分钟窗口里新增 11 条、相邻两次新增的最长间隔只有 10 分钟，' +
       '余量近 20 倍。',
   },
-  // 海外气象源（0.6.0，DESIGN 4.7）。两条都是 **Client 直连的 REST 轮询**（CORS 实测允许），
-  // 而且都是**按关注点查询**（NWS 按点、ECCC 按 bbox）——这一点决定了它们与其它源的三处不同：
-  //   · locator 是 'overseas'（命中在取数时就已发生，匹配层不算距离）；
-  //   · staleAfterMs 只能是 null（空响应是常态，判不出上游停更）；
-  //   · 时间语义相反（NWS 自带偏移、ECCC 是 UTC `Z`，都不需要补本地时区）。
+  // 海外气象源：两条都是 **Client 直连的 REST 轮询**（CORS 实测允许），且都是**按关注点查询**
+  // （NWS 按点、ECCC 按 bbox）——locator 是 'overseas'（命中在取数时已发生，匹配层不算距离）、
+  // staleAfterMs 只能是 null（空响应是常态）、时间语义相反（NWS 自带偏移、ECCC 是 UTC Z）。
   nws_alerts: {
     label: 'NWS alerts (api.weather.gov)',
     region: 'us',
@@ -7035,9 +6115,8 @@ const SOURCE_CONTRACTS = {
     required: [
       'properties 是对象（一条 CAP 电文）',
       'properties.event string 且**精确命中 8 类洪水白名单**（未命中判 empty，见下）',
-      // 0.6.1 review 订正：实现会退回 GeoJSON 外层的 `id`（实测外层给的是
-      // `https://api.weather.gov/alerts/urn:oid:…`，解析器会剥掉 URL 前缀），所以
-      // "properties.id 必需"是**比实现更严**的声明——后来者按它写测试会误判某个字段必需。
+      // 实现会退回 GeoJSON 外层的 `id`（实测是 URL，解析器会剥掉前缀），所以"properties.id 必需"
+      // 是比实现更严的声明——后来者按它写测试会误判某个字段必需。
       '`properties.id` 或 GeoJSON 外层的 `id` 至少有一个非空（去重与消息级 id 的基础）',
       'properties.sent 可解析的 ISO 时间（带偏移）',
     ],
@@ -7099,21 +6178,13 @@ const SOURCE_CONTRACTS = {
 };
 
 // ---------------------------------------------------------------- Result 包装
-// 每个包装函数先把"结构不符 / 值不可能"挡在解析器之前，再调用**真实解析器**（单一实现，
-// 不复制业务逻辑）。这样既得到契约要求的失败分类，又保证线上链路与测试走同一段代码。
+// 包装函数先把"结构不符 / 值不可能"挡在解析器之前，再调用真实解析器（单一实现）。
 
 /**
  * P2PQuake（551/552/556）。
  *
- * **它确实在运行时链路里**（0.9.5 / X-6 订正）：一份审查报告的"措辞校正"里写着这个包装函数
- * 「只被 scripts/check-contracts.mjs 使用，**没进运行时链路**」—— 那是错的。真实调用点是
- * `client/src/15-entry.js` 里 P2PQuake 的 `onRaw`（WebSocket 的每一帧；EMSC 那一侧同形），
- * 而且调用之后立刻 `noteParseResult('p2pquake', res)`（05g-source-health），schema / value
- * 失败会升级成界面上的**蓝点**（"数据格式异常，等插件更新"）并计入数据健康，不是被静静丢掉。
- *
- * 为什么把这句话留在这里：C2 / P3-41 的修法是"把 required 改成实现真的会拦下的"，那件事只
- * 关系文档与 fixture 的可信度；而上面那条错误前提会让人以为"schema 失败没人看得见"，进而去
- * 补一个并不存在的守卫。**要改这块之前先读这一段。**
+ * 运行时调用点是 15-entry.js 里 P2PQuake 的 onRaw（每帧一次），调用后立刻记入数据健康：
+ * schema / value 失败会升级成界面蓝点，不是被丢掉。
  */
 function parseEpspResult(raw) {
   if (!isPlainObject(raw)) return failResult('schema', '顶层不是对象')
@@ -7170,7 +6241,7 @@ function parseEpspResult(raw) {
     }
   }
   const alert = parse(raw);
-  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  if (!alert) return failResult('schema', '解析器未能生成 Alert（结构通过校验但字段映射失败）')
   return okResult(alert)
 }
 
@@ -7179,7 +6250,6 @@ function parseJmaResult(xml, entry) {
   const text = String(xml === undefined || xml === null ? '' : xml);
   if (!text) return failResult('schema', '电文为空')
   if (text.indexOf('<Report') === -1) {
-    // extra.xml 的详情地址偶尔会返回错误页 / 拦截页（HTTP 200 的 HTML），那种情况是 schema
     if (/^\s*<(!doctype|html)/i.test(text) || text.indexOf('<html') !== -1) {
       return failResult('schema', '返回的是 HTML 而不是 XML 电文（可能被拦截或地址失效）')
     }
@@ -7211,7 +6281,7 @@ function parseEmscResult(raw) {
     return failResult('empty', '非地震事件（evtype=' + String(p.evtype) + '）')
   }
   const alert = parseEmsc(raw);
-  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  if (!alert) return failResult('schema', '解析器未能生成 Alert（结构通过校验但字段映射失败）')
   return okResult(alert)
 }
 
@@ -7231,7 +6301,7 @@ function parseUsgsResult(feature) {
   if (t === null) return failResult('schema', '缺少 properties.time（epoch 毫秒或可解析的时间）')
   if (timeIsImpossible(t)) return failResult('value', '发震时刻客观不可能：' + String(p.time))
   const alert = parseUsgsFeature(feature);
-  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  if (!alert) return failResult('schema', '解析器未能生成 Alert（结构通过校验但字段映射失败）')
   return okResult(alert)
 }
 
@@ -7248,7 +6318,7 @@ function parseNoaaResult(xml, entry) {
   const msgType = (/<msgType>([^<]*)<\/msgType>/.exec(text) || [])[1] || '';
   if (String(msgType).trim() === 'Test') return failResult('empty', '演练电文（msgType=Test）')
   const alert = parseNoaaCap(text, entry);
-  if (!alert) return failResult('schema', '缺少 <identifier> 或解析器未能归一')
+  if (!alert) return failResult('schema', '缺少 <identifier> 或解析器未能生成 Alert')
   if (alert.geoList && alert.geoList.length) {
     for (const g of alert.geoList) {
       if (Math.abs(g.lat) > 90 || Math.abs(g.lon) > 180) return failResult('value', 'circle 坐标越界：' + g.lat + ',' + g.lon)
@@ -7268,7 +6338,7 @@ function parseCencEewResult(raw) {
   if (raw.type !== undefined && String(raw.type) !== 'cenc_eew') {
     return failResult('schema', 'type 不是 cenc_eew（收到 ' + String(raw.type) + '）')
   }
-  // empty 判据：10 个字段一个都没有。理由与证据等级见 SOURCE_CONTRACTS.cenc_eew.empty。
+  // empty 判据：10 个字段一个都没有。理由见 SOURCE_CONTRACTS.cenc_eew.empty。
   const fields = ['ID', 'EventID', 'OriginTime', 'ReportTime', 'Latitude', 'Longitude', 'Magnitude', 'Depth', 'MaxIntensity', 'HypoCenter'];
   const hasAny = fields.some((k) => {
     const v = raw[k];
@@ -7286,7 +6356,7 @@ function parseCencEewResult(raw) {
   if (t === null) return failResult('schema', '缺少 OriginTime（可解析的北京时间）')
   if (timeIsImpossible(t)) return failResult('value', '发震时刻客观不可能：' + String(raw.OriginTime))
   const alert = parseCencEew(raw);
-  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  if (!alert) return failResult('schema', '解析器未能生成 Alert（结构通过校验但字段映射失败）')
   return okResult(alert)
 }
 
@@ -7307,17 +6377,15 @@ function parseCencEqlistItemResult(item) {
   if (t === null) return failResult('schema', '缺少 time（可解析的北京时间）')
   if (timeIsImpossible(t)) return failResult('value', '发震时刻客观不可能：' + String(item.time))
   const alert = parseCencEqlistItem(item);
-  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  if (!alert) return failResult('schema', '解析器未能生成 Alert（结构通过校验但字段映射失败）')
   return okResult(alert)
 }
 
 /**
  * 速报整表 → 批量结果 `{ ok, alerts, dropped, md5 }`。
  *
- * **为什么批量与单项分开判**：整表 50 条，一条缺坐标就让整表作废等于漏掉另外 49 条真实地震
- * ——0.4.2 已经就 551 的观测点定过同一口径（"存在则类型必须正确"，缺失容忍）。
- * 所以：坏条目**逐条丢弃并计数**（`dropped`，不是静默），只有**一条都没解析出来**才判整表 schema。
- * 整表一条都没有则判 empty——源正常但当前没有速报数据。
+ * 坏的条目逐条丢弃并计数（`dropped`，不是静默），只有一条都没解析出来才判整表 schema——
+ * 一条缺坐标就让整表作废等于漏掉其余真实地震。整表一条都没有则判 empty。
  */
 function parseCencEqlistResult(json) {
   if (!isPlainObject(json)) return failResult('schema', '顶层不是对象')
@@ -7345,21 +6413,17 @@ function parseCencEqlistResult(json) {
 /**
  * 中央气象台预警（`nmc_alarm`）。
  *
- * 与其它源的两处判据差异（都由"匹配依赖机构名"这一条推出）：
- *   · `title` 里**必须**能解析出机构名——解析不出就等于这条预警无法归属（DESIGN 8.5），
- *     宁可点亮蓝点让用户知道"数据格式变了"，也不要静默播报一条不知道发给谁的预警。
- *   · 灾种不在本插件范围内时判 **empty 而不是 schema**：Host 已按灾种过滤，正常收不到这类
- *     条目；判 empty 是为了让"Host 将来转发更多灾种"这件事对旧 Client 是静默跳过。
+ * `title` 里**必须**能解析出机构名——匹配依赖它。灾种不在范围内时判 empty 而不是 schema：
+ * Host 已按灾种过滤，正常收不到，判 empty 使"Host 将来转发更多灾种"对旧 Client 是静默跳过。
  */
 function parseNmcAlarmResult(raw) {
   if (!isPlainObject(raw)) return failResult('schema', '顶层不是对象')
   const alertid = String(raw.alertid === undefined || raw.alertid === null ? '' : raw.alertid).trim();
   if (!alertid) return failResult('schema', '缺少 alertid（string）')
   if (typeof raw.kind !== 'string' || !raw.kind) return failResult('schema', '缺少 kind（string）')
-  // 查表一律走 own()（0.5.4）：`NMC_KIND_TEXT['constructor']` 会命中原型链返回 Object 构造函数
-  // （truthy），于是 `kind: 'constructor'` 这样的脏数据会**绕过 empty / schema 判据**被放行，
-  // 一路带进 Alert 的 kindLabel / severity（实测能得到「大陆function Object()…预警」这种文案）。
-  // 契约层存在的意义就是"Host 的 JSON 属于不可信输入"，所以这里不能直查。
+  // 查表一律走 own()：`NMC_KIND_TEXT['constructor']` 会命中原型链返回 Object 构造函数（truthy），
+  // 于是 `kind: 'constructor'` 这样的格式不合法的数据会绕过 empty / schema 判据被放行。Host 的 JSON 属于
+  // 不可信输入，不能直查。
   if (!own(NMC_KIND_TEXT, raw.kind)) return failResult('empty', '灾种不在本插件范围内：' + raw.kind)
   if (typeof raw.level !== 'string' || !own(NMC_LEVEL_TEXT, raw.level)) {
     return failResult('schema', '缺少或无法识别的 level：' + String(raw.level))
@@ -7371,15 +6435,15 @@ function parseNmcAlarmResult(raw) {
   if (t === null) return failResult('schema', '缺少 issued（可解析的 ISO 时间）')
   if (timeIsImpossible(t)) return failResult('value', '发布时间客观不可能：' + String(raw.issued))
   const alert = parseNmcAlarm(raw);
-  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  if (!alert) return failResult('schema', '解析器未能生成 Alert（结构通过校验但字段映射失败）')
   return okResult(alert)
 }
 
 /**
  * 美国 NWS 洪水类预警（`nws_alerts`）。
  *
- * `opts.place` 是取数器查这条时用的关注点——它让匹配层不必再算距离（DESIGN 4.7.3）。
- * 判据顺序与其它源一致：先把"不在范围内"与"结构不符"分开，再交给解析器（单一实现）。
+ * `opts.place` 是取数器查这条时用的关注点——它让匹配层不必再算距离。判据顺序：先把
+ * "不在范围内"与"结构不符"分开，再交给解析器（单一实现）。
  */
 function parseNwsAlertResult(raw, opts) {
   if (!isPlainObject(raw)) return failResult('schema', '顶层不是对象')
@@ -7387,7 +6451,7 @@ function parseNwsAlertResult(raw, opts) {
   if (!isPlainObject(p)) return failResult('schema', '缺少 properties（对象）')
   const event = typeof p.event === 'string' ? p.event : '';
   // 走 own()：`event: 'constructor'` 这类键直查会命中原型链返回函数对象（truthy），
-  // 于是脏数据绕过白名单被放行（与 0.5.4 修的 nmc 查表是同一个坑）。
+  // 于是格式不合法的数据绕过白名单被放行（与 nmc 查表是同一个坑）。
   if (!own(NWS_EVENT_WHITELIST, event)) {
     return failResult('empty', '事件类型不在本插件范围内：' + (event || '(空)'))
   }
@@ -7397,15 +6461,15 @@ function parseNwsAlertResult(raw, opts) {
   if (t === null) return failResult('schema', '缺少或无法解析 properties.sent（ISO 时间）')
   if (timeIsImpossible(t)) return failResult('value', '发布时间客观不可能：' + String(p.sent))
   const alert = parseNwsAlert(raw, opts);
-  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  if (!alert) return failResult('schema', '解析器未能生成 Alert（结构通过校验但字段映射失败）')
   return okResult(alert)
 }
 
 /**
  * 加拿大 ECCC 预警（`eccc_alerts`）。
  *
- * 两道过滤器都在契约层做（与解析器里的同一份名单），这样"不在范围内"这件事在
- * **进入解析器之前**就有明确的归类，而不是靠解析器返回 null 再反推是 schema 还是 empty。
+ * 两道过滤器都在契约层做（与解析器里的同一份名单），让"不在范围内"在**进入解析器之前**就有
+ * 明确归类，而不是靠解析器返回 null 再反推是 schema 还是 empty。
  */
 function parseEcccAlertResult(raw, opts) {
   if (!isPlainObject(raw)) return failResult('schema', '顶层不是对象')
@@ -7417,7 +6481,7 @@ function parseEcccAlertResult(raw, opts) {
   }
   const nameEn = typeof p.alert_name_en === 'string' ? p.alert_name_en.trim() : '';
   if (!nameEn) return failResult('schema', '缺少 alert_name_en（string）')
-  // 先排除、再包含——与 05h 里的顺序一致（那边是解析器的最后一道）。
+  // 先排除、再包含——与 05h 里的顺序一致。
   if (ECCC_EXCLUDE.test(nameEn) || !ECCC_INCLUDE.test(nameEn)) {
     return failResult('empty', '灾种不在本插件范围内：' + nameEn)
   }
@@ -7431,74 +6495,37 @@ function parseEcccAlertResult(raw, opts) {
     return failResult('schema', 'risk_colour_en 缺失或越界：' + String(p.risk_colour_en))
   }
   const alert = parseEcccAlert(raw, opts);
-  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  if (!alert) return failResult('schema', '解析器未能生成 Alert（结构通过校验但字段映射失败）')
   return okResult(alert)
 }
-
-// ---------------------------------------------------------------- 健康状态（机制层）
-// 0.5.3：实现已在 **05g-source-health.js**（DESIGN 11.1 的"约定层 / 机制层"划分），调用方
-// 直接从那里 import。**不要在本文件 re-export**：同一个导出名出现两个来源会被
-// `scripts/check-imports.mjs` 直接判失败（它就是这么设计的），而且会让"契约"与"机制"重新
-// 混在一起——那正是 0.5.3 要修的东西（见 DESIGN 11.9）。
 
 // ============================================================================
 // dsh-quake-alert · client/src/05g-source-health.js
 //
-// 作用：**机制层**——统一的源健康记录（0.5.3 / DESIGN 11.9）。
-// 内容：三层模型（conn / data / fresh）中 data 与 fresh 两层的存储与合成、
-//       逐条计数的升级阈值、蓝点的跨刷新持久化与 TTL 自愈。
-// 依赖：01-constants（HEALTH_KEY）、02-storage（loadJSON / saveJSON / isPlainObject）、
-//       07-store（把状态变化报给 UI）。
+// 作用：**机制层**——统一的源健康记录：data / fresh 两层的存储与合成、逐条计数的升级阈值、
+//       蓝点的跨刷新持久化与 TTL 自愈。
+// 依赖：01-constants（HEALTH_KEY）、02-storage（loadJSON / saveJSON / isPlainObject）、07-store。
+// 分工：05d 是**约定层**（字段契约与失败分类），本文件是**机制层**（失败怎么存、何时升级成源级
+// 异常、何时消失）。调用方仍调 `noteParseResult` 等函数，但 import 来自这里。
 //
-// 与 05d 的分工（DESIGN 11.1 的"约定层 / 机制层"）：
-//   · 05d 是**约定层**：每个源的字段契约、失败分类（empty / schema / value）怎么判。
-//   · 本文件是**机制层**：这些失败**怎么存、什么时候升级成源级异常、什么时候消失**。
-//   调用方（15-entry / 12b / 12c）仍然调 `noteParseResult` 等函数，但 import 的来源是这里。
+// 三件事是本文件存在的理由：① 单条失败不立即点亮蓝点——同一失败原因 10 分钟窗口内累计 ≥5 条、
+// 或连续失败 ≥10 条才升级（线上是逐条 entry，实测整表 50 条里坏 1〜2 条是常态）；② 蓝点带 24 小时
+// TTL，不復现就自动清除；③ data 层写入本地存储，页面刷新后蓝点仍在——"要等插件更新"与刷新页面无关。
 //
-// ---------------------------------------------------------------------------
-// 为什么需要它（三条证据，都不是推测；详见 DESIGN 11.9）
-//
-// ① 升级阈值：此前**每一条**解析失败都立即把源标成 schema-error（蓝点）+ 一个按了也没用的
-//    「重试」。而线上的形态是逐条 entry（Host 已把整表拆开），所以上游**一条**脏数据就会
-//    点亮蓝点。实测速报整表 50 条里坏 1〜2 条是常态（字段缺失），"整表全坏"才是几百条连坏。
-//    现在：同一失败原因在 10 分钟窗口内累计 ≥5 条、或连续失败 ≥10 条，才升级。
-// ② 蓝点的生命周期：升级后只靠"下一次成功解析"或 empty 分支清除。`cenc_eew` 实测数天才有
-//    一条数据，而它的 empty 判据（10 个字段全空）与 Host"无 ID 不转发"互斥 —— 于是一条判错的
-//    蓝点可以挂数天（DESIGN 11.7 第 2 条）。现在蓝点带 24 小时 TTL：不復现就自动清除并记一次
-//    自愈。**判据本身不改**（改了会引入别的误判），让生命周期来兜。
-// ③ 跨刷新：此前这份记录是纯内存的，页面刷新即丢（DESIGN 11.6 第 7 条）。现在 data 一层落盘，
-//    页面重载后蓝点仍在 —— 它表达的"要等插件更新"这件事与刷新页面无关。
-//
-// 明确不做：连接状态（conn）不持久化、也不在这里判定，它由各传输层上报（重启即重新建连，
-// 旧值没有意义）；新鲜度（fresh）只存"最后数据时间"，判定交给探针（12d），阈值只从契约来。
+// 明确不做：连接状态（conn）不持久化、也不在这里判定，由各传输层上报；新鲜度（fresh）只存"最后
+// 数据时间"，判定交给自检，阈值只从契约来。
 // ============================================================================
 
 
-/**
- * 同一失败原因在窗口内累计这么多条 → 升级成源级蓝点。
- *
- * 取 5 的依据：速报整表 50 条里坏 1〜2 条是常态（个别条目字段缺失），5 条以上同因更像是
- * "上游改了一个字段名"这类真问题；而窗口取 10 分钟，与 `dedupe.windowMinutes` 同一量级，
- * 让"同一轮里的连续坏条目"能被累计起来。
- */
+/** 同一失败原因在窗口内累计这么多条 → 升级成源级蓝点。取 5：整表 50 条里坏 1〜2 条是常态。 */
 const SCHEMA_ESCALATE_COUNT = 5;
 const SCHEMA_ESCALATE_WINDOW_MS = 10 * 60 * 1000;
 
-/**
- * 连续失败这么多条（**不看原因**）→ 同样升级。
- *
- * 这条兜的是"坏法不重样"：上游把结构改得面目全非时，每条失败的原因字符串可能都不同
- * （不同字段先被检查到），按原因计数永远到不了阈值。10 条这个量级对任何源都只有
- * "结构性失败"才可能达到（正常波动不会连续 10 条全坏）。
- */
+/** 连续失败这么多条（**不看原因**）→ 同样升级。兜"坏法不重样"：结构改得面目全非时每条失败的原因
+ *  字符串都不同，按原因计数到不了阈值。 */
 const SCHEMA_ESCALATE_CONSECUTIVE = 10;
 
-/**
- * 蓝点的存活上限：超过它没有复现就自动清除（并记一次自愈）。
- *
- * 24 小时：足够长到"用户第二天打开还在"（那时插件更新可能已经发布），又足够短到不会让
- * 一条判错的蓝点永久挂在界面上。稀疏源（`cenc_eew` 数天一条）正是靠它恢复。
- */
+/** 蓝点的存活上限：超过它没有复现就自动清除。24 小时足够"用户第二天打开还在"，又不会永久挂着。 */
 const HEALTH_TTL_MS = 24 * 60 * 60 * 1000;
 
 // ---------------------------------------------------------------- 存储
@@ -7519,7 +6546,7 @@ function ensure(id) {
   return r
 }
 
-/** 落盘。只写 data 一层（理由见文件头），没有异常的源不占空间。 */
+/** 写入本地存储。只写 data 一层，没有异常的源不占空间。 */
 function persist() {
   const out = {};
   for (const [id, r] of health) {
@@ -7533,11 +6560,8 @@ function persist() {
   saveJSON(HEALTH_KEY, out);
 }
 
-/**
- * 从 localStorage 恢复（模块加载时自动调一次）。过期的直接丢掉——TTL 在**读取**时也要判，
- * 否则关掉浏览器三天再打开会看到一个早已过期的蓝点。
- * @returns {number} 恢复了几条
- */
+/** 从 localStorage 恢复（模块加载时自动调一次）。过期的直接丢掉——TTL 在**读取**时也要判，
+ *  否则关掉浏览器三天再打开会看到一个早已过期的蓝点。 @returns {number} 恢复了几条 */
 function loadHealth(now) {
   const t = now === undefined ? Date.now() : now;
   const raw = loadJSON(HEALTH_KEY, null);
@@ -7564,23 +6588,16 @@ function loadHealth(now) {
 }
 
 // ---------------------------------------------------------------- 数据层（解析失败）
-/**
- * 连接层基线：清掉数据健康之后，展示状态该回到哪一个连接状态。
- *
- * store 里存的是**合成结果**，所以先看它是不是由数据层投出来的（`schema-error` / `stale`）——
- * 是就说明连接层本身没有更好的信息，按 `open` 计；否则**沿用**当前值，否则会把
- * `reconnecting` / `degraded` / `disabled` 这些真实的连接状态抹成绿色。
- */
+/** 连接层基线：清掉数据健康之后，展示状态该回到哪一个连接状态。store 里存的是**合成结果**，所以先
+ *  看它是不是由数据层投出来的（`schema-error` / `stale`）——是就按 `open` 计，否则沿用当前值。 */
 function connBaseOf(sourceId) {
   const cur = (store.sources && store.sources[sourceId]) || {};
   const s = cur.status;
   return (s === 'schema-error' || s === 'stale' || !s) ? 'open' : s
 }
 
-/**
- * 清掉 data 层（成功解析 / empty / TTL 自愈都走这里）。
- * 只有**确实从异常恢复了**才上报——否则每条成功的数据都会触发一次设置页重渲。
- */
+/** 清掉 data 层（成功解析 / empty / TTL 自愈都走这里）。只有**确实从异常恢复了**才上报——否则
+ *  每条成功的数据都会触发一次设置页重渲。 */
 function clearData(sourceId, detail, t) {
   const r = health.get(sourceId);
   if (!r || !r.data) return false
@@ -7588,28 +6605,22 @@ function clearData(sourceId, detail, t) {
   r.data = null;
   r.consecutiveFail = 0;
   persist();
-  // 走 publishStatus 而不是直接 pushSource：清掉蓝点之后该显示什么，得由合成规则决定——
-  // 若这个源此刻正停更（fresh.stale），展示状态应当是「数据已过期」而不是「已连接」。
+  // 走 publishStatus 而不是直接 pushSource：清掉蓝点之后该显示什么得由合成规则决定——若这个源
+  // 此刻正停更，展示状态应当是「数据已过期」而不是「已连接」。
   if (wasEscalated) publishStatus(sourceId, { status: connBaseOf(sourceId), detail });
   return true
 }
 
 /**
- * 记录一次解析结果。返回 true 表示"这条数据不可用，调用方不应继续处理它"
- * —— 注意这与"是否点亮蓝点"**已经解耦**（0.5.3）：单条坏数据不该让整个源变蓝。
+ * 记录一次解析结果。返回 true = "这条数据不可用，调用方不应继续处理它"——与"是否点亮蓝点"**解耦**：
+ * 单条坏数据不该让整个源变蓝。
  *
- * empty 仍然算"结构是好的"（源正常地给出了这一条，只是与本插件无关），**默认**清掉蓝点
- * ——这条语义沿用 0.4.2，JMA 的常态就是 empty（否则一条坏电文会让蓝点挂到下一次成功解析为止）。
- *
- * **唯一例外是逐条上报（`opts.perItem`）**：那时 empty 只计数、不清 data 层。理由：empty 是
- * "**这一条**与本插件无关"，不能证明"同一批次里此前那条 schema 失败的已恢复"。批量取数
- * （12e 一轮查 N 个关注点）里立即 `clearData` 会把**其它条目**的失败计数与 `r.data` 一起清掉
- * ——实测（1 个被拦截的 URL + 4 个只有非白名单事件的 URL，连跑 6 轮）：schema 计数涨到 6 而
- * `consecutiveFail` 恒为 0，两条升级阈值都不可达、蓝点永不点亮。那正是"局部改版 / 局部拦截"
- * 退化成**静默漏报**的形态——本插件最不能接受的失败。
- *
- * 「条级独立」的来源（12b 的 feed、15-entry 的 WS：每条电文 / 消息各是一次独立事实）**不传**
- * `perItem`，保持 0.4.2 语义；只有"一轮 = 一批请求"的海外源逐条上报才传它。
+ * empty 仍算"结构是好的"，**默认**清掉蓝点（JMA 的常态就是 empty）。**唯一例外是逐条上报
+ * （`opts.perItem`）**：那时 empty 只计数、不清 data 层——empty 只说明"**这一条**无关"，不能证明
+ * 同批次此前那条 schema 失败已恢复；批量取数（12e 一轮查 N 个关注点）里立即 clearData 会连**其它
+ * 条目**的失败计数一起清掉，两条升级阈值都不可达、蓝点永不点亮，即"局部改版 / 局部拦截"退化成
+ * **静默漏报**。「条级独立」的来源（12b 的 feed、15-entry 的 WS）不传 perItem；只有"一轮 = 一批
+ * 请求"的海外源传。
  */
 function noteParseResult(sourceId, res, now, opts) {
   if (!res || res.ok) return false
@@ -7651,10 +6662,7 @@ function noteSourceSuccess(sourceId, now) {
   return clearData(sourceId, 'schema recovered')
 }
 
-/**
- * TTL 自愈：由探针定期调用（模块自己不排定时器——定时器归 fiber，见 12d）。
- * @returns {number} 这一轮自愈了几个源
- */
+/** TTL 自愈：由自检定期调用（模块自己不排定时器，定时器归 fiber）。 @returns {number} 自愈了几个源 */
 function pruneHealth(now) {
   const t = now === undefined ? Date.now() : now;
   let healed = 0;
@@ -7674,17 +6682,14 @@ function pruneHealth(now) {
 }
 
 // ---------------------------------------------------------------- 新鲜度层
-/**
- * 上报"我最后一次拿到数据的时刻"（epoch 毫秒）。**判定不在这里**——阈值只从契约来，
- * 由探针（12d）统一算。各源只管上报事实。
- */
+/** 上报"我最后一次拿到数据的时刻"（epoch 毫秒）。**判定不在这里**——阈值只从契约来，由自检统一算。 */
 function noteFreshness(sourceId, dataTime) {
   const r = ensure(sourceId);
   if (typeof dataTime === 'number' && Number.isFinite(dataTime) && dataTime > 0) r.fresh.dataTime = dataTime;
   return Object.assign({}, r.fresh)
 }
 
-/** 探针写入判定结果。`staleSince` 只在"从未停更变成停更"的那一刻记一次。 */
+/** 自检写入判定结果。`staleSince` 只在"从未停更变成停更"的那一刻记一次。 */
 function noteStale(sourceId, stale, now) {
   const t = now === undefined ? Date.now() : now;
   const r = ensure(sourceId);
@@ -7705,7 +6710,7 @@ function snapshot(r) {
   }
 }
 
-/** 单个源的记录；传 undefined 取全部（诊断快照用）。沿用既有的 API 名，减少调用方改动面。 */
+/** 单个源的记录；传 undefined 取全部（诊断快照用）。 */
 function sourceHealthOf(sourceId) {
   if (sourceId !== undefined) {
     const r = health.get(sourceId);
@@ -7718,16 +6723,10 @@ function sourceHealthOf(sourceId) {
 
 /**
  * 把"数据健康"叠加到连接状态上。优先级：数据格式异常（用户处理不了）> 停更（中灰）> 连接状态。
- *
- * 0.5.3 起**多了一层 stale**：此前 stale 由各源自己 pushSource 上报（12b 直通 Host 的
- * `stats.stale`、12c 直通 SSE 的 status 帧），于是"谁在判"和"阈值在哪"都散着。现在统一由
- * 探针按契约判定并写进这里，各源只上报 dataTime。
  */
 function effectiveStatusOf(sourceId, connStatus, detail) {
-  // 0.9.5（fresh review）：用户**主动关掉**的源优先于一切健康判定。此前蓝点（data 层升级）与
-  // stale 会覆盖 disabled，于是"我把这个灾种关了"被界面改写成"数据格式异常 / 上游停更"——
-  // 侧边栏挂着蓝点（最长 24h TTL）、聚合状态也不会变成 disabled，还给一个已关掉的源画「重试」。
-  // 这正是 P2-17 想消灭的那类"关掉之后仍被拖成异常"的残留，只是它当时只处理了 stale 那一层。
+  // 用户**主动关掉**的源优先于一切健康判定：否则蓝点与 stale 会覆盖 disabled，把"我把这个灾种关了"
+  // 改写成"数据格式异常 / 上游停更"。
   if (connStatus === 'disabled') return { status: 'disabled', detail }
   const r = health.get(sourceId);
   if (r && r.data && r.data.escalated) return { status: 'schema-error', detail: r.data.kind + '：' + r.data.detail }
@@ -7736,20 +6735,11 @@ function effectiveStatusOf(sourceId, connStatus, detail) {
 }
 
 /**
- * **统一的状态发布入口**（0.5.4）——任何要写 `store.sources` 的层都从这里走。
+ * **统一的状态发布入口**——任何要写 `store.sources` 的层都从这里走。
  *
- * 为什么必须统一：`store.pushSource` 是**整体替换** status + detail 的，而界面上那个状态是
- * **合成**出来的（见 `effectiveStatusOf`：蓝点 > 停更 > 连接）。此前只有 12b / 12c 两个出口
- * 走了合成，探针（12d）、健康层自身（本文件）与 12-websocket 都是直接写 store，于是后写的
- * 那个会把前者的结论整个抹掉。实测两条路径都真实可达：
- *   · 探针在「数据已过期 → 恢复」翻转时写 `open`，把一条 schema-error 蓝点永久刷成绿色
- *     （12b 的去重键认定"自己的 eff 没变"，此后每一轮都不再上报）；
- *   · P2PQuake 约每 10 分钟一次的**常态断线**写 `reconnecting`，同样把蓝点冲掉。
- * 而 `sourceHealthOf()` 里 escalated 仍然是 true —— 也就是 DESIGN 11.9 A 那句
- * 「schema-error 优先于连接状态」被绕过，「上游改了字段、要等插件更新」这个用户处理不了的
- * 信号从界面上消失（设置页那个「重试」按钮也跟着消失）。
- *
- * 合成规则只有 `effectiveStatusOf` 一处，这里只负责"合成 + 写 store"。
+ * `store.pushSource` 是**整体替换** status + detail 的，而展示状态是**合成**出来的（见
+ * `effectiveStatusOf`）。其它层直接写 store 会把合成结论抹掉：自检把"停更"翻回"恢复"时写 `open` 会永久
+ * 刷绿一条 schema-error 蓝点，P2PQuake 常态断线写 `reconnecting` 同样冲掉蓝点。
  *
  * @param {string} sourceId
  * @param {object} patch 至少给 status 与 detail 之一；其余字段（label / retries…）原样透传
@@ -7757,10 +6747,8 @@ function effectiveStatusOf(sourceId, connStatus, detail) {
  */
 function publishStatus(sourceId, patch) {
   const p = Object.assign({}, patch);
-  // 探针（12d）与健康层（本文件）手里没有中文源名，而 07-store.pushSource 的兜底是**裸 id**。
-  // 不补的话，"刷新页面后立刻重发蓝点"（`republishDataHealth`）与"探针翻停更"这两条路径
-  // 会让侧边栏的悬停详情显示成「usgs：上游数据已过期…」。store 里已有 label 就沿用，
-  // 否则退到契约里的 label（同一份声明，比 id 可读），最后才是 id。
+  // 07-store.pushSource 的兜底是**裸 id**，不补 label 的话侧边栏详情会显示成「usgs：上游数据已过期…」。
+  // store 里已有 label 就沿用，否则退到契约里的 label，最后才是 id。
   if (p.label === undefined) {
     const cur = (store.sources && store.sources[sourceId]) || {};
     const declared = SOURCE_CONTRACTS[sourceId];
@@ -7773,13 +6761,8 @@ function publishStatus(sourceId, patch) {
   return eff
 }
 
-/**
- * 把已经升级的数据健康记录重新发布到 store——插件装载时调用。
- *
- * 刷新页面后 store 是空的，而蓝点存在 localStorage 里（DESIGN 11.9 A）。不重发的话，
- * 要等该源下一次上报（feed 源首轮 3 秒 + 15 秒一轮）才显示出来，而「上游改了字段」这件事
- * 与用户刷新页面毫无关系——"蓝点跨刷新存活"这条承诺应当是**立刻**成立，而不是十几秒后。
- */
+/** 把已经升级的数据健康记录重新发布到 store——插件装载时调用。刷新页面后 store 是空的而蓝点存在
+ *  localStorage 里，不重发就要等该源下一次上报才显示，而"蓝点跨刷新存活"应当是**立刻**成立。 */
 function republishDataHealth() {
   for (const [id, r] of health) {
     if (!r.data || !r.data.escalated) continue
@@ -7787,7 +6770,7 @@ function republishDataHealth() {
   }
 }
 
-/** 手动重试（DESIGN 5.4）：清掉异常标记，等下一批数据自证。 */
+/** 手动重试：清掉异常标记，等下一批数据自证。 */
 function retrySource(sourceId, now) {
   const r = ensure(sourceId);
   r.data = null;
@@ -7798,11 +6781,8 @@ function retrySource(sourceId, now) {
 }
 
 /**
- * 插件（重新）装载时重置**连接与新鲜度**两层。
- *
- * 刻意**不清 data 层**：它已经从 localStorage 恢复，而"上游改了字段、等插件更新"这件事与
- * 用户刷新页面 / 重新启用插件无关。0.5.2 之前这里清掉全部，理由是"避免上一代残留"——那是
- * data 还不持久化时的判断，现在持久化本身就是设计（DESIGN 11.9 A）。
+ * 插件（重新）装载时重置**连接与新鲜度**两层。刻意**不清 data 层**：它已从 localStorage 恢复，
+ * 而"上游改了字段、等插件更新"与用户刷新页面 / 重新启用插件无关。
  */
 function resetConnHealth() {
   for (const [, r] of health) {
@@ -7817,35 +6797,24 @@ function resetSourceHealth() {
   saveJSON(HEALTH_KEY, {});
 }
 
-// 模块加载时恢复一次：页面刷新后蓝点仍在（loadClient 在测试里新建沙箱时会重新执行到这里，
-// 所以"跨刷新存活"这条能力可以被直接断言）。
+// 模块加载时恢复一次：页面刷新后蓝点仍在。
 loadHealth();
 
 // ============================================================================
 // dsh-quake-alert · client/src/06-matcher.js
-//
-// 作用：匹配引擎——决定一条 Alert 是否该提醒用户。
-// 内容：regionInWatch（县级 + 市级收窄）、阈值判定（震度/海啸等级）、
-//       missReason（未命中原因，含未识别区域名与市级收窄提示）。
-// 依赖：01-constants、04-city-table（lookupAddrCity）。
-// 放行规则：区域级数据与归一不到市町村的观测点一律放行，宁可多报绝不漏报。
+// 作用：匹配引擎——决定一条 Alert 是否该提醒用户（区域匹配、阈值判定、未命中原因）；
+//       依赖 01-constants、04-city-table（lookupAddrCity）、05h-overseas-parsers。
 // ============================================================================
 
 
-// ---------- 匹配引擎 ----------
-// 关注地区匹配：县级始终生效（watch.prefectures 为空 = 全日本）；市级只在数据本身有
-// 市区町村粒度时收窄——即 551 的观测点条目（isArea=false，addr 形如「白河市新白河」）。
-// 两类情况一律放行，宁可多提醒也绝不漏报：
-//   ① 区域级数据：isArea=true 的区域名、556 的区域名、552 的津波予報区名都对应不到市町村；
-//   ② addr 归一不到任何市町村：机场观测点（新千歳空港）、未收录写法等。
+// 关注地区匹配：县级始终生效（watch.prefectures 为空 = 全日本）；市级只在数据本身有市区町村粒度
+// 时收窄（cityLevel）。放行两类：区域级数据（对应不到市町村）、addr 认不出市町村。
 function regionInWatch(region, watch, cityLevel, anyResolvedPref) {
   const list = watch && watch.prefectures;
   const cities = (watch && watch.cities) || [];
-  // region.pref 为空 = 归属县未能识别。这里**不能简单地一律放行**（0.4.2 修正）：
-  // 552/556 走的是 cityLevel=false，县级过滤是**唯一**的收窄手段，一律放行会让一条含
-  // "未收录预报区名"的海啸电文提醒**所有关注列表非空的用户**（海啸域的误报最伤信任）。
-  // 口径：同一条消息里只要**有**区域能归到县，归不到的条目不参与县级过滤（不因它命中）；
-  // 只有当整条消息的区域**全都**归不到县时，才为了不漏报而放行（DESIGN 3.2 的"边界情况让步"）。
+  // region.pref 为空 = 归属县未能识别，不能一律放行：552 / 556 的县级过滤是唯一的收窄手段，
+  // 一律放行会让含"未收录预报区名"的海啸电文提醒所有关注列表非空的用户。
+  // 口径：同一条消息里只要有区域能归到县，归不到的条目不参与县级过滤；全都归不到县时才放行。
   if (list && list.length > 0) {
     if (region.pref) {
       if (list.indexOf(region.pref) === -1) return false
@@ -7860,14 +6829,9 @@ function regionInWatch(region, watch, cityLevel, anyResolvedPref) {
   return cities.indexOf(addrCity) !== -1
 }
 
-// 气象警报（泥石流 / 洪水 / 大雨 / 高潮…）的关注地区匹配。
-// 与 551 不同，JMA 电文的区域在解析阶段就已经归到「县 + 市町村」，不需要再做 addr 归一；
-// 两类一律放行，宁可多报绝不漏报：
-//   ① pref 为空（区域码认不出县、或名称反查不到）——无法判定，放行；
-//   ② 区域级条目（city 为空，如「宗谷地方」「○○川上流」）——对应不到市町村，放行。
-// 市町村比对走 normKana 归一等价：电文/河川区域表的假名写法可能与本表不同
-// （「金ケ崎町」vs「金け崎町」、「南アルプス市」vs「南あるぷす市」），
-// 直接 indexOf 会让勾选了该市町村的用户漏报。
+// 气象警报（泥石流 / 洪水 / 大雨 / 高潮…）的关注地区匹配。与 551 不同：JMA 电文的区域在解析阶段
+// 就已归到「县 + 市町村」，不再做 addr 反查。放行两类：pref 为空（无法判定）、区域级条目（city 为空）。
+// 市町村比对走 normKana 等价（「金ケ崎町」vs「金け崎町」），直接 indexOf 会让已勾选的用户漏报。
 function regionInWeatherWatch(region, watch) {
   const list = (watch && watch.prefectures) || [];
   const cities = (watch && watch.cities) || [];
@@ -7879,10 +6843,8 @@ function regionInWeatherWatch(region, watch) {
 }
 
 // ---------- 坐标匹配（全球源：EMSC / USGS / NOAA CAP） ----------
-// 全球源给的是「震中坐标 + 震级」，没有日本那样的都道府县 / 市町村。用户的关注表达因此是
-// 「我所在的位置 + 可接受半径」，由这里做球面距离判定（Haversine，误差 <0.5%）。
-// 与行政区匹配同一条原则：宁可多报绝不漏报；但坐标缺失时**不猜**——如实说明无法判定，
-// 而不是默默放行（放行会让"配错了关注点"看起来像"根本没有地震"）。
+// 全球源只给「震中坐标 + 震级」，用户按「位置 + 半径」关注，这里做球面距离判定（Haversine）；
+// 坐标缺失时如实说明无法判定，不猜、不静默放行。
 const EARTH_RADIUS_KM = 6371;
 function distanceKm(lat1, lon1, lat2, lon2) {
   const toRad = (d) => (d * Math.PI) / 180;
@@ -7892,16 +6854,14 @@ function distanceKm(lat1, lon1, lat2, lon2) {
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.pow(Math.sin(dLon / 2), 2);
   return 2 * EARTH_RADIUS_KM * Math.asin(Math.min(1, Math.sqrt(a)))
 }
-/** 坐标是否可用于计算：数值、有限、且在合法范围内（-200 这类"未知"哨兵值会被挡下）。 */
+/** 坐标是否可用于计算：数值、有限、且在合法范围内（-200 这类"未知"特殊标记值会被挡下）。 */
 function validGeo(geo) {
   return !!geo && typeof geo.lat === 'number' && Number.isFinite(geo.lat) &&
     typeof geo.lon === 'number' && Number.isFinite(geo.lon) &&
     Math.abs(geo.lat) <= 90 && Math.abs(geo.lon) <= 180
 }
 /**
- * 坐标型警报的匹配：震中落在任一关注点的半径内即命中。
- * 震级阈值单独判断（globalMagnitude）——全球源给出的是震级，与日本的震度不可换算，
- * 用一个独立旋钮比"假装能换算"诚实。
+ * 坐标型警报的匹配：震中落在任一关注点的半径内即命中；震级阈值单独判断。
  * @returns {{ hit: boolean, reason: string, place?: object, distanceKm?: number }}
  */
 function matchPointAlert(alert, cfg) {
@@ -7909,17 +6869,14 @@ function matchPointAlert(alert, cfg) {
   if (places.length === 0) {
     return { hit: false, reason: t('reason.noGlobalWatch') }
   }
-  // 多区域电文（CAP 允许一个 info 下多个 <area><circle>）：任一圆心落在半径内即算命中。
-  // 只看第一个 circle 会让其余海域的沿海用户漏报——多区域海啸恰恰是最常见形态。
+  // 多区域电文（CAP 允许一个 info 下多个 <area><circle>）：任一圆心落在半径内即算命中，只看第一个
+  // circle 会让其余海域的沿海用户漏报。
   const pts = (Array.isArray(alert.geoList) && alert.geoList.length ? alert.geoList : [alert.geo]).filter(validGeo);
   if (pts.length === 0) {
     return { hit: false, cannotJudge: true, reason: t('reason.noCoordinates') }
   }
-  // 海啸的**等级闸门**同样适用于全球源（0.4.1）。NOAA CAP 的 <event> 决定等级
-  // （Warning=3 / Advisory・Watch=2 / Information=0，见 05c 的 NOAA_EVENT_RULES），
-  // 与日本 552 的 tsunamiGrade 共用同一把尺。此前这条闸门只作用于日本源，于是
-  // 「Tsunami Information」（气象机构明确表示无破坏性海啸的信息）也会在半径内响铃——
-  // 全球海啸完全无法用等级收敛，而海啸的误报会直接摧毁用户对整条链路的信任。
+  // 海啸等级门槛同样适用于全球源：NOAA CAP 的 <event> 决定等级，与日本 552 的 tsunamiGrade 共用
+  // 一把尺（Warning=3 / Advisory・Watch=2 / Information=0）。
   if (alert.kind === 'tsunami') {
     const rank = typeof alert.tsunamiRank === 'number'
       ? alert.tsunamiRank
@@ -7929,17 +6886,13 @@ function matchPointAlert(alert, cfg) {
       return { hit: false, reason: t('reason.tsunamiBelowGrade', { rank: rank, min: minRank }) }
     }
   }
-  // 震级门槛分两把（0.5.0）：坐标型**预警**（EMSC / USGS / cenc_eew）用 globalMagnitude，
-  // 大陆**速报**（cenc_eqlist，alert.speedReport）用独立的 cnReportMagnitude——速报覆盖低到
-  // M2.5 且每天都有数据，用预警门槛播报会被小震频繁打扰（DESIGN 8.4）。
+  // 震级门槛分两把：坐标型预警（EMSC / USGS / cenc_eew）用 th.globalMagnitude，
+  // 大陆速报（cenc_eqlist，alert.speedReport）用 th.cnReportMagnitude。
   const th = cfg.thresholds || {};
   const minMag = alert.speedReport ? th.cnReportMagnitude : th.globalMagnitude;
   const magName = alert.speedReport ? t('reason.magThresholdReport') : t('reason.magThresholdGlobal');
   const mag = typeof alert.magnitude === 'number' && Number.isFinite(alert.magnitude) ? alert.magnitude : null;
-  // 震级阈值只作用于地震。海啸的严重性由它自己的等级决定（上面的闸门），
-  // 不该被"引发它的那次地震有多大"过滤掉：NOAA 电文里那个前震震级只是参考值，而且用同一个
-  // 阈值卡海啸是危险的——用户把全球阈值调到 M7.0 时，一场 M6.7 引发的海啸警报会被静默丢掉，
-  // 而海啸恰恰是这里最不能漏的一类。
+  // 震级阈值只作用于地震：海啸的严重性由自己的等级决定，NOAA 电文里的前震震级只是参考值。
   const quakeLike = alert.kind === 'quake' || alert.kind === 'eew';
   if (quakeLike && mag !== null && typeof minMag === 'number' && mag < minMag) {
     return { hit: false, reason: t('reason.magBelow', { mag: mag, name: magName, min: minMag }) }
@@ -7977,14 +6930,11 @@ function missReason(alert, watch, base) {  const list = watch && watch.prefectur
   return reason
 }
 
-// ---------- 行政区层级匹配（大陆气象源，0.5.2 / DESIGN 8.5） ----------
+// ---------- 行政区层级匹配（大陆气象源） ----------
 /**
- * 「省·市」名字 → 行政区对。设置页「中国大陆」加进来的点由 04-city-table 的 cnPlaceOf 生成，
- * 名字固定是「省·市」（用 U+00B7 分隔，以免两个省的"城区"撞名）。
- *
- * **它不再是"这个点算不算大陆点"的判据**（0.8.2 / DESIGN 11.9 B）——那个判据是 `origin`，
- * 见 `cnWatchPlaces`。这里只做一件事：给 0.8.1 及以前存下的老配置（place 上只有名字、
- * 没有显式 `province` / `city`）解析出省 / 市，迁移一次之后就不再需要。
+ * 「省·市」名字 → 行政区对（分隔符是 U+00B7，以免两个省的"城区"撞名）。
+ * 只服务老配置（place 上只有名字、没有显式 province / city）的解析，**不是**"这个点算不算
+ * 大陆点"的判据——那个判据是 `origin`，见 cnWatchPlaces。
  */
 function cnPlaceParts(name) {
   const s = String(name === undefined || name === null ? '' : name).trim();
@@ -7995,20 +6945,13 @@ function cnPlaceParts(name) {
 
 const trimmed = (v) => (typeof v === 'string' ? v.trim() : '');
 
-// 「一个大陆关注点都没配」的说明。noWatch 与普通未命中的区别见 11-pipeline：前者不进历史。
+// 一条大陆关注点都没配时的说明；noWatch 的条目在 11-pipeline 里不进历史。
 const NO_CN_WATCH_REASON = t('reason.noCnWatch');
 
 /**
- * 从关注点列表里挑出**大陆关注点**，并给出每条的省 / 市（0.8.2 / DESIGN 11.9 B）。
- *
- * 判据是 0.8.0 就有的显式来源分支 `origin`（DESIGN 9.3），且走 02-storage 的 `placeOriginOf`
- * ——与 `normalizePlaces` 用**同一个函数**，两处口径不会各写一份然后漂开。
- * 原实现是「名字里有没有 `·`」：手填坐标（origin 是 'global'）只要名字里带 `·` 就被算成大陆点，
- * 未命中也会往履历里写；而 `origin` 缺失的老配置由 `placeOriginOf` 按同一形状规则推导，
- * 所以这条回退不会把 0.8.1 及以前的大陆关注点判丢。
- *
- * 省 / 市优先读 place 上的显式字段（0.8.2 起 `cnPlaceOf` 写入），缺失时回退解析「省·市」名字。
- * 回退**只发生在已经确定是大陆点之后**——它服务的是老配置，不是判定依据。
+ * 从关注点列表里挑出**大陆关注点**（判据是 placeOriginOf 给的 origin，与 normalizePlaces 同一个
+ * 函数，两处口径不会漂开），并给出每条的省 / 市：优先读 place 上的显式字段，缺失时回退解析
+ * 「省·市」名字——回退只发生在已确定是大陆点之后。
  */
 function cnWatchPlaces(places) {
   const out = [];
@@ -8029,24 +6972,12 @@ function cnWatchPlaces(places) {
   return out
 }
 
-/** 等级中文（与 05f 的 NMC_LEVEL_TEXT 同源；这里只需要拼 reason，不复制映射表会更好，
- *  但 06 不该依赖解析层——所以就地写一份最小的，并靠回归断言钉住两边一致。 */
-// 等级词与灾种名是**我们给起的**（不是电文原文）→ 按界面语言取词（0.9.4）
+// 等级词与灾种名是界面用语（不是电文原文）→ 按界面语言取词
 const NMC_LEVEL_KEY = { red: 'kind.cnLevelRed', orange: 'kind.cnLevelOrange', yellow: 'kind.cnLevelYellow', blue: 'kind.cnLevelBlue' };
 
 /**
- * 大陆气象预警的匹配。规则按优先级排，每一条都对应一个"用户会问为什么"的场景：
- *
- *  ① 灾种开关（DESIGN 8.4 把它们拆成两个：暴雨的橙 / 红常年可见，地质灾害实测全是黄色）。
- *  ② **先确认有没有大陆关注点，再看播报门槛**（0.8.2 调整，DESIGN 11.9 A）。原来门槛排在前面，
- *     于是"一个大陆关注点都没配"的用户，黄 / 蓝预警会持续写进履历——同一路数据橙色以上不进历史、
- *     蓝色却进，两种口径（11-pipeline 的 `noWatch` 只对走到后面那条分支的条目生效）。
- *  ③ 播报门槛：**橙色及以上**才打扰；黄 / 蓝是"未达档位"，0.9.4（PD-1）起**既不播报也不进
- *     历史**（此前只入历史）。不满足时 reason 要说清是"等级不够"，
- *     而不是含糊的"未命中"——否则用户会把"这条预警我收到了但没响"读成故障。
- *  ④ 归属：市能对上就用市；市对不上（省直辖县 / 省台发布 / 机构名错字）时**按省放行**；
- *     连省都认不出（国家级机构等）也放行。后两条都是 DESIGN 3.2 / 8.5 的"宁可多报绝不漏报"
- *     ——一次漏报的代价远大于一次多报。**放行的对象只有真正的大陆关注点**（见 cnWatchPlaces）。
+ * 大陆气象预警的匹配，规则按优先级排：灾种开关 → 有无大陆关注点（无则 noWatch）→ 播报门槛
+ * （橙色及以上）→ 归属（市对上用市；市对不上按省放行；连省都认不出也放行）。
  */
 function matchCnAreaAlert(alert, cfg) {
   const d = cfg.disasters || {};
@@ -8056,17 +6987,15 @@ function matchCnAreaAlert(alert, cfg) {
     return { hit: false, reason: t('reason.cnRainstormOff') }
   }
   if (alert.cancelled) return { hit: false, reason: t('reason.clearedMuted') }
-  // 等级词与灾种名都是**我们给起的**（不是电文原文）→ 按界面语言取词（0.9.4，见 00g-texts-events）
+  // 等级词与灾种名都是界面用语（不是电文原文）→ 按界面语言取词
   const levelWord = t(NMC_LEVEL_KEY[alert.cnLevel] || 'kind.cnLevelUnknown');
   const kindWord = t(alert.cnKind === 'geology' ? 'kind.cnGeology' : 'kind.cnRainstorm');
   const what = t('kind.cnWhat', { kind: kindWord, level: levelWord });
   const places = (cfg.watch && cfg.watch.places) || [];
   const cnPlaces = cnWatchPlaces(places);
   if (cnPlaces.length === 0) {
-    // 与坐标型源同一条原则：没有关注点就明确说明怎么加，**不静默**——
-    // "配错了关注点"看起来像"根本没有预警"是这套系统最该避免的误解之一。
-    // `noWatch` 让 11-pipeline 能把这一类和"命中了但不在列表里"区分开（前者不进历史，0.5.4）。
-    // 它必须排在门槛之前：否则黄 / 蓝预警会绕过 noWatch 继续进历史（DESIGN 11.9 A）。
+    // 没有关注点就明确说明怎么加，不静默；noWatch 让 11-pipeline 把这一类和"命中了但不在列表里"
+    // 区分开（前者不进历史），所以它必须排在门槛之前。
     return { hit: false, noWatch: true, reason: NO_CN_WATCH_REASON }
   }
   const rank = typeof alert.cnRank === 'number' ? alert.cnRank : 0;
@@ -8086,11 +7015,8 @@ function matchCnAreaAlert(alert, cfg) {
       reason: t('reason.cnNotWatched', { what: what, province: province, city: city }),
     }
   }
-  // 市级归属未知：省内有任何一个关注点就放行，并在 reason 里如实说明只定位到省。
-  // 实测这一类的来源是海南省直辖县（乐东 / 昌江 / 琼中…）、上海市辖区，以及上游的机构名错字
-  //（「黑龙江省齐哈尔市克山县」少了"齐"）——它们都是真实预警，丢掉就是漏报。
-  // 省名也认不出时按全国放行，同样是 DESIGN 8.4 的兜底（国家级机构发布的预警没有省可对）。
-  // 这一条以前会把**任一**关注点（含手填坐标）当放行依据，现在 `cnPlaces` 只剩真正的大陆点。
+  // 市级归属未知：省内有任何一个关注点就放行，并在 reason 里说明只定位到省（省直辖县、省台发布、
+  // 机构名错字都属这一类）；省名也认不出时按全国放行。
   const sameProv = cnPlaces.filter((p) => !province || p.province === province);
   if (sameProv.length > 0) {
     return {
@@ -8105,26 +7031,15 @@ function matchCnAreaAlert(alert, cfg) {
 }
 
 /**
- * 海外气象源（0.6.0）的命中判定：**查询即匹配**（DESIGN 4.7.3）。
- *
- * 与 matchPointAlert 的根本差别：那边的语义是"震中距 ≤ 半径"，坐标在**电文里**；
- * 这边的语义是"这条预警属于用户关注的哪个点"，归属在**取数时就确定了**
- * （取数器按关注点查 NWS 的 `?point=` / ECCC 的 `?bbox=`），所以这里不算距离——
- * 算也没有意义：NWS 返回的是"该点所在县 / 区划"的预警，一个县没有"距关注点多少公里"。
- *
- * 剩下的三个判定都是"用户看不见的漏报"防线：
- *   ① 关注点被删了（用户改配置后取数器要下一轮才生效）→ 如实说明，不当成命中；
- *   ② 档位不够（NWS 的 Watch / Advisory / Statement）→ 不播报；0.9.4（PD-1）起"未达档位"
- *      也不再进历史（此前只记历史），与大陆源的黄 / 蓝同一口径；
- *   ③ 取数器没记归属（理论上不该发生）→ 不猜，明确说"无法判定"。
+ * 海外气象源的命中判定：**查询即匹配**——取数器按关注点查 NWS 的 `?point=` / ECCC 的 `?bbox=`，
+ * 归属在取数时就已确定，这里不算距离。三个判定都是漏报防线：关注点被删了如实说明、档位不够不播报
+ * （也不进历史）、取数器没记归属就明确说无法判定。
  */
 function matchOverseasAlert(alert, cfg) {
   const d = cfg.disasters || {};
   if (d.overseasWeather === false) return { hit: false, reason: t('reason.overseasWeatherOff') }
-  // **防御性守卫，不是本函数的正常输入路径**（0.6.1 review 订正注释）：取消 / 解除消息由
-  // 11-pipeline 的 handleAlert 在 matchAlert **之前**就交给 handleCancelled 了，所以线上
-  // 走到这里的一定不是 cancelled。保留它是为了守住 matchAlert 的对外不变量——"cancelled 的
-  // 消息永远不返回 hit"，避免将来多一条调用路径时把一条"已作废"当成新警报播出去。
+  // 防御性守卫：取消 / 解除消息的正常路径在 11-pipeline 里已由 handleCancelled 处理，走到这里
+  // 的不是 cancelled。保留是为守住 matchAlert 的对外不变量——cancelled 的消息永不返回 hit。
   if (alert.cancelled) return { hit: false, reason: t('reason.cancelledMuted') }
   const places = (cfg.watch && cfg.watch.places) || [];
   if (places.length === 0) {
@@ -8136,7 +7051,7 @@ function matchOverseasAlert(alert, cfg) {
   }
   const origin = alert.originPlace;
   if (!origin) return { hit: false, cannotJudge: true, reason: t('reason.overseasNoOrigin') }
-  // 关注点还在不在：按"名字 + 坐标"比对（用户只改半径时仍是同一个点，命中判定不变）。
+  // 关注点还在不在按"名字 + 坐标"比对（用户只改半径时仍是同一个点）
   const still = places.some((p) => p && p.name === origin.name && p.lat === origin.lat && p.lon === origin.lon);
   if (!still) {
     return { hit: false, reason: t('reason.overseasOriginGone', { place: (origin.name || t('reason.placeUnnamed')) }) }
@@ -8157,17 +7072,17 @@ function matchOverseasAlert(alert, cfg) {
 
 function matchAlert(alert, cfg) {
   const w = cfg.watch || {};
-  // 局部变量**不能叫 	**：那是 00-i18n 的取词函数，遮蔽之后本函数里的 t('reason…') 会变成
-  // 调用配置对象（TypeError）。0.9.4 引入本地化时踩到过，check-imports 现在会拦这种遮蔽。
+  // 局部变量不能叫 `t`：那是 00-i18n 的取词函数，遮蔽之后本函数里的 t('reason…') 会变成调用
+  // 配置对象（TypeError）；check-imports 会拦这种遮蔽。
   const th = cfg.thresholds || {};
-  // 这条消息里是否存在**能归到县**的区域：决定"归不到县的区域"要不要放行（见 regionInWatch）
+  // 这条消息里是否存在能归到县的区域：决定"归不到县的区域"要不要放行（见 regionInWatch）
   const anyPref = (alert.regions || []).some((r) => !!r.pref);
   if (alert.kind === 'eew' || alert.kind === 'quake') {
     if ((cfg.disasters || {}).earthquake === false) return { hit: false, reason: t('reason.quakeOff') }
     if (alert.cancelled) return { hit: false, reason: t('reason.cancelledMuted') }
     // 全球源（EMSC / USGS）只有震中坐标、没有行政区区域 → 走坐标匹配
     if (alert.locator === 'point') return matchPointAlert(alert, cfg)
-    // 551 的「震源情报 / 远地地震」没有 points，无从按震度判定——明确说明，避免用户误以为链路故障
+    // 551 的「震源情报 / 远地地震」没有 points，无从按震度判定
     if (alert.regions.length === 0) {
       return {
         hit: false,
@@ -8184,7 +7099,7 @@ function matchAlert(alert, cfg) {
   if (alert.kind === 'tsunami') {
     if ((cfg.disasters || {}).tsunami === false) return { hit: false, reason: t('reason.tsunamiOff') }
     if (alert.cancelled) return { hit: false, reason: t('reason.clearedMuted') }
-    // NOAA CAP 的海啸同样是坐标型（CAP 里给的是 circle / polygon，不是日本的津波予報区）
+    // NOAA CAP 的海啸同样是坐标型（CAP 里给的是 circle / polygon，不是津波予報区）
     if (alert.locator === 'point') return matchPointAlert(alert, cfg)
     if (alert.regions.length === 0) return { hit: false, cannotJudge: true, reason: t('reason.noTsunamiAreas') }
     const minRank = own(TSUNAMI_RANK, th.tsunamiGrade) || 1;
@@ -8194,24 +7109,17 @@ function matchAlert(alert, cfg) {
       : { hit: false, reason: missReason(alert, w, t('reason.tsunamiMissed')) }
   }
   if (alert.kind === 'weather') {
-    // 海外气象源（0.6.0）走**查询即匹配**：取数器是按关注点查的（NWS 按点、ECCC 按 bbox），
-    // "这条属于哪个关注点"在取数时就已经确定，所以这里不做距离计算，只做归属与档位判定。
+    // 海外气象源走**查询即匹配**：取数器按关注点查，归属在取数时已定，这里不做距离计算
     if (alert.locator === 'overseas') return matchOverseasAlert(alert, cfg)
-    // 大陆气象源（0.5.2）走**行政区层级**匹配，与日本电文那套（都道府县 + 市町村名）是两套
-    // 规则：那边的粒度是市町村、兜底是"区域级条目放行"；这边的粒度是地级市、兜底是"省级放行"，
-    // 而且多一道**等级门槛**（DESIGN 8.4：橙色及以上才播报）。
+    // 大陆气象源走**行政区层级**匹配，多一道等级门槛（橙色及以上才播报）
     if (alert.locator === 'area') return matchCnAreaAlert(alert, cfg)
     if ((cfg.disasters || {}).weather === false) return { hit: false, reason: t('reason.weatherOff') }
     if (alert.cancelled) return { hit: false, reason: t('reason.clearedMuted') }
     if (alert.regions.length === 0) return { hit: false, cannotJudge: true, reason: t('reason.jmaNoUsableArea') }
-    // 播报边界写死在 L4：L1〜L3 仍然解析，但 0.9.4（PD-1）起**不再进历史**
-    //（此前会留下灰色条目），只是不打扰。
-    // 依据见 DESIGN 10.3——L3 是「高齢者等避難」，与 DSH 用户群不匹配；L4 才是避难指示级。
-    //
-    // **闸门必须看命中地区自己的级别**，不能看电文最大值：同一条 VPWW55 里姫路市是
-    // L4 大雨危険警報、相生市是 L3 大雨警報、西脇市是 L2 大雨注意報（2026-09-14 兵庫県实测）。
-    // 用电文最大值会把只到 L2 的地区播成「警戒レベル4（避难指示级）」——内容夸大，
-    // 而且让「市级收窄」彻底失去意义。region.level 缺失时（老对象 / 类型未识别）回退电文级别。
+    // 播报边界写死在 L4：L1〜L3 仍然解析，但既不播报也不进历史（L3 是「高齢者等避難」，L4 才是
+    // 避难指示级）。是否播报必须看命中地区**自己的**级别，不能看电文最大值：同一条 VPWW55 里姫路市 L4、
+    // 相生市 L3、西脇市 L2 是常态，用电文最大值会把只到 L2 的地区播成「警戒レベル4」，还让市级收窄
+    // 失去意义。region.level 缺失时（老对象 / 类型未识别）回退电文级别。
     const lvOf = (r) => (typeof r.level === 'number' ? r.level : alert.level);
     const hitRegion = alert.regions.find((r) => regionInWeatherWatch(r, w) && lvOf(r) >= 4);
     if (!hitRegion) {
@@ -8234,12 +7142,8 @@ function matchAlert(alert, cfg) {
 
 // ============================================================================
 // dsh-quake-alert · client/src/08-audio.js
-//
-// 作用：提示音合成（Web Audio，零音频文件）。
-// 内容：AudioContext 懒创建与用户手势解锁、四种音色（地震/EEW/海啸/取消）、
-//       按灾害类型选音色并播放。
-// 依赖：01-constants。
-// 浏览器策略：AudioContext 需要一次用户交互才能出声，故有 unlock 逻辑。
+// 作用：提示音合成（Web Audio，零音频文件）——AudioContext 懒创建与解锁、按灾害类型选音色播放。
+// 依赖：01-constants。浏览器要求 AudioContext 先经一次用户交互才能出声，故有 unlock 逻辑。
 // ============================================================================
 
 // ---------- 音频（Web Audio 合成，零文件） ----------
@@ -8255,19 +7159,10 @@ function unlockAudio() {
   const ctx = ensureAudio();
   if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
 }
-/**
- * 当前音频可用状态（0.4.1）：'running' | 'suspended' | 'unavailable'。
- *
- * 为什么需要它：浏览器要求 AudioContext 必须先有一次用户交互才能出声，而**页面可见时
- * 通知路径只用页内 toast（不发系统通知）**。于是"打开 DSH 后从未点击过页面"的用户
- * 在设置里看到「提示音：开」，实际一条声音都听不到，且没有任何地方能发现这件事——
- * 这是纯静默失效。设置页据此显式提示"提示音尚未解锁"。
- */
+/** 当前音频可用状态：'running' | 'suspended' | 'unavailable'，设置页据此提示尚未解锁。 */
 function audioState() {
-  // 注意：**不能调用 ensureAudio()**（0.4.2）。设置页在渲染时会读这个函数，而 ensureAudio 会
-  // 真的 new 一个 AudioContext —— 于是"只是打开设置页"就创建了音频上下文（浏览器控制台会报
-  // "AudioContext was not allowed to start"），也破坏了"只在用户手势里创建"的设计。
-  // 未创建同样属于"未解锁"，直接按 suspended 回答。
+  // 不能调用 ensureAudio()：它真的会 new AudioContext，设置页渲染读本函数时会在无用户手势的
+  // 情况下创建音频上下文。未创建同样属于"未解锁"，按 suspended 回答。
   if (typeof window !== 'undefined' && !(window.AudioContext || window.webkitAudioContext)) return 'unavailable'
   if (audioCtx === null) return 'suspended'
   return audioCtx.state === 'running' ? 'running' : 'suspended'
@@ -8287,9 +7182,7 @@ const SOUNDS = {
     { freq: 659, start: 0, dur: 0.18, type: 'sine' },
     { freq: 880, start: 0.2, dur: 0.3, type: 'sine' },
   ] },
-  // 气象警报（泥石流 / 洪水 / 大雨 / 高潮）：下行三音 + triangle 波形。
-  // 与地震（上行双音 sine）、EEW（急促方波）、海啸（低频长音 sawtooth）都区分开——
-  // 气象灾害与地震的应对方式不同，不该共用一个音色。
+  // 气象警报（泥石流 / 洪水 / 大雨 / 高潮）：下行三音 + triangle 波形，与地震 / EEW / 海啸区分开
   weather: { notes: [
     { freq: 587, start: 0, dur: 0.22, type: 'triangle' },
     { freq: 494, start: 0.26, dur: 0.22, type: 'triangle' },
@@ -8332,8 +7225,7 @@ function playSound(kind, volume) {
       nodes.push(osc, g);
       if (n.start + n.dur > endAt) endAt = n.start + n.dur;
     }
-    // 播完断开：osc.stop() 只是停止发声，节点仍挂在 destination 上；
-    // 每次警报都新建 2～3 个节点，长期运行会一直累积（disconnect 后交给 GC）。
+    // 播完断开：osc.stop() 只是停止发声，节点仍挂在 destination 上，长期运行会一直累积
     setTimeout(() => {
       for (const node of nodes) { try { node.disconnect(); } catch (err) { /* 已断开等忽略 */ } }
       try { master.disconnect(); } catch (err) { /* 忽略 */ }
@@ -8342,7 +7234,7 @@ function playSound(kind, volume) {
   if (ctx.state === 'suspended') ctx.resume().then(() => { if (ctx.state === 'running') doPlay(); }).catch(() => {});
   else doPlay();
 }
-/** 按灾害类型选音色（抽成纯函数，便于断言"气象不再沿用地震音"）。 */
+/** 按灾害类型选音色（纯函数，便于断言气象不再沿用地震音）。 */
 function soundKindOf(alert) {
   if (!alert) return 'test'
   if (alert.kind === 'eew') return 'eew'
@@ -8354,11 +7246,8 @@ function playAlertSound(alert, volume) {
   playSound(soundKindOf(alert), volume);
 }
 /**
- * 这条提醒该不该**发声**（0.9.4 / C1：分灾害音效开关）。
- *
- * `notify.sound` 是总开关；三个分开关按**灾种类别**细分：地震（含 EEW）、海啸、气象。
- * 抽成纯函数是为了能被直接断言——沙箱里没有 AudioContext，"到底响没响"只能靠这个判据钉住。
- * 认不出的 kind（测试音等）不受分开关影响，只看总开关。
+ * 这条提醒该不该**发声**：`notify.sound` 是总开关，三个分开关按灾种类别细分——地震（含 EEW）/ 海啸 /
+ * 气象；认不出的 kind（测试音等）只看总开关。
  */
 function soundAllowedFor(cfg, alert) {
   const n = (cfg && cfg.notify) || {};
@@ -8372,31 +7261,22 @@ function soundAllowedFor(cfg, alert) {
 
 // ============================================================================
 // dsh-quake-alert · client/src/10-dedupe.js
-//
-// 作用：三层去重与「已提醒事件」记忆。
-// 内容：消息 id 去重（防重连重放）、事件键去重（同一地震的多次发布，强度升级穿透）、
-//       **跨源权威源**（0.8.0 / DESIGN 3.4：同一事件只让一个源播报，其余只计数不进历史）、
-//       跨标签页认领（BroadcastChannel + 事件键同步）、已提醒事件集合（取消提醒用）。
+// 作用：三层去重（消息 id 防重放、事件键合并同一地震的多次发布、跨标签页抢占）与「已提醒事件」记忆。
 // 依赖：01-constants、07-store（通道建立时机在 15-entry 的 apply 里）、06-matcher（坐标型近似归并）。
-// 注意：通道监听必须在插件加载时就建立，否则会错过其它标签页的广播。
+// 通道监听必须在插件加载时就建立，否则会错过其它标签页的广播。
 // ============================================================================
 
 
 // ---------- 去重 ----------
-// 三层：① 消息 id（防重连重放）② 事件键（同一地震的多次发布）③ 跨标签页（多开 DSH 页面）
-//
-// 时钟回拨（NTP 校正 / 用户改时间 / 休眠唤醒后的时钟修正）的处理：把记录时间**夹到 now**，
-// 而不是删除。删掉等于一次性清空三层去重记忆——本该被窗口抑制的重复消息会重新播报，
-// alertedEvents 清空还会让随后的解除找不到"此前提醒过的事件"（少一条有用的解除提示）。
+// 时钟回拨（NTP 校正 / 用户改时间 / 休眠唤醒）时把记录时间夹到 now，而不是删除：删掉等于一次性
+// 清空去重记忆，本该被窗口抑制的重复消息会重新播报。
 const seen = new Map(); // id -> { ts, win }
 function isDuplicate(id, windowMinutes) {
   if (!id) return false
   const now = Date.now();
   const win = Math.max(1, windowMinutes || 10) * 60 * 1000;
   for (const [k, v] of seen) {
-    // 0.9.4（P3-39）：清理要用**这条记录自己的窗口**，而不是本次调用的窗口——本次的窗口可能
-    // 属于另一个源 / 另一段设置，用它清掉别人的记录，本该被抑制的重复就会重走一遍主链
-    //（isEventRepeat 在 0.5.4 修过同一形态，这里一直留着旧写法）。
+    // 清理要用**这条记录自己的窗口**，不是本次调用的窗口——本次的窗口可能属于另一个源 / 另一段设置
     const ts = typeof v === 'object' && v !== null ? v.ts : v;
     const own = (typeof v === 'object' && v !== null && typeof v.win === 'number') ? v.win : win;
     if (ts > now) { seen.set(k, { ts: now, win: own }); continue }
@@ -8404,9 +7284,7 @@ function isDuplicate(id, windowMinutes) {
   }
   const prev = seen.get(id);
   if (prev) {
-    // 0.9.4（P2-20）：命中即**刷新**时间戳。固定窗口意味着同一条被持续投递的预警每过一个窗口
-    // 就被当成"新消息"重走整条主链（parse / match / 写历史 + 一次 localStorage 同步写），
-    // 而它从头到尾都是同一条——窗口的语义应当是"这段时间内见过就算重复"，不是"首次见到起算"。
+    // 命中即刷新时间戳：窗口语义是"这段时间内见过就算重复"，不是"首次见到起算"
     const own = typeof prev.win === 'number' ? prev.win : win;
     seen.set(id, { ts: now, win: own });
     return true
@@ -8414,16 +7292,15 @@ function isDuplicate(id, windowMinutes) {
   seen.set(id, { ts: now, win });
   return false
 }
-// 同一次地震会连发「震度速报 → 震源情报 → 各地震度」或 EEW 多报（serial 递增）。
-// 这些消息 id 各不相同，但共享事件键；只有强度升级时才再提醒一次，避免连续响铃。
+// 同一次地震会连发「震度速报 → 震源情报 → 各地震度」或 EEW 多报（serial 递增）：消息 id 各不相同，
+// 但共享事件键；只有强度升级时才再提醒一次。
 //
-// 坐标型（全球源）另存发震时刻与震中：eventKey 是「分钟 + 0.1 度」的字符串指纹，
-// 而源的定位会在 0.05〜0.1 度之间浮动、发震时刻也会差几十秒——任一处跨过量化边界，
-// 同一场地震就会算出不同的键，于是 EMSC 与 USGS 各响一次（README 承诺"只提醒一次"）。
-// 所以键未命中时再按「±2 分钟 + 50km」找一次。
+// 坐标型源另存发震时刻与震中：eventKey 是「分钟 + 0.1 度」的指纹，而源的定位与发震时刻都会浮动，
+// 任一处跨过量化边界就会算出不同的键（EMSC 与 USGS 因此各响一次）——所以键未命中时再按
+// 「±2 分钟 + 50km」找一次。
 const GEO_NEAR_MS = 2 * 60 * 1000;
 const GEO_NEAR_KM = 50;
-/** 强度是否可用于比较（0.9.4 / P3-40）：只有有限数值才算数，见 isEventRepeat 里的说明。 */
+/** 强度是否可用于比较：只有有限数值才算数。 */
 const isFiniteStrength = (v) => typeof v === 'number' && Number.isFinite(v);
 const eventSeen = new Map(); // eventKey -> { ts, strength, at, geo, source, win, kind, test }
 function issuedMsOf(alert) {
@@ -8432,22 +7309,11 @@ function issuedMsOf(alert) {
   return Number.isFinite(ms) ? ms : null
 }
 /**
- * 找"这一条可能对应的先前事件记录"。
- *
- * 两级：先看**精确事件键**；未命中时再看**坐标近似**（±2 分钟 + 50km）。
- *
- * `allowSameSource` 决定近似那一级要不要排除同源：
- *   · `isEventRepeat` 传 false —— 它要回答"这条是不是另一条源对同一场地震的重复播报"，
- *     而同源不会用两个 id 报同一事件（同源修订复用同一个 id）。同源的两次不同地震
- *     （例如相隔 40 秒、相距 7km 的主震与余震）被归并就是漏报。
- *   · `isStrengthUpgrade` 传 true —— 它只在**消息 id 已经重复**时才被求值（handleAlert 里的
- *     `&&` 短路），也就是说调用方已经确定"这是同一条消息的又一次到达"，此时同源的坐标近似
- *     也必须认（EMSC 的修订版会挪坐标 / 跨分钟，键就变了）。
- *
- * 0.8.0 起判据是「**有没有可用震中**」而不是「locator 是不是 point」：日本源（551 / 556）此前
- * 完全没有坐标，于是它和 USGS / 大陆源报的同一场地震**永不相遇**——那是 3.4 要解决的核心问题
- * （同一场地震响两次）。现在日本源也带 geo（05-parser 的 geoOfHypo），但它**仍是行政区匹配**
- * （不设 locator: 'point'），所以这里放宽的只是"能不能参与事件归并"，不是"怎么匹配"。
+ * 找"这一条可能对应的先前事件记录"：先查精确事件键，未命中再按「±2 分钟 + 50km」找。
+ * `allowSameSource` 决定近似那一级要不要排除同源：isEventRepeat 传 false（同源修订复用同一个消息
+ * id，同源两次不同地震被归并就是漏报），isStrengthUpgrade 传 true（调用方已确定是同一条消息的再次
+ * 到达）。判据是「有没有可用震中」而不是「locator 是不是 point」：日本源（551 / 556）也带 geo 并参与
+ * 事件归并，但仍走行政区匹配。
  */
 function findPrevEvent(alert, allowSameSource) {
   const prev = eventSeen.get(alert.eventKey);
@@ -8460,13 +7326,8 @@ function findPrevEvent(alert, allowSameSource) {
   for (const v of eventSeen.values()) {
     if (!v.geo || typeof v.at !== 'number') continue
     if (!allowSameSource && source && v.source && v.source === source) continue
-    // 0.9.4：候选也要过滤。此前只过滤"来者"（上面那行与 crossSourceCopyOf 里各一次），
-    // 于是两类**不可见的漏报**：
-    //   ① 一条 NOAA 海啸警报只要落在"此前 2 分钟内播报过的另一机构地震"震中 50km 内，
-    //      就被判成同一事件的副本而完全静默（跨源不比 strength，没有任何"升级"能救回来）；
-    //   ② 用户点过一次"发送测试全球警报"（震中 = 首个关注点、source = emsc）后，2 分钟内
-    //      同坐标附近的真实地震也会被压掉。
-    // 灾种不同、或对方是演示消息，就不该算"同一事件的副本"。
+    // 候选也要过滤：灾种不同、或对方是演示消息，就不该算"同一事件的副本"（否则跨源不比 strength，
+    // 一条海啸警报可能被附近的地震记录压成静默）
     if (v.test) continue
     if (v.kind && alert.kind && v.kind !== alert.kind) continue
     if (Math.abs(v.at - at) <= GEO_NEAR_MS && distanceKm(alert.geo.lat, alert.geo.lon, v.geo.lat, v.geo.lon) <= GEO_NEAR_KM) {
@@ -8477,8 +7338,8 @@ function findPrevEvent(alert, allowSameSource) {
 }
 
 /**
- * @param {number} [nowMs] 注入点（测试用）。`Date.now()` 不可注入时，"窗口是否过期"这类跨时间
- *   行为只能靠读码验证——而这正是 0.5.1 review 漏掉 D 类残留的原因之一（见 CHANGELOG）。
+ * 事件键级去重：同一条事件键此前见过且强度未升级 → 判重复。
+ * @param {number} [nowMs] 注入点（测试用）：`Date.now()` 不可注入时跨时间行为无法测试。
  */
 function isEventRepeat(alert, windowMinutes, nowMs) {
   if (!alert.eventKey) return false
@@ -8486,23 +7347,19 @@ function isEventRepeat(alert, windowMinutes, nowMs) {
   const win = Math.max(1, windowMinutes || 10) * 60 * 1000;
   for (const [k, v] of eventSeen) {
     if (v.ts > now) { v.ts = now; continue }
-    // 清理要用**这条记录自己的窗口**，而不是本次调用的窗口。此前用的是本次的 `win`，
-    // 于是一条按 3 小时窗口记住的气象事件，会被 10 分钟后任意一条"命中"地震带着的
-    // 10 分钟窗口清掉——随后 L4 的更新就被判成新事件，重复响铃（0.5.1 review 的 D 类残留）。
-    // 旧记录没有 win 字段时退回本次调用的窗口，行为与修复前一致（不会突然留得更久）。
+    // 清理要用**这条记录自己的窗口**，不是本次调用的窗口：否则按 3 小时窗口记住的气象事件会被
+    // 10 分钟后任意一条命中地震带着的 10 分钟窗口清掉，随后的更新就被判成新事件而重复响铃。
+    // 旧记录没有 win 字段时退回本次调用的窗口。
     const own = typeof v.win === 'number' ? v.win : win;
     if (now - v.ts > own) eventSeen.delete(k);
   }
   const prev = findPrevEvent(alert, false);
-  // 0.9.4（P3-40）：强度必须是**有限数值**才参与比较，判据写显式。缺失时 `undefined <= x`
-  // 恒为 false，于是这条消息永远不被判重复——当前六个解析器都在赋值，所以它此前只是"回归风险"
-  // （新加解析器忘了赋 strength 就会变成重复响铃）。方向仍然与全项目一致：
-  // 说不清是不是升级 → 放行（宁可多响一次，也不因为缺字段把升级静默掉）。
+  // 强度必须是有限数值才参与比较（缺失时 undefined <= x 恒为 false，这条消息永远不被判重复）；
+  // 方向与全项目一致：说不清是不是升级 → 放行。
   if (prev && isFiniteStrength(alert.strength) && alert.strength <= prev.strength) return true
   const at = issuedMsOf(alert);
   const geo = validGeo(alert.geo) ? { lat: alert.geo.lat, lon: alert.geo.lon } : null;
-  // kind / test 一并存下来：findPrevEvent 的**近似**那一级要靠它们过滤候选（0.9.4），
-  // 而在此之前记录里根本没有 kind 字段，所以那种过滤想写也写不出来。
+  // kind / test 一并存下来：findPrevEvent 的近似那一级靠它们过滤候选
   eventSeen.set(alert.eventKey, {
     ts: now,
     strength: alert.strength,
@@ -8516,15 +7373,8 @@ function isEventRepeat(alert, windowMinutes, nowMs) {
   return false
 }
 
-// ---------- 跨源权威源（0.8.0 / DESIGN 3.4） ----------
-/**
- * 把一条 Alert 归到"哪个源"——跨源判定的统一钥匙。
- *
- * 日本源（551 / 552 / 556）的解析器**不设 `source` 字段**：它们是 P2PQuake 转播的気象庁信息，
- * 历来靠数字 code 认源（见 11-pipeline 的 authorityOf / 13-ui 的 SOURCE_CODE_TEXT）。
- * 跨源归并需要一把所有源都能给的钥匙，所以在**这一处**按 code 补，而不是去改五个解析器的
- * 既有形状（`alert.source` 的消费者不止一个，动它要连带复核每一处）。
- */
+// ---------- 跨源优先源 ----------
+// 日本源（551 / 552 / 556）的解析器不设 `source` 字段（历来靠数字 code 认源），故在这里按 code 补。
 const SOURCE_BY_CODE = { 551: 'p2pquake', 552: 'p2pquake', 556: 'p2pquake' };
 function sourceIdOf(alert) {
   if (!alert) return ''
@@ -8534,31 +7384,15 @@ function sourceIdOf(alert) {
   return own(SOURCE_BY_CODE, code) || ''
 }
 /**
- * 源的权威序（数字越小越"本地权威"）。依据是 DESIGN 3.4 的表：
- *   1 日本 P2PQuake —— 带日本境内观测点 / 预测区域，EEW 还是秒级
- *   2 大陆预警 cenc_eew —— 台网主动发布，只针对其辖区
- *   3 大陆速报 cenc_eqlist —— 台网编目（含境外条目），弱于预警、强于国际目录
- *   4 USGS / EMSC —— 全球目录，任何一场地震它都有，但都不是"本地"
- *   5 NOAA —— 海啸电文，不参与地震去重
- *
- * **它不决定谁先播**：先到者播是时序决定的，而 DESIGN 3.4 的"边界"一条已经明确
- * "低优先级源先播、高优先级源后到 → 不补播"（预警的价值在时效，补播只是多一次打扰）。
- * 所以这张表在这里只服务**诊断文案**——用户要能看出被压掉的那条来自哪个源、它比播报的那条
- * 更权威还是更弱；判错时（把两场不同地震并成一个）这是唯一能看出端倪的地方。
+ * 源的权威序（数字越小越"本地权威"）：1 日本 P2PQuake、2 大陆预警 cenc_eew、3 大陆速报
+ * cenc_eqlist、4 USGS / EMSC、5 NOAA。它不决定谁先播（先到者播是时序决定的，低优先级源先播、
+ * 高优先级源后到也不补播），只服务诊断文案。
  */
 const SOURCE_RANK = { p2pquake: 1, cenc_eew: 2, cenc_eqlist: 3, usgs: 4, emsc: 4, noaa: 5 };
 /**
- * 源的**机构**归属。跨源归并只在**跨机构**时成立（见 crossSourceCopyOf）。
- *
- * 为什么要有这一层：DESIGN 8.3 对**同一机构内部**的两条产品线有明确要求——"同一场地震的
- * EEW 与速报不会响两次……走'强度未升级 → 不重播'链路，**只记历史**"。而 3.4 的"其余连历史
- * 都不进"针对的是**同一件事被不同机构各报一遍**（实测：福克斯群岛地震同时出现在 cenc_eqlist
- * 的整表与 USGS 里）。两者不是同一件事：
- *   · 同机构（EEW → 速报）是**同一份信息的演进**，"台网最终测定 M3.2"本身是有价值的历史；
- *   · 跨机构（日本台网 / USGS / EMSC）是**同一件事的重复转述**，进历史只会挤占那 30 条。
- * 所以前者仍走 isEventRepeat（记历史、强度升级放行），只有后者走权威源抑制。
- *
- * `p2pquake` 与 `jma` 同属気象庁：P2PQuake 是转播渠道，两者是同一机构的两个面。
+ * 源的**机构**归属：跨源归并只在跨机构时成立。同机构（EEW → 速报）是同一份信息的演进，仍走
+ * isEventRepeat（记历史、强度升级放行）；跨机构（日本台网 / USGS / EMSC）是同一件事的重复转述，
+ * 才按优先源规则抑制。`p2pquake` 与 `jma` 同属気象庁（P2PQuake 只是转播渠道）。
  */
 const SOURCE_AGENCY = {
   p2pquake: 'jma', jma: 'jma',
@@ -8570,11 +7404,9 @@ const agencyOf = (id) => {
   const v = own(SOURCE_AGENCY, key);
   return v || key // 认不出的源用它自己当机构名：两个未知源只在 id 相同时才算同一机构
 };
-/** 参与跨源归并的灾种（理由见 crossSourceCopyOf）：只有地震类有"多个源报同一件事"的形态。 */
+/** 参与跨源归并的灾种：只有地震类有"多个源报同一件事"的形态。 */
 const CROSS_SOURCE_KINDS = { quake: true, eew: true, tsunami: true };
-// 源显示名**不再自建一份中文表**（0.9.4）：00f 的 settings.sourceLabels.* 已经是那份唯一的映射，
-// 而且是四语的（这里此前是写死的中文，诊断说明在英文界面下会冒出「大陆地震速报」）。
-// 认不出的源退回 id 本身（至少能看出是哪个源，而不是空白）。
+// 源显示名走 00f 的 settings.sourceLabels.*（四语的唯一映射）；认不出的源退回 id 本身。
 const sourceNameOf = (id) => sourceLabelOf(id) || String(id || t('reason.sourceUnknown'));
 const rankOfSource = (id) => {
   const v = own(SOURCE_RANK, String(id === undefined || id === null ? '' : id));
@@ -8583,27 +7415,12 @@ const rankOfSource = (id) => {
 const sourceZhOf = (id) => sourceNameOf(id);
 
 /**
- * 这条是不是**同一事件在另一个源上的副本**？
- *
+ * 这条是不是**同一事件在另一个源上的副本**？只对地震类、且只对**跨机构**生效。
  * @returns {{source: string, mine: string, rank: number, mineRank: number}|null}
- *   `source` = 已经播报过的那个源；null = 不是跨源副本（交给 isEventRepeat）。
+ *   `source` = 已经播报过的那个源（null = 不是跨源副本，交给 isEventRepeat）。
  *
- * 只对**地震类**（quake / eew / tsunami）生效。DESIGN 3.4 解决的是"同一场地震被多个源报出"，
- * 而气象源的地区与判据各家完全不同（日本 JMA / 大陆中央气象台 / 美国 NWS / 加拿大 ECCC），
- * 没有对应的重复形态——把它们也纳进来只会凭空增加"两件不相干的事被并成一件"的风险。
- *
- * 只对**跨机构**生效（见 SOURCE_AGENCY）：同一机构内部的产品演进（大陆 EEW → 速报）仍走
- * isEventRepeat，那是 8.3 明确要求"只记历史"的那条链路。
- *
- * 判据只有 `findPrevEvent(alert, false)` 一条路径：它先查精确事件键，未命中再按
- * 「±2 分钟 + 50km」找，并且**排除同源**（同源归 isEventRepeat 管，那边的语义是
- * "同一地震的后续发布"——会进历史、强度升级仍放行）。
- *
- * **跨源不比 strength**（DESIGN 3.4 硬约束一）：日本给的是震度、全球给的是震级，两者
- * 不可换算，比大小没有意义。所以跨源副本一律抑制，不看谁的数字更大——否则一场 M6 的
- * USGS 复核会把已经播过的震度 5 弱 EEW 当成"强度升级"再响一次。
- *
- * 消息 id 完全相同的**同源**重放不在这里管（isDuplicate / isStrengthUpgrade 那条链更精确）。
+ * 判据只有 findPrevEvent(alert, false) 一条路径（先精确事件键，再「±2 分钟 + 50km」，排除同源）。
+ * **跨源不比 strength**：日本给的是震度、全球给的是震级，两者不可换算。
  */
 function crossSourceCopyOf(alert) {
   if (!alert || !alert.eventKey) return null
@@ -8619,14 +7436,7 @@ function crossSourceCopyOf(alert) {
   return { source: other, mine, rank: rankOfSource(other), mineRank: rankOfSource(mine) }
 }
 
-/**
- * 被权威源压掉的条数（DESIGN 3.4 的硬要求：**"不进历史 ≠ 不可见"**）。
- *
- * 被抑制的条目连历史都不进，所以计数必须另留一处：权威源一旦判错（把两场不同地震并成一个
- * = 真漏报），用户与历史里都看不出任何痕迹——而"静默失效"恰是本插件最不能接受的形态。
- * 与 feedStatsOf / overseasStatsOf 同形：模块级、**不经过 store**（诊断每 5 秒读一次，
- * 一个计数变化不值得让设置页那几千个市町村按钮跟着重渲）。
- */
+/** 被优先源压掉的条数：被抑制的条目连历史都不进，所以计数必须另留一处供诊断读取。 */
 const authorityStats = { suppressed: 0, bySource: {}, lastAt: 0, lastDetail: '' };
 function noteAuthoritySuppressed(info, alert) {
   authorityStats.suppressed += 1;
@@ -8646,13 +7456,9 @@ function authorityStatsOf() {
 }
 
 /**
- * 让事件键的强度**回落**（降级电文调用），返回是否真的降了。
- *
- * 气象电文会"降级"：L4 → L3 → L2 是同一次灾害过程的强度回落，本身不该播报（L3 以下本来就不播报），
- * 但必须让记忆里的 strength 跟着降下来。否则"降级之后再次升级"会被判成"强度未升级的重复发布"
- * 而永久静默——这是 0.4.1 把发布时刻从事件键里去掉之后**新引入**的漏报
- * （实测：L4 播报 → L3 降级 → 再升回 L4，返回 event-repeat）。
- * 只在强度**确实更低**时下调，所以"关注地区未命中"这类 not-hit 不会误降（强度没变）。
+ * 让事件键的强度**回落**（降级电文调用），返回是否真的降了。气象电文的 L4 → L3 → L2 是同一次
+ * 灾害过程的强度回落，但记忆里的 strength 必须跟着降，否则"降级之后再次升级"会被判成"强度未
+ * 升级的重复发布"而永久静默。只在强度确实更低时下调。
  */
 function weakenEvent(alert) {
   if (!alert || !alert.eventKey) return false
@@ -8662,64 +7468,36 @@ function weakenEvent(alert) {
   return false
 }
 /**
- * 只读探测：同一个事件键此前见过、且这一条的强度更高吗？
+ * 只读探测：同一个事件键此前见过、且这一条的强度更高吗？消息级去重（isDuplicate，按 alert.id）
+ * 排在事件级去重之前，而同一个消息 id 可能携带升级后的内容——EMSC 修订复用同一个 unid、
+ * USGS 震级复核后刷新 properties.updated。若只按 id 挡掉，震级上修（M5.2 → M6.4）永远不会再提醒。
  *
- * 为什么需要：消息级去重（isDuplicate，按 alert.id）排在事件级去重（isEventRepeat）之前，
- * 而**同一个消息 id 完全可能携带升级后的内容**——全球源就是这个形态：
- *   · EMSC 对同一事件的修订复用同一个 unid（`action: 'update'`）
- *   · USGS 的同一个 feature id 在震级复核后会刷新 properties.updated
- * 若只按 id 一律挡掉，震级上修（M5.2 → M6.4）永远不会再提醒——那是漏报，
- * 而"同一场地震只响一次"的本意是"重复的同一强度不要连响"，不是"修订版一律静默"。
- *
- * 本函数**不修改任何状态**（登记由 isEventRepeat 负责），只回答"该不该让消息级去重放行"。
- * 放行后仍会走 isEventRepeat 的正常判定：强度确实升级才播报，未升级依旧只记历史。
- * 时钟回拨（ts > now）按"未见过"处理，与 isEventRepeat 的清理判据保持一致。
+ * 本函数不修改任何状态（登记由 isEventRepeat 负责）。时钟回拨（ts > now）按"未见过"处理。
  */
 function isStrengthUpgrade(alert) {
   if (!alert || !alert.eventKey) return false
-  // 必须走 findPrevEvent（含坐标近似）：本函数只在**消息 id 已重复**时被求值，也就是调用方
-  // 已经确定"同一条消息又来了"。而源在修订时会把坐标挪过 0.1° 桶、或让发震时刻跨分钟 ——
+  // 必须走 findPrevEvent（含坐标近似）：源修订会把坐标挪过 0.1° 桶、或让发震时刻跨分钟，
   // 精确键随之改变，只查精确键就会把"震级上修"误判成"重复发布"而静默
-  // （实测 EMSC 同一 unid M5.0 → M6.4 跨分钟修订 → duplicate）。这是 0.4.1 声称修好、
-  // 实际只在键逐字相同时成立的那条。
   const prev = findPrevEvent(alert, true);
   if (!prev) return false
   if (prev.ts > Date.now()) return false
   return alert.strength > prev.strength
 }
 /**
- * 忘掉一个事件键。
- *
- * 解除 / 取消应当调用它：那表示这次灾害过程已经结束，之后再发布同一个键
- * （同一官署 + 同一灾种）是**新事件**，必须能重新播报。不这么做的话，
- * 长事件窗口（气象 3 小时）会把"解除后再次发布"当成重复而静默——那是漏报。
+ * 忘掉一个事件键，解除 / 取消时调用：灾害过程已结束后再发布同一个键（同一官署 + 同一灾种）
+ * 是新事件，必须能重新播报，否则长事件窗口（气象 3 小时）会把"解除后再次发布"当成重复而静默。
  */
 function forgetEvent(eventKey) {
   if (eventKey) eventSeen.delete(eventKey);
 }
-// 已实际提醒过的事件（eventKey → ts）。
-// 取消 / 解除消息只在「此前确实提醒过同一事件」时才补一条：既避免「没收到警报却收到取消」的困惑，
-// 也让用户知道已经发出的警报作废（EEW 取消 / 海啸解除本身是有用信息，不该静默）。
-//
-// 0.9.4（C4）**这份记忆与"事件级去重的窗口"是两件事，别把它们当成同一个数字**：
-//   · 这里的 24 小时回答"这条**取消 / 解除**是否对应我刚提醒过的事件"——解除必然晚于发布
-//     （实测 2026-09-07 東京都「大雨特別警報」13:57 发布、19:01 解除，相隔 5 小时），
-//     所以窗口必须按"一条气象事件可能持续多久"来取。
-//   · `WEATHER_EVENT_WINDOW_MINUTES`（11-pipeline 里的 180 分钟）回答的是另一件事：
-//     "同一官署 + 同一灾种的后续电文要不要再响一次"。
-// 此前一份审查报告把两者混为一谈（说"实测 24 小时而文档写 3 小时"），结论是文档与实现不符——
-// 实际两处代码都与各自的注释一致，缺的是**把这两个窗口的分工写清楚**。
+// 已实际提醒过的事件（eventKey → ts），供取消 / 解除判断"此前是否确实提醒过同一事件"。
+// 这份记忆与"事件级去重的窗口"（11-pipeline 的 WEATHER_EVENT_WINDOW_MINUTES，180 分钟）是两件事：
+// 这里的 24 小时按"一条气象事件可能持续多久"取（实测发布到解除可相隔 5 小时）。
 const ALERTED_MAX_MS = 1440 * 60 * 1000;
 const alertedEvents = new Map();
 /**
- * 落盘（0.9.4 / C6）：把"真正播报过的事件"写进 localStorage，刷新 / 重开标签页后仍然有效。
- *
- * 为什么必须持久化：Host 重启后会按冷启动回看窗口（USGS 6 小时 / NOAA 24 小时）重新投递缓冲里的
- * 事件，而消息级去重只有 10 分钟、事件级只有 3 小时——页面一刷新，这份 24 小时记忆就没了，
- * 同一场地震会被再报一次。它同时也是"解除能找到此前提醒过的事件"的依据。
- *
- * 写法上：**先清理再落盘**（同内存里的清理规则），并且只写有限数值、只在真的变了时写
- * （`alertedEvents` 的写入频率与播报次数同阶，一天几条，不存在写盘压力）。
+ * 把"真正播报过的事件"写进 localStorage：Host 重启后会按首次启动回看窗口重新投递缓冲里的事件，
+ * 而消息级去重只有 10 分钟、事件级只有 3 小时，不持久化就会重报。先清理再写入本地存储，只写有限数值。
  */
 function persistAlerted() {
   const now = Date.now();
@@ -8732,7 +7510,7 @@ function persistAlerted() {
   }
   saveJSON(ALERTED_KEY, out);
 }
-/** 启动时读回（0.9.4 / C6）。认不出的形状一律当"没有记忆"，过期条目直接丢掉。 */
+/** 启动时读回：认不出的形状当"没有记忆"，过期条目直接丢掉。 */
 function loadAlerted() {
   const raw = loadJSON(ALERTED_KEY, null);
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return
@@ -8747,11 +7525,8 @@ function loadAlerted() {
 }
 loadAlerted();
 /**
- * 取消 / 解除的匹配键。
- *
- * **不留 kind 兜底**：事件键为空的 alert（例如某些解析不出区域的电文）若退化成 kind，
- * 任意一条海啸解除都会匹配上"此前提醒过的任意海啸事件"，播出一条假解除——假安全比不提醒更危险。
- * 空键直接返回空串，rememberAlerted / wasRecentlyAlerted 会跳过它（该事件无法被取消，安全侧）。
+ * 取消 / 解除的匹配键。不留 kind 兜底：事件键为空的 alert 若退化成 kind，任意一条海啸解除都会
+ * 匹配上"此前提醒过的任意海啸事件"而播出一条假解除。空键返回空串，调用方会跳过它。
  */
 const cancelKeyOf = (alert) => (alert && alert.eventKey) || '';
 function rememberAlerted(alert) {
@@ -8765,37 +7540,23 @@ function rememberAlerted(alert) {
   alertedEvents.set(key, now);
   persistAlerted();
 }
-/**
- * 忘掉"此前提醒过"的某个事件（0.9.4 / C6：删除也要落盘）。
- *
- * 取消 / 解除链路在播报后会删掉这条记忆（同一条取消只提醒一次）。只在新增时落盘的话，
- * 这次删除不会写进 localStorage——刷新之后那条已被取消的事件又变成"提醒过"，
- * 随后再来一条同键的解除就会重复提示。
- */
+/** 忘掉"此前提醒过"的某个事件；删除也要写入本地存储，否则刷新后那条已取消的事件又变回"提醒过"。 */
 function forgetAlerted(alert) {
   const key = cancelKeyOf(alert);
   if (!key) return
   if (alertedEvents.delete(key)) persistAlerted();
 }
 /**
- * 清空**整份**"此前提醒过"的记忆（内存 + 磁盘）。
- *
- * 0.9.5（fresh review）：「清空记录」此前只清内存里的这一份、且只清了一半——发起页压根不清，
- * 接收页清了内存却不落盘。后果不只是"记忆残留"：同一条解除到达时，A 页因为记忆还在而播
- * 「已解除」并写一条历史，B 页（已清内存）只写一条「无对应提醒」的历史——**同一条消息在两个
- * 标签页上得出相反结论**；任意一页刷新后记忆又从 ALERTED_KEY 复活。
+ * 清空**整份**"此前提醒过"的记忆（内存 + 磁盘）。只清内存或只清一半会让同一条解除在两个标签页
+ * 上得出相反结论，任意一页刷新后记忆也会从 ALERTED_KEY 复活。
  */
 function forgetAllAlerted() {
   alertedEvents.clear();
-  try { saveJSON(ALERTED_KEY, {}); } catch (err) { /* 写盘失败：内存已清，下一次写入会覆盖 */ }
+  try { saveJSON(ALERTED_KEY, {}); } catch (err) { /* 写入本地存储失败：内存已清，下一次写入会覆盖 */ }
 }
 /**
- * 取消 / 解除消息是否有"此前确实提醒过的同一事件"。
- *
- * 窗口必须与 alertedEvents 的保留期（24 小时）一致，**不能**用 dedupe.windowMinutes（默认 10 分钟）：
- * 解除必然晚于发布——实测 2026-09-07 東京都「大雨特別警報」13:57 发布、19:01 解除，相隔 5 小时。
- * 旧实现在 10 分钟后就把记忆清掉，于是 0.1.3 加入的解除链路从未真正生效：用户收到警报后
- * 永远收不到「已解除」。
+ * 取消 / 解除消息是否有"此前确实提醒过的同一事件"。窗口必须与 alertedEvents 的保留期（24 小时）
+ * 一致，不能用 dedupe.windowMinutes（默认 10 分钟）：解除必然晚于发布（实测发布到解除相隔 5 小时）。
  */
 function wasRecentlyAlerted(alert) {
   const key = cancelKeyOf(alert);
@@ -8807,13 +7568,11 @@ function wasRecentlyAlerted(alert) {
   return true
 }
 // 多开 DSH 页面时每个标签页都会收到同一条推送；用 BroadcastChannel 协商，只让一个标签页播报。
-// 通道必须在插件加载时就建立监听（见 apply），否则后加载的标签页会错过先到的广播。
-// 不支持 BroadcastChannel 时退化为「各标签页各自提醒」，不影响正确性。
+// 通道必须在插件加载时就建立监听，否则后加载的标签页会错过先到的广播；不支持 BroadcastChannel
+// 时退化为「各标签页各自提醒」。
 //
-// TTL 从 5 秒改到 10 分钟（0.4.1）：5 秒只覆盖"几乎同时"的情形，而真正会重复播报的是
-// **先被冻结、后恢复**的标签页——冻结期间另一个标签页已经播报过，恢复后它才拉到同一批
-// entry（或收到同一条 WS 推送），此时 5 秒窗口早已过期，于是又响一次。10 分钟与消息级
-// 去重窗口一致：同一 alert.id 本来就不该在 10 分钟内被合法地播报两次。
+// TTL 取 10 分钟：真正会重复播报的是**先被冻结、后恢复**的标签页——恢复后它才拉到同一批 entry，
+// 5 秒窗口早已过期；10 分钟与消息级去重窗口一致。
 const TAB_DEDUPE_MS = 10 * 60 * 1000;
 const tabAlerted = new Map(); // key -> ts
 let alertChannel = null;
@@ -8827,14 +7586,11 @@ function ensureAlertChannel() {
       // 另一个标签页清空了历史 → 本标签页也要清（否则它的下一次 addEvent 会把整份记录写回磁盘）
       if (d.type === 'history-cleared') {
         alertedEvents.clear();
-        // 0.9.5（fresh review）：**磁盘上那份也要清**。此前只清了内存，于是本页刷新后
-        // "已播报"记忆又从 ALERTED_KEY 复活——发起清空的那一页反而没被清干净。
-        try { saveJSON(ALERTED_KEY, {}); } catch (err) { /* 写盘失败：内存已清 */ }
-        // **内存副本与磁盘都要清**（0.5.4）：此前只清了 alertedEvents，于是本标签页的历史列表
-        // 仍然显示着那些条目，而下一次 addEvent 会把它们（连同新条目）重新写回 localStorage
-        // ——发起清空的那个标签页一刷新又看到了。「清空记录」若出于隐私动机，这就是实际的泄漏面。
+        try { saveJSON(ALERTED_KEY, {}); } catch (err) { /* 写入本地存储失败：内存已清 */ }
+        // **内存副本与磁盘都要清**：只清 alertedEvents 的话，本标签页的历史列表仍显示那些条目，
+        // 下一次 addEvent 会把它们（连同新条目）重新写回 localStorage。
         store.push({ events: [] });
-        try { saveJSON(HISTORY_KEY, []); } catch (err) { /* 写盘失败：内存已清，下次 addEvent 会覆盖 */ }
+        try { saveJSON(HISTORY_KEY, []); } catch (err) { /* 写入本地存储失败：内存已清，下次 addEvent 会覆盖 */ }
         return
       }
       if (d.type !== 'alerted' || !d.key) return
@@ -8845,6 +7601,7 @@ function ensureAlertChannel() {
   } catch (err) { alertChannel = null; }
   return alertChannel
 }
+/** 抢占这条提醒：已被本标签页抢占过则返回 false，抢占成功则广播给其它标签页。 */
 function claimAlertForTab(key, eventKey) {
   if (!key) return true
   const now = Date.now();
@@ -8859,7 +7616,7 @@ function claimAlertForTab(key, eventKey) {
   }
   return true
 }
-/** 广播「历史已清空」，让其它标签页同步清掉内存副本（见 13-ui-settings 的清空按钮）。 */
+/** 广播「历史已清空」，让其它标签页同步清掉内存副本与磁盘（见 13-ui-settings 的清空按钮）。 */
 function broadcastHistoryCleared() {
   if (ensureAlertChannel()) {
     try { alertChannel.postMessage({ type: 'history-cleared' }); } catch (err) { /* 忽略 */ }
@@ -8867,7 +7624,7 @@ function broadcastHistoryCleared() {
 }
 
 
-// 通道关闭：原来由 entry 的 effect 直接读模块级 alertChannel，改成显式出口
+// 通道关闭
 function closeAlertChannel() {
   try { if (alertChannel) { alertChannel.close(); alertChannel = null; } } catch (err) { /* 忽略 */ }
 }
@@ -8875,32 +7632,21 @@ function closeAlertChannel() {
 // ============================================================================
 // dsh-quake-alert · client/src/11-pipeline.js
 //
-// 作用：主链——收到一条原始消息后的完整处理顺序。
-// 内容：handleRaw（解析 → 去重 → 匹配 → 静默时段 → 跨标签页 → 通知 → 历史）、
-//       handleCancelled（取消 / 解除提醒，仅对已提醒过的事件）。
+// 作用：主链——收到一条原始消息后的完整处理顺序（解析 → 去重 → 匹配 → 静默时段 →
+//       跨标签页抢占 → 通知 → 历史）；handleCancelled 处理取消 / 解除（仅对已提醒过的事件）。
 // 依赖：05-parser、06-matcher、07-store、08-audio、09-notify、10-dedupe、01-constants、00-i18n。
-// 重要：这是唯一把各层串起来的地方，改动前先读 06-matcher 的放行规则。
 // ============================================================================
 
 
 /**
- * 气象灾害的**事件窗口**（分钟）。
- *
- * 气象灾害是持续过程：同一官署同一灾种会在数小时内反复发布（更新、扩区、维持），
- * 而这些更新的强度通常不变。事件键已按「官署 + 灾种」归并（见 05b 的 eventKey），
- * 若还用默认的 10 分钟窗口，窗口一过每一条更新都会被当成新事件重新响铃。
- * 取 3 小时：窗口内强度未升级只记历史，升级（L3→L4、注意報→危険警報）仍会提醒；
- * 解除时会 forgetEvent 清掉记忆，所以"解除后再次发布"不会被吞掉。
- *
- * 0.9.4（C4）：这个 3 小时**不是** `ALERTED_MAX_MS` 的 24 小时（见 10-dedupe 的说明）——
- * 那个回答"这条解除是否对应我刚提醒过的事件"，这个回答"同一官署同一灾种的后续电文要不要再响"。
- * 两处代码都与各自的注释一致；此前一份审查报告把两者当成同一个窗口，得出"文档与实现不符"的结论。
+ * 气象灾害的**事件窗口**（分钟）：同一官署同一灾种在此窗口内的后续电文只记历史，强度升级仍提醒。
+ * 气象灾害是持续过程、多次发布的强度通常不变，默认 10 分钟窗口会让每条更新重新响铃。
+ * 与 10-dedupe 的 `ALERTED_MAX_MS`（24 小时，判"这条解除是否对应提醒过的事件"）不是同一个窗口。
  */
 const WEATHER_EVENT_WINDOW_MINUTES = 180;
 
 // ---------- 主链：收到消息 ----------
-// 区域文案：府県予報区级的条目里 area 与 pref 常是同一个名字（「東京都」+「東京都」），
-// 直接拼接会显示成「東京都東京都」。
+// 区域文案：府県予報区级条目的 area 与 pref 常同名，直接拼接会显示成「東京都東京都」。
 function areaLabelOf(region) {
   const name = region.city || region.area || '';
   if (!name) return region.pref || ''
@@ -8908,11 +7654,7 @@ function areaLabelOf(region) {
   return region.pref + name
 }
 
-/**
- * 大陆源的产品名。日本源与大陆源虽然都叫"地震预警 / 速报"，却是**两家不同机构的不同产品**：
- * 気象庁的是「緊急地震速報」，中国地震台网的是「地震预警」。把日方名称套到大陆源上，
- * 用户会以为收到了日本气象厅的速报——在预警类产品里这是会误导行动的错误。
- */
+/** 大陆源的产品名：日本源与大陆源是两家机构的不同产品（緊急地震速報 / 地震预警），名称不可互套。 */
 function cnProductName(alert) {
   if (!alert) return ''
   if (alert.source === 'cenc_eew') return t('product.cnEew')
@@ -8921,26 +7663,18 @@ function cnProductName(alert) {
 }
 
 /**
- * 通知文案里的「官方发布」指哪家机构。
- *
- * 各源的主管机构完全不同。此前文案里硬编码了「气象厅」，于是希腊的一场 USGS 地震、
- * 四川的一场 CENC 预警都会让用户"以气象厅官方发布为准"——免责声明里出现错误机构，
- * 会直接削弱这份声明本身的可信度。这里按源给出机构名，认不出时退化成中性表述。
+ * 通知文案里的「官方发布」指哪家机构：各源主管机构完全不同，认不出时退化成中性表述。
+ * 值存文案表的 key 而不是名字本身——机构归属与语言无关，名字要随界面语言走（00a-texts-core.js）。
  */
-// 值改成文案表的 key 而不是名字本身：**机构归属与语言无关**（哪个源归哪家机构是事实），
-// 而名字要跟着界面语言走，所以映射留在代码里、名字留在 00a-texts-core.js。
 const AUTHORITY_BY_SOURCE = {
   emsc: 'authority.emsc',
   usgs: 'authority.usgs',
   noaa: 'authority.noaa',
   cenc_eew: 'authority.cenc',
   cenc_eqlist: 'authority.cenc',
-  // 0.5.2：大陆气象预警的发布主体是**各级气象台**，汇总在中央气象台（中国气象局）的网站上。
-  // 免责声明里点名"中央气象台（中国气象局）"而不是泛泛的"气象厅"——后者是日本的机构，
-  // 出现在一条云南暴雨预警的免责声明里会直接削弱这份声明的可信度（同上一段的理由）。
+  // 大陆气象预警的发布主体是各级气象台，汇总在中央气象台（中国气象局）的网站上。
   nmc_alarm: 'authority.cma',
-  // 0.6.1：海外气象源。不登记的话，一条美国洪水预警的免责声明会退化成泛泛的
-  // 「请以官方发布为准」——用户看不出该找哪家机构（与上面 nmc 的理由相同）。
+  // 海外气象源（美国 NWS / 加拿大 ECCC）。
   nws_alerts: 'authority.nws',
   eccc_alerts: 'authority.eccc',
   jma: 'authority.jma',
@@ -8951,23 +7685,20 @@ function authorityOf(alert) {
   if (bySource) return t(bySource)
   const byCode = own(AUTHORITY_BY_SOURCE, String(alert.code === undefined ? '' : alert.code));
   if (byCode) return t(byCode)
-  // P2PQuake 的 551 / 552 / 556 都是转播気象庁的信息（它们只有数字 code，没有 source）
+  // P2PQuake 的 551 / 552 / 556 都是转播気象庁的信息（只有数字 code，没有 source）
   if (alert.code === 551 || alert.code === 552 || alert.code === 556) return t('authority.jma')
   return ''
 }
-/** 「仅供参考」那一行。机构已知时点名，未知时用中性表述（不硬编码日本气象厅）。 */
+/** 「仅供参考」那一行：机构已知时点名，未知时用中性表述。 */
 function disclaimerOf(alert) {
   const a = authorityOf(alert);
   return a ? t('disclaimer.named', { authority: a }) : t('disclaimer.generic')
 }
 
 /**
- * 气象预警的**行动提示**：三家机构的处置口径不同，不能互相套用（0.6.2）。
- *
- * · 日本气象电文 → 市町村级的避难信息（日本の避難情報）
- * · 大陆气象预警 → 各级气象台发布的防御指引（没有"市町村"这个行政层级）
- * · 海外气象（NWS / ECCC）→ 当地官方发布的避难与撤离指引
- * 认定不出来源时退回**中性**表述，而不是默认套日本的制度（同 disclaimerOf 的取向）。
+ * 气象预警的**行动提示**，按机构分岔：日本气象电文 → 市町村级的避难信息（日本の避難情報）；
+ * 大陆气象预警 → 各级气象台发布的防御指引（没有"市町村"这个行政层级）；
+ * 海外气象（NWS / ECCC）→ 当地官方发布的避难与撤离指引；认不出来源退回中性表述（action.generic）。
  */
 function weatherActionHintOf(alert) {
   if (!alert) return t('action.generic')
@@ -8976,16 +7707,10 @@ function weatherActionHintOf(alert) {
   return t('action.jp')
 }
 
-/**
- * 系统通知 / 页内 toast 的标题。抽成纯函数是为了能直接断言文案——
- * 旧写法把「地震情报 · 」与「各地震度」分开拼，非「各地」分支会留下一个悬空的分隔符。
- */
+/** 系统通知 / 页内 toast 的标题。 */
 function alertTitleOf(alert) {
   if (!alert) return t('app.name')
-  // kindLabel 本身已区分「地震速报·震度速报」「地震情报·各地震度」等，不需要再拼后缀
-  // **但「（警报）」不能省**（0.8.2 review 订正）：气象厅的「緊急地震速報」分警報与予報两级，
-  // kindLabel 写的是「紧急地震速报（警报）」，通知标题里删掉就成了两个说法（0.8.1 删过一次，
-  // 而守着它的断言说明写着"文案一个字都不能变"——测试绿、没人守）。分级是安全信息，不是括号冗余。
+  // kindLabel 已含灾种与「（警报）」等级，不另拼后缀；分级是安全信息，不可省略。
   if (alert.kind === 'eew') return '⚠ ' + (cnProductName(alert) || t('product.jpEew'))
   if (alert.kind === 'quake') return '🌐 ' + alert.kindLabel
   if (alert.kind === 'tsunami') return '🌊 ' + alert.kindLabel
@@ -8995,15 +7720,9 @@ function alertTitleOf(alert) {
 
 /**
  * 命中之后的 severity：决定通知配色，也决定静默时段能否穿透。
- *
- * 日本地震按**命中区域的实际强度**判定（关注县的震度低时颜色不该是红，而 headline 里的
- * 最大震度可能来自别的县）；EEW 恒为 red（警报本质，不能因为预测震度刚好到阈值就降级）；
- * 海啸 / 气象用解析层算好的 severity。
- *
- * 全球源（`locator === 'point'`）必须单独处理：它们没有震度，`maxScale` 恒为 -1，
- * 若沿用震度的路径，一场 M7.4 会被算成 `info`（信息蓝）——既显示不出严重性，
- * 也会在静默时段被当成"非红色等级"静默掉（用户开了红色穿透也收不到）。所以坐标型地震
- * 直接用解析层按震级判定的 `severity`（severityOfMagnitude）。
+ * 日本地震按命中区域的震度判定（非 headline 里的最大震度），EEW 恒为 red，海啸 / 气象用解析层算好的值。
+ * 坐标型全球源（`locator === 'point'`）的 `maxScale` 恒为 -1，必须用解析层按震级判定的 `severity`，
+ * 否则强震会被算成 `info`，既显示不出严重性、也会被静默时段当成非红色等级吞掉。
  */
 function hitSeverityOf(alert, m) {
   if (!alert || alert.kind !== 'quake') return alert ? alert.severity : 'info'
@@ -9012,25 +7731,18 @@ function hitSeverityOf(alert, m) {
   return severityOfScale(scale)
 }
 
-// 气象警报的「静默提示」：只在"命中关注地区、但未达 L4 所以没有播报"时留一笔，
-// 由侧边栏状态点的悬停提示与设置页显示。
-// 注意 L4 以上**必须清掉**它：那时已经真正播报过，再挂着这条（文案是"未达 L4，未播报"）
-// 就与事实自相矛盾——这是加测试按钮后暴露出来的问题。
+// 气象警报的「静默提示」：命中关注地区、但未达 L4 所以没有播报时留一笔，供侧边栏悬停提示与设置页显示。
+// 命中地区已达 L4（已真正播报）时必须清掉，否则「未达 L4，未播报」的文案与事实矛盾。
+// 只对日本气象电文生效：大陆源（`locator === 'area'`）与海外源（`locator === 'overseas'`）的
+// `regions` 恒为空数组，它们会走到"清空提示"分支、把日本电文刚留下的提示抹掉。
 function updateWeatherHint(alert, cfg) {
   if (alert.kind !== 'weather' || alert.cancelled) return
-  // 只对**日本气象电文**生效（0.5.4）：大陆气象源（nmc_alarm，`locator === 'area'`）的
-  // `regions` 恒为空数组（归属在 cnArea 里），于是这里的 `hit` 恒为 undefined，
-  // 每一条大陆预警都会走到下面的"清空提示"分支，把日本电文刚留下的
-  // 「L3 正在升级、未达 L4」抹成 null——两家机构、两个地区的两件事，不该互相清。
-  // 0.6.0 review：**海外气象源（`locator === 'overseas'`）是同一个形态的更严重版本**——
-  // 它的 `regions` 同样恒为空（05h），而它每 2 分钟就可能来一条（NWS 的 Watch/Advisory 也在其中），
-  // 于是侧边栏那条日本 L3 提示会被一条美国预警反复抹掉。两条路径一起排除。
   if (alert.locator === 'area' || alert.locator === 'overseas') return
   if ((cfg.disasters || {}).weather === false) return
   const w = cfg.watch || {};
   const lvOf = (r) => (typeof r.level === 'number' ? r.level : alert.level);
-  // 只看**关注地区自己的级别**：整条电文最大是 L4 时关注地区可能只有 L3（提示要保留），
-  // 反之命中地区已达 L4（已真正播报）就该清掉——否则「未达 L4，未播报」的文案会与事实矛盾。
+  // 只看**关注地区自己的级别**：整条电文最大 L4 时关注地区可能只有 L3（提示要保留），
+  // 反之命中地区已达 L4（已播报）就该清掉。
   const hit = alert.regions.find((r) => regionInWeatherWatch(r, w) && lvOf(r) === 3);
   const hitL4 = alert.regions.some((r) => regionInWeatherWatch(r, w) && lvOf(r) >= 4);
   if (!hit || hitL4) {
@@ -9046,17 +7758,12 @@ function updateWeatherHint(alert, cfg) {
 function handleCancelled(alert, cfg) {
   if (alert.kind !== 'eew' && alert.kind !== 'tsunami' && alert.kind !== 'weather') return
   const disasters = cfg.disasters || {};
-  // 历史条目带上解析层给出的正文（0.6.1 review）：NWS 的 description + instruction、ECCC 的
-  // 正文 + 署名此前**没有任何消费者**——`addEvent` 会被 normalizeHistoryEntry 过滤掉未列出的
-  // 字段，展开详情也只渲染 headline。而 instruction 恰恰是"该怎么做"，署名是 ECCC 许可
-  //（End-use Licence v2.1.1）的硬要求。见 07-store / 02-storage 的 detail 字段。
+  // 历史条目带上解析层给出的正文（detail）：NWS 的 description + instruction、ECCC 的正文 + 署名
+  // 都在其中，`addEvent` 会被 normalizeHistoryEntry 过滤掉未列出的字段（见 07-store / 02-storage）。
   const pushEvent = (fields) => addEvent(Object.assign({ detail: alert.detail }, fields));
   if (alert.kind === 'eew' && disasters.earthquake === false) return
   if (alert.kind === 'tsunami' && disasters.tsunami === false) return
-  // 气象的开关按**来源**分岔（0.6.1 review）：海外源由它自己的 `overseasWeather` 管
-  // （见 12e 的 enabled 判定与 13-ui 的设置项）。此前统一看日本气象的 `weather`，
-  // 于是"关掉日本气象、保留海外源"的用户收到过洪水播报，却永远收不到它的作废提醒——
-  // 取消链路承诺的正是这一条（CHANGELOG 0.6.0「此前播报的警报已作废」）。
+  // 气象的开关按**来源**分岔：海外源由它自己的 `overseasWeather` 管（见 12e 与 13-ui 的设置项）。
   if (alert.kind === 'weather') {
     const off = alert.locator === 'overseas' ? disasters.overseasWeather === false : disasters.weather === false;
     if (off) return
@@ -9078,10 +7785,9 @@ function handleCancelled(alert, cfg) {
     });
     return
   }
-  // 0.9.4（C6）：用 forgetAlerted 而不是直接 delete —— 删除也要落盘，否则刷新之后
-  // 这条已被取消的事件又变成"提醒过"，同键的解除会重复提示。
+  // 用 forgetAlerted 从本地存储里删除而不是直接 delete，否则刷新后这条已被取消的事件又变成"提醒过"。
   forgetAlerted(alert); // 同一条取消只提醒一次
-  // 灾害过程已结束：忘掉事件键，这样"解除之后再次发布"会被当成新事件而不是重复（见 10-dedupe）
+  // 灾害过程已结束：忘掉事件键，"解除之后再次发布"才会被当成新事件（见 10-dedupe）
   forgetEvent(cancelKeyOf(alert));
   if (!claimAlertForTab('cancel:' + (alert.id || cancelKeyOf(alert)), '')) {
     pushEvent({
@@ -9116,19 +7822,11 @@ function handleRaw(raw, cfg) {
 }
 
 /**
- * 处理一条已归一为 Alert 的消息——P2PQuake 的 551/552/556 与気象庁的电文最后都汇到这里，
- * 保证去重 / 匹配 / 静默 / 跨标签页 / 通知 / 历史这六步对两者完全一致。
- * @param {{ skipQuietHours?: boolean }} [opts] 仅供设置页的「发送测试气象警报」使用：
- *   测试的语义是"验证提醒链路"，不该被静默时段悄悄吞掉，否则用户会以为插件坏了。
- * @returns {{ notified: boolean, reason?: string, detail?: string }} 如实回报这一步到底做没做播报，
- *   以及没播报的原因——设置页的测试按钮据此给出准确提示，而不是写死一句"应看到弹窗"。
+ * 处理一条已统一为 Alert 的消息——P2PQuake 的 551/552/556 与気象庁的电文都汇到这里，六步流程一致。
+ * @param {{ skipQuietHours?: boolean }} [opts] 仅供设置页的「发送测试气象警报」用（测试不该被静默吞掉）。
+ * @returns {{ notified: boolean, reason?: string, detail?: string }} 是否真的播报了，以及没播报的原因。
  */
-/**
- * 全球源（坐标型）在用户**没有配置任何「全球关注点」**时整条丢弃，连历史都不记。
- * 理由：EMSC 实测每天推送几十条 M3.8+ 的全球地震。若按"未命中"记入历史，历史列表会被
- * 与用户毫无关系的远地地震刷屏，真正该看见的提醒反而被挤掉。配置了关注点后立即生效
- * （不需要重连或重启），状态点与设置页会提示"全球源已连接但未设置关注点"。
- */
+/** 坐标型全球源在用户**没有配置任何「全球关注点」**时整条丢弃（连历史都不记），配好后立即生效。 */
 function watchlessPoint(alert, cfg) {
   if (!alert || alert.locator !== 'point') return false
   const places = (cfg.watch && cfg.watch.places) || [];
@@ -9137,23 +7835,17 @@ function watchlessPoint(alert, cfg) {
 
 function handleAlert(alert, cfg, opts) {
   const options = opts || {};
-  // 历史条目统一带上解析层的正文（0.6.1 review，理由同 handleCancelled 里的说明）。
+  // 历史条目统一带上解析层的正文（同 handleCancelled）。
   const pushEvent = (fields) => addEvent(Object.assign({ detail: alert.detail }, fields));
   if (watchlessPoint(alert, cfg)) {
     return { notified: false, reason: 'no-watch-point', detail: t('reason.noGlobalWatch') }
   }
-  // 诊断计数：用 push 带出去，让设置页的"已收到 N 条推送"立刻反映（直接自增不会触发重渲，
-  // 徽标会滞后到下一次 push；而 clearSources 时会归零，不再跨代累积）。
+  // received 计数用 push 带出去，设置页的"已收到 N 条推送"才会立刻反映（直接自增不会触发重渲）。
   store.push({ received: store.received + 1 });
-  // 消息级去重按 alert.id。**但强度升级要放行**：全球源的修订版复用同一个 id
-  // （EMSC 的 unid / USGS 的 feature id），一律挡掉会让震级上修永远不再提醒。
-  // 放行后由下面的 isEventRepeat 判定"确实升级才播报"，未升级仍只记历史。
-  //
-  // `isDuplicate` 有登记副作用（见 10-dedupe），所以只求值一次并留用；`isStrengthUpgrade` 保留
-  // 短路——它只在"消息 id 已重复"时才可求值。
-  // `upgrading` 还要留到**跨标签页认领**那一步用：认领键是消息 id、记忆保留 10 分钟，同 id 的
-  // 修订版会被本标签页自己上一次的认领当成"其它标签页已提醒"挡下——那正是这条放行本来要防住的
-  // 漏报（震级上修在最后一跳被静默）。
+  // 消息级去重按 alert.id，**但强度升级要放行**：全球源的修订版复用同一个 id（EMSC 的 unid /
+  // USGS 的 feature id），一律挡掉会让震级上修永远不再提醒。`isDuplicate` 有登记副作用（见
+  // 10-dedupe），只求值一次并留用；`upgrading` 还要供**跨标签页抢占**用：抢占记忆按消息 id 保留
+  // 10 分钟，不绕开的话同 id 的修订版会被本标签页上一次的抢占挡下（震级上修被静默）。
   const dup = isDuplicate(alert.id, cfg.dedupe.windowMinutes);
   const upgrading = dup && isStrengthUpgrade(alert);
   if (dup && !upgrading) {
@@ -9164,37 +7856,19 @@ function handleAlert(alert, cfg, opts) {
     return { notified: false, reason: 'cancelled', detail: t('reason.clearedIsNotAlert') }
   }
   const m = matchAlert(alert, cfg);
-  // 气象强度的**回落**要在命中与未命中两条路径上都写回事件记忆（0.6.1 review）。
-  // 日本气象电文的命中闸门与强度是同一个 level（L4），回落必然走 !m.hit 分支，所以只在那里
-  // 下调曾经是对的；而海外气象源的**档位**由 event 名（NWS）或颜色档（ECCC）决定、**强度**
-  // 由 severity 决定——两条正交。于是"NWS 的 Flood Warning 从 Severe 降到 Moderate"仍然命中
-  // （档位不变），记忆强度不会被下调；随后回升时 `isStrengthUpgrade` 判 false → 永久静默，
-  // 正是 weakenEvent 注释里声明要防住的那条漏报。它只在强度确实更低时下调，所以对未命中
-  // 路径（"关注地区未命中"）没有副作用。
-  // 只有气象下调"已播报强度"的记忆。**不是漏了另外两个灾种，是刻意不推广**（0.9.4 复核）：
-  // 551 的「震源情报」（震源已知、震度未公布）`strength` 是 **-1**（`typeof eq.maxScale === 'number'
-  // ? eq.maxScale : -1`），而它与该地震的「各地震度」共用同一个事件键（都取自 `earthquake.time`）。
-  // 一旦对地震也调 weakenEvent，日本气象厅的正常电文序列「速报 → 震源情报 → 各地震度」里那条
-  // 震源情报就会把记忆强度从 45/50 拉到 -1，随后**同一场地震**的各地震度被 `isStrengthUpgrade`
-  // 判成"升级"再响一次铃——那是每一场有感地震都多响一次，把降级保护变成了骚扰。
-  // 海啸（552）那边没有可归并的事件 id（README 已登记"同一海啸多次发布会逐条提醒"），
-  // 所以对它调用与不调用没有区别；真要有区别时再连同"强度语义"一起定。
+  // 气象强度的**回落**要在命中与未命中两条路径上都写回事件记忆：海外气象源的档位由 event 名
+  // （NWS）或颜色档（ECCC）决定、强度由 severity 决定，两条正交，"命中但降级"也会发生。
+  // 只对气象下调"已播报强度"，不推广到另外两个灾种：551 的「震源情报」`strength` 是 -1，
+  // 而它与该地震的「各地震度」共用同一个事件键（都取自 `earthquake.time`），下调会让同一场地震的
+  // 各地震度被 `isStrengthUpgrade` 判成"升级"再响一次；海啸（552）没有可归并的事件 id。
   if (alert.kind === 'weather') weakenEvent(alert);
   if (!m.hit) {
     // 气象警报：即使不播报（L3 及以下），也把"正在升级"留给侧边栏 tooltip
     updateWeatherHint(alert, cfg);
-    // 全球源（坐标型）的"未命中"通常不进历史：USGS 的 24 小时目录有近百条 M2.5+，
-    // 逐条记"未命中"会把历史列表刷满与用户无关的地震，真正该看的提醒反而被挤掉。
-    //
-    // 0.9.4（PD-1，产品决策）：这条口径**推广到所有源**——"没命中 / 未达档位"的条目一律不进历史。
-    // 起因是历史被 L1〜L3 与 Watch/Advisory 占满（日气象约 170 条/天、NWS 的 Watch/Advisory 占其
-    // 洪水类 53%）。用户选择的做法是排除"完全未命中"，代价是少了一个"我在被监控"的信号。
+    // "没命中 / 未达档位"的条目一律不进历史（否则历史会被 L1〜L3 与 Watch/Advisory 占满）；
+    // `m.noWatch`（未配置关注点，命中概率恒为 0）同样不进。
     // **但"判不了"必须留痕**：region 数据缺失、坐标缺失、震源情报无震度、海外源没有来源关注点
-    // 这些不是"离得远"而是"根本没法判定"（DESIGN 3.1 要求如实说明），丢掉它们就回到"用户以为
-    // 当时没有预警"那种形态。matcher 用 `cannotJudge` 把这两类分开。
-    //
-    // `m.noWatch`（**未配置**关注点，命中概率恒为 0）仍然不进历史，理由见原注（0.5.4）：
-    // 一个都没配的用户，每天几十条「未命中：未设置关注点」会把 HISTORY_MAX 占满。
+    // 不是"离得远"而是"根本没法判定"，matcher 用 `cannotJudge` 把这两类分开。
     if (!m.noWatch && m.cannotJudge === true) {
       pushEvent({
         id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: alert.severity,
@@ -9203,41 +7877,27 @@ function handleAlert(alert, cfg, opts) {
     }
     return { notified: false, reason: 'not-hit', detail: m.reason }
   }
-  // 0.9.5（fresh review）：命中的提示必须在**任何抑制分支之前**更新。此前它只在那条"真的播报
-  // 出去了"的路径末尾调用，于是过老 / 静默时段 / 其它标签页 / 重放这些分支都会跳过它——最刺眼的
-  // 一次：22:00 的 L3 写下「未达 L4、未播报」，00:30 同一官署同一灾种升到 L4 却被静默时段吞掉，
-  // 侧边栏于是继续显示"未播报"，而历史里如实标着"已命中"。这条不变量就写在 updateWeatherHint
-  // 自己的注释里（"L4 以上必须清掉它，否则文案与事实自相矛盾"）。它内部会判是否达 L4 并清旧提示，
-  // 所以提到前面是安全的。
+  // 命中的提示必须在**任何抑制分支之前**更新：它只写在"真的播报出去"的路径末尾时，过老 / 静默
+  // 时段 / 其它标签页 / 重放这些分支都会跳过它，侧边栏会停在"未播报"而历史里标着"已命中"。
   updateWeatherHint(alert, cfg);
   const hitPref = m.region ? m.region.pref : '';
-  // 严重度见 hitSeverityOf 的注释（全球点型地震此前被算成 info，静默穿透因此失效）
+  // 严重度见 hitSeverityOf 的注释
   const hitSeverity = hitSeverityOf(alert, m);
-  // 跨会话重放**探测**（0.4.2）：Host 重启后会按冷启动回看窗口（USGS 6 小时 / NOAA 24 小时）把
-  // 缓冲里的事件重新投递，而 Client 的消息级 / 事件级去重都是 10 分钟的内存窗口——页面没刷新时
-  // 早已过期，同一场地震会被再报一次。`alertedEvents`（"真正播报过"的记忆）保留 24 小时，
-  // 正好用来挡这种重放。
-  // **必须在这里先算**：isEventRepeat 会把 strength 更新成本次的值，之后 isStrengthUpgrade 就
-  // 永远是 false。也不能直接在这里就抑制——同一会话内的"后续发布"（震度速报 → 各地震度）
-  // 应该由 isEventRepeat 归类为更准确的"同一地震的后续发布"，而不是笼统的"重放"。
+  // 跨会话重放**探测**：Host 重启后会按首次启动的回看窗口（USGS 6 小时 / NOAA 24 小时）重投缓冲里的事件，
+  // 而 Client 的去重窗口只有 10 分钟；`alertedEvents`（"真正播报过"的记忆）保留 24 小时，正好挡它。
+  // **必须在这里先算**：isEventRepeat 会把 strength 更新成本次的值，之后 isStrengthUpgrade 恒为 false；
+  // 也不能就地抑制——同一会话内的后续发布（震度速报 → 各地震度）要由 isEventRepeat 归类。
   const looksReplayed = wasRecentlyAlerted(alert) && !isStrengthUpgrade(alert);
   // 同一次地震的后续发布（速报 → 震源 → 各地震度、或 EEW 多报）强度未升级 → 只更新历史，不再响铃。
-  // 气象灾害用更长的事件窗口（见 WEATHER_EVENT_WINDOW_MINUTES 的说明）。
+  // 气象灾害用更长的事件窗口（见 WEATHER_EVENT_WINDOW_MINUTES）。
   const repeatWindow = alert.kind === 'weather'
     ? Math.max(cfg.dedupe.windowMinutes || 10, WEATHER_EVENT_WINDOW_MINUTES)
     : cfg.dedupe.windowMinutes;
-  // 跨源权威源（0.8.0 / DESIGN 3.4）：同一场地震被多个源报出时，只让**一个**源向用户播报。
-  //
-  // 位置有讲究，两条都不能挪：
-  //   · **必须在 isEventRepeat 之前**——它是只读探测，而 isEventRepeat 会把这条事件写进记忆；
+  // 跨源优先源：同一场地震被多个源报出时，只让**一个**源向用户播报。位置两条都不能挪：
+  //   · **必须在 isEventRepeat 之前**——它是只读探测，而 isEventRepeat 会把这条事件写进记忆，
   //     写进去之后 findPrevEvent 找到的就是它自己，跨源判定永远不会成立。
-  //   · **必须在 m.hit 之后**——只有"本来会播报"的副本才算被权威源压掉。没命中关注点的
-  //     副本本来就不响，把它计进 suppressed 会让诊断里那个数字失去意义。
-  //
-  // **不进历史**（DESIGN 3.4）：一场大规模余震会让同一场地震在历史里出现 2～3 条，而
-  // 「最近预警」只有 30 条——多源重复会把真正该看的记录挤掉。余震本身是不同的事件
-  // （不同的 eventKey），不受这条规则影响。
-  // 代价是"权威源判错时用户看不出来"，所以抑制必须**留下计数与原因**（noteAuthoritySuppressed）。
+  //   · **必须在 m.hit 之后**——只有"本来会播报"的副本才算被优先源压掉。
+  // 被压掉的副本**不进历史**（多源重复会把 30 条的「最近预警」挤掉），但抑制必须留下计数与原因。
   const crossSource = crossSourceCopyOf(alert);
   if (crossSource) {
     return { notified: false, reason: 'authority-suppressed', detail: noteAuthoritySuppressed(crossSource) }
@@ -9251,13 +7911,8 @@ function handleAlert(alert, cfg, opts) {
     return { notified: false, reason: 'event-repeat', detail: t('reason.eventRepeatDetail') }
   }
   // 事件级去重没拦下、但记忆说"这个事件在 24 小时内已经真正播报过" → 判为跨会话重放
-  // （Host 重启按回看窗口重投），只记历史不响铃。
-  //
-  // 0.5.4 修正**文案**：`looksReplayed` 的判据是 24 小时的已提醒记忆，它覆盖的不只是
-  // Host 回看窗口的重投，还包括"同一官署同一灾种在 3 小时事件窗口之后、24 小时之内等强度的
-  // 第二次独立发布"（气象事件尤其如此）。旧文案把原因写成"Host 重启 / 重连后的重放"，
-  // 会让排查的人去翻 Host 重启日志，而真正生效的是长期事件记忆。行为方向是安全的
-  // （不重复响铃），所以只改措辞、不改判据。
+  // （Host 重启按回看窗口重投），只记历史不响铃。该判据覆盖的不只是重投，还包括"同一官署同一
+  // 灾种在事件窗口之后、24 小时之内等强度的第二次独立发布"，所以文案不写成"Host 重启后的重放"。
   if (looksReplayed) {
     pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
@@ -9266,23 +7921,15 @@ function handleAlert(alert, cfg, opts) {
     });
     return { notified: false, reason: 'replayed', detail: t('reason.replayDetail') }
   }
-  // 打开页面时才发现的老预警（0.6.0 的年龄闸门，DESIGN 4.7.6）：**仍然命中、仍然进历史**，
-  // 但不响铃、不弹通知——海外气象源是**按关注点查询**的，页面一打开就会把当前生效的预警全拉回来，
-  // 其中可能有几小时前发布、仍在生效的洪水预警（有效期实测中位 12.6 小时）。把那些当"刚刚发生"
-  // 播报是纯粹的打扰；整条丢掉又会让用户看不到"就在打开页面前发布的那一条"。
-  // 与"静默时段"分开成两条 reason：那个是用户自己设的时段，这个是数据本身发布得早。
-  //
-  // **位置有讲究**（0.6.0 review 修正）：必须放在 `isEventRepeat` **之后**。放在它之前会绕过
-  // 事件级记忆的更新——同一条老预警每过一轮消息级去重窗口（10 分钟）就会再进一次历史，
-  // 30 条的历史列表会被同一条老预警占满、真正的提醒被挤出去（正是 11.10 第 4 条那个形态）。
-  // 放在后面时：第一次到达由本分支记历史，而 isEventRepeat 已经把事件写进记忆，
-  // 后续轮次会被判成"同一事件的后续发布"，不再重复进历史。
+  // 打开页面时才发现的老预警（options.staleOnArrival，时效门槛）：**仍然命中、仍然进历史**，但不响铃、
+  // 不弹通知——海外气象源按关注点查询，页面一打开就会把当前生效的（可能几小时前发布的）预警全拉回来。
+  // **必须放在 `isEventRepeat` 之后**：放在它之前会绕过事件级记忆的更新，同一条老预警每过一轮消息级
+  // 去重窗口（10 分钟）就再进一次历史，把 30 条的历史列表占满。
   if (options.staleOnArrival) {
     const hours = typeof options.staleOnArrival === 'number' ? options.staleOnArrival : 0;
-    // **同时记进"已提醒过"的 24 小时记忆**（0.6.0 review B-4）：只靠 `isEventRepeat` 的事件窗口
-    // （气象 3 小时）不够——窗口一过，同一条仍在生效的老预警会被判成新事件、在开着的页面里响铃
-    //（洪水有效期中位 12.6 小时 → 一天可能响 3〜4 次，而用户刚被告知"只记历史，不打扰"）。
-    // 记进这条记忆之后，后面的 `looksReplayed` 分支会把它拦住。
+    // **同时记进"已提醒过"的 24 小时记忆**：只靠 isEventRepeat 的事件窗口（气象 3 小时）不够，
+    // 窗口一过，同一条仍在生效的老预警会被判成新事件、在开着的页面里响铃；记进去之后由上面的
+    // `looksReplayed` 分支拦住。
     rememberAlerted(alert);
     pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
@@ -9303,10 +7950,10 @@ function handleAlert(alert, cfg, opts) {
     });
     return { notified: false, reason: 'quiet-hours', detail: t('reason.quietHoursDetail') }
   }
-  // 其它 DSH 标签页已经播报过同一条消息 → 本标签页静默，避免多个页面同时响铃。
-  // 用消息 id 而不是事件键：多标签页收到的是同一条消息，而同一事件的不同消息（如强度升级）不应被拦。
-  // **但同 id、更高强度的修订版必须绕开认领**（`upgrading`）：认领记忆按消息 id 保留 10 分钟，
-  // 不绕开的话"震级上修"会被上一次同 id 的认领抑制，成为一条静默的漏报。
+  // 其它 DSH 标签页已经播报过同一条消息 → 本标签页静默，避免多个页面同时响铃。抢占键用消息 id
+  // 而不是事件键：多标签页收到的是同一条消息，而同一事件的不同消息（如强度升级）不应被拦。
+  // **但同 id、更高强度的修订版必须绕开抢占**（`upgrading`），否则"震级上修"会被上一次同 id 的
+  // 抢占（按消息 id 保留 10 分钟）抑制，成为一条静默的漏报。
   if (!upgrading && !claimAlertForTab(alert.id, cancelKeyOf(alert))) {
     pushEvent({
       id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
@@ -9316,8 +7963,7 @@ function handleAlert(alert, cfg, opts) {
     return { notified: false, reason: 'other-tab', detail: t('reason.otherTabDetail') }
   }
   // 县名走 prefLabelOf（随界面语言）：日文界面是「東京都」，中文界面「东京（東京都）」，
-  // 英文界面「Tokyo (東京都)」。命中行的**标签**也跟着语言走，但原名的括号只在
-  // "显示名与原名不同"时出现——同一种语言里不会出现「東京都（東京都）」。
+  // 英文界面「Tokyo (東京都)」。命中行的标签也跟着语言走，原名括号只在"显示名与原名不同"时出现。
   const prefLabel = prefLabelOf(hitPref);
   const title = alertTitleOf(alert);
   const bodyLines = [alert.headline];
@@ -9326,24 +7972,18 @@ function handleAlert(alert, cfg, opts) {
       ? t('notify.hitPrefNamed', { pref: prefLabel, jp: hitPref })
       : t('notify.hitPref', { pref: prefLabel }));
   }
-  // 全球源没有行政区，命中依据是「距某个关注点多少公里」——把距离说出来，
-  // 用户才能判断这条提醒是否可信（半径是自己设的）。
-  //
-  // **判据是"有没有真实距离"，不是"是哪个源"**（0.6.1 写了前者的一半，0.6.2 补全）：
-  // 只有坐标型源（`locator === 'point'`，见 matchPointAlert）会给出 `distanceKm`；
-  // 海外气象（查询即匹配）与大陆气象（行政区层级）都只给关注点，于是它们落到下面那一支时
+  // 全球源没有行政区，命中依据是「距某个关注点多少公里」——半径由用户自己设，说出距离才可判断可信度。
+  // **判据是"有没有真实距离"，不是"是哪个源"**：只有坐标型源（`locator === 'point'`，见 matchPointAlert）
+  // 会给出 `distanceKm`；海外气象（查询即匹配）与大陆气象（行政区层级）都只给关注点，落到下面那一支
   // `Math.round(undefined)` 会拼出「距震中约 NaN km」，还把一场暴雨 / 洪水说成"震中"。
-  // 0.6.1 只给 `locator === 'overseas'` 分了岔，**大陆源仍然带着这个错误文案上线**——
-  // 现在按距离是否存在分岔，任何"没有距离的行政/查询型命中"都走同一支。
   else if (m.place && typeof m.distanceKm === 'number' && Number.isFinite(m.distanceKm)) {
     bodyLines.push(t('notify.hitPlaceDistance', { place: m.place.name, km: Math.round(m.distanceKm) }));
   } else if (m.place) {
     bodyLines.push(t('notify.hitPlaceOfficial', { place: m.place.name }));
   }
   if (alert.kind === 'tsunami') bodyLines.push(t('action.tsunami'));
-  // 行动提示按**机构**分岔（0.6.1 加海外那一支，0.6.2 补大陆那一支）：日本气象电文对应的是
-  // 市町村级的避难信息，中国大陆的预警由各级气象台发布、处置口径不同，而美加的洪水预警由
-  // 当地应急部门（county / 省）发布——把日本制度套到别处既找不到对应入口，也会误导行动。
+  // 行动提示按**机构**分岔：日本气象电文对应市町村级的避难信息，大陆预警由各级气象台发布，
+  // 美加的洪水预警由当地应急部门（county / 省）发布。
   if (alert.kind === 'weather') bodyLines.push(weatherActionHintOf(alert));
   bodyLines.push(disclaimerOf(alert));
   pushEvent({
@@ -9351,12 +7991,12 @@ function handleAlert(alert, cfg, opts) {
     issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
   });
   const vol = cfg.notify.volume;
-  // 0.9.4（C1）：总开关 + 分灾害开关（地震含 EEW / 海啸 / 气象），见 soundAllowedFor
+  // 总开关 + 分灾害开关（地震含 EEW / 海啸 / 气象），见 soundAllowedFor
   if (soundAllowedFor(cfg, alert)) playAlertSound(alert, vol);
   const pageVisible = typeof document !== 'undefined' && document.visibilityState === 'visible';
   const body = bodyLines.join('\n');
   if (pageVisible) {
-    // 页面可见时只用页内 toast（DESIGN 第 7 节：可见 → toast，后台 → 系统通知）
+    // 页面可见时只用页内 toast，后台才走系统通知
     showToast({ title, body, color: sevColor(hitSeverity) });
   } else if (cfg.notify.system) {
     const ok = showSystemNotification({ title, body, tag: 'quake-alert-' + alert.id, silent: true });
@@ -9368,63 +8008,33 @@ function handleAlert(alert, cfg, opts) {
 
 // ============================================================================
 // dsh-quake-alert · client/src/12-websocket.js
-//
-// 作用：P2PQuake WebSocket 连接管理。
-// 内容：连接/断开状态机、指数退避重连（1s→60s 封顶）、数据源切换（正式/沙箱）、
-//       建连超时看门狗、「久无数据」的半开连接检测（主动重连）、消息转交主链。
-// 依赖：00-i18n（默认的连接说明文案）、01-constants、02-storage（读数据源）、11-pipeline（handleRaw）。
-// 背景：P2PQuake 约每 10 分钟强制断线，重连是常态路径而非异常。
+// 作用：P2PQuake WebSocket 连接管理（状态机、重连间隔递增、数据源切换、建连超时监控、连接假死检测、断线补拉、转交主链）。
+// 依赖：00-i18n、01-constants、02-storage、03-settings-bridge、05g-source-health、11-pipeline。
 // ============================================================================
 
 
-/**
- * 建连看门狗（0.3.3）：浏览器在"连不上又不断开"的半开状态下不会给任何事件——既没有 onopen
- * 也没有 onclose。没有这个看门狗，状态点会永远停在「连接中…」并且不会有任何重连。
- * 下面的久无数据检测以 onopen 为基准，覆盖不到建连这一段；两者互补。
- */
+/** 建连超时监控：连接假死时浏览器既不给 onopen 也不给 onclose，没有它状态点会永远停在「连接中…」。 */
 const CONNECT_TIMEOUT_MS = 15 * 1000;
 
-/**
- * 半开连接检测（0.3.2）：NAT / 代理静默断开时 TCP 已经不通，但浏览器**不会**触发 onclose，
- * 于是状态点一直是绿色的「已连接」，实际一条推送都收不到——对预警产品这是最危险的失效模式
- * （用户以为自己在被保护）。P2PQuake 约每 10 分钟强制断线一次，正常情况下 lastActivityAt
- * 会被 onclose → 重连 → onopen 不断刷新，所以 20 分钟毫无活动只可能是连接真的死了。
- */
+/** 连接假死检测：NAT / 代理静默断开时浏览器不触发 onclose，状态点常绿却收不到推送；正常时 lastActivityAt
+ *  会被 onclose → 重连 → onopen 不断刷新，所以 20 分钟无活动即判死。 */
 const STALE_AFTER_MS = 20 * 60 * 1000;
 const STALE_CHECK_MS = 60 * 1000;
 
-/**
- * 断线补拉（0.9.4 / C5）。
- *
- * P2PQuake 的 WS **没有回放**：断线窗口（退避 1–60 秒，加上网络中断本身可能是几分钟）里发出去的
- * 551 / 552 / 556 就此永久丢失——而 EEW 的有效窗口只有几十秒，等价于漏报。
- * 官方 REST `/v2/history` 返回的正是**与 WS 推送同一套 JSON**，所以补拉之后走同一条主链：
- * 消息级去重按 id 生效，与直播流重叠的部分不会二次响铃（跨标签页认领也照旧）。
- *
- * 三条边界：
- *   · **只在重连时补**。首次连接没有"缺口"可言——用户刚打开页面时把几小时前的旧警报当新闻
- *     刷屏，是这套系统明确不做的。
- *   · 窗口取 2 分钟，与 Host 侧 JMA 轮询器的冷启动容差同一个量级与理由：覆盖常见的网络抖动与
- *     休眠唤醒，又不把真正过期的电文当实时警报播出去。
- *   · 时间认不出的条目不补（补拉是恢复路径，宁可少补一条也不播一条说不清时间的旧消息），
- *     但会计数（`backfillSkipped`）——它是可见的。
- */
+/** 断线补拉：P2PQuake 的 WS **没有回放**，断线窗口里的 551 / 552 / 556 永久丢失，而 EEW 的有效窗口只有几十秒。
+ *  官方 REST `/v2/history` 返回与 WS 同一套 JSON，补拉后走同一条主链（按 id 去重）；只在重连时补，窗口 2 分钟，
+ *  时间认不出的条目不补但计入 backfillSkipped。 */
 const P2P_HISTORY_URL = 'https://api.p2pquake.net/v2/history';
 const P2P_HISTORY_CODES = [551, 552, 556];
 const P2P_HISTORY_WINDOW_MS = 2 * 60 * 1000;
 const P2P_HISTORY_LIMIT = 20;
-/** 两次补拉之间的最小间隔：重连可能连续发生（退避最密 1 秒一次），别把 REST 打成洪水。 */
+/** 两次补拉之间的最小间隔（重连最密 1 秒一次，避免把 REST 打成洪水）。 */
 const P2P_HISTORY_MIN_GAP_MS = 5 * 1000;
 
-// ---------- WebSocket 客户端 ----------
+// ---------- WebSocket 客户端（P2PQuake：约每 10 分钟强制断线，重连是常态路径） ----------
 /**
- * @param {object} [opts] 不传即 P2PQuake（日本链路），行为与 0.3.x 完全一致。
- * @param {string} [opts.sourceId] 状态汇报用的源标识（多源聚合，见 07-store 的 pushSource）
- * @param {string} [opts.label] 状态文案里的源名
- * @param {() => string} [opts.urlOf] 当前应连的地址（P2PQuake 会在正式源 / 沙箱源之间切换）
- * @param {number} [opts.staleAfterMs] 「久无数据」判据；0 = 关闭（消息稀疏的源必须关掉）
- * @param {(url: string) => string} [opts.openDetail] 连上后的状态文案
- * @param {(raw: object, cfg: object) => void} [opts.onRaw] 消息处理入口
+ * @param {object} [opts] 不传即 P2PQuake（日本链路）；urlOf 默认在正式源 / 沙箱源之间切换，staleAfterMs = 0
+ *   关闭「久无数据」检测；sourceId / label / openDetail 供状态上报用；onRaw 是消息处理入口。
  */
 function createWsClient(opts) {
   const o = opts || {};
@@ -9434,16 +8044,12 @@ function createWsClient(opts) {
   const staleCheckMs = o.staleCheckMs === undefined ? STALE_CHECK_MS : o.staleCheckMs;
   const connectTimeoutMs = o.connectTimeoutMs === undefined ? CONNECT_TIMEOUT_MS : o.connectTimeoutMs;
   const urlOf = o.urlOf || (() => (currentCfg().source === 'sandbox' ? SANDBOX_URL : WS_URL));
-  // 默认连接说明**在调用时取词**（0.9.3）：写死在模块里的中文会让英文 / 繁体界面在「来源状态」
-  // 与侧边栏悬停提示里露出一整句中文。取词放在函数体里，切语言后由 recomputeStatus 重算。
+  // 默认连接说明**在调用时取词**：写死在模块里的中文会让英文 / 繁体界面露出整句中文，切语言后重算。
   const openDetailOf = o.openDetail || ((url) => (url.indexOf('sandbox') !== -1
     ? t('source.p2pSandbox')
     : t('source.p2pConnected')));
   const onRaw = o.onRaw || ((raw, cfg) => handleRaw(raw, cfg));
-  // 上报经 publishStatus 合成（0.5.4）：本层只知道**连接**状态，而展示状态还要叠加
-  // 数据健康（蓝点）与停更。此前直接 pushSource，于是"一次常态断线"（P2PQuake 约每 10 分钟
-  // 必发生一次）就会把一条 schema-error 蓝点冲成 reconnecting，而上游其实一直在坏——
-  // 用户看到的是"链路在重连"，看不到"数据我们读不懂"（两者要采取的行动完全不同）。
+  // 上报经 publishStatus 合成：本层只知道**连接**状态，展示状态还要叠加数据健康（蓝点）与停更。
   const report = (patch) => publishStatus(sourceId, Object.assign({ label }, patch));
   let ws = null;
   let timer = null;
@@ -9452,15 +8058,12 @@ function createWsClient(opts) {
   let stopped = false;
   let retries = 0;
   let lastActivityAt = 0; // 最近一次 onopen / onmessage 的时刻
-  let processFails = 0; // 连续的消息处理失败次数（0.4.1：主链异常必须可见）
+  let processFails = 0; // 连续的消息处理失败次数（主链异常必须可见）
   let visibilityBound = false;
 
   /**
-   * 页面从冻结 / 休眠中恢复时刷新活动时刻（0.4.1）。
-   *
-   * 后台标签页被冻结、系统休眠期间，消息事件根本不会被派发；恢复后如果立刻用「20 分钟无活动」
-   * 判死，就会把一条本来健康的连接拆掉重连（P2PQuake 没有回放，冻结期间缓冲里的 551/556
-   * 就此永久丢失——EEW 的有效窗口只有几十秒，等价漏报）。恢复可见时给一个完整的新窗口。
+   * 页面从冻结 / 休眠中恢复时刷新活动时刻：冻结期间消息事件不会被派发，恢复后立刻按「20 分钟无活动」判死
+   * 会拆掉健康的连接，而 P2PQuake 没有回放、冻结期间的消息永久丢失。
    */
   function onVisibilityChange() {
     if (stopped) return
@@ -9489,7 +8092,7 @@ function createWsClient(opts) {
   function clearConnectWatch() {
     if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; }
   }
-  /** 建连阶段排一个超时：到点还没动静就放弃这条连接，按退避重来。 */
+  /** 建连阶段排一个超时：到点还没动静就放弃这条连接，按递增的间隔重来。 */
   function armConnectWatch(target) {
     clearConnectWatch();
     if (stopped || !(connectTimeoutMs > 0)) return
@@ -9510,7 +8113,7 @@ function createWsClient(opts) {
       staleTimer = null;
       if (stopped) return
       if (lastActivityAt && Date.now() - lastActivityAt > staleAfterMs) {
-        // 这条连接确实已经死了，不必再等退避：立刻换一条，onopen 会刷新 lastActivityAt
+        // 这条连接确实已经死了，不必再等下一次重试间隔：立刻换一条，onopen 会刷新 lastActivityAt
         report({ status: 'reconnecting', retries, detail: 'stale link · reconnecting' });
         teardown();
         connect();
@@ -9524,7 +8127,7 @@ function createWsClient(opts) {
   /** @param {string} [reason] 断开原因，写进状态文案（onclose 时留空用默认文案）。 */
   const scheduleReconnect = (reason) => {
     if (stopped) return
-    retries += 1; // 从「第 1 次」开始计数，退避序列 1s → 2s → 4s → … → 60s 封顶
+    retries += 1; // 从「第 1 次」开始计数，重连间隔依次为 1s → 2s → 4s → … → 60s 封顶
     report({
       status: 'reconnecting',
       retries,
@@ -9546,7 +8149,7 @@ function createWsClient(opts) {
     ];
     for (const c of cands) {
       const iso = p2pTimeToIso(String(c === undefined || c === null ? '' : c));
-      // 局部变量不叫 `t`（那是 00-i18n 的取词函数，遮蔽了本函数里的 t('key') 会去调 Date.parse）
+      // 局部变量不叫 `t`（那是 00-i18n 的取词函数，遮蔽后 t('key') 会变成 Date.parse）
       const ms = Date.parse(iso);
       if (Number.isFinite(ms)) return ms
     }
@@ -9556,10 +8159,7 @@ function createWsClient(opts) {
     if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : '?'))
     return res.json()
   }));
-  /**
-   * 重连后补拉断线窗口里的消息（见文件头 P2P_HISTORY_* 的说明）。**逐条**交给主链：
-   * 一条坏数据不该让整次补拉白做，而且主链自己就是按条去重的。
-   */
+  /** 重连后补拉断线窗口里的消息（见文件头 P2P_HISTORY_*）。**逐条**交给主链：一条坏数据不该让整次补拉白做。 */
   function backfillAfterGap() {
     if (stopped) return
     const now = Date.now();
@@ -9589,7 +8189,7 @@ function createWsClient(opts) {
         backfillStats.lastAt = Date.now();
       })
       .catch((err) => {
-        // 补拉失败**不改变连接状态**：它只是一条恢复路径，把它算成"源不可达"会让状态点无谓变红
+        // 补拉失败**不改变连接状态**：它只是一条恢复路径，算成"源不可达"会让状态点无谓变红
         backfillStats.errors += 1;
         backfillStats.lastDetail = String((err && err.message) || err);
       });
@@ -9610,7 +8210,7 @@ function createWsClient(opts) {
       lastActivityAt = Date.now();
       armStaleWatch();
       report({ status: 'open', retries: 0, detail: openDetailOf(url) });
-      // 0.9.4（C5）：**重连**时补拉断线窗口里的消息（首次连接没有缺口）。见 backfillAfterGap。
+      // **重连**时补拉断线窗口里的消息（首次连接没有缺口），见 backfillAfterGap
       const isReconnect = everOpened;
       everOpened = true;
       if (isReconnect) backfillAfterGap();
@@ -9619,14 +8219,10 @@ function createWsClient(opts) {
       lastActivityAt = Date.now();
       let raw;
       try { raw = JSON.parse(String(ev.data)); } catch (err) { return } // 单条 JSON 坏掉不影响连接
-      // 主链**必须单独 try**（0.4.1）。此前 JSON.parse 与 onRaw 共用一个空 catch，
-      // 于是 parse / match / handleAlert 里任何确定性异常都被吞掉：socket 正常、状态常绿、
-      // 零提醒、无计数——这是比断线更难发现的静默失效（断线至少会变红）。
+      // 主链**必须单独 try**：与 JSON.parse 共用空 catch 会把 parse / match / handleAlert 的异常一起吞掉。
       try {
         onRaw(raw, currentCfg());
-        // 恢复：连续失败之后只要有一条处理成功，就要把状态改回 open（0.4.2）。
-        // 原先只在 onopen 时复位，于是 **一次** 主链异常就会让侧边栏永久停在"链路降级"——
-        // 用户看到一个错误的黄点，比不显示更糟。
+        // 恢复：连续失败后只要有一条处理成功就把状态改回 open，否则一次主链异常会让侧边栏永久停在"链路降级"。
         if (processFails > 0) {
           processFails = 0;
           report({ status: 'open', retries, detail: openDetailOf(url) });
@@ -9655,10 +8251,7 @@ function createWsClient(opts) {
   };
   return {
     start() {
-      // start 必须是 stop 的逆操作（0.5.4）：原来只有 restart() 清 `stopped`，于是
-      // "stop 之后再 start"会静默地什么都不做（connect() 第一行就是 `if (stopped) return`）。
-      // 当前唯一调用点是入口的一次 start（重配走 restart），所以不是活缺陷——
-      // 但 start/stop 与 restart 的语义不对称，任何后来的"重新 start"都会被静默吞掉。
+      // start 是 stop 的逆操作：只有 restart() 清 `stopped` 时，"stop 之后再 start"会静默地什么都不做。
       stopped = false;
       retries = 0;
       processFails = 0;
@@ -9674,7 +8267,7 @@ function createWsClient(opts) {
     backfillStatsOf() { return Object.assign({}, backfillStats) },
     restart() {
       stopped = false;
-      retries = 0; // 切数据源后立即从 1s 退避重新开始，而不是沿用上一条连接的退避进度
+      retries = 0; // 切数据源后立即从 1s 的间隔重新开始，而不是沿用上一条连接的递增进度
       processFails = 0;
       bindVisibility(); // stop() 会解绑；restart 之后这条 socket 同样需要"恢复可见时重置 stale 计时"
       teardown();
@@ -9691,50 +8284,29 @@ const setActiveClient = (c) => { activeClient = c; };
 
 // ============================================================================
 // dsh-quake-alert · client/src/12b-feed-poll.js
-//
-// 作用：从 Host 的只读路由拉気象庁电文增量，解析成 Alert 后交给主链
-//       ——与 P2PQuake 的 551/552/556 汇到同一个 handleAlert。
-// 内容：游标生命周期（持久化 / 首次对齐 / Host 重启恢复）、增量应用、失败容错、
-//       启停、诊断计数。
-// 依赖：02-storage（游标落盘）、03-settings-bridge（currentCfg）、
-//       05b-jma-parser（parseJma）、11-pipeline（handleAlert）。
-//
-// 为什么拉本地而不是浏览器直连気象庁：Host 是每台机器唯一的外部请求者，多标签页 / 多窗口
-// 不会放大请求——気象庁明文要求「一度取得したファイルを再度取得しない」，违反会被封 IP。
-// 这里只从回环地址取增量，没有外部成本。
-//
-// 游标语义（0.3.2 起三种）：
-//   · `?since=N`     —— 返回 seq > N 的条目；Host 环缓冲淘汰旧条目时带 truncated，表示中间
-//                       有缺口，此时仍然应用已有条目（宁可少报几条，也不要卡住不再前进）。
-//   · `?since=tail`  —— **首次启动**（本地还没有游标）只要当前位置、不要历史。若首次就用 0，
-//                       刷新页面会把 Host 缓冲里几小时前的旧警报当新闻重放（响铃 + 弹窗）。
-//   · 响应 `reset`   —— Host 进程重启后游标从 0 重新计数，此时 Client 手里那个更大的游标会让
-//                       `entries` 永远为空（连 truncated 都不为真）→ 静默失联。Host 检出
-//                       `since > cursor` 后按 0 补齐并置 reset，Client 据此对齐游标。
-// 游标落盘后，刷新 / 新开标签页都从上次的位置继续，不会再重放。
+// 作用：从 Host 的只读路由拉気象庁 / 全球源的电文增量，解析成 Alert 后交给主链（handleAlert，与 P2PQuake 的
+//       551/552/556 汇到同一条链）；含读取位置生命周期、增量应用、失败容错、启停、诊断计数。
+// 依赖：02-storage（读取位置写入本地存储）、03-settings-bridge、05b/05d（解析契约）、05g（健康）、07-store、11-pipeline。
 // ============================================================================
 
 
-/** Host 侧的电文增量路由（与 lib/index.js 的 FEED_PATH 对应）。 */
+/** Host 侧的电文增量路由（与 lib/index.js 的 FEED_PATH 对应）。只从回环地址取增量：Host 是每台机器唯一的
+ *  外部请求者（気象庁要求「一度取得したファイルを再度取得しない」，多标签页不会放大请求）。 */
 const FEED_PATH = '/dsh-quake-alert/feed';
 /** 本地拉取间隔：Host 每 60s 拉一次源，这里 15s 拉一次本地缓存，端到端最坏约 75s。 */
 const FEED_POLL_MS = 15 * 1000;
 /** 启动后首轮延迟：给插件装载、城市表与 host 侧首轮轮询让路。 */
 const FEED_FIRST_DELAY_MS = 3000;
-/** 游标在 localStorage 里的键（与 history / 配置同域，风格一致）。 */
+/** 读取位置在 localStorage 里的键。 */
 const FEED_CURSOR_KEY = 'dsh.quakeAlert.feedCursor';
-/** 首次启动的哨兵：还没有游标 → 用 tail 语义对齐位置而不是重放历史。 */
+/** 首次启动的特殊标记值：还没有读取位置 → 用 tail 语义对齐位置而不是重放历史。 */
 const FEED_TAIL = 'tail';
-/**
- * 各源最近一次轮询结果的**只读快照**（id → stats）。放在模块级对象而不是 store：
- * 轮询每 15 秒一轮，若每轮都 store.push，设置页与侧边栏会被无意义地反复重渲。
- * 设置页自己定时读它（见 13-ui-settings 的「全球源状态」）。
- */
+/** 各源最近一次轮询结果的**只读快照**（id → stats）。放模块级对象而不是 store：每轮都 push 会让设置页与侧边栏反复重渲。 */
 const feedStatsOf = {};
 /** 本地路由的单次请求超时：Host 卡住时不能让 inFlight 一直占着、把整条轮询拖停。 */
 const FEED_FETCH_TIMEOUT_MS = 10 * 1000;
 
-/** 读回持久化游标；任何脏数据（非数字 / NaN / 负数）一律当作"没有记录"。 */
+/** 读回已持久化的读取位置；任何格式不合法的数据（非数字 / NaN / 负数）一律当作"没有记录"。 */
 function loadFeedCursor(key) {
   const v = loadJSON(key, null);
   return (typeof v === 'number' && Number.isFinite(v) && v >= 0) ? Math.floor(v) : null
@@ -9747,29 +8319,16 @@ async function defaultFetchJson(url, signal) {
   const AS = (typeof window !== 'undefined' && window) ? window.AbortSignal : undefined;
   let timeout = (AS && typeof AS.timeout === 'function') ? AS.timeout(FEED_FETCH_TIMEOUT_MS) : undefined;
   let timeoutTimer = null;
-  // 0.9.5（fresh review）：`AbortSignal.timeout` 只有较新的引擎才有（Chrome 103+ / Firefox 124+）。
-  // 在"有 AbortController 却没有 AbortSignal.timeout"的引擎上 `timeout` 是 undefined，于是下面
-  // `if (signal && timeout)` 整支不成立 → 只剩"停用插件才 abort"的业务信号；而底部的 Promise.race
-  // 兜底又要求"连 AbortController 都没有"（那时才没有别的办法）——两处条件正好错开，
-  // **超时保护整条消失**：挂死的本地请求让 inFlight 永不 settle，schedule() 在 await 之后才重排，
-  // jma / usgs / noaa / nmc 四源同时永久停摆而状态停在上一次的绿。这里补上自建的那一支
-  // （照 12e-overseas-poll 的做法：AbortController + setTimeout）。
+  // `AbortSignal.timeout` 只有较新引擎才有（Chrome 103+ / Firefox 124+），缺失时超时保护会整条消失：挂死的
+  // 请求让 inFlight 永不 settle、四源一起永久停摆。这里补一个自建 AbortController 的分支。
   if (!timeout && typeof AbortController === 'function') {
     const ctrl = new AbortController();
     timeoutTimer = setTimeout(() => { try { ctrl.abort(); } catch (err) { /* 已中止 */ } }, FEED_FETCH_TIMEOUT_MS);
     timeout = ctrl.signal;
   }
-  /**
-   * 把「请求超时」与「插件停用时中止」合成**一个**信号。
-   *
-   * 0.9.4 修：此前写的是 `if (signal && timeout && AS.any) any([...])` / `else if (signal) sig = signal`
-   * ——在"有 AbortSignal.timeout 却没有 AbortSignal.any"的浏览器上（Chrome 103-115 /
-   * Firefox 100-123）第二支会把**超时信号整个丢掉**，只剩"停用插件才 abort"的业务信号，
-   * 而注释写的是"退回超时信号"。后果不是少一次请求：挂死的本地请求让 inFlight 永不 settle，
-   * 而 schedule() 在 await 之后才重排，于是 jma / usgs / noaa / nmc **四源同时永久停摆**，
-   * 状态还停在上一次的绿。现在不依赖 any：自建 AbortController，两个信号任一触发就中止，
-   * 超时也因此能真正掐断底层请求（12e 的 Promise.race 只是让 Promise 早点失败）。
-   */
+  /** 把「请求超时」与「插件停用时中止」合成**一个**信号：`AbortSignal.any` 在 Chrome 103-115 /
+   *  Firefox 100-123 上没有，缺失时自建 AbortController 合并两个信号（任一触发即中止），
+   *  只有这样才能真正掐断底层请求（12e 的 Promise.race 只是让 Promise 早点失败）。 */
   let sig = timeout;
   const anyFn = (AS && typeof AS.any === 'function')
     ? AS.any
@@ -9790,7 +8349,6 @@ async function defaultFetchJson(url, signal) {
         sig = ctrl.signal;
       } else {
         // 连 AbortController 都没有（很老的引擎）：只能保业务信号，超时退回 Promise.race 兜底
-        // ——比"完全丢掉超时"好，代价是底层请求不会被中止。
         sig = signal;
       }
     } else if (signal) {
@@ -9802,8 +8360,7 @@ async function defaultFetchJson(url, signal) {
       if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : '?'))
       return res.json()
     });
-  // 兜底（只在"连 AbortController 都没有"的老引擎上生效——那时没有任何办法中止底层请求，
-  // 只能让这一轮按时结束）："轮询链永久停摆"比"少一个中止信号"严重得多。
+  // 兜底（只在"连 AbortController 都没有"的老引擎上生效）：让这一轮按时结束，避免轮询链永久停摆。
   try {
     if (!(typeof AbortController === 'function') && timeout) {
       let timer = null;
@@ -9820,28 +8377,18 @@ async function defaultFetchJson(url, signal) {
     }
     return await request
   } finally {
-    // 自建的超时定时器要在请求结束（成功 / 失败 / 被中止）时清掉，否则它会一直挂到超时点。
+    // 自建的超时定时器要在请求结束时清掉（成功 / 失败 / 被中止），否则会一直挂到超时点
     if (timeoutTimer) clearTimeout(timeoutTimer);
   }
 }
 
 /**
- * @param {object} [opts]
- * @param {string} [opts.id] 源标识（诊断用）
- * @param {string} [opts.path] Host 增量路由；全球源用 `?source=usgs` 这类分派参数
- * @param {string} [opts.cursorKey] 该源自己的游标存储键——多源共用一条键会互相顶掉游标
- * @param {(cfg: object) => boolean} [opts.enabled] 该源当前是否需要拉取（按灾种开关判断）
- * @param {number} [opts.intervalMs]
- * @param {number} [opts.firstDelayMs]
- * @param {(url: string) => Promise<object>} [opts.fetchJson] 注入点（测试用）
- * @param {(patch: object) => void} [opts.onStatus] 状态上报（0.4.1）：把本源的连接 / 失败情况
- *   送进 store，参与整体状态聚合。没有它的话轮询链路整体死掉时侧边栏仍然是绿的。
- * @param {string} [opts.label] 状态文案里的源名
- * @param {(entry: object, cfg: object) => boolean} [opts.apply] 注入点（测试用）
- * @param {() => object} [opts.getCfg] 注入点（测试用）
- * @param {() => (number|null)} [opts.loadCursor] 注入点（测试用；默认读 localStorage）
- * @param {(v: number) => void} [opts.saveCursor] 注入点（测试用；默认写 localStorage）
- * @param {(err: Error) => void} [opts.onError]
+ * @param {object} [opts] 注入点（fetchJson / apply / getCfg / loadCursor / saveCursor / onError / onStatus）供测试替换。
+ * @param {string} [opts.id] 源标识（诊断用）；[opts.label] 状态文案里的源名。
+ * @param {string} [opts.path] Host 增量路由；全球源用 `?source=usgs` 这类分派参数。
+ * @param {string} [opts.cursorKey] 该源自己的读取位置存储键——多源共用一条键会互相顶掉读取位置。
+ * @param {(cfg: object) => boolean} [opts.enabled] 该源当前是否需要拉取（按灾种开关判断）。
+ * @param {(patch: object) => void} [opts.onStatus] 状态上报：把本源的连接 / 失败情况送进 store 参与整体聚合。
  */
 function createFeedClient(opts = {}) {
   const id = opts.id || 'jma';
@@ -9855,13 +8402,11 @@ function createFeedClient(opts = {}) {
   const onError = opts.onError || (() => {});
   const onStatus = opts.onStatus || (() => {});
   // 该源此轮要不要拉：气象源跟 weather 开关，全球地震跟 earthquake 开关，海啸跟 tsunami 开关。
-  // 关掉之后 Client 不再拉增量，Host 侧对应的轮询器也会因 idle 自然停下。
   const enabled = opts.enabled || ((cfg) => (cfg.disasters || {}).weather !== false);
   const loadCursor = opts.loadCursor || (() => loadFeedCursor(cursorKey));
   const saveCursor = opts.saveCursor || ((v) => saveFeedCursor(v, cursorKey));
   const apply = opts.apply || ((entry, cfg) => {
-    // 走解析契约（0.4.1）：schema / value 失败会计入数据健康并**不播报**，
-    // empty（与本插件无关的电文）只是静静地跳过。
+    // 走解析契约：schema / value 失败会计入数据健康且**不播报**，empty（与本插件无关的电文）静静跳过。
     const res = parseJmaResult(entry && entry.xml, { id: entry && entry.id });
     if (noteParseResult(id, res)) return false
     if (!res.ok) return false
@@ -9870,80 +8415,69 @@ function createFeedClient(opts = {}) {
     return true
   });
 
-  // null = 本浏览器还没有游标（首次启动）→ 首轮用 tail 对齐，不重放 Host 缓冲里的历史
+  // null = 本浏览器还没有读取位置（首次启动）→ 首轮用 tail 对齐，不重放 Host 缓冲里的历史。
+  // 读取位置语义：`?since=N` 返回 seq > N 的条目（Host 的固定长度缓冲淘汰旧条目时带 truncated，有缺口仍照常应用）；
+  // `?since=tail` 是首次启动只要当前位置；响应带 `reset` 表示 Host 重启后读取位置从 0 重算，据此对齐。
   let since = null;
   try {
     const stored = loadCursor();
     if (typeof stored === 'number' && Number.isFinite(stored) && stored >= 0) since = Math.floor(stored);
-  } catch (err) { /* 读盘失败按首次启动处理 */ }
+  } catch (err) { /* 读取本地存储失败按首次启动处理 */ }
   let timer = null;
   let running = false;
   let stopped = false; // 插件停用：在途轮询的响应回来后不该再 apply
   let inFlight = null;
   let abortCtl = null;
   let lastStatusKey = '';
-  // Host 的 errors / detailDropped 是**进程内累计**计数（永不归零）。要判断"这一轮又失败了"
-  // 必须看增量——直接判"非 0 就告警"会让一次瞬时失败之后该源永久停在"链路降级"（0.4.2 修正）。
+  // Host 的 errors / detailDropped 是**进程内累计**计数（永不归零），判断"这一轮又失败了"必须看增量。
   let lastHostErrors = 0;
   let lastHostDropped = 0;
   const stats = { polls: 0, received: 0, applied: 0, errors: 0, truncated: 0, tailSync: 0, resets: 0, morePages: 0, lastAt: 0, cursor: 0, host: null };
 
-  /** 状态上报：只在**变化**时送出去（轮询每 15 秒一轮，每轮都 push 会让设置页反复重渲）。
-   *  经过 effectiveStatusOf 合并"数据格式异常"——那是蓝点，优先级高于连接状态：
-   *  连接好着呢、只是数据我们读不懂，这个状态不该被下一轮"拉取成功"覆盖掉。 */
+  /** 状态上报：只在**状态**变化时送出（轮询每 15 秒一轮，每轮都 push 会让设置页反复重渲），并经
+   *  effectiveStatusOf 合并"数据格式异常"（蓝点，优先级高于连接状态）。 */
   function reportStatus(patch) {
     const eff = effectiveStatusOf(id, patch.status, patch.detail);
-    // key **只取状态**：detail 里含"已收到 N 条增量""Host 轮询 N 次"这类单调计数，
-    // 用它做 key 会让每轮都判定为"变化"→ 每 15 秒整页重渲一次（正是拆 SourceStatusBlock
-    // 想避免的事）。数字本身由 SourceStatusBlock 每 5 秒直接从 feedStatsOf 读，不依赖这里。
-    //
-    // 除自己上一轮报出的状态，还要比 **store 里当前实际的状态**（0.5.4）：探针（12d）、
-    // 健康层（05g）与 WS 连接层（12-websocket）也会写同一个源。若它们刚把展示状态改成别的值，
-    // 而这里因为"自己的 eff 没变"就不上报，那个被覆盖的状态会**永久**留在界面上
-    //（实测：一条蓝点被探针的"数据已恢复"刷成绿色之后，此后再也不自愈）。
+    // key **只取状态**：detail 里含"已收到 N 条增量"这类单调计数，用它做 key 会让每轮都判定为"变化"。
+    // 还要比 **store 里当前实际的状态**：自检（12d）、健康层（05g）与 WS 连接层也会写同一个源，若它们
+    // 刚改过展示状态而这里不上报，那个状态会**永久**留在界面上。
     const cur = ((store.sources || {})[id] || {}).status;
     if (eff.status === lastStatusKey && cur === eff.status) return
     lastStatusKey = eff.status;
     try { onStatus(Object.assign({ label }, eff)); } catch (err) { /* UI 回调异常不影响轮询 */ }
   }
 
-  /** 推进游标并落盘（值没变就不写，15s 一次的轮询不必每次都碰 localStorage）。 */
+  /** 推进读取位置并写入本地存储（值没变就不写，15s 一次的轮询不必每次都碰 localStorage）。 */
   function setCursor(next) {
     if (!(typeof next === 'number' && Number.isFinite(next) && next >= 0)) return
     const v = Math.floor(next);
     if (v === since) return
     since = v;
-    try { saveCursor(v); } catch (err) { /* 隐私模式等写盘失败：本次仍以内存游标工作 */ }
+    try { saveCursor(v); } catch (err) { /* 隐私模式等写入本地存储失败：本次仍以内存里的读取位置工作 */ }
   }
   const cursorNow = () => (since === null ? 0 : since);
 
   async function pollOnce() {
     stats.polls += 1;
-    // 该源的灾种开关关闭时不必拉增量（Host 侧随后也会据此停轮询）。状态如实上报为「已关闭」，
-    // 这样聚合状态不会因为"用户主动关掉了"而显示成异常。
+    // 灾种开关关闭时不必拉增量（Host 侧随后也会据此停轮询）；状态如实上报为「已关闭」，聚合状态不会显示成异常。
     if (!enabled(getCfg())) {
       reportStatus({ status: 'disabled', detail: 'disabled · hazard switch off' });
       return { applied: 0, cursor: cursorNow(), skipped: true }
     }
     let data;
-    // 自持取消器（0.4.1）：插件停用时要能中止在途请求，否则响应回来后仍会 apply
-    // → handleAlert → 响铃 / 弹窗 / 写历史（用户以为已经关掉了插件）。
+    // 自持取消器：插件停用时要能中止在途请求，否则响应回来后仍会 apply → handleAlert → 响铃 / 弹窗 / 写历史。
     abortCtl = (typeof window !== 'undefined' && window && typeof window.AbortController === 'function')
       ? new window.AbortController()
       : null;
     try {
-      // path 可能自带查询串（全球源用 `?source=usgs` 分派），所以要按需选分隔符。
-      // stats=1（0.4.1）：把 Host 侧的健康计数一并取回（errors / detailDropped / lastPollAt /
-      // idleSkips / bufferSize）。此前 Client 从不带它，于是「上游被墙 / 被限流」与「上游没有新闻」
-      // 在界面上完全不可区分——设置页的「最近拉取 2 秒前」说的只是**本地路由**的拉取时刻。
+      // path 可能自带查询串（全球源用 `?source=usgs` 分派），按需选分隔符；stats=1 把 Host 侧的健康计数一并取回。
       const sep = path.indexOf('?') === -1 ? '?' : '&';
       data = await fetchJson(
         path + sep + 'since=' + (since === null ? FEED_TAIL : since) + '&stats=1',
         abortCtl ? abortCtl.signal : undefined,
       );
     } catch (err) {
-      // 用户主动停用（abort）不是"源不可达"：不上报 unreachable、不计失败、不写失败日志。
-      // 否则停用插件会在侧边栏留下一个红点；重载时旧 fiber 的这次上报还会把新会话短暂染红。
+      // 用户主动停用（abort）不是"源不可达"：不上报 unreachable、不计失败，否则侧边栏会留下一个红点。
       if (stopped) return { applied: 0, cursor: cursorNow(), aborted: true }
       stats.errors += 1;
       onError(err);
@@ -9953,8 +8487,8 @@ function createFeedClient(opts = {}) {
       abortCtl = null;
     }
     stats.lastAt = Date.now();
-    // Host 回显的源必须与请求的一致：Host 比 Client 旧（或参数被改写）时会把 jma 的原文
-    // 交给 noaa 的解析器，解析必然失败、而游标仍在推进——那些条目被永久跳过且表面正常。
+    // Host 回显的源必须与请求的一致：Host 比 Client 旧时会把 jma 的原文交给 noaa 的解析器，解析必失败，
+    // 而读取位置仍在推进——那些条目被永久跳过且表面正常。
     if (data && data.source && data.source !== id) {
       const err = new Error('source mismatch: asked ' + id + ', host returned ' + data.source);
       stats.errors += 1;
@@ -9963,18 +8497,13 @@ function createFeedClient(opts = {}) {
       return { applied: 0, cursor: cursorNow() }
     }
     if (data && data.stats) stats.host = data.stats;
-    // 0.5.3（DESIGN 11.9 B）：把**源自己的数据时间**交给探针，阈值由探针从契约里取——
-    // 这里只上报事实，不判 stale。
-    //
-    // 取 Host 的 `feedTime`（poller 从源自己的 <updated> / metadata.generated / 列表最新一条
-    // 算出来的），**不是**"我们收到条目的时刻"：JMA 可能几小时只有天气预报（没有与本插件相关
-    // 的电文），用收到时刻会把那种完全正常的情况判成停更。这也是契约里写明"判据不是我们收到
-    // 多少条"的原因。
+    // 把**源自己的数据时间**交给自检（阈值由自检从契约里取），这里只上报事实、不判 stale。取 Host 的
+    // `feedTime`（源自 <updated> / metadata.generated / 列表最新一条），不是"我们收到条目的时刻"：JMA 可能
+    // 几小时只有天气预报，用收到时刻会把那种正常情况判成停更。
     if (data && data.stats && Number.isFinite(data.stats.feedTime) && data.stats.feedTime > 0) {
       noteFreshness(id, data.stats.feedTime);
     }
-    // 首次对齐：Host 只回当前位置。不应用任何条目（即使响应里意外带了也不应用），
-    // 否则"刷新页面"又变成了重放历史。
+    // 首次对齐：Host 只回当前位置，不应用任何条目（即使响应里意外带了也不应用），否则"刷新页面"又变成重放历史。
     if (data && data.tail === true) {
       stats.tailSync += 1;
       setCursor(data.cursor);
@@ -9982,10 +8511,8 @@ function createFeedClient(opts = {}) {
       reportStatus({ status: 'open', detail: 'aligned · ' + hostDetail() });
       return { applied: 0, cursor: cursorNow(), tail: true }
     }
-    // 本地还没有游标、响应却没带 tail 标记 → 对面是不认 `since=tail` 的旧版 Host
-    // （它按 0 把整个环缓冲吐了回来）。这是一次全新会话，取它的游标对齐即可，
-    // 不能把这些历史当增量播一遍——否则"只刷新页面、不重启 Host"的升级路径会重放一次。
-    // 纯 0.3.2 环境下 tail 请求必定带回 tail 标记，这个分支不会触发。
+    // 本地没有读取位置、响应却没带 tail 标记 → 对面是不认 `since=tail` 的旧版 Host（按 0 吐回整个固定长度缓冲）：
+    // 取它的读取位置对齐即可，不能把这些历史当增量播一遍。
     if (since === null) {
       stats.tailSync += 1;
       if (data && Number.isFinite(data.cursor)) setCursor(data.cursor);
@@ -10002,7 +8529,7 @@ function createFeedClient(opts = {}) {
       try {
         if (apply(e, getCfg())) applied += 1;
       } catch (err) {
-        // 单条电文解析失败不能影响后续条目，也不能让游标停住
+        // 单条电文解析失败不能影响后续条目，也不能让读取位置停住
         stats.errors += 1;
         onError(err);
       }
@@ -10011,20 +8538,17 @@ function createFeedClient(opts = {}) {
     stats.applied += applied;
     let reset = false;
     if (data && Number.isFinite(data.cursor)) {
-      // Host 重启过 → 它给的游标一定比 Client 手里的小（两侧同源，正常情况不会倒退）。
-      // 以 `data.cursor < since` 为准而不是只看 reset 标记：Host 漏标记时也必须自愈，
-      // 否则 Client 会卡在一个比 Host 大的游标上、entries 恒空且 truncated 不为真——静默失联。
+      // Host 重启过 → 它给的读取位置一定比 Client 手里的小；以 `data.cursor < since` 为准而不是只看 reset 标记：
+      // 漏标记时也必须自愈，否则 entries 恒空且 truncated 不为真——静默失联。
       const regressed = since !== null && data.cursor < since;
       if (data.reset === true || regressed) {
         reset = true;
         stats.resets += 1;
       }
-      // Host 会用 MAX_FEED_ENTRIES 截断大响应（本轮只给前 N 条）。此时不能直接跳到
-      // data.cursor，否则那 N 条之后的条目会被静默跳过；改用**最后一条实际返回的 seq**
-      // 推进，下一轮接着取。正常增量路径 entries 很短，等价于 data.cursor。
+      // Host 会用 MAX_FEED_ENTRIES 截断大响应（本轮只给前 N 条），此时不能直接跳到 data.cursor（那 N 条之后的条目
+      // 会被静默跳过），改用**最后一条实际返回的 seq** 推进。
       const last = entries.length ? entries[entries.length - 1] : null;
-      // 被停用打断时（stopped）只能用**已经处理到的那条**推进：直接跳到整批末条会把没处理的
-      // 条目连同游标一起跳过，下次回来也补不回来（永久漏报）。一条都没处理就原地不动。
+      // 被停用打断时（stopped）只能用**已经处理到的那条**推进：跳到整批末条会把没处理的条目连读取位置一起跳过。
       const next = stopped
         ? (lastSeenSeq !== null ? lastSeenSeq : cursorNow())
         : (last && Number.isFinite(last.seq) ? last.seq : data.cursor);
@@ -10032,9 +8556,8 @@ function createFeedClient(opts = {}) {
       setCursor(next);
     }
     stats.cursor = cursorNow();
-    // 增量缺口与游标重置必须**让用户看得见**：被跳过的条目是静默漏报，
-    // 只进诊断计数的话用户会以为"该收到的都收到了"。
-    // Host 的 errors / detailDropped 是累计计数，所以一律看**增量**（见 lastHostErrors 的说明）。
+    // 增量缺口与读取位置重置必须**让用户看得见**：被跳过的条目是静默漏报，只进诊断计数会被当成"都收到了"。
+    // Host 的 errors / detailDropped 是累计计数，所以一律看增量。
     const host = stats.host || {};
     const hostErrors = Number(host.errors) || 0;
     const hostDropped = Number(host.detailDropped) || 0;
@@ -10047,8 +8570,7 @@ function createFeedClient(opts = {}) {
     if (reset) warn.push('host cursor reset');
     if (errDelta) warn.push('host fetch failures +' + errDelta);
     if (dropDelta) warn.push('host detail drops +' + dropDelta);
-    // stale 有**自己的状态**（中灰「数据已过期」），不折叠进 degraded：它表示"源在响应、
-    // 但给的是旧数据"，与"链路有故障"是两类，DESIGN 的六态里也是分开的。
+    // stale 有**自己的状态**（中灰「数据已过期」），不折叠进 degraded：它表示"源在响应、但给的是旧数据"。
     reportStatus({
       status: host.stale ? 'stale' : (warn.length ? 'degraded' : 'open'),
       detail: 'received ' + stats.received + ' increments · ' + hostDetail() +
@@ -10080,14 +8602,11 @@ function createFeedClient(opts = {}) {
 
   function schedule(delay) {
     if (!running) return
-    // 与其他定时器一致的纪律（0.5.4）：排新的之前先清旧的。当前控制流（回调里先 timer=null
-    // 再递归，且 pollSerial 有 inFlight 守卫）保证不会双排，但少这一行就意味着"以后谁改了
-    // 一处控制流，就多一条各自自续的轮询链"（= 上游请求速率翻倍）。
+    // 与其他定时器一致的纪律：排新的之前先清旧的，少这一行就意味着多一条自续的轮询链（上游请求速率翻倍）。
     if (timer) { clearTimeout(timer); timer = null; }
     timer = setTimeout(async () => {
       timer = null;
-      // 灾种开关的判断放在 pollOnce 里：那里会如实上报「已关闭」状态（不产生任何网络请求），
-      // 这样聚合状态不会因为"用户主动关掉了"而显示成异常。
+      // 灾种开关的判断放在 pollOnce 里：那里会如实上报「已关闭」状态（不产生任何网络请求）。
       try { await pollSerial(); } catch (err) { onError(err); }
       schedule(intervalMs);
     }, delay);
@@ -10113,59 +8632,35 @@ function createFeedClient(opts = {}) {
     pollOnce,
     pollSerial,
     stats() { return Object.assign({}, stats, { running }) },
-    /** 测试与诊断用：当前游标（尚未对齐时为 0）。 */
+    /** 测试与诊断用：当前的读取位置（尚未对齐时为 0）。 */
     cursor() { return cursorNow() },
-    /** 测试与诊断用：本客户端是否还没有游标（首轮会走 tail 对齐）。 */
+    /** 测试与诊断用：本客户端是否还没有读取位置（首轮会走 tail 对齐）。 */
     hasCursor() { return since !== null },
   }
 }
 
 // ============================================================================
 // dsh-quake-alert · client/src/12c-cn-stream.js
-//
-// 作用：消费大陆源（Wolfx cenc_eew / cenc_eqlist）的 **SSE 推送**，解析成 Alert 后交给主链
-//       ——与 P2PQuake 的 551/552/556、気象庁的电文汇到同一个 handleAlert。
-// 内容：EventSource 生命周期、断线补齐（Last-Event-ID）、游标持久化、
-//       **降级到轮询**（EventSource 不可用 / 连不上 / 连上但不推流）。
-// 依赖：00-i18n（状态说明的文案）、02-storage（游标落盘）、03-settings-bridge（currentCfg）、05d（解析契约与健康状态）、
-//       11-pipeline（handleAlert）、12b-feed-poll（降级用的轮询客户端）。
-//
-// 为什么用 SSE 而不是复用 12b 的轮询：EEW 的价值在秒级。轮询是 15 秒一轮，
-// 等于把"预警"变成"事后通知"——那正是这个源存在的理由（DESIGN 5.3 的三方案比较）。
-//
-// 为什么必须自带降级（而不是留给设计里的"降级开关"）：
-//   EventSource 是浏览器原生能力，但它**可能被中间设备掐掉**（代理缓冲流式响应、重置长连接），
-//   而 `/feed?source=cenc_eew` 那条普通 HTTPS 轮询往往仍然通（DESIGN 11.5）。没有自动降级的话，
-//   这些网络下的用户会**静默地只收到轮询源、永远收不到大陆预警**——正是本插件最不能接受的失败形态。
-//   所以这里的口径是：只要能证明"SSE 这条链路走不通"，就自动切到轮询，并且**把降级这件事说出来**
-//   （状态上报成 degraded），用户与 AI 都看得见。
-//   手动开关（用户强制选轮询）与只读诊断快照是 0.5.0 的后续增量。
+// 作用：消费大陆源（Wolfx cenc_eew / cenc_eqlist）的 **SSE 推送**，解析成 Alert 后交给主链 handleAlert；含
+//       EventSource 生命周期、Last-Event-ID 断线补齐、读取位置持久化、**降级到轮询**。
+// 依赖：00-i18n、02-storage、03-settings-bridge、05d（解析契约）、05g（健康）、07-store、11-pipeline、12b-feed-poll。
 // ============================================================================
 
 
 /** Host 侧的 SSE 路由（与 lib/index.js 的 STREAM_PATH 对应）。 */
 const STREAM_PATH = '/dsh-quake-alert/stream';
-/** 每个源自己的游标键前缀（与 12b 的 FEED_CURSOR_KEY 同域、风格一致）。 */
+/** 每个源自己的读取位置存储键前缀。 */
 const CN_CURSOR_KEY = 'dsh.quakeAlert.streamCursor';
-/**
- * 连上之后多久没收到首帧 `sync` 就判定"这条流不通"。
- * 首帧是 Host 立刻写出的，正常情况几十毫秒就到；8 秒足够覆盖慢机器，
- * 又远小于"用户会以为插件坏了"的心理阈值。
- */
+/** 连上之后多久没收到第一条数据 `sync` 就判定"这条流不通"。第一条数据是 Host 立刻写出的，正常几十毫秒就到。 */
 const SSE_PROBE_MS = 8000;
-/** 连续失败到这个次数就降级到轮询。取 3：容忍一次网络抖动与一次 Host 重启。 */
+/** 连续失败到这个次数就降级到轮询（3 = 容忍一次网络抖动与一次 Host 重启）。 */
 const SSE_MAX_FAILS = 3;
-/** 降级/停用期间的重探间隔：用户重新打开灾种开关后要能回来。 */
+/** 降级 / 停用期间重新探测的间隔：用户重新打开灾种开关后要能回来。 */
 const CN_RECHECK_MS = 5000;
-/**
- * 已连接的流"多久没有任何帧"即判定连接已死（0.9.4 / P2-15）。
- *
- * Host 每 15 秒必发一个 status 帧（见 onStatusFrame），所以 45 秒 = 3 倍余量是可靠的判据：
- * 半开的长连接在浏览器里**不会**触发 onerror，用户看到的是"SSE 已连接"却永远收不到预警。
- */
+/** 已连接的流"多久没有任何帧"即判定连接已死：Host 每 15 秒必发一个 status 帧，45 秒 = 3 倍余量可靠；看似连着其实已断的长连接在浏览器里**不会**触发 onerror。 */
 const SSE_SILENCE_DEAD_MS = 45 * 1000;
 
-/** 读回持久化游标；任何脏数据一律当作"没有记录"。 */
+/** 读回已持久化的读取位置；任何格式不合法的数据一律当作"没有记录"。 */
 function loadCursorOf(key) {
   const v = loadJSON(key, null);
   return (typeof v === 'number' && Number.isFinite(v) && v >= 0) ? Math.floor(v) : null
@@ -10175,21 +8670,12 @@ function saveCursorOf(key, v) {
 }
 
 /**
- * @param {object} opts
- * @param {string} opts.id 源标识（`cenc_eew` / `cenc_eqlist`）
- * @param {string} [opts.label] 状态文案里的源名
- * @param {string} [opts.path] SSE 路由（含 `?source=`）
- * @param {(entry: object, cfg: object) => boolean} [opts.apply] 逐条应用（15-entry 注入解析契约）
- * @param {(cfg: object) => boolean} [opts.enabled] 该源当前是否需要消费（按灾种开关判断）
- * @param {(patch: object) => void} [opts.onStatus] 状态上报
- * @param {(err: Error) => void} [opts.onError]
- * @param {(url: string) => object} [opts.createEventSource] 注入点（测试用）
- * @param {() => object} [opts.createFallback] 降级客户端工厂（测试用；默认建一个 12b 的轮询客户端）
- * @param {() => object} [opts.getCfg]
- * @param {() => object} [opts.loadCursor] / @param {(v: number) => void} [opts.saveCursor]
- * @param {number} [opts.probeMs] / @param {number} [opts.maxFails]
- * @param {number} [opts.silenceDeadMs] 已连接的流"多久没有任何帧"即判死（0.9.4 / P2-15；0 = 不判）
- * @param {() => number} [opts.now] 注入点（与 silenceDeadMs 配套，测试用假时钟）
+ * @param {object} opts —— `id`（`cenc_eew` / `cenc_eqlist`）、`label`（状态文案里的源名）、`path`（SSE 路由，
+ *   含 `?source=`）、`enabled`（该源当前是否需要消费）、`apply`（逐条应用，注入解析契约）、`onStatus` / `onError`。
+ * @param {(url: string) => object} [opts.createEventSource] 注入点（测试用）；[opts.createFallback] 降级客户端工厂
+ *   （默认建一个 12b 的轮询客户端）；[opts.createFeedClient] 供断言"降级客户端拿了哪个读取位置键"。
+ * @param {() => object} [opts.getCfg]、[opts.loadCursor]、[opts.saveCursor]、[opts.now]（与 silenceDeadMs 配套的假时钟）。
+ * @param {number} [opts.probeMs]、[opts.maxFails]、[opts.silenceDeadMs]（已连接的流多久无帧即判死；0 = 不判）。
  */
 function createCnStream(opts = {}) {
   const id = opts.id;
@@ -10209,20 +8695,17 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
   const saveCursor = opts.saveCursor || ((v) => saveCursorOf(cursorKey, v));
   const createEventSource = opts.createEventSource
     || ((url) => new window.EventSource(url));
-  // 定时器注入点：探针超时与周期检查都靠它，测试要能确定性地推进（不真等 8 秒 / 5 秒）
+  // 定时器注入点：自检超时与周期检查都靠它，测试要能确定性地推进（不真等 8 秒 / 5 秒）
   const setTimer = opts.setTimer || ((fn, ms) => setTimeout(fn, ms));
   const clearTimer = opts.clearTimer || ((timer) => clearTimeout(timer));
   // 降级工厂：默认按 12b 的轮询客户端建一个（`?source=` 分派，Host 侧早就支持）。
-  // createFeedClient 也可注入：这样"降级客户端拿了哪个游标键"能被直接断言——那正是
-  // "降级期间静默漏掉一段条目"的成因，光看 mode 有没有变成 poll 是测不出来的。
   const makeFeedClient = opts.createFeedClient || createFeedClient;
   const createFallback = opts.createFallback || (() => makeFeedClient({
     id,
     label,
     path: FEED_PATH + '?source=' + id,
-    // 与 SSE 用**同一个**游标键：两侧的 seq 都来自 Host 同一个源的游标，所以降级时能无缝接续。
-    // 用各自独立的键（原先的 FEED_CURSOR_KEY）会让轮询从 `since=tail` 起步，SSE 挂掉到降级生效
-    // 之间 Host 缓冲里的条目被静默跳过——那是一个真实的漏报窗口。
+    // 与 SSE 用**同一个**读取位置键：两侧的 seq 都来自 Host 同一个源的读取位置，降级时能无缝接续；用独立的键会让轮询
+    // 从 `since=tail` 起步，SSE 挂掉到降级生效之间的条目被静默跳过（真实的漏报窗口）。
     cursorKey: CN_CURSOR_KEY + '.' + id,
     enabled,
     // 不是 onStatus：降级态下轮询侧的 "open" 会把"已降级"盖掉，必须合成一条（见 fallbackStatus）。
@@ -10235,7 +8718,7 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
   try {
     const stored = loadCursor();
     if (typeof stored === 'number' && Number.isFinite(stored) && stored >= 0) since = Math.floor(stored);
-  } catch (err) { /* 读盘失败按首次启动处理 */ }
+  } catch (err) { /* 读取本地存储失败按首次启动处理 */ }
 
   let running = false;
   let source = null; // EventSource 实例
@@ -10249,23 +8732,19 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
   let inFallback = false;
   /** 当前的轮询是"用户选的"还是"自动降级来的"——只有前者能自动升回 SSE。 */
   let fallbackManual = false;
-  // 0.9.4（P2-15）：最近一次收到**任何**帧（sync / entry / status）的时刻。Host 每 15 秒必发
-  // 一个 status 帧，所以"长时间一个帧都没有"是可靠的死连接判据——此前的降级判定只覆盖
-  // "首帧之前"（sawSyncThisConn 一旦为 true 就再没有降级路径），于是一条曾经成功、之后被
-  // 中间设备静默掐断的长连接永不被判死，界面停在"SSE 已连接"。
+  // 最近一次收到**任何**帧（sync / entry / status）的时刻。Host 每 15 秒必发一个 status 帧，"长时间一个帧都没有"
+  // 是可靠的死连接判据（只看"第一条数据之前"发现不了曾经成功、之后被中间设备静默掐断的长连接）。
   let lastFrameAt = 0;
   const stats = {
     mode: 'idle', connections: 0, syncs: 0, received: 0, applied: 0, errors: 0,
     sseErrors: 0, probeTimeouts: 0, fallbacks: 0, fallbackManual: false, truncated: 0, resets: 0,
-    // 已连接的流被判"静默死亡"的次数（0.9.4 / P2-15）：与 probeTimeouts（首帧之前超时）分开，
-    // 两者成因不同（前者是连接被掐断，后者是代理把流缓冲住了）。
+    // 已连接的流被判"静默死亡"的次数：与 probeTimeouts（第一条数据之前超时）成因不同，分开统计。
     silentDeaths: 0,
-    // stale（源可达但数据是旧的）：由 Host 的 sync / status 帧告知，Client 自己判不出来
-    // ——"没有新 entry"与"这几天确实没有地震"在本地长得一模一样。
+    // stale（源可达但数据是旧的）：由 Host 的 sync / status 帧告知；Client 自己判不出来——"没有新 entry"与
+    // "这几天确实没有地震"在本地长得一模一样。
     stale: false, dataTime: 0,
-    // Host 侧的"中继连接是否还活着"与它最近一次错误（0.9.5 / fresh review）：SSE 路径下
-    // Client 不轮询 /feed，所以 Host 的 stats 在界面上零消费者——中继被掐断时界面会一直显示
-    // 绿色的 "SSE connected · received 0"，与"这段时间确实没有地震"同形。
+    // Host 侧的"中继连接是否还活着"与它最近一次错误：SSE 路径下 Client 不轮询 /feed，Host 的 stats 在界面上
+    // 零消费者，中继被掐断时界面会一直显示绿色的 "SSE connected · received 0"。
     hostConnected: null, hostError: '',
     lastAt: 0, lastEventAt: 0, cursor: 0, frozen: false, lastDetail: '',
   };
@@ -10274,14 +8753,8 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
   const wantPoll = (cfg) => String((cfg && cfg.cnTransport) || 'auto') === 'poll';
 
   const cursorNow = () => (since === null ? 0 : since);
-  /**
-   * 注册到表里（实时读取，见 cnStreamRegistry 的说明）。
-   *
-   * 0.9.4（C10）：**注册/注销与 start/stop 对齐**。此前只在构造时写一次、`stop()` 后不清理，
-   * 于是停用之后表里仍列着该源（`running=false, mode='idle'`）——设置页那个"尚未启动"分支
-   * 因此永远不可达，诊断也把一个已停用的源当成"在跑但空闲"。改在 start 里注册、stop 里删除，
-   * 重启（restart）时又会重新注册，不留悬挂条目。
-   */
+  /** 注册到 cnStreamRegistry（实时读取，见文件末说明）。注册与 start / stop 对齐：只在构造时写一次会让停用后的
+   *  源仍列在表里（`running=false, mode='idle'`），设置页的"尚未启动"分支永远不可达。 */
   function registerSelf() {
     cnStreamRegistry[id] = {
       stats: () => Object.assign({}, stats, { running, hasCursor: since !== null, fallbackActive: inFallback }),
@@ -10291,53 +8764,37 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
   function unregisterSelf() {
     if (cnStreamRegistry[id]) delete cnStreamRegistry[id];
   }
-  /**
-   * @param {number} next
-   * @param {boolean} [force] Host 明确说"游标重置过"（它重启 / 时钟回拨）时**必须允许回退**，
-   *   否则本地游标永远卡在一个比 Host 大的值上，之后每次重连都触发 reset + 全量重放。
-   *   12b 的轮询路径有等价的自愈（`regressed`），SSE 这条此前缺失（0.5.1 review 的 D 类残留）。
-   */
+  /** @param {number} next @param {boolean} [force] Host 明确说"读取位置重置过"（它重启 / 时钟回拨）时必须允许回退，
+   *   否则本地读取位置永远卡在一个比 Host 大的值上，之后每次重连都触发 reset + 全量重放（12b 有等价的自愈）。 */
   function setCursor(next, force) {
     if (!(typeof next === 'number' && Number.isFinite(next) && next >= 0)) return
     const v = Math.floor(next);
     if (v === since) return
-    // 游标只前进：SSE 的补发与实况可能交错到达，回退会让"断线补齐"重复投递
+    // 读取位置只前进：SSE 的补发与实况可能交错到达，回退会让"断线补齐"重复投递
     if (!force && since !== null && v < since) return
     since = v;
     stats.cursor = v;
-    try { saveCursor(v); } catch (err) { /* 隐私模式等写盘失败：本次仍以内存游标工作 */ }
+    try { saveCursor(v); } catch (err) { /* 隐私模式等写入本地存储失败：本次仍以内存里的读取位置工作 */ }
   }
 
-  /**
-   * 状态上报。`k` 是去重键，**不取 detail**：detail 里含"已收到 N 条"这类单调计数，
-   * 用它做键会每轮都判定为"变化"→ 设置页反复重渲。
-   * 但键也不能只取 status：降级（degraded）与"出错但正在自动重连"是同一个 status，
-   * 却是完全不同的两件事——后者能自己恢复，前者意味着链路已经变了、必须让用户知道。
-   * 所以由调用方给一个稳定的**语义**键，默认退回 status。
-   */
+  /** 状态上报。`k` 是去重键，**不取 detail**（detail 里含"已收到 N 条"这类单调计数，用它做键会每轮都判定为
+   *  "变化"）；也不能只取 status：降级与"出错但正在自动重连"是同一个 status，却是完全不同的两件事。
+   *  所以由调用方给一个稳定的**语义**键，默认退回 status。 */
   function reportStatus(patch, k) {
     stats.lastDetail = String(patch.detail || '');
     const eff = effectiveStatusOf(id, patch.status, patch.detail);
     const key = k || eff.status;
-    // 除自己的去重键，还要比 **store 里当前实际的状态**（0.5.4）：探针（12d）、健康层（05g）
-    // 与 WS 连接层会写同一个源；若它们刚把展示状态改成别的值，而这里因为"自己的键没变"就
-    // 不上报，那个被覆盖的状态会永久留在界面上（12b 侧同款修正，理由见 12b-feed-poll.js）。
+    // 还要比 **store 里当前实际的状态**：自检（12d）、健康层（05g）与 WS 连接层会写同一个源，若它们刚把展示
+    // 状态改成别的值而这里不上报，那个被覆盖的状态会永久留在界面上（12b 侧同款修正）。
     const cur = ((store.sources || {})[id] || {}).status;
     if (key === lastStatusKey && cur === eff.status) return
     lastStatusKey = key;
     try { onStatus(Object.assign({ label }, eff)); } catch (err) { /* UI 回调异常不影响链路 */ }
   }
 
-  /**
-   * 降级态下，轮询客户端（12b）的上报要经过这一层再出去。
-   *
-   * 为什么必须包一层：12b 的客户端有**自己独立的**状态去重键（初值空），所以降级之后它第一次
-   * 成功轮询就会报一条 `open`——"轮询这条路通了"本身是真的，但它会把 12c 刚报出去的
-   * "已降级为轮询"整条覆盖掉：聚合状态回绿、侧边栏悬停详情里只剩正常源。而 DESIGN 11.5 要求
-   * 降级**必须让用户看见**（它意味着延迟从秒级变成最长 15 秒）。
-   * 处理方式是把两者**合并成一条**：状态取"降级"（或用户手动选择），细节把轮询侧的信息附上。
-   * 键带上轮询侧的状态，这样它自己从 open 变 degraded / schema-error 时仍会重新上报。
-   */
+  /** 降级态下，轮询客户端（12b）的上报要经过这一层再出去：12b 有**自己独立的**状态去重键，降级之后它第一次
+   *  成功轮询就会报一条 `open`，把 12c 刚报出去的"已降级为轮询"整条覆盖掉。处理方式是把两者**合并成一条**：
+   *  状态取"降级"（或用户手动选择），细节附上轮询侧的信息；键带上轮询侧的状态，它自己变化时仍会重新上报。 */
   function fallbackStatus(patch) {
     if (!inFallback) return
     const p = patch || {};
@@ -10358,28 +8815,21 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
     }
   }
 
-  /**
-   * 切到轮询。
-   * @param {string} reason 人话原因（会出现在状态里，所以要说清是"哪条链路不行了"）
-   * @param {boolean} [manual] true = 用户在设置页选了「强制轮询」，false/缺省 = 自动降级。
-   *   区别只在能不能自动升回 SSE：自动降级不再升回（链路既然证明过不通，反复试探只是抖动），
-   *   而**手动**选择是可以撤销的——用户改回「自动」就该回到 SSE。
-   */
+  /** 切到轮询。
+   *  @param {string} reason 人话原因（会出现在状态里，所以说清是"哪条链路不行了"）
+   *  @param {boolean} [manual] true = 用户在设置页选了「强制轮询」，false/缺省 = 自动降级。区别只在能不能自动
+   *    升回 SSE：自动降级不再升回，而**手动**选择是可以撤销的（用户改回「自动」就该回到 SSE）。 */
   function activateFallback(reason, manual) {
     if (inFallback) return
-    // **先建客户端，成功之后才置位**（0.5.4）。原来的顺序是 `inFallback = true` → `mode='poll'`
-    // → `closeSource()` → 建客户端，而建失败时直接 return：于是 inFallback 锁死、SSE 已关、
-    // fallbackClient 仍是 null，tick 的四条分支没有一条能再建起链路（只有刷新页面），
-    // 而设置页与诊断显示的是"已降级为轮询"——用户以为在被保护，实际一条预警都收不到。
-    // 这恰是本文件头写明的、最不能接受的那种形态。
+    // **先建客户端，成功之后才置位**：反过来（先置位、建失败就 return）会让 inFallback 锁死、SSE 已关、
+    // fallbackClient 仍是 null，tick 没有一条分支能再建起链路，而界面显示的是"已降级为轮询"。
     let client = null;
     try {
       client = createFallback();
     } catch (err) {
       onError(err);
-      // 回滚到 idle 并如实上报。此后：用户显式选了「强制轮询」时 tick 会每 5 秒重试一次；
-      // 自动降级来的（wantPoll 为假）不再重试——SSE 已经证明不通、轮询客户端又建不起来，
-      // 此时显示"无法连接"就是全部能做的，继续静默地假装已降级才是错的。
+      // 回滚到 idle 并如实上报：用户显式选了「强制轮询」时 tick 会每 5 秒重试一次；自动降级来的（wantPoll
+      // 为假）不再重试——SSE 已证明不通、轮询客户端又建不起来，显示"无法连接"就是全部能做的。
       inFallback = false;
       fallbackManual = false;
       mode = 'idle';
@@ -10396,9 +8846,8 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
     closeSource();
     fallbackClient = client;
     try { fallbackClient.start(); } catch (err) { onError(err); }
-    // 降级必须**说出来**：否则用户看到"一切正常"却收不到预警（本插件最不能接受的形态）。
-    // 去重键显式给 'fallback'：进入降级之前刚上报过 degraded（"出错、正在重连"）是同一个
-    // status，若按 status 去重，这条"已降级"会被自己的上一条吃掉——而降级是不能被静默的。
+    // 去重键显式给 'fallback'：进入降级之前刚上报过 degraded 是同一个 status，按 status 去重会让这条"已降级"
+    // 被自己的上一条吃掉——而降级是不能被静默的。
     reportStatus({
       status: fallbackManual ? 'disabled' : 'degraded',
       detail: (fallbackManual ? t('source.cnPollManual') : t('source.cnFallbackReason', { reason })) +
@@ -10415,34 +8864,27 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
     fallbackClient = null;
     mode = 'idle';
     stats.mode = mode;
-    // 0.9.4（P2-14）：降级期间推进游标的是**轮询客户端**（它写的正是同一个存储键，见
-    // createFallback 的 cursorKey），12c 自己的内存 `since` 停在进入降级之前那一刻。
-    // 不重新读盘就升回 SSE，会带着过期游标建连 —— Host 于是把整段环缓冲重放一遍：
-    // 超过 24 小时的旧条目会再次响铃，24 小时内的把历史刷满。
+    // 降级期间推进读取位置的是**轮询客户端**（它写的正是同一个存储键），12c 自己的内存 `since` 停在进入降级之前
+    // 那一刻；不重新读取本地存储就升回 SSE 会带着过期的读取位置建连，Host 于是重放整段固定长度缓冲。
     try {
       const stored = loadCursor();
       if (typeof stored === 'number' && Number.isFinite(stored) && stored >= 0) since = Math.floor(stored);
-    } catch (err) { /* 读盘失败就沿用内存值（退化为旧行为，不至于连不上） */ }
+    } catch (err) { /* 读取本地存储失败就沿用内存值（退化为旧行为，不至于连不上） */ }
     consecutiveFails = 0;
     connectSse();
   }
 
-  /**
-   * 单一的周期检查（每 5 秒）。用**一个**定时器同时管三个方向，因为它们会互相打架：
-   *   · 灾种开关被关掉 → 主动断开 SSE（不再读 `/stream`，Host 侧十分钟后自然断开与 Wolfx 的连接）
-   *   · 灾种开关又打开 → 恢复消费
-   *   · 设置页的「链路」选择变了 → 强制轮询 ↔ 自动（手动选择的可以撤销，自动降级的不再升回）
-   * 分成多个定时器容易写出"关掉之后再也回不来"这种半途状态。
-   */
+  /** 单一的周期检查（每 5 秒）。用**一个**定时器同时管三个方向，因为它们会互相打架：灾种开关被关掉 → 主动
+   *  断开 SSE（Host 侧十分钟后自然断开与 Wolfx 的连接）；开关又打开 → 恢复消费；「链路」选择变了 → 强制轮询
+   *  ↔ 自动。分成多个定时器容易写出"关掉之后再也回不来"这种半途状态。 */
   function scheduleTick() {
     if (!running) return
     if (tickTimer) { clearTimer(tickTimer); tickTimer = null; }
     tickTimer = setTimer(() => {
       tickTimer = null;
       if (!running) return
-      // 整段兜错：这个 tick 是**唯一**的恢复链（灾种开关往返、手动 / 自动链路切换都靠它），
-      // 一次抛错就会让它不再 self-reschedule，之后所有恢复都失效。12b 的等价处（schedule）
-      // 也包了 try/catch。reschedule 放在 catch 之外，保证无论成败都会重排。
+      // 整段捕获异常：这个 tick 是**唯一**的恢复链（灾种开关往返、手动 / 自动链路切换都靠它），一次抛错就不会再
+      // self-reschedule；reschedule 放在 catch 之外，保证无论成败都会重排。
       try {
         const cfg = getCfg();
         const on = enabled(cfg);
@@ -10450,15 +8892,13 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
           if (mode !== 'disabled') enterDisabled();
         } else if (mode === 'disabled') {
           consecutiveFails = 0;
-          // 恢复消费时**同样要先看用户的链路选择**：选了「强制轮询」就不该先建一条 SSE
-          //（那既白占一条 Wolfx 连接，又会在 8 秒探针超时后谎报一次"连上但不推流"）。
-          // 这与 start() 里"一开始就不建 SSE"是同一个不变量。
+          // 恢复消费时**同样要先看用户的链路选择**：选了「强制轮询」就不该先建 SSE（白占一条 Wolfx 连接，还会
+          // 在自检超时后谎报一次"连上但不推流"），与 start() 里的不变量一致。
           if (wantPoll(cfg)) activateFallback('manual polling selected', true);
           else connectSse();
         } else if (wantPoll(cfg)) {
-          // 用户选了「强制轮询」。**已经在轮询（自动降级来的）时也要认下这个选择**：
-          // 否则 fallbackManual 永远是 false，用户之后改回「自动」时下面那条 leaveFallback
-          // 分支不成立 → 永久停在轮询，只能刷新页面才回得去。
+          // 用户选了「强制轮询」。**已经在轮询（自动降级来的）时也要认下这个选择**：否则 fallbackManual 永远是
+          // false，用户之后改回「自动」时 leaveFallback 分支不成立 → 永久停在轮询。
           if (!inFallback) activateFallback('manual polling selected', true);
           else if (!fallbackManual) {
             fallbackManual = true;
@@ -10469,9 +8909,8 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
           // 用户改回「自动」：手动选的轮询要能撤销。自动降级的不升回——那条链路已经证明过不通。
           leaveFallback();
         }
-        // 0.9.4（P2-15）：**持续静默**的存活判据（放在链路选择之后：用户刚改回自动时应该先建连）。
-        // 此前的降级判定只覆盖"首帧之前"。Host 每 15 秒发一个 status 帧，超时没有帧即判死：
-        // 关掉这条流重连，连续 maxFails 次就降级——否则界面会永远停在"SSE 已连接"。
+        // **持续静默**的存活判据（放在链路选择之后：用户刚改回自动时应先建连）。Host 每 15 秒发一个 status 帧，
+        // 超时没有帧即判死：关流重连，连续 maxFails 次就降级——否则界面会永远停在"SSE 已连接"。
         if (silenceDeadMs > 0 && mode === 'sse' && source && lastFrameAt &&
             (now() - lastFrameAt) > silenceDeadMs) {
           stats.silentDeaths += 1;
@@ -10495,8 +8934,8 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
     sawSyncThisConn = false;
     stats.connections += 1;
     const url = path + (path.indexOf('?') === -1 ? '?' : '&') +
-      // 页面首次建立连接时带上持久化游标：刷新 / 重开标签页都能补齐断线期间的事件。
-      // 之后浏览器自动重连时会带 `Last-Event-ID`，Host 优先用它（更准）。
+      // 页面首次建立连接时带上已持久化的读取位置：刷新 / 重开标签页都能补齐断线期间的事件；之后浏览器自动重连时会带
+      // `Last-Event-ID`，Host 优先用它（更准）。
       'since=' + (since === null ? 'tail' : since);
     let es;
     try {
@@ -10515,15 +8954,11 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
     source = es;
     mode = 'sse';
     stats.mode = mode;
-    // 静默判据的起点：建连那一刻起算，首帧之前的判定仍由下面的 8 秒探针负责（更精确）。
+    // 静默判据的起点：建连那一刻起算，第一条数据之前的判定仍由下面的 8 秒自检负责（更精确）。
     lastFrameAt = now();
-    /**
-     * sync 帧算出的告警（增量缺口 / 游标重置 / Host 侧未在运行）。
-     *
-     * **必须留到 status 帧继续带上**：store.pushSource 是整体替换 status + detail 的，而 status 帧
-     * 每 15 秒就来一次；若它只报"已连接"，这三条"有消息被跳过""Host 那边没在跑"的告警会在 15 秒后
-     * 自己消失——而它们的条件其实仍然成立。（键相同则不会重新上报，所以正常的降级/恢复去重不受影响。）
-     */
+    /** sync 帧算出的告警（增量缺口 / 读取位置重置 / Host 侧未在运行）。**必须留到 status 帧继续带上**：
+     *  store.pushSource 整体替换 status + detail，而 status 帧每 15 秒就来一次，只报"已连接"会让这三条
+     *  告警在 15 秒后自己消失——它们的条件其实仍然成立。 */
     let connWarn = [];
     const onSync = (ev) => {
       if (source !== es) return
@@ -10539,14 +8974,11 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
       stats.frozen = !!(d && d.frozen);
       stats.stale = !!(d && d.stale);
       if (d && Number.isFinite(d.dataTime)) stats.dataTime = d.dataTime;
-      // 0.5.3（DESIGN 11.9 B）：同一个数据时间也交给探针——探针按**契约里的阈值**判，
-      // 而 Host 这一侧继续按它自己的常量判（它能分辨"中继停更"与"数据陈旧"，比我们准）。
-      // 两者用的是同一个数值，一致性由回归断言钉住，不靠"记得同时改两处"。
+      // 同一个数据时间也交给自检——自检按**契约里的阈值**判，Host 侧继续按它自己的常量判（它能分辨"中继停更"
+      // 与"数据陈旧"）；两者用的是同一个数值。
       if (d && Number.isFinite(d.dataTime) && d.dataTime > 0) noteFreshness(id, d.dataTime);
-      // Host 明确说重置过（它重启 / 时钟回拨）→ **允许游标回退**并对齐到它的当前位置，
-      // 否则本地游标卡在比 Host 大的值上，每次重连都会 reset + 全量重放。
-      // 没有补发条目 = 已经在线，游标就是 Host 的当前位置 → 同样对齐，
-      // 这样刷新页面不会重复拉一段已经消费过的增量。
+      // Host 明确说重置过（它重启 / 时钟回拨）→ **允许读取位置回退**并对齐到它的当前位置，否则本地读取位置卡在比 Host
+      // 大的值上，每次重连都会 reset + 全量重放；没有补发条目 = 已经在线，读取位置就是 Host 的当前位置 → 同样对齐。
       if (d && d.reset && Number.isFinite(d.cursor)) setCursor(d.cursor, true);
       else if (d && Number.isFinite(d.cursor) && (!d.replayed || d.replayed === 0)) setCursor(d.cursor);
       const warn = [];
@@ -10554,8 +8986,7 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
       if (d && d.reset) warn.push('host cursor reset');
       if (d && d.frozen) warn.push('host source not running');
       connWarn = warn;
-      // stale 有**自己的状态**（中灰「数据已过期」），不折叠进 degraded：它表示"源在响应、
-      // 但给的是旧数据"，与"链路有故障"是两类。口径与 12b 的轮询路径一致。
+      // stale 有**自己的状态**（中灰「数据已过期」），不折叠进 degraded：源在响应、但给的是旧数据；口径与 12b 一致。
       reportStatus({
         status: stats.stale ? 'stale' : (warn.length ? 'degraded' : 'open'),
         detail: 'SSE connected' + (d ? ' · replayed ' + (d.replayed || 0) : '') +
@@ -10564,14 +8995,9 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
           (warn.length ? ' · ' + warn.join('；') : ''),
       });
     };
-    /**
-     * Host 的周期状态帧（每 15 秒，兼作 SSE keep-alive）。
-     *
-     * 它存在的唯一理由是**停更**：停更的形态就是"不再有新 entry"，只看 entry 的话状态会永远
-     * 停在连接那一刻；而 48 小时的停更探针是 cenc_eqlist 这个源存在的意义之一（见契约里的
-     * staleReason）。Host 不推这一帧的话，默认（SSE）路径下这件事在界面上完全不可见——
-     * 只有降级到轮询之后才读得到 /feed 的 stats。
-     */
+    /** Host 的周期状态帧（每 15 秒，兼作 SSE keep-alive）。它存在的理由是**停更**：停更的形态就是"不再有新
+     *  entry"，只看 entry 的话状态会永远停在连接那一刻；Host 不推这一帧，默认（SSE）路径下这件事在界面上
+     *  完全不可见——只有降级到轮询之后才读得到 /feed 的 stats。 */
     const onStatusFrame = (ev) => {
       if (source !== es) return
       // 状态帧同样是"这条连接还活着"的证据——Host 每 15 秒必发一个，静默判据正是靠它。
@@ -10580,16 +9006,12 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
       try { d = JSON.parse(String(ev && ev.data)); } catch (err) { d = null; }
       if (!d || typeof d !== 'object') return
       stats.stale = d.stale === true;
-      // 0.9.5（fresh review）：Host 说"中继连接断了"时，界面不能继续显示绿色已连接。
-      // `connected` 只有 Host 知道（它才持有那条 WebSocket），而在 SSE 路径下我们拿不到 /feed 的 stats。
+      // Host 说"中继连接断了"时界面不能继续显示绿色已连接：`connected` 只有 Host 知道（它才持有那条 WebSocket）。
       if (typeof d.connected === 'boolean') stats.hostConnected = d.connected;
       stats.hostError = d.lastError ? String(d.lastError) : '';
       if (Number.isFinite(d.dataTime)) stats.dataTime = d.dataTime;
       if (Number.isFinite(d.dataTime) && d.dataTime > 0) noteFreshness(id, d.dataTime);
-      // 有意**不更新** stats.lastAt：它表示"最近一条数据"，而状态帧每 15 秒必到一次，
-      // 更新它会让设置页永远显示"最近数据 0 秒前"，恰好把"其实很久没有数据了"盖掉。
-      // 状态里同时带上 sync 那一刻算出的 connected 告警（见 connWarn）：只报"已连接"会把
-      // 增量缺口 / 游标重置 / Host 未运行这三条在 15 秒后抹掉，而它们的条件仍然成立。
+      // 有意**不更新** stats.lastAt：它表示"最近一条数据"，而状态帧每 15 秒必到，更新它会让设置页永远显示"最近数据 0 秒前"。
       const hostWarn = [];
       if (stats.hostConnected === false) hostWarn.push('relay disconnected');
       if (stats.hostError) hostWarn.push(stats.hostError);
@@ -10603,10 +9025,7 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
     };
     const onEntry = (ev) => {
       if (source !== es) return
-      // 收到真实数据即证明这条链路是通的（0.5.4）：这个计数同时被"连续 N 次没收到首帧"的
-      // 降级判定使用，而它此前只在 `sync` 帧归零。于是一条已经健康跑了很久的连接上零星累积的
-      // error 会留在计数里，下一次"连上但没首帧"的第一跳就可能直接 ≥ maxFails ——
-      // 降级理由写成"连续 N 次未收到首帧"，而实际只失败了一次。
+      // 收到真实数据即证明链路是通的：该计数也被"连续 N 次没收到第一条数据"的降级判定使用，只在 sync 帧归零会让零星 error 累积。
       consecutiveFails = 0;
       stats.lastAt = Date.now();
       stats.lastEventAt = Date.now();
@@ -10622,13 +9041,11 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
       try {
         if (apply(entry, getCfg())) stats.applied += 1;
       } catch (err) {
-        // 单条事件解析失败不能影响后续条目，也不能让游标停住
+        // 单条事件解析失败不能影响后续条目，也不能让读取位置停住
         stats.errors += 1;
         onError(err);
       }
-      // 0.9.4（P2-16）：游标在 apply **之后**推进，与 12b 的口径一致（"已处理到的最后一条"）。
-      // 此前先推游标再 apply：apply 抛错时游标已经落盘，那条永久不再投递——而"游标停住"
-      // 也不是解法（那会把后续条目一起卡住），所以这里只在投递**之后**推进。
+      // 读取位置在 apply **之后**推进，与 12b 的口径一致（"已处理到的最后一条"）；先推读取位置的话 apply 抛错时那条就永久不再投递。
       if (Number.isFinite(entry.seq)) setCursor(entry.seq);
     };
     const onErrorEv = (ev) => {
@@ -10636,9 +9053,8 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
       stats.sseErrors += 1;
       stats.errors += 1;
       consecutiveFails += 1;
-      // EventSource 自己会按 readyState 重连；这里只负责"什么时候判定这条路走不通"。
-      // 已经收到过 sync 的连接再出错，多半是网络抖动或 Host 重启，交给浏览器重连；
-      // 一次 sync 都没收到就说明这条流从来没通过。
+      // EventSource 自己会按 readyState 重连，这里只判定"这条路走不通"：收到过 sync 的连接再出错多是网络抖动或
+      // Host 重启，一次 sync 都没收到说明这条流从来没通过。
       reportStatus({
         status: 'degraded',
         detail: 'SSE down (x' + consecutiveFails + ')' + (sawSyncThisConn ? ' · reconnecting' : ''),
@@ -10649,12 +9065,11 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
       es.addEventListener('sync', onSync);
       es.addEventListener('entry', onEntry);
       es.addEventListener('error', onErrorEv);
-    } catch (err) { /* 极简实现可能不支持命名事件，下面由 probe 兜住 */ }
-    // status 与上面分开注册：它是最可有可无的一帧（少了它只是看不到"停更"这一种状态），
-    // 不该因为某个实现不认这个事件名而把 sync / entry 的注册一起带走。
+    } catch (err) { /* 极简实现可能不支持命名事件，下面由超时自检捕获 */ }
+    // status 与上面分开注册：它是最可有可无的一帧（少了它只是看不到"停更"），不该因为某个实现不认这个事件名
+    // 而把 sync / entry 的注册一起带走。
     try { es.addEventListener('status', onStatusFrame); } catch (err) { /* 忽略 */ }
-    // 首帧探针：连上但**不推流**（代理把流缓冲住了）与"连不上"是两回事，
-    // 而 onerror 未必会来。没有这个探针，用户会停在"SSE 已连接"却永远收不到预警。
+    // 第一条数据的自检：连上但**不推流**（代理把流缓冲住了）与"连不上"是两回事，而 onerror 未必会来。
     if (probeMs > 0) {
       probeTimer = setTimer(() => {
         probeTimer = null;
@@ -10666,7 +9081,7 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
         if (consecutiveFails >= maxFails) activateFallback('connected but silent');
         else connectSse();
       }, probeMs);
-      // 与 tickTimer 一致地 unref：这个 8 秒探针不该把 Node 侧的测试进程拖住。
+      // 与 tickTimer 一致地 unref：这个 8 秒自检不该把 Node 侧的测试进程拖住
       if (probeTimer && typeof probeTimer.unref === 'function') probeTimer.unref();
     }
   }
@@ -10689,7 +9104,7 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
     start() {
       if (running) return
       running = true;
-      registerSelf(); // 0.9.4（C10）：与 stop() 里的注销配对
+      registerSelf(); // 与 stop() 里的注销配对
       stats.cursor = cursorNow();
       scheduleTick();
       const cfg = getCfg();
@@ -10708,7 +9123,7 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
       fallbackManual = false;
       mode = 'idle';
       stats.mode = mode;
-      unregisterSelf(); // 0.9.4（C10）：停用后不再挂在注册表里（见 registerSelf 的说明）
+      unregisterSelf(); // 停用后不再挂在注册表里（见 registerSelf 的说明）
     },
     /** 测试与诊断：当前处于哪条链路。 */
     modeOf() { return mode },
@@ -10724,62 +9139,27 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
   }
 }
 
-/**
- * 大陆源客户端的注册表（id → { stats, mode }），供设置页与诊断快照**实时**读取。
- *
- * 为什么不做成"每隔 N 秒把 stats 拷进一个普通对象"：设置页与其它的源状态块已经是
- * "按需读实时计数"的形态（见 12b 的 feedStatsOf 说明），拷贝出来的快照会滞后一轮，
- * 而这里恰恰要靠计数判断"是不是根本没在收数据"。
- */
+/** 大陆源客户端的注册表（id → { stats, mode }），供设置页与诊断快照**实时**读取：拷出来的快照会滞后一轮，
+ *  而这里恰恰要靠计数判断"是不是根本没在收数据"。 */
 const cnStreamRegistry = {};
 
 // ============================================================================
 // dsh-quake-alert · client/src/12d-health-probe.js
 //
-// 作用：**机制层**的探针调度（0.5.3 / DESIGN 11.9 B）。
-// 内容：一个定时器，按 `SOURCE_CONTRACTS[*].staleAfterMs` 判定每个源的新鲜度，
-//       并顺带驱动蓝点的 TTL 自愈（`pruneHealth`）。
+// 作用：机制层的自检调度——定时器按 `SOURCE_CONTRACTS[*].staleAfterMs` 判定各源新鲜度，并驱动
+//       蓝点 TTL 自愈（`pruneHealth`）。契约是唯一阈值来源，源只上报最后取数时刻、自己不判 stale；
+//       自检不发外部请求，只读已有的数据时间。
 // 依赖：05d（契约声明）、05g（健康记录）、07-store（状态上报）。
-//
-// ---------------------------------------------------------------------------
-// 这个文件存在的唯一理由：**让契约里的阈值从"文档"变成"开关"**。
-//
-// 0.5.3 开工前 grep 的结论：`SOURCE_CONTRACTS[*].staleAfterMs`（8 个源）在整个代码库里
-// **没有任何读取点**。阈值实际散在四处硬编码 —— lib/index.js 的 feedStaleMs（jma 3h /
-// usgs 30min / nmc 3h）、lib/wolfx-source.js 的 preset（速报 48h）、15-entry 传给
-// 12-websocket 的 staleAfterMs（emsc 3h）、以及 12c 对 SSE status 帧的直通。
-// 后果是：改契约里的数字，行为一点不变；而"某个源的阈值到底是多少"要翻四个文件才对得上。
-//
-// 现在：**探针是唯一的判定者，契约是唯一的阈值来源**。各源只上报"我最后一次拿到数据的
-// 时刻"（`noteFreshness`），不再自己判 stale。
-//
-// ---------------------------------------------------------------------------
-// 两个刻意的例外（不统一是为了不把事情做坏）
-//
-// ① **`staleAfterMs: null` 的源不判**（P2PQuake / EMSC / cenc_eew）。推送源没有"数据新鲜度"
-//    这个概念——日本可能数小时没有有感地震，而连接是好的。它们的活性由连接层负责
-//    （建连看门狗 + 半开检测），契约里的 `staleReason` 已经写明了这一点。探针读到 null 就跳过。
-// ② **Host 侧保留自己的常量**。`lib/` 不能 import Client 的契约（两个半边是分开构建的），
-//    所以 Host 的 `feedStaleMs` 仍然存在。两边的一致性由**回归断言**守护
-//    （`SOURCE_CONTRACTS[src].staleAfterMs === Host 侧同名常量`），而不是靠"记得同时改两处"。
-//
-// 明确不做：不在探针里发起任何外部请求。它只读已经存在的数据时间——源到不了的时候，
-// "最后数据时间"自然就旧了，不需要另外去探（多一条外部请求路径就多一个要处理的失败形态）。
 // ============================================================================
 
 
-/**
- * 探针周期。30 秒的依据：最短的阈值是 USGS 的 30 分钟，30 秒的分辨率足以让"刚过期"和
- * "过期半小时"在 UI 上的差别不值得更细；而它足够轻（只遍历 8 条记录、不发请求）。
- */
+/** 自检周期。最短阈值是 USGS 的 30 分钟，30 秒分辨率够用，每轮只遍历 8 条记录、不发请求。 */
 const PROBE_INTERVAL_MS = 30 * 1000;
 
 /**
- * 取某个源的新鲜度阈值（毫秒）；`null` / 非正数表示"这条链路不判新鲜度"。
- *
- * 抽成导出函数是为了让"声明生效"这件事可以被直接断言：测试里把契约的字段改成 1 分钟，
- * 探针的行为必须跟着变——那就证明阈值真的来自契约，而不是某个硬编码。
- * @param {string} sourceId
+ * 取某个源的新鲜度阈值（毫秒）；`null` / 非正数表示这条链路不判新鲜度。`staleAfterMs: null` 的是推送源
+ * （P2PQuake / EMSC / cenc_eew，活性由连接层负责）。Host 与 Client 分开构建，`lib/` 不能 import 本契约，
+ * 故 Host 侧仍保留自己的 `feedStaleMs` 常量，两边一致性由回归断言守护。
  */
 function staleAfterOf(sourceId) {
   const c = SOURCE_CONTRACTS[sourceId];
@@ -10796,19 +9176,12 @@ function humanMinutes(ms) {
 }
 
 /**
- * 建一个探针。定时器与 pushSource 都可注入（测试用假时钟直接调 `tick()`，不等真实定时器）。
- *
- * @param {object} [opts]
- * @param {() => number} [opts.now]
- * @param {number} [opts.intervalMs]
- * @param {(fn: Function, ms: number) => any} [opts.setTimer]
- * @param {(t: any) => void} [opts.clearTimer]
- * @param {(id: string, patch: object) => void} [opts.pushSource] 注入点（测试用）。**默认不走它**：
- *   生产路径必须经 `publishStatus` 合成（见下），注入时保持"原样推送"以便断言原始 patch。
- * @param {(id: string) => boolean} [opts.sourceEnabled] 该源当前是否被用户开着（0.9.4 / P2-17）。
- *   关掉的源不该被判 stale：用户主动关掉一个源之后，我们**不再去问它**了，dataTime 自然停住，
- *   于是几小时后界面把"我已关闭"改写成"上游数据已过期（事实是我们不再问了）"，整体状态还被
- *   这个已关闭的源拖成中灰，重新打开也不能立即自愈。默认全部视为开启（保持既有行为）。
+ * 建一个自检器。定时器与 pushSource 都可注入（测试用假时钟直接调 `tick()`，不等真实定时器）。
+ * @param {object} [opts] 另有 now / intervalMs / setTimer / clearTimer 可注入。
+ * @param {(id: string, patch: object) => void} [opts.pushSource] 注入点（测试用）：注入时按原样
+ *   推送以便断言原始 patch；生产路径必须经 `publishStatus` 合成新鲜度 / 连接层 / 数据健康层。
+ * @param {(id: string) => boolean} [opts.sourceEnabled] 该源当前是否被用户开着。关掉的源不判
+ *   stale：Client 不再拉它，dataTime 停在关掉前的值。默认全部视为开启。
  */
 function createHealthProbe(opts = {}) {
   const now = opts.now || (() => Date.now());
@@ -10816,17 +9189,14 @@ function createHealthProbe(opts = {}) {
   const setTimer = opts.setTimer || ((fn, ms) => setInterval(fn, ms));
   const clearTimer = opts.clearTimer || ((t) => clearInterval(t));
   const sourceEnabled = opts.sourceEnabled || (() => true);
-  // 默认经 publishStatus（0.5.4）：探针报的是**新鲜度**这一层，而展示状态要把它与连接层、
-  // 数据健康层合成。此前直接 pushSource，于是"数据已恢复更新"这一句会把一条 schema-error
-  // 蓝点整个刷掉，而 health 里 escalated 仍为 true —— 用户再也看不到"上游改版"的信号。
+  // 默认经 publishStatus 合成展示状态（新鲜度 + 连接层 + 数据健康层）；直接 pushSource 会让
+  // "数据已恢复更新"刷掉 schema-error 蓝点。
   const push = opts.pushSource || ((id, patch) => publishStatus(id, patch));
   let timer = null;
 
   /**
-   * 跑一轮：先做 TTL 自愈，再逐源判新鲜度。
-   *
-   * `dataTime` 从未上报（值为 0）时**不判**——"不知道数据什么时候来的"不等于"数据是旧的"，
-   * 把它当成 stale 会在每个源刚启动的头几秒里闪一片中灰。
+   * 跑一轮：先做 TTL 自愈，再逐源判新鲜度。`dataTime` 从未上报（0）时不判——"不知道数据什么时候
+   * 来的"不等于"数据是旧的"。返回本轮时刻。
    */
   function tick() {
     const t = now();
@@ -10834,9 +9204,8 @@ function createHealthProbe(opts = {}) {
     for (const id of Object.keys(SOURCE_CONTRACTS)) {
       const after = staleAfterOf(id);
       if (after <= 0) continue
-      // 0.9.4（P2-17）：源被用户关掉时不判新鲜度。关掉之后 Client 不再拉它，dataTime 停在
-      // 关掉前的值——继续判 stale 就是在说"上游停更了"，而事实是我们自己不再问了。
-      // 先清掉可能残留的 stale（否则关闭那一刻的 stale 会一直挂到重开）
+      // 源被用户关掉时不判新鲜度（Client 不再拉它，dataTime 停在关掉前的值）；先清掉可能残留的
+      // stale，否则关闭那一刻的 stale 会一直挂到重开。
       if (!sourceEnabled(id)) {
         const recOff = sourceHealthOf(id);
         if (recOff && recOff.fresh && recOff.fresh.stale) {
@@ -10852,9 +9221,8 @@ function createHealthProbe(opts = {}) {
       const was = !!(rec && rec.fresh && rec.fresh.stale);
       noteStale(id, stale, t);
       if (stale !== was) {
-        // 只在**翻转**的那一刻上报：状态没变时每次 push 都会让设置页与状态点重渲一遍。
-        // 恢复时给的是 `open`，而源自己的连接状态可能是 reconnecting —— 那由源的下一次
-        // 上报（feed 源 15 秒一轮）纠正。用 05g 记录的连接状态去猜反而会引入两份真相。
+        // 只在翻转的那一刻上报：状态没变时每次 push 都会让设置页与状态点重渲一遍。恢复时给的
+        // 是 `open`，源自己的连接状态由源的下一次上报纠正。
         push(id, stale
           ? { status: 'stale', detail: 'stale · no new data for ' + humanMinutes(after) }
           : { status: 'open', detail: 'data fresh again' });
@@ -10878,96 +9246,54 @@ function createHealthProbe(opts = {}) {
 }
 
 // ============================================================================
-// dsh-quake-alert · client/src/12e-overseas-poll.js
-//
-// 作用：海外气象源（美国 NWS / 加拿大 ECCC）的**取数器**——按关注点查询外部 REST，
-//       逐条交给解析契约，命中门槛的交给主链。设计与实测依据见 DESIGN 4.7。
-// 依赖：02-storage（own）、03-settings-bridge（currentCfg）、05d（契约包装）、
-//       05g（健康）、07-store（读当前状态）、11-pipeline（handleAlert）。
-//
-// 为什么是 Client 直连、而不是像 JMA / nmc 那样走 Host（DESIGN 4.7.1）：
-//   ① 两个源都返回 `Access-Control-Allow-Origin: *`，浏览器可直连；
-//   ② **只有"按关注点查询"才可用**——全量分别是 1.2GB/天（NWS）与 144MB/天（ECCC），
-//      而 Host 的既有纪律是"不知道 Client 配置、靠 idleMs 自然停下"，它拿不到关注点；
-//   ③ NWS 官方"必须带 User-Agent 标识应用"实测不阻断浏览器（带 Chrome UA 与不带 UA 都 200）。
-//
-// 两个源的取数语义**刻意不统一**（DESIGN 4.7.2），因为它们的能力本来就不同：
-//   · NWS 只支持按点查（`?point=`），它返回的是"该点所在县 / 区划"的预警，**不做半径扩张**。
-//     所以半径 ≥ 25km 时补 4 个方位采样点——注意这是**近似**（100km 内可能有十几个县），
-//     设置页文案必须如实说明。半径 < 25km 只查中心点：NWS 的县通常比它大，采样点会落进同一个县。
-//   · ECCC 的 OGC API 支持 `bbox`，于是半径**直接参与**查询；语义是"与这个矩形相交"（比圆略宽），
-//     方向是多报不漏报（DESIGN 3.2），可以接受。
-//
-// 三个共同的纪律（与 12b / 12c / 12-websocket 一致）：
-//   · **每轮读一次配置**（getCfg）：关注点变了下一轮就生效，不需要重建取数器；
-//   · **串行请求**：对上游礼貌（DESIGN 4.2 对 JMA 定的口径，这里沿用）；
-//   · **排新定时器前先清旧的**（0.5.4 对 12b 的修正）：少这一行就意味着以后谁改了一处控制流
-//     就多一条自续的轮询链。
-//
-// 一个刻意的取舍（DESIGN 4.7.7 第 2 条）：`staleAfterMs` 是 null，本模块**不判停更**，
-// 因为按点 / 框查询天然可能是空响应。活性只由"请求是否成功"表达。
+// dsh-quake-alert · client/src/12e-overseas-poll.js — 海外气象源（美国 NWS / 加拿大 ECCC）的取数器：
+// 按关注点查询外部 REST，逐条交给解析契约，命中门槛的交给主链；每轮读一次配置、串行请求，
+// `staleAfterMs` 为 null 故不判停更。依赖 02-storage、03-settings-bridge、05d、05g、07-store、11-pipeline。
 // ============================================================================
 
 
-/** NWS 的洪水类查询端点（全量 `/alerts/active` 1.67MB 不可用，见文件头）。 */
+/** NWS 的洪水类查询端点（全量 `/alerts/active` 1.67MB 不可用）。 */
 const NWS_ALERTS_BASE = 'https://api.weather.gov/alerts/active';
 /** ECCC 的预警集合（OGC API - Features）。 */
 const ECCC_ALERTS_BASE = 'https://api.weather.gc.ca/collections/weather-alerts/items';
 /**
- * NWS 的 `?event=` 白名单参数——**从 05h 的白名单派生**，不再手抄一份（0.6.1 review）。
- *
- * 为什么必须派生：这个参数是**发给上游的服务端过滤**。将来往白名单里加一类（例如新出现的
- * 洪水类产品）而忘了同步这里，上游不会报错、只是永远不返回那一类；客户端白名单也不会因为
- * "缺了它"而报 schema / empty —— 整条链路静默漏报（DESIGN 3.2 最反对的形态）。
- * 派生成同一个集合之后，"加灾种"这件事只剩一处可改。
+ * NWS 的 `?event=` 白名单参数——从 05h 的白名单派生（同一个集合）。它是发给上游的服务端过滤：
+ * 漏同步不会报错，只是那一类永远不返回（静默漏报）。
  */
 const NWS_EVENT_QUERY = Object.keys(NWS_EVENT_WHITELIST).join(',');
 
 const NWS_POLL_MS = 120 * 1000;
 const ECCC_POLL_MS = 300 * 1000;
-/** 首轮延迟：错开启动窗口，也让设置页先渲染出来（与 12b 的 FEED_FIRST_DELAY_MS 同取向）。 */
+/** 首轮延迟：错开启动窗口，也让设置页先渲染出来。 */
 const OVERSEAS_FIRST_DELAY_MS = 4000;
-/** 单次请求超时（Client 侧统一 10 秒，DESIGN 4.2）。 */
+/** 单次请求超时（Client 侧统一 10 秒）。 */
 const OVERSEAS_TIMEOUT_MS = 10 * 1000;
-/** 单次响应体上限。ECCC 的 bbox 查询在预警密集时实测可到 200KB（几何 + 双语正文），512KB 有余量。 */
+/** 单次响应体上限。ECCC 的 bbox 查询在预警密集时实测可到 200KB（几何 + 双语正文）。 */
 const OVERSEAS_MAX_BODY_CHARS = 512 * 1024;
-/** 半径小于它时只查中心点（见文件头：采样点会落进同一个县，白花请求）。 */
+/** 半径小于它时只查中心点：NWS 的县通常比它大，采样点会落进同一个县，白花请求。 */
 const MIN_SAMPLE_RADIUS_KM = 25;
 /** 每轮请求数上限：20 个关注点 × 5 个采样点 = 100，串行跑完会超过一轮的间隔。 */
 const MAX_REQUESTS_PER_ROUND = 40;
-/** 年龄闸门：首轮（或距上次成功超过 GATE_RESET）时，只播报发布在这么久以内的条目。 */
+/** 时效门槛：首轮（或距上次成功超过 GATE_RESET）时，只播报发布在这么久以内的条目。 */
 const OVERSEAS_FRESH_GATE_MS = 6 * 60 * 60 * 1000;
 /** 距上次成功超过这么久，就重新按"首轮"处理（页面休眠恢复后不该把几小时前的当新警报）。 */
 const OVERSEAS_GATE_RESET_MS = 30 * 60 * 1000;
 /**
- * HTTP 400 之后的冷却期（0.6.0 review A-2）。**不永久拉黑**：400 也可能表示"我们的参数被上游
- * 拒绝"（event 名改了、中间设备改写、WAF），一次误判不该让某个点在本会话里永远查不到。
- * 冷却期内跳过该 URL，到期后自动重试一次。
+ * HTTP 400 之后的冷却期：冷却期内跳过该 URL，到期自动重试一次（400 也可能是我们的参数被上游拒绝）。
  */
 const UNCOVERED_TTL_MS = 60 * 60 * 1000;
-/** 整轮全部失败时的退避起点与上限（DESIGN 4.7.2 对轮询源的通用约束）。 */
+/** 整轮全部失败时，重试间隔逐次延长的起点与上限。 */
 const OVERSEAS_MIN_BACKOFF_MS = 1000;
 const OVERSEAS_MAX_BACKOFF_MS = 60 * 1000;
 
 /**
- * 海外源的计数快照（供设置页的状态区块与诊断快照读取）。
- *
- * 与 12b 的 `feedStatsOf` **分成两张表**：那张表的字段是"增量 / 游标 / Host 计数"，
- * 语义与这里的"轮次 / 请求数 / 未覆盖 / 年龄闸门"完全不同——混在一张表里会让渲染代码
- * 靠 `if (f.host)` 之类的形状判断去猜来源（0.5.4 修过的那类问题）。两张表各自由自己的
- * 渲染分支读，互不干扰。
+ * 海外源的计数快照（供设置页的状态区块与诊断快照读取）：轮次 / 请求数 / 未覆盖 / 时效门槛。
  */
 const overseasStatsOf = {};
 
-/**
- * 覆盖范围包围盒。**宁可宽一点也不精确**：盒外的关注点不产生请求（用户没配那个国家就不查），
- * 盒内重叠（美加边境）会让同一个点查两个源——多一次请求，NWS 对覆盖外的点回 400，
- * 由 pollOnce 的 `uncovered` 分类兜住（不会显示成故障）。
- *
- * 0.6.1 review 补上三个**海外领地**（此前只有本土 / 阿拉斯加 / 夏威夷）：波多黎各与美属维尔京群岛、
- * 关岛与北马里亚纳、美属萨摩亚都是 NWS 的正式预报区（各有 WFO），但原先全部落在盒外 →
- * 配了圣胡安的用户会看到「未设置美国关注点」，而那个点明明就在设置页的列表里。
- */
+/** 覆盖范围包围盒：盒外的关注点不产生请求。NWS 对覆盖外的点回 400，由 pollOnce 的 `uncovered`
+ *  分类捕获；盒内重叠（美加边境）会让同一个点查两个源。含波多黎各与美属维尔京群岛、关岛与
+ *  北马里亚纳、美属萨摩亚（都是 NWS 的正式预报区）。 */
 const US_BOXES = [
   { minLat: 24, maxLat: 50, minLon: -125, maxLon: -66 }, // 本土
   { minLat: 51, maxLat: 72, minLon: -170, maxLon: -129 }, // 阿拉斯加
@@ -11000,14 +9326,11 @@ function lonDegreesOf(km, lat) {
   return km / (KM_PER_DEG * Math.max(0.05, c))
 }
 
-// 采样点 / bbox 的坐标夹取（0.6.1 review）：半径最大 2000km 时，高纬度的方位点会算出
-// `lon < -180`（安克雷奇 → -186 之类）。那样的 URL 会被上游回 400，于是我们自己生成的
-// 非法参数被归类成"被上游拒绝"——诊断会把错误指向对方。夹到合法范围即可（方位点略微
-// 偏离本意，但不会凭空多查一个错误的位置）。
+// 采样点 / bbox 的坐标夹取：半径 2000km 时高纬度的方位点会算出 `lon < -180`，那样的 URL 会被上游回 400。
 const clampLat = (v) => Math.max(-90, Math.min(90, v));
 const clampLon = (v) => Math.max(-180, Math.min(180, v));
 
-/** ECCC 的 bbox：坐标 ± 半径（经度按纬度修正）。 */
+/** ECCC 的 bbox：坐标 ± 半径（经度按纬度修正）。NWS 不支持 bbox，只按点查（`?point=`）。 */
 function ecccBboxOf(place) {
   const dLat = Number(place.radiusKm || 0) / KM_PER_DEG;
   const dLon = lonDegreesOf(Number(place.radiusKm || 0), place.lat);
@@ -11039,27 +9362,20 @@ async function defaultFetchText(url, ctx) {
   const work = (async () => {
     const res = await fetch(url, { signal, headers: { Accept: 'application/json' } });
     if (!res.ok) {
-      // 带上状态码：NWS 对"覆盖范围之外"的坐标返回 400（实测多伦多 / 温哥华 / 伦敦都是），
-      // 那与"网络不通"是两回事，见 pollOnce 里的分类。
+      // 带上状态码：NWS 对覆盖范围之外的坐标返回 400，那与"网络不通"是两回事（见 pollOnce）。
       const err = new Error('HTTP ' + res.status);
       err.status = res.status;
-      // 400 的响应体自带原因（NWS 是 `Invalid Parameter` + parameterErrors）——**只留给诊断**，
-      // 不参与任何判据（按错误文本做分支就是"猜"，DESIGN 4.5 明确反对）。
-      // 截 160 字：与下面 catch 里展示时的切片长度一致（两处不一致会让读码的人以为丢了信息）。
+      // 400 的响应体自带原因（NWS 是 `Invalid Parameter` + parameterErrors），只留给诊断、不参与判据。
       if (res.status === 400) {
         try { err.bodyHint = String(await res.text()).slice(0, 160); } catch (e) { /* 读不到就算了 */ }
       }
       throw err
     }
-    // 0.9.4（C12⑦ / 同 C7② 的做法）：**按流读取并在超限处立刻停**。
-    // 此前是 `await res.text()` 之后才比长度——那时整个响应体已经在内存里了，上限只保护了
-    // "后续 JSON.parse 的代价"，峰值内存根本没被保护（与 Host 轮询器修过的是同一个形态）。
-    // 单位说明：这里比的是**字符数**（历史原因，`OVERSEAS_MAX_BODY_CHARS` 的名字也这么写），
-    // 而流的每一块用字节数计——对 UTF-8 中文两者差 3 倍，取字节数偏保守（宁可早停）。
+    // 按流读取并在超限处立刻停：`await res.text()` 之后才比长度时整个响应体已进内存，上限只
+    // 保护了后续 JSON.parse 的代价。比的是字符数，而流按字节计——取字节数偏保守（宁可早停）。
     const stream = res.body;
     const dec = typeof TextDecoder !== 'undefined' ? new TextDecoder('utf-8') : null;
-    // 没有 TextDecoder 就不走流式路径：那样只能 `String(chunk)`（字节数组的逗号串），
-    // 解出来的 JSON 一定是坏的——退化成"读全文再比长度"比产出垃圾要好（老环境罕见但真实）。
+    // 没有 TextDecoder 就只能 `String(chunk)`（字节数组的逗号串），解出来一定是坏 JSON，故退化。
     if (dec && stream && typeof stream.getReader === 'function') {
       const reader = stream.getReader();
       let out = '';
@@ -11085,9 +9401,8 @@ async function defaultFetchText(url, ctx) {
     return await res.text()
   })();
   if (signal) return await work
-  // 没有 AbortController 时用 Promise.race 兜住超时（0.6.0 review C-7）：否则单次请求可以永久
-  // 挂住，而下一轮只在上一轮结束之后才排 → 整条轮询链会静默停摆、状态还保持绿色。
-  // （无法真正取消那个 fetch，但至少让失败可见、让下一轮照常排。）
+  // 没有 AbortController 时用 Promise.race 实现超时保护：否则单次请求可以永久挂住，下一轮不再排，
+  // 整条轮询链静默停摆、状态还保持绿色。
   return await Promise.race([
     work,
     new Promise((_, reject) => {
@@ -11096,18 +9411,11 @@ async function defaultFetchText(url, ctx) {
   ])
 }
 
-/** 会话内的"覆盖外"标记以 **URL 本身**为键：坐标或半径一变，旧标记自然失效，不必手动清理。 */
-
 /**
- * 通用海外取数器。与 12b 的 createFeedClient **接口同形**（start / stop / pollOnce / pollSerial /
- * stats），差别只在"数据从哪来"：那边是 Host 的增量游标，这边是按关注点的外部查询。
- *
- * @param {object} opts
- *   id / label / intervalMs / firstDelayMs / enabled / getCfg
- *   placesFor(cfg) -> place[]          该国关注点
- *   urlsFor(place, cfg) -> string[]    该关注点的查询 URL（NWS 多个采样点、ECCC 一个 bbox）
- *   parseOne(feature, place) -> result 契约包装（05d）
- *   onStatus(patch) / onError(err) / fetchText(url, ctx)
+ * 通用海外取数器，与 12b 的 createFeedClient 接口同形（start / stop / pollOnce / pollSerial / stats）。
+ * @param {object} opts 另有 id / label / intervalMs / firstDelayMs / enabled / getCfg / placesFor(cfg)
+ *   -> place[]（该国关注点）/ urlsFor(place, cfg) -> string[]（该点的查询 URL，NWS 多个采样点、
+ *   ECCC 一个 bbox）/ parseOne(feature, place) -> result / onStatus(patch) / onError(err) / fetchText(url, ctx)
  */
 function createOverseasSource(opts = {}) {
   const id = opts.id || 'overseas';
@@ -11123,16 +9431,11 @@ function createOverseasSource(opts = {}) {
   const placesFor = opts.placesFor || (() => []);
   const urlsFor = opts.urlsFor || (() => []);
   const parseOne = opts.parseOne || (() => ({ ok: false, kind: 'schema', detail: 'no parser configured' }));
-  // 单次请求的超时可注入（0.6.1）：好让回归测试能在毫秒级验"超时"这条路径的文案与分类
-  // ——否则它得真的等 10 秒（默认沙箱此前连 AbortController 都没有，这条路径从未被跑过）。
-  // 用 Number.isFinite 而不是 typeof：`NaN` 也是 number，而 `setTimeout(fn, NaN)` 会**立即**触发
-  //（0.6.2 review）。
+  // 超时与 400 冷却期时长可注入，便于回归测试在毫秒级验这两条路径（`NaN` 也是 number 而
+  // `setTimeout(fn, NaN)` 会立即触发，故用 Number.isFinite 判）。
   const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : OVERSEAS_TIMEOUT_MS;
-  // 400 冷却期的时长可注入（0.6.1）：好让回归测试真的能走到"TTL 到期后自动重试"那一侧
-  // ——此前只有常量自证（`UNCOVERED_TTL_MS > 0`），把实现改成永久拉黑也测不出来。
   const uncoveredTtlMs = Number.isFinite(opts.uncoveredTtlMs) ? opts.uncoveredTtlMs : UNCOVERED_TTL_MS;
-  // 交给主链的出口做成可注入：默认就是 11-pipeline 的 handleAlert，测试注入 spy 之后
-  // 就能只验"取数器交出了什么"，而不必把整条通知链（音频 / 通知 / toast）拖进单测。
+  // 交给主链的出口可注入：默认是 11-pipeline 的 handleAlert，测试注入 spy 后只验取数器交出了什么。
   const onAlert = opts.onAlert || handleAlert;
 
   let timer = null;
@@ -11143,38 +9446,28 @@ function createOverseasSource(opts = {}) {
   let lastStatusKey = '';
   let lastSuccessAt = 0;
   let lastError = '';
-  /** 年龄闸门上一轮是否处于激活状态（用于"只在进入时计数"，见 pollOnce 里的 gated）。 */
+  /** 时效门槛上一轮是否处于激活状态（用于"只在进入时计数"，见 pollOnce 里的 gated）。 */
   let gateActive = false;
-  /** 整轮全部失败时的退避（0 = 没有退避，用正常间隔）。 */
+  /** 整轮全部失败时的重试间隔递增量（0 = 不递增，用正常间隔）。 */
   let backoffMs = 0;
   const stats = {
     polls: 0, requests: 0, received: 0, applied: 0, errors: 0,
     ageSkipped: 0, throttledLast: 0, throttledTotal: 0, gated: 0, rejected: 0,
     truncated: 0, lastAt: 0, lastDataAt: 0,
   };
-  // 会话内记住"这些 URL 暂时别查"（键 = URL，值 = 可以再试的时刻）。0.6.0 review A-2：
-  // 原来是永久拉黑，一次误判（上游改参数名 / WAF 回 400）就让那个点在本会话里永远查不到；
-  // 现在带 TTL，到点自动重试一次。
+  // 会话内记住"这些 URL 暂时别查"（键 = URL，值 = 可以再试的时刻），到期自动重试一次。
   const uncovered = new Map();
 
-  /**
-   * 状态上报：只在**变化**时送出，且除自己上一轮的值还比 **store 里的当前值**
-   * （0.5.4 的修正：探针 / 健康层也会写同一个源，只比自己会把别人的状态永久盖住）。
-   */
+  /** 状态上报：只在变化时送出；除自己上一轮的值，还比 store 里的当前值（自检 / 健康层也写同一个源）。 */
   function reportStatus(patch) {
     const eff = effectiveStatusOf(id, patch.status, patch.detail);
     const cur = ((store.sources || {})[id] || {});
-    // 去重键 = **status + detail**（0.6.0 review 修正）。此前只比 status，于是"同一状态下的
-    // 语义变化"永远推不出去：用户刚加了一个关注点，状态仍是 open，而 detail 从
-    // 「未设置美国关注点（设置 → …）」变成了「已查询」——旧文案会一直挂在设置页上，
-    // 用户以为没配成功（这正是 0.5.4「信号被覆盖」那一类）。
-    // 代价是 **detail 里不能放单调计数**：那会让每轮都判定为变化、整页反复重渲。
-    // 所以计数一律不进 detail，由 13-ui 的 OVERSEAS_STAT_ORDER 从 stats 直接读。
+    // 去重键 = status + detail：只比 status 会让"同一状态下的语义变化"永远推不出去；代价是
+    // detail 里不能放单调计数（那会让每轮都判为变化、整页重渲），计数由 13-ui 直接读 stats。
     const key = eff.status + '|' + String(eff.detail || '');
     if (key === lastStatusKey && cur.status === eff.status && String(cur.detail || '') === String(eff.detail || '')) return
     lastStatusKey = key;
-    // 与 12b 同形：**由调用方（15-entry 的 feedStatus）落库**，本模块不直接写 store
-    // ——两处都写会让同一个状态在一轮里被 publish 两次，也会让"谁写的"变得不可追。
+    // 与 12b 同形：由调用方（15-entry 的 feedStatus）统一写入，本模块不直接写 store（否则一轮 publish 两次）。
     try { onStatus(Object.assign({ label }, eff)); } catch (err) { /* UI 回调异常不影响轮询 */ }
   }
 
@@ -11188,12 +9481,8 @@ function createOverseasSource(opts = {}) {
     }
     const places = placesFor(cfg);
     if (places.length === 0) {
-      // 与坐标型源同一条原则（06-matcher 的 noWatch）：**不静默**——"配错了关注点"看起来像
-      // "根本没有预警"是这套系统最该避免的误解。这里不产生任何网络请求。
-      //
-      // 两种"0 个关注点"必须分开说（0.6.1 review）：是配置里根本没有点，还是**有**点但都落在
-      // 本源的覆盖盒之外（关岛之类，或纯加拿大用户看美国源）？此前一律说"未设置"，
-      // 而用户明明在设置页的列表里看得见那个点。
+      // 与坐标型源同一条原则（06-matcher 的 noWatch）：不静默——"配错了关注点"看起来像"根本
+      // 没有预警"。这里不产生任何网络请求。是"配置里没有点"还是"有点但都在覆盖盒外"必须分开说。
       const anyPlaces = ((cfg.watch || {}).places || []).length > 0;
       reportStatus({
         status: 'open',
@@ -11204,14 +9493,9 @@ function createOverseasSource(opts = {}) {
       });
       return { applied: 0, noPlaces: true }
     }
-    // 请求清单（0.6.0 review 修正）：**先保证每个关注点都被查一次，再补采样点**。
-    // 此前是按关注点顺序平铺后整段截断——10 个关注点 × 5 个采样点 = 50 > 上限 40 时，
-    // 排在后面的两个关注点**每一轮都被截断、永远查不到**，而用户看不出任何异常
-    //（这正是 3.2 最反对的"静默漏报"）。现在：
-    //   · 每个关注点的第一个 URL（NWS 的中心点 / ECCC 的 bbox）无条件排上；
-    //   · 剩下的额度才按顺序补方位采样点。
-    // 关注点上限是 20（MAX_WATCH_PLACES），远小于请求上限，所以正常配置下**不会再丢关注点**；
-    // 万一真的超出，`skippedPlaces` 会如实计数并写进状态（不静默）。
+    // 请求清单：先保证每个关注点都被查一次，再补采样点——按顺序平铺后整段截断会让排在后面的
+    // 关注点每轮都被截断、永远查不到（静默漏报）。每个关注点的第一个 URL 无条件排上，剩下的
+    // 额度才补方位采样点；真超出时 `skippedPlaces` 如实计数。
     const now = Date.now();
     // 暂时被上游拒绝的 URL 先跳过（TTL 到期后会自动重试一次，见下面 400 分支）
     const groups = places
@@ -11220,9 +9504,7 @@ function createOverseasSource(opts = {}) {
     const reqs = [];
     for (const g of groups) reqs.push({ place: g.place, url: g.urls[0] });
     const coreCount = reqs.length;
-    // 剩余额度补方位采样点，**起点按轮次轮转**（0.6.0 review B-2）：固定顺序会让排在后面的
-    // 关注点每一轮都只拿到中心点（实测 10 个点时尾部两点永远只有 1 个采样点，等效半径退化成
-    // "那一个县"）。轮转之后长期看每个点都能轮到方位采样。
+    // 补方位采样点的起点按轮次轮转：固定顺序会让排在后面的关注点每轮都只拿到中心点，等效半径退化成"那一个县"。
     const offset = groups.length > 0 ? (stats.polls % groups.length) : 0;
     const rotated = groups.slice(offset).concat(groups.slice(0, offset));
     for (const g of rotated) {
@@ -11233,22 +9515,18 @@ function createOverseasSource(opts = {}) {
       if (reqs.length >= MAX_REQUESTS_PER_ROUND) break
     }
     const capped = reqs.slice(0, MAX_REQUESTS_PER_ROUND);
-    // 被截断的采样点数要按"本该有多少"算，而不是用 reqs.length——补采样点时就已经 break 在
-    // 上限上了，剩下的采样点根本没进 reqs（用 reqs.length 会永远算出 0，设置页那一行就成了摆设）。
+    // 被截断的采样点数要按"本该有多少"算：补采样点时已 break 在上限上，剩下的没进 reqs。
     const wantSamples = groups.reduce((n, g) => n + Math.max(0, g.urls.length - 1), 0);
     const gotSamples = Math.max(0, capped.length - Math.min(coreCount, capped.length));
     const skippedPlaces = Math.max(0, coreCount - capped.length);
     const skippedSamples = Math.max(0, wantSamples - gotSamples);
-    // 两个计数分开（0.6.0 review B-6）：`Last` 是本轮值（设置页看当下）、`Total` 是累计
-    // （诊断里看趋势）——此前只有一个覆盖式的值，会出现"忽有忽无、也不知道累计跳了多少"。
+    // `Last` 是本轮值（设置页看当下）、`Total` 是累计值（诊断里看趋势），两个计数分开。
     stats.throttledLast = skippedPlaces + skippedSamples;
     stats.throttledTotal += stats.throttledLast;
 
-    // 年龄闸门（DESIGN 4.7.6）：首轮或"距上次成功超过 30 分钟"（页面休眠恢复）时，
-    // 只把发布在 6 小时以内的条目当新警报播；更早的仍进历史，但不打扰。
+    // 时效门槛：首轮或"距上次成功超过 30 分钟"（页面休眠恢复）时，只把发布在 6 小时以内的当新警报。
     const gated = (now - lastSuccessAt) > OVERSEAS_GATE_RESET_MS;
-    // 只在**进入**闸门的那一刻计数（0.6.1 review）：此前统计的是"闸门处于激活状态的轮数"，
-    // 而源持续不可达时 lastSuccessAt 一直不更新 → 每轮都 +1，诊断里会读成"进入过几百次首轮"。
+    // 只在进入门槛的那一刻计数：源持续不可达时 lastSuccessAt 一直不更新，否则每轮都会 +1。
     if (gated && !gateActive) stats.gated += 1;
     gateActive = gated;
 
@@ -11265,10 +9543,7 @@ function createOverseasSource(opts = {}) {
     const seen = new Set();
     for (const item of capped) {
       if (stopped) break
-      // 超时标记（0.6.1 review）：`AbortController.abort()` 造成的错误与"用户停用插件"
-      // 在 fetch 层完全同形（Chrome 的文案甚至是 "The user aborted a request."）。
-      // 只靠 `stopped` 区分不了，于是真实超时会被诊断成"用户主动中止"——正是 A-1 想消灭的
-      // 那条误导信息。这里自己记一笔，好在 catch 里给出正确的文案。
+      // 超时标记：`AbortController.abort()` 的错误与"用户停用插件"在 fetch 层完全同形，只靠 `stopped` 区分不了。
       let timedOut = false;
       abortCtl = typeof AbortController === 'function' ? new AbortController() : null;
       const timerId = abortCtl
@@ -11287,33 +9562,24 @@ function createOverseasSource(opts = {}) {
         try {
           json = JSON.parse(text);
         } catch (err) {
-          // 与下面"缺 features"同一类（0.6.1 review）：HTTP 200 却不是 JSON，最常见的原因是
-          // 拦截页 / 上游改版。此前它按**链路故障**上报，于是同一份证据在同一个函数里得出两个
-          // 相反的六态（蓝点 vs 红点）——而 JMA / NOAA 对"返回 HTML 而不是电文"一律判 schema。
+          // HTTP 200 却不是 JSON（拦截页 / 上游改版）按 schema 上报，不按链路故障（否则同一份证据两个六态）。
           noteParseResult(id, failResult('schema', 'response is not JSON (blocked page or upstream change?)'));
           throw new Error('response is not JSON (blocked page or upstream change?)')
         }
         const feats = json && Array.isArray(json.features) ? json.features : null;
         if (!feats) {
-          // 顶层结构不符 = **契约漂移**，不是链路故障（0.6.0 review 修正）。按 DESIGN 4.5 的六态
-          // 语义它该点亮**蓝点**（用户处理不了、等插件更新），而不是红点（让用户去折腾自己的网络）。
-          // 此前这里只抛普通 Error，于是整轮被归成 unreachable —— 与 check-contracts 把同一个
-          // 条件判成"结构变了"的结论自相矛盾。
+          // 顶层结构不符 = 契约漂移（蓝点：用户处理不了、等插件更新），不是链路故障（红点）。
           noteParseResult(id, failResult('schema', 'response lacks features[]'));
           throw new Error('response lacks features[]')
         }
-        // 结构正确但**空数组**（NWS 按点查询的常态）交给**轮末**统一判定（0.6.2 修正，见下）。
-        // 0.6.1 曾在这里逐响应上报 `empty`，而 05g 的 empty 会 `clearData`（清蓝点 + 归零连续
-        // 失败计数）——同一轮里只要有一条 URL 返回空数组，其它 URL 的同类 schema 失败就被清零：
-        // 实测（每轮 1 个拦截页 + 4 个空响应 × 6 轮）schema 计数涨到 6 而 consecutiveFail 恒为 0，
-        // **蓝点永不点亮**。局部改版 / 局部拦截于是变成静默漏报（DESIGN 3.2 最反对的形态）。
+        // 结构正确但空数组（NWS 按点查询的常态）交给轮末统一判定：逐响应上报 `empty` 会
+        // `clearData`（清蓝点 + 归零连续失败计数），同轮其它 URL 的 schema 失败就被清零。
         if (typeof json.numberMatched === 'number' && json.numberMatched > feats.length) truncatedNow += 1;
         okCount += 1;
         stats.received += feats.length;
         for (const feature of feats) {
-          // **单条各自兜错**（0.6.0 review B-3）：此前整个 features 循环与 fetch 共用一个 try，
-          // 一条 entry 的解析 / 主链异常会被记成"这个请求失败"，还会静默丢掉该响应里剩下的条目
-          //（12b 的既有纪律正是"单条失败不阻断其余条目"，见其 apply 循环）。
+          // 单条各自捕获异常：整个 features 循环与 fetch 共用一个 try，会让一条 entry 的解析 /
+          // 主链异常被记成"这个请求失败"，还会静默丢掉该响应里剩下的条目。
           let res = null;
           try {
             res = parseOne(feature, item.place);
@@ -11322,10 +9588,8 @@ function createOverseasSource(opts = {}) {
             lastError = 'item parse threw: ' + String((parseErr && parseErr.message) || parseErr);
             continue
           }
-          // 契约分类：empty（不在本插件范围 / 该点无预警）不计失败，schema / value 计入健康。
-          // **逐条 empty 传 `perItem`**：只计数、不清蓝点——单条"不在范围内"不能证明同轮其它
-          // 条目的 schema 失败已恢复（不传的话，1 个被拦截的 URL + N 个非白名单事件的 URL
-          // 会让蓝点永不点亮。0.6.2 只把"空数组"挪到了轮末，这里是同型的另一半）。
+          // 逐条 empty 必须传 `perItem`：只计数、不清蓝点——单条"不在范围内"不能证明同轮其它
+          // 条目的 schema 失败已恢复。
           if (noteParseResult(id, res, undefined, { perItem: true })) continue
           if (!res.ok) continue
           const alert = res.alert;
@@ -11335,13 +9599,12 @@ function createOverseasSource(opts = {}) {
           const issued = Date.parse(alert.issued);
           if (Number.isFinite(issued) && issued > newestDataAt) newestDataAt = issued;
           const stale = gated && Number.isFinite(issued) && (now - issued) > OVERSEAS_FRESH_GATE_MS;
-          // 只统计**本来会被播报**的那些（0.6.1 review）：Watch / Advisory 由档位决定
-          // （`overseasRank < 3`）本来就不播报，把它们算进"过老只记历史"会让设置页那个
-          // 数字失去解释力（用户会以为有那么多条被闸门拦下了播报）。
+          // 只统计本来会被播报的那些：Watch / Advisory 由档位决定（`overseasRank < 3`）本来就
+          // 不播报，算进"过老只记历史"会让设置页那个数字失去解释力。
           const rank = typeof alert.overseasRank === 'number' ? alert.overseasRank : 0;
           if (stale && rank >= OVERSEAS_BROADCAST_MIN_RANK) stats.ageSkipped += 1;
-          // 过老的条目仍然交给主链，但带 staleOnArrival：主链会走"命中 + 只记历史"的那条分支
-          // （与"跨会话重放"同形）。丢掉它会让用户看不到"就在打开页面前刚发布的洪水预警"。
+          // 过老的条目仍然交给主链（带 staleOnArrival，主链走"命中 + 只记历史"那条分支），
+          // 丢掉它会让用户看不到"就在打开页面前刚发布的洪水预警"。
           try {
             onAlert(alert, cfg, stale ? { staleOnArrival: Math.round((now - issued) / 3600000) } : undefined);
           } catch (alertErr) {
@@ -11352,29 +9615,19 @@ function createOverseasSource(opts = {}) {
           applied += 1;
         }
       } catch (err) {
-        // **用户主动停用不是故障**（0.6.0 review A-1，照搬 12b 的既有守卫）：stop() 会 abort
-        // 在途请求，于是 catch 会收到一个 AbortError。若照常累加，停用插件就会在侧边栏留下
-        // 一个红点、并往诊断里写一条 "The user aborted a request."——而重载时旧 fiber 的这次
-        // 上报还会把新会话短暂染红。这里直接返回，让本轮当作"被中止"处理。
+        // 用户主动停用不是故障：stop() 会 abort 在途请求，照常累加会在侧边栏留下红点并往诊断里写中止信息。
         if (stopped) return { applied, aborted: true }
-        // 400 = "这个坐标不在我的服务范围内"（NWS 实测对加拿大 / 英国的点都这么答）。
-        // 这是**参数问题，不是链路故障**：按 DESIGN 4.5 的状态语义，把它显示成红色"不可达"
-        // 会让一个多伦多用户以为插件坏了（实际是"你关注的地方没有这个源"）。
-        // 三个约束（0.6.0 review A-2）：
-        //   ① **不替上游断言原因**——400 也可能是"我们的参数被拒"（上游改了 event 名、
-        //      中间设备改写、WAF），文案只说"被上游拒绝（HTTP 400）"，并把响应体前 160 字
-        //      留在诊断里供人判断，不写"这个点不在覆盖范围"这种我们无法证实的话；
-        //   ② **拉黑带 TTL**——记的是"这个 URL 暂时别查"，1 小时后自动重试一次，
-        //      避免一次误判让某个点在本会话里永远查不到；
-        //   ③ **按请求（URL）记，不是按关注点**：NWS 的"覆盖外"是逐点的，一个美加边境的点的
-        //      中心点可能 400，而它的四个方位点里有落在美国境内、本该查得到的。
+        // 400 = "这个坐标不在我的服务范围内"（NWS 实测对加拿大 / 英国的点都这么答）：参数问题、
+        // 不是链路故障，显示成红色"不可达"会让用户以为插件坏了。① 不替上游断言原因（文案只说
+        // "被上游拒绝（HTTP 400）"，响应体前 160 字留在诊断里）；② 拉黑带 TTL，1 小时后重试一次；
+        // ③ 按请求（URL）记而不是按关注点——NWS 的覆盖外是逐点的。
         if (err && err.status === 400) {
           stats.rejected += 1;
           rejectedNow += 1;
           uncovered.set(item.url, now + uncoveredTtlMs);
           if (!lastError) lastError = 'HTTP 400（' + String(err.bodyHint || '').slice(0, 160) + '）';
-          // 400 也是"上游有响应"，同样算一次成功接触：否则只配了覆盖外坐标的用户
-          // `lastSuccessAt` 永远不更新、年龄闸门恒处于"首轮"。
+          // 400 也是"上游有响应"，同样算一次成功接触：否则只配了覆盖外坐标的用户 lastSuccessAt
+          // 永远不更新、时效门槛恒处于"首轮"。
           lastSuccessAt = Date.now();
           continue
         }
@@ -11393,39 +9646,27 @@ function createOverseasSource(opts = {}) {
     }
     if (newestDataAt) {
       stats.lastDataAt = newestDataAt;
-      // 上报"最后一次拿到数据的时刻"：契约里这条源的 staleAfterMs 是 null（探针不判），
+      // 上报"最后一次拿到数据的时刻"：契约里这条源的 staleAfterMs 是 null（自检不判），
       // 但诊断快照与排障要看得到它。
       noteFreshness(id, newestDataAt);
     }
-    // 轮末的两条**轮级**判定（0.6.2 修正）。
-    // ① 分页截断：按**轮**计数（此前按响应累加——加拿大用户有 N 个关注点时一轮会 +N，
-    //    与 UI / 诊断里"多少轮被截断"的说法不符）。
+    // 轮末的两条轮级判定：① 分页截断按轮计数（按响应累加时 N 个关注点的一轮会 +N，与 UI 说法
+    // 不符）；② 结构正常的空结果只在整轮无失败时才判"结构没问题"（05g 的 empty 语义，清蓝点）。
     if (truncatedNow) stats.truncated += 1;
-    // ② 结构正常的空结果：**只有整轮一条失败都没有**时，才把这一轮判成"结构没问题"。
-    //    这正是 05g 的 empty 语义（empty 也算结构是好的 → 清蓝点），但它必须以**轮**为单位：
-    //    逐响应上报会让局部失败（5 个采样点里 1 个被拦截）永远升不了级，见上面的说明。
-    //    `applied === 0` 时才需要它——有成功解析的条目时 `noteSourceSuccess` 已经清过蓝点。
+    // `applied === 0` 时才需要它：有成功解析的条目时 `noteSourceSuccess` 已经清过蓝点。
     if (okCount > 0 && failCount === 0 && applied === 0) {
-      // 轮级判定：整轮无失败、只是没有本插件范围内的条目 → 结构正常，照旧清蓝点（不传 perItem）。
       noteParseResult(id, failResult('empty', 'ok structure, nothing in scope'));
     }
-    // 停用之后不再写状态（0.6.0 review A-1）：否则"用户主动关掉插件"会在侧边栏留下红点，
-    // 诊断里也会多一条 "The user aborted a request."
+    // 停用之后不再写状态，否则"用户主动关掉插件"会在侧边栏留下红点、诊断里多一条中止信息。
     if (stopped) return { applied, aborted: true }
-    // 成功一轮就清掉上次的失败文案（0.6.0 review B-6）：否则一次瞬时 500 会永远挂在诊断里。
+    // 成功一轮就清掉上次的失败文案，否则一次瞬时 500 会永远挂在诊断里。
     if (okCount > 0 && failCount === 0) lastError = '';
-    // 状态分类（DESIGN 4.5 的六态语义）：
-    //   · 有响应且没有失败 → open
-    //   · 有响应但也有失败 → degraded（部分链路有问题，但仍在工作）
-    //   · 全部失败 → unreachable（红色：环境问题，用户或许能处理）
-    //   · 全部被 400 拒绝 → **仍然是 open**（400 是参数问题，不是链路故障，见上面的分档）
+    // 状态分类：有响应且无失败 → open；有响应也有失败 → degraded（仍在工作）；
+    // 全部失败 → unreachable（红色，环境问题）；全部被 400 拒绝 → 仍是 open（参数问题）。
     if (okCount > 0 && failCount === 0) {
       lastSuccessAt = Date.now();
-      // detail 只放**非单调**的语义信息（0.6.0 review 修正 + B-1）：它进了上报去重键，
-      // 含单调计数会让每轮都判为"变化"、设置页反复重渲。但也**不能留空**——空 detail 会让
-      // 侧边栏悬停与设置页顶部回退成裸状态词（出现「NWS：open」这种英文）。"已按 N 个关注点
-      // 查询"里的 N 只在用户改配置时变，正是想推出去的语义变化；计数由设置页的
-      // OVERSEAS_STAT_ORDER 从 stats 直接读。
+      // detail 只放非单调的语义信息（它进去重键），但也不能留空——空 detail 会让侧边栏悬停与
+      // 设置页顶部回退成裸状态词。计数由设置页从 stats 直接读。
       const notes = [];
       if (skippedPlaces) notes.push('too many watch points · queried ' + capped.length);
       else if (skippedSamples) notes.push('sample points capped');
@@ -11438,8 +9679,7 @@ function createOverseasSource(opts = {}) {
     } else if (failCount > 0) {
       reportStatus({ status: 'unreachable', detail: 'all requests failed: ' + lastError });
     } else if (rejectedNow > 0) {
-      // 不替上游断言原因（0.6.0 review A-2）：400 也可能是"我们的参数被拒"，
-      // 文案只说被拒绝 + 多久后重试，响应体前 160 字在诊断里。
+      // 不替上游断言原因：400 也可能是"我们的参数被拒"，文案只说被拒绝 + 多久后重试。
       reportStatus({
         status: 'open',
         detail: 'rejected x' + rejectedNow + ' (HTTP 400) · retry in ' + Math.round(uncoveredTtlMs / 60000) + 'm',
@@ -11456,8 +9696,7 @@ function createOverseasSource(opts = {}) {
     if (inFlight) return inFlight
     inFlight = pollOnce().finally(() => {
       inFlight = null;
-      // 给设置页的「源状态」与诊断快照留一份快照（与 12b 对 feedStatsOf 的做法一致：
-      // 不触发 store 重渲，渲染侧每 5 秒自己读一次）。
+      // 给设置页的「源状态」与诊断快照留一份快照（不触发 store 重渲，渲染侧每 5 秒自己读）。
       overseasStatsOf[id] = Object.assign({}, stats, { running, lastError });
     });
     return inFlight
@@ -11465,17 +9704,14 @@ function createOverseasSource(opts = {}) {
 
   function schedule(delay) {
     if (!running) return
-    // 排新的之前先清旧的（0.5.4 对 12b 的修正，这里同纪律）
+    // 排新的定时器之前先清旧的
     if (timer) { clearTimeout(timer); timer = null; }
     timer = setTimeout(async () => {
       timer = null;
       let res = null;
       try { res = await pollSerial(); } catch (err) { onError(err); }
-      // 失败退避（0.6.0 review B-5；语义在 0.6.2 修正）：整轮全部失败才退避，成功即回正常间隔。
-      // **必须加在正常间隔之上**：退避上限是 60 秒，而两个源的真实间隔是 120 / 300 秒——
-      // 0.6.1 写成 `max(退避, 正常间隔)` 之后，在真实间隔下它恒等于正常间隔，退避阶梯成了
-      // 死代码（0.6.0 承诺的"1s→60s 退避"实际不存在；两条退避用例注入的都是毫秒级间隔，
-      // 永远发现不了）。现在失败时是 `正常间隔 + 退避`，对上游礼貌的方向不变、强度回来了。
+      // 失败后的重试间隔递增：整轮全部失败才递增，成功即回正常间隔。递增必须加在正常间隔之上——上限
+      // 60 秒而真实间隔是 120 / 300 秒，取 max 会让递增恒等于正常间隔（等于死代码）。
       const allFailed = !!(res && res.requests > 0 && res.failed === res.requests);
       if (allFailed) backoffMs = backoffMs ? Math.min(backoffMs * 2, OVERSEAS_MAX_BACKOFF_MS) : OVERSEAS_MIN_BACKOFF_MS;
       else backoffMs = 0;
@@ -11491,9 +9727,8 @@ function createOverseasSource(opts = {}) {
       stopped = false;
       running = true;
       backoffMs = 0;
-      // 闸门标志也要复位（0.6.2 review）：它记的是"上一轮闸门是否激活"。若在闸门激活期间
-      // stop()（或测试里 resetGate()）之后重新开始，闸门重新为真而标志仍是 true →
-      // "进入过几次闸门"少计一次，正是本模块要修的那类"数字不可解释"。
+      // 门槛标志也要复位：它记的是"上一轮门槛是否激活"，在门槛激活期间 stop() 之后重新开始
+      // 会让"进入过几次门槛"少计一次。
       gateActive = false;
       schedule(firstDelayMs);
     },
@@ -11503,7 +9738,7 @@ function createOverseasSource(opts = {}) {
       if (timer) { clearTimeout(timer); timer = null; }
       // 中止在途请求：插件停用后回来的响应不该再进主链（响铃 / 弹窗 / 写历史）
       if (abortCtl) { try { abortCtl.abort(); } catch (err) { /* 已结束等忽略 */ } abortCtl = null; }
-      // 停用后也刷新一次快照（0.6.0 review B-6）：否则诊断里 `running` 会一直停在 true。
+      // 停用后也刷新一次快照，否则诊断里 `running` 会一直停在 true。
       overseasStatsOf[id] = Object.assign({}, stats, { running: false, lastError });
     },
     pollOnce,
@@ -11543,13 +9778,13 @@ function createEcccSource(opts = {}) {
   }, opts))
 }
 
-/** URL 里的值只做最小转义：**保留逗号**。NWS 的 `point=lat,lon` 与 ECCC 的 `bbox=a,b,c,d`
- *  都靠逗号分隔，转成 `%2C` 之后 URL 在排障日志里几乎没法读；两个源都接受裸逗号（实测）。 */
+/** URL 里的值只做最小转义：保留逗号（`point=lat,lon` 与 `bbox=a,b,c,d` 都靠逗号分隔，
+ *  两个源都接受裸逗号，转成 `%2C` 之后 URL 在排障日志里几乎没法读）。 */
 function encodeValue(v) {
   return encodeURIComponent(v).replace(/%2C/g, ',')
 }
 
-/** 模块级 URL 拼装（两个 profile 共用；createOverseasSource 内部不再各写一份）。 */
+/** 模块级 URL 拼装（两个 profile 共用）。 */
 function urlOfLocal(base, params) {
   const qs = Object.keys(params).map((k) => k + '=' + encodeValue(params[k])).join('&');
   return base + '?' + qs
@@ -11557,45 +9792,23 @@ function urlOfLocal(base, params) {
 
 // ============================================================================
 // dsh-quake-alert · client/src/16-diag.js
-//
-// 作用：**只读诊断快照**（DESIGN 11.3 的交付物之一）。
-// 内容：把 Client 侧的实时状态压成一份 JSON——聚合状态、逐源状态与数据健康、增量计数、
-//       大陆源的链路模式、关注点摘要、最近几条历史。
-// 依赖：03-settings-bridge、05d-source-contracts、07-store、12b-feed-poll、12c-cn-stream。
-//
-// 为什么需要它：`TROUBLESHOOTING.zh.md` 的读者是 **AI**，而 AI 只能看到用户粘贴给它的东西。
-// Host 侧的 `/feed?stats=1` 已经能读，但"浏览器这一半到底收到了什么、卡在哪一步"此前
-// 完全在界面里、靠人肉描述——而人肉描述恰恰是最不可靠的一环（"没响"可能是没收到、
-// 可能是解析失败、可能是没命中关注点、可能是被静默时段吞掉，四种原因在用户叙述里长得一样）。
-//
-// 三条纪律：
-//   ① **只读**：不修改任何状态、不发任何请求。诊断本身不能改变被诊断的东西。
-//   ② **永不抛错**：每个片段各自 try/catch。一个会抛错的诊断工具在真出事时最没用。
-//   ③ **只放可 JSON 化的叶子字段**：store / registry / cfg 都是活对象，直接 JSON.stringify
-//      会拖出整个模块图（也能成环）。逐字段取。
-//
-// 关于版本号：快照里**不含插件版本**——本项目的版本号只在 package.json / CHANGELOG /
-// README 三处（见约定），把它复制进 client bundle 会多出一个会漂移的位置。
-// `snapshot` 是这份**快照格式**的版本，用来判断字段含义。
+// 作用：**只读诊断快照**——把 Client 侧的实时状态压成一份 JSON：聚合状态、逐源状态与数据健康、
+//       增量计数、大陆源的链路模式、关注点摘要、最近几条历史、投递面。
+// 依赖：03-settings-bridge、05g-source-health、07-store、08-audio、09-notify、10-dedupe、
+//       12b-feed-poll、12c-cn-stream、12e-overseas-poll。
+// 三条纪律（对外契约）：① **只读**——不改状态、不发请求；② **永不抛错**——每个片段各自 try/catch，
+//       异常进 `warnings` 一并返回；③ **只放可 JSON 化的叶子字段**——活对象必须逐字段取，不能直接 stringify。
 // ============================================================================
 
 
-/** 快照格式版本（与插件版本无关，见文件头）。逐版对应：
- *  · 1 = 0.5.0 起的初始形状
- *  · 2 = 0.8.0（新增 `authority` 段 + `config.watch.places[].origin`）；0.8.1 把 `config.language`
- *    加在了 2 里没提号（review 时发现两种形状都自称 2，所以下面这条规则要真的执行）
- *  · 3 = 0.8.2（`config.watch.places[]` 再增 `province` / `city`）
- *  · 4 = 0.9.2 新增 `delivery` 段（段是 0.9.2 加的，但号当时忘了提——0.9.4 补上，
- *    并把"加段也要提号"写进规则：读快照的一方据此知道"这份快照有哪些键"，
- *    缺键 = 来自更早的版本，而不是"这一项没配"）
- *
- *  **加字段就提号**（0.8.0 的先例）。 */
+/** 快照格式版本（与插件版本无关）。**加字段就提号**：读快照的一方据此知道"这份快照有哪些键"，
+ *  缺键 = 来自更早的版本，而不是"这一项没配"。 */
 const DIAG_SNAPSHOT_VERSION = 4;
 
 const str = (v) => String(v === undefined || v === null ? '' : v);
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
-/** 每个片段都各自兜错：诊断工具在任何状态下都必须能产出东西。 */
+/** 每个片段各自捕获异常，异常写进 warnings：一个会抛错的诊断工具在真出事时最没用。 */
 function safe(fn, fallback, warnings, label) {
   try {
     return fn()
@@ -11605,7 +9818,7 @@ function safe(fn, fallback, warnings, label) {
   }
 }
 
-/** 来源标注：让 AI 知道这条状态是哪条链路报的，不用去猜字段顺序。 */
+/** 来源标注：让读快照的一方知道这条状态是哪条链路报的，不用去猜字段顺序。 */
 function sourceRows() {
   const out = {};
   const srcs = (store && store.sources) || {};
@@ -11633,19 +9846,9 @@ function feedRows() {
   return out
 }
 
-/**
- * 海外源（12e，0.6.0）：Client 直连的 REST 轮询。
- *
- * 三个字段是这个形态**独有**的，也是排障时最先要看的：
- *   · `rejected` —— 被上游用 HTTP 400 拒绝的请求数（实测多伦多 / 温哥华 / 伦敦的坐标都被
- *     NWS 这样答过）。**它不代表"这个点不在覆盖范围"**（也可能是我们的参数被拒），
- *     文案与代码都不替上游断言原因。（0.6.1 review：此处此前写作 `uncovered` ——
- *     那是 12e 内部 Map 的名字，快照里从来没有这个字段。）
- *   · `ageSkipped` —— 被年龄闸门拦下的、**本来会播报**的条数（打开页面时已发布超过 6 小时
- *     的那些，只进历史不响铃）。它解释"为什么我看到预警但没响"。
- *   · `gated` —— 这个源**进入**过几次"首轮 / 休眠恢复"状态（每次进入都会重新按 6 小时判）。
- *   · `truncated` —— 上游返回的条目数超过每次请求上限、被我们截断的轮数（ECCC 的 limit=200）。
- */
+/** 海外源（12e）：Client 直连的 REST 轮询，字段语义与 feed / streams 两张表不同。`rejected` 是被上游
+ *  HTTP 400 拒绝的请求数，**不代表"这个点不在覆盖范围"**（也可能是参数被拒）；`ageSkipped` 是被年龄门槛
+ *  拦下、本来会播报的条数（只进历史不响铃）；`gated` 是进入首轮 / 休眠恢复状态的次数。 */
 function overseasRows() {
   const out = {};
   for (const id of Object.keys(overseasStatsOf)) {
@@ -11653,13 +9856,12 @@ function overseasRows() {
     out[id] = {
       polls: num(o.polls), requests: num(o.requests), received: num(o.received), applied: num(o.applied),
       errors: num(o.errors),
-      // `rejected` = 被上游用 HTTP 400 拒绝的请求数（**不代表"这个点不在覆盖范围"**，
-      // 也可能是我们的参数被拒；响应体前 160 字在 lastError 里）。
+      // 被上游用 HTTP 400 拒绝的请求数（**不代表"这个点不在覆盖范围"**，响应体前 160 字在 lastError 里）
       rejected: num(o.rejected),
       ageSkipped: num(o.ageSkipped),
       // 上游条目数超过每次请求上限、被我们截断的轮数（ECCC 的 limit=200）
       truncated: num(o.truncated),
-      // 两个 throttle 计数分开：Last 是本轮、Total 是累计（0.6.0 review B-6）
+      // 两个 throttle 计数分开：Last 是本轮、Total 是累计
       throttledLast: num(o.throttledLast), throttledTotal: num(o.throttledTotal), gated: num(o.gated),
       lastAt: o.lastAt ? new Date(o.lastAt).toISOString() : null,
       lastDataAt: o.lastDataAt ? new Date(o.lastDataAt).toISOString() : null,
@@ -11673,9 +9875,6 @@ function overseasRows() {
 /** 大陆源（12c）：**链路模式是这里最要紧的一列**——降级意味着延迟从秒级变成最长 15 秒。 */
 function streamRows(warnings) {
   const out = {};
-  // 0.9.4（P2-26）：这里（以及 mode / stringify 两处）此前把 `[]` 当 warnings 传进去 —— 而 safe()
-  // 是往里 push 的，于是"诊断片段自己抛错"这条信息被丢进一个没人看的空数组，与文件头
-  // "诊断工具在任何状态下都必须能产出东西、失败也要可见"直接冲突。改成把调用方的 warnings 传下去。
   const warn = Array.isArray(warnings) ? warnings : [];
   for (const id of Object.keys(cnStreamRegistry)) {
     const reg = cnStreamRegistry[id];
@@ -11699,8 +9898,7 @@ function streamRows(warnings) {
   return out
 }
 
-/** 关注点摘要。**坐标是有意保留的**：匹配失败通常就要靠"震中距最近关注点多少公里"来判，
- *  去掉坐标等于把最有用的那一列删了。用户是主动粘贴这份快照的，界面上也写明了含坐标。 */
+/** 关注点摘要。**坐标是有意保留的**：匹配失败通常就要靠"震中距最近关注点多少公里"来判。 */
 function watchSummary(cfg) {
   const w = (cfg && cfg.watch) || {};
   const places = Array.isArray(w.places) ? w.places : [];
@@ -11710,25 +9908,17 @@ function watchSummary(cfg) {
     cities: Array.isArray(w.cities) ? w.cities.slice(0, 30) : [],
     places: places.slice(0, 20).map((p) => ({
       name: str(p && p.name), lat: num(p && p.lat), lon: num(p && p.lon), radiusKm: num(p && p.radiusKm),
-      // 0.8.0：来源分支（jp / cn / global）。它决定"这个关注点归哪个源"（DESIGN 9.3 → 3.4），
-      // 诊断里必须能看到——权威源判错时，第一个要核的就是"这个点被算作了谁的分支"。
+      // 来源分支（jp / cn / global）：决定"这个关注点归哪个源"；优先源判错时第一个要核的就是它。
       origin: str(p && p.origin) || 'global',
-      // 0.8.2：大陆关注点的省 / 市（DESIGN 11.9 B）。行政区层级匹配现在读它，不再从名字反推，
-      // 所以诊断里也要看得到——"为什么这条大陆预警没命中"的第一个要核的就是这两个值。
-      // 非大陆点不写这两个键，免得快照里多出一堆空字段。
+      // 大陆关注点的省 / 市：行政区层级匹配读它而不从名字反推。非大陆点不写这两个键，免得快照里多出空字段。
       ...(str(p && p.origin) === 'cn' ? { province: str(p && p.province), city: str(p && p.city) } : {}),
     })),
     placesCount: places.length,
   }
 }
 
-/**
- * 跨源权威源（0.8.0 / DESIGN 3.4）：被权威源压掉的条数。
- *
- * 这一段的**唯一**存在理由：被抑制的条目连历史都不进，用户没有任何别的途径看到它们。
- * 权威源一旦判错（把两场不同地震并成一个 = 真漏报），这个数字与 `lastDetail` 是唯一的痕迹。
- * `bySource` 按**已播报的那个源**分组——它能回答"是不是 USGS 总在抢在日本源前面"。
- */
+/** 跨源优先源：被优先源压掉的条数。被抑制的条目连历史都不进，这一段是它们的**唯一**痕迹；
+ *  `bySource` 按**已播报的那个源**分组，能回答"是不是 USGS 总在抢在日本源前面"。 */
 function authorityRow() {
   const a = authorityStatsOf();
   const bySource = {};
@@ -11774,11 +9964,8 @@ function pageEnv() {
   return out
 }
 
-/**
- * 生成诊断快照。
- * @param {number} [now] 注入点（测试用）
- * @returns {object} 可直接 JSON.stringify 的纯数据对象
- */
+/** 生成诊断快照。@param {number} [now] 注入点（测试用）
+ *  @returns {object} 可直接 JSON.stringify 的纯数据对象；被捕获的异常在 `warnings` 里 */
 function buildDiagSnapshot(now) {
   const warnings = [];
   const cfg = safe(() => currentCfg() || {}, {}, warnings, 'cfg') || {};
@@ -11815,12 +10002,8 @@ function buildDiagSnapshot(now) {
         breakForSevere: cfgQuiet.breakForSevere !== false,
       },
       cnTransport: str(cfg.cnTransport) || 'auto', // 'auto'（默认，SSE 可自动降级）| 'poll'（用户强制轮询）
-      // 界面语言（0.8.1 先立字段，0.9.0 落地本地化，0.9.3 加上繁体）。"界面没跟着切"
-      // 这类问题第一个要核的就是这一项。
-      // **它是归一后的生效值，不是持久层原值**（0.8.2 review 订正）：`cfg` 来自 `currentCfg()`，
-      // 而那条路一定过 `normalizeCfg`，所以手改配置写进去的、或将来降级留下的非法值在这里
-      // 已经被换成默认值——这一项能回答"界面现在按哪个语言渲染"，回答不了"配置里原本写了什么"。
-      // 要区分后者得带 Host user 层的原值，那是 0.9.0 本地化落地时一并决定的事。
+      // 界面语言：**规整后的生效值，不是持久层原值**（cfg 来自 currentCfg()，一定过 normalizeCfg），
+      // 所以它只能回答"界面现在按哪个语言渲染"。
       language: str(cfg.language),
       watch: safe(() => watchSummary(cfg), {}, warnings, 'watch'),
     }), {}, warnings, 'config'),
@@ -11829,42 +10012,33 @@ function buildDiagSnapshot(now) {
     dataHealth: safe(() => sourceHealthOf() || {}, {}, warnings, 'health'),
     feed: safe(feedRows, {}, warnings, 'feed'),
     streams: safe(() => streamRows(warnings), {}, warnings, 'streams'),
-    // 海外源（0.6.0）：Client 直连的 REST 轮询。与 feed / streams 并列而不是塞进任一张表
-    // ——它们的字段语义不同（见 overseasRows 的注释）。
+    // 海外源：Client 直连的 REST 轮询，与 feed / streams 并列（字段语义不同，见 overseasRows）。
     overseas: safe(overseasRows, {}, warnings, 'overseas'),
-    // 跨源权威源（0.8.0）：被压掉的跨源副本条数。**这一段是那些条目的唯一痕迹**——
-    // 它们不进历史（DESIGN 3.4），所以诊断里没有的话就彻底不可见。
+    // 跨源优先源：被压掉的跨源副本条数——那些条目不进历史，这里是它们唯一的痕迹。
     authority: safe(authorityRow, {}, warnings, 'authority'),
     history: safe(historySummary, {}, warnings, 'history'),
-    // 投递面（0.9.2）：**"收到并命中但没响"与"根本没收到"在用户叙述里长得一样**。音频未解锁
-    // （用户从未点过页面）与系统通知权限被拒都**无法从 config 推导**——config.notify.system 是
-    // "用户想不想要"，这里是"浏览器允不允许 / 解锁没解锁"。两者都是只读探测，符合快照的只读纪律。
+    // 投递面：音频未解锁（用户从未点过页面）与系统通知权限被拒都**无法从 config 推导**——
+    // config.notify.system 是"用户想不想要"，这里是"浏览器允不允许 / 解锁没解锁"。
     delivery: safe(() => ({
       audio: str(audioState()),
       notificationPermission: str(notificationPermission()),
     }), {}, warnings, 'delivery'),
-    // 生成过程中被兜住的异常：诊断工具自身的失败也要可见，不能假装一切正常
+    // 生成过程中被捕获的异常：诊断工具自身的失败也要可见，不能假装一切正常
     warnings,
   }
 }
 
-/**
- * 复制诊断快照到剪贴板。剪贴板不可用（沙箱 iframe / 权限被拒）时**不抛错**，
- * 而是把文本交回调用方去显示成可手动复制的文本框——诊断的第一步不该卡在复制上。
- * @returns {Promise<{ ok: boolean, text: string, error?: string }>}
- */
+/** 复制诊断快照到剪贴板。剪贴板不可用（沙箱 iframe / 权限被拒）时**不抛错**，而是把文本交回调用方去显示成可手动复制的文本框。
+ *  @returns {Promise<{ ok: boolean, text: string, warning?: string, error?: string }>} */
 async function copyDiagSnapshot(now) {
-  // 0.9.4（P2-26）：stringify 失败时把原因**带回去**，而不是 `[]` 丢掉 + 返回 ok:true。
-  // 诊断工具自己失败却报"复制成功、内容是 {}"，是最难归因的一种形态。
   const warnings = [];
   const text = safe(() => JSON.stringify(buildDiagSnapshot(now), null, 2), '{}', warnings, 'stringify');
   try {
     if (typeof navigator !== 'undefined' && navigator && navigator.clipboard &&
         typeof navigator.clipboard.writeText === 'function') {
       await navigator.clipboard.writeText(text);
-      // 快照生成时被兜住的异常要**跟着结果回给界面**（0.9.4 / P2-26）：复制确实成功了，
-      // 所以不能报 ok:false（那会被界面读成"剪贴板不可用"），但也绝不能只说"已复制"——
-      // 用户以为手里是一份完整诊断，而里面其实少了几个片段。
+      // 快照生成时被捕获的异常要**跟着结果回给界面**：复制确实成功了，所以不能报 ok:false；
+      // 但也绝不能只说"已复制"——用户以为手里是一份完整诊断，而里面其实少了几个片段。
       return warnings.length
         ? { ok: true, text, warning: warnings.join('；') }
         : { ok: true, text }
@@ -11877,22 +10051,14 @@ async function copyDiagSnapshot(now) {
 
 // ============================================================================
 // dsh-quake-alert · client/src/17-config-io.js
-//
-// 作用：配置的导出 / 导入 / 撤销（0.9.0，DESIGN 11.1 的第二半）。
+// 作用：配置的导出 / 导入 / 撤销。
 // 内容：导出文件格式与版本、导入校验、导入前自动备份、撤销上次导入、文件下载与读取。
-// 依赖：01-constants、02-storage（归一与存取）、03-settings-bridge（读写配置的唯一入口）。
-//
-// 定稿的语义（0.9.0 开工前拍定，写在 DESIGN 11.11）：
-//   · **只导出配置本身**：关注点、阈值、语言、数据源、静默时段……与 0.8.2 的配置契约
-//     一一对应。历史（履历）与源健康记录**不进文件**——前者含源侧原文、换机器后未必对应
-//     得上；后者是会话内的时效数据，导过去基本没用。
-//   · **导入是整体替换**，不是合并：语义最直白、可预测。所以导入前**自动把当前配置备份一份**
-//     （同一个 localStorage 里），并给出「撤销上次导入」这个出口——否则备份就是个没人用的文件。
-//   · **格式版本是唯一的契约**：文件里不写插件版本（那会诱使调用方按版本号做分支，而真正
-//     要判断的是结构是否兼容）。`formatVersion` 高于本版能读的就**拒绝**，而不是尽力解析
-//     ——半个配置比没有配置更危险。
-//   · 校验失败一律返回**错误码**（不是拼好的中文句子）：文案由 UI 层按当前界面语言翻，
-//     否则导入失败提示会固定成中文（本地化在这里最容易漏）。
+// 依赖：01-constants、02-storage（规整与存取）、03-settings-bridge（读写配置的唯一入口）。
+// 语义（对外契约）：
+//   · 只导出配置本身（关注点、阈值、语言、数据源、静默时段……）；历史与源健康记录**不进文件**。
+//   · **导入是整体替换**，不是合并，所以导入前**自动把当前配置备份一份**，并给出「撤销上次导入」出口。
+//   · **格式版本是唯一的契约**：文件里不写插件版本；`formatVersion` 高于本版能读的就**拒绝**。
+//   · 校验失败一律返回**错误码**（不是拼好的中文句子）：文案由 UI 层按当前界面语言翻。
 // ============================================================================
 
 
@@ -11910,11 +10076,7 @@ function configFileName(now) {
   return 'quake-alert-config-' + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '.json'
 }
 
-/**
- * 生成导出文件内容（缩进过的 JSON）。
- * @param {object} [cfg] 要导出的配置；省略时取当前生效的配置。
- * @param {Date} [now] 用于测试注入时间。
- */
+/** 生成导出文件内容（缩进过的 JSON）。cfg 省略时取当前生效的配置；now 用于测试注入时间。 */
 function buildConfigExport(cfg, now) {
   const at = now instanceof Date ? now : new Date();
   return JSON.stringify({
@@ -11925,16 +10087,11 @@ function buildConfigExport(cfg, now) {
   }, null, 2)
 }
 
-/**
- * 解析并校验一份导入文本。**不做任何写入**（纯函数，便于直接断言各种坏输入）。
- * @returns {{ok:true,cfg:object,formatVersion:number,warnings:object}|{ok:false,error:string,detail?:string}}
- *   error 取值：`json`（不是 JSON）/ `shape`（不是本插件配置的结构）/
- *   `format`（其它应用的 JSON）/ `version`（版本号缺失或非法）/ `newer`（版本高于本版能读的）
- */
+/** 解析并校验一份导入文本。**不做任何写入**（纯函数）。
+ *  @returns {{ok:true,cfg:object,formatVersion:number,warnings:object}|{ok:false,error:string,detail?:string}}
+ *  error 取值：`json`（不是 JSON）/ `shape`（结构不符）/ `format`（其它应用）/ `version`（非法）/ `newer`（版本更高） */
 function parseConfigImport(text) {
-  // 去掉 BOM：JSON 规范不允许它，但记事本、PowerShell 的 `Out-File -Encoding utf8` 之类都会加上，
-  // 而 `JSON.parse` 会因此在第一个字符上抛——对用户表现为"我导出后一个字没改，它却说不是有效的
-  // JSON"。只差这一个 replace。
+  // 去掉 BOM：记事本、PowerShell 的 `Out-File -Encoding utf8` 都会加上，而 JSON.parse 会因此在首字符上抛。
   const raw = String(text === undefined || text === null ? '' : text).replace(/^\uFEFF/, '');
   if (!raw.trim()) return { ok: false, error: 'shape' }
   let parsed;
@@ -11949,13 +10106,9 @@ function parseConfigImport(text) {
   if (typeof v !== 'number' || !Number.isFinite(v) || v < 1) return { ok: false, error: 'version' }
   if (v > CONFIG_FORMAT_VERSION) return { ok: false, error: 'newer', detail: String(v) }
   if (!isPlainObject(parsed.config)) return { ok: false, error: 'shape' }
-  // 归一必须与"返回错误码"同一口径：畸形配置（例如某个字段是 `{toString: null, valueOf: null}`
-  // 这种**转不成字符串**的对象）会在归一里抛。让它抛出去的话，UI 那条 `.then` 链上没人接得住
-  // ——用户点「导入」之后界面毫无反应，而这是最难归因的一类失败（11.8 教训 4）。
+  // 规整出错也返回错误码：畸形配置（字段是转不成字符串的对象）会在规整里抛，抛出去 UI 那条 .then 链上没人接得住。
   let cfg;
-  // 关注点体检账本（0.9.4）：归一化会**静默**丢弃坐标非法的关注点，而"导入"这个动作上静默
-  // 等于数据丢失无反馈——用户看到"已导入配置。"，实际少了几个点，界面上看不出来。
-  // 这里把账本一起交出去，由界面如实说明（见 13-ui-settings 的 onImportCfg）。
+  // 关注点检查清单：规整流程会**静默**丢弃坐标非法的关注点，这里把清单交出去，由界面如实说明少了什么。
   const audit = { total: 0, dropped: 0, radiusFixed: 0 };
   try {
     cfg = normalizeCfg(parsed.config, audit);
@@ -11965,14 +10118,8 @@ function parseConfigImport(text) {
   return { ok: true, cfg, formatVersion: v, warnings: audit }
 }
 
-/**
- * 把当前配置备份到 localStorage（覆盖上一次备份）。
- *
- * **返回备份时间；写不进去时返回空字符串**——返回值不是"操作成功"的同义词。`saveJSON` 是
- * 静默失败的（`try { setItem } catch {}`），而这份备份是"导入还能回滚"的**全部依据**：写不进去
- * 却照样返回时间戳，界面就会显示「撤销上次导入」，用户点下去才发现没有备份，而那时他原来的
- * 配置已经被替换掉了。所以写后**回读校验**，确认它真的落了盘。
- */
+/** 把当前配置备份到 localStorage（覆盖上一次备份）。**返回备份时间；写不进去时返回空字符串**——
+ *  saveJSON 是静默失败的，而这份备份是"导入还能回滚"的**全部依据**，所以写后**回读校验**、确认真的写进了本地存储。 */
 function backupCurrentConfig(now) {
   const at = now instanceof Date ? now : new Date();
   const payload = { at: at.toISOString(), config: normalizeCfg(currentCfg()) };
@@ -11989,9 +10136,7 @@ function loadConfigBackup() {
   try {
     cfg = normalizeCfg(b.config);
   } catch (err) {
-    // 0.9.5（fresh review）：备份同样是外部输入（用户在 localStorage 里就能改），而归一化会调
-    // i18n 取词、遇到字符串化不了的形状会抛 TypeError。调用方在**渲染期**（设置页要看"能不能撤销"），
-    // 所以这里按"没有可撤销的备份"处理——与上面那句契约一致。
+    // 备份同样是外部输入（用户能在 localStorage 里改），规整时可能抛；调用方在渲染期，按"没有可撤销的备份"处理。
     try { console.warn('[dsh-quake-alert] 备份配置归一化失败，视为无备份：' + String((err && err.message) || err)); } catch (e) { /* 忽略 */ }
     return null
   }
@@ -12004,29 +10149,19 @@ function clearConfigBackup() {
   } catch (err) { /* 存储不可用时忽略：清不掉备份不影响正确性 */ }
 }
 
-/**
- * 导入：**先备份当前配置，再整体替换**。校验失败时**什么都不写**（连备份都不做）。
- * @returns {{ok:true,cfg:object,backupAt:string}|{ok:false,error:string,detail?:string}}
- */
+/** 导入：**先备份当前配置，再整体替换**；校验失败时**什么都不写**（连备份都不做）。
+ *  @returns {{ok:true,cfg:object,backupAt:string}|{ok:false,error:string,detail?:string}} */
 function importConfig(text, now) {
   const parsed = parseConfigImport(text);
   if (!parsed.ok) return parsed
   const backupAt = backupCurrentConfig(now);
-  // 备份不成功就**不导入**：定稿承诺的是"导入后随时能撤销"，而做不到这一点时，"整体替换成
-  // 另一份配置"是不可逆的破坏性操作。宁可这次导入失败并如实说明，也不要在没有退路的情况下替换。
+  // 备份不成功就**不导入**：没有退路时"整体替换成另一份配置"是不可逆的破坏性操作。
   if (!backupAt) return { ok: false, error: 'backup-failed' }
   const next = applyCfg(parsed.cfg);
   return { ok: true, cfg: next, backupAt, warnings: parsed.warnings }
 }
 
-/**
- * 撤销上次导入：把备份写回去，**然后清掉备份**（0.9.2 起为一次性撤销）。
- *
- * 此前备份永久保留（原注释写"可以反复撤"），于是「撤销上次导入」按钮**跨会话一直存在**，
- * 而它回滚的是"导入之前"的整份配置——用户在几周后误触它，就是一次静默的配置丢失。而"反复撤"
- * 本身没有实际价值：第二次撤写的还是同一份备份。改为一次性：撤销成功即清掉快照，
- * 按钮随之消失（这也让 clearConfigBackup 第一次有了调用点）。
- */
+/** 撤销上次导入：把备份写回去，**然后清掉备份**——一次性撤销，撤销成功即清掉快照、按钮随之消失。 */
 function undoConfigImport() {
   const b = loadConfigBackup();
   if (!b) return { ok: false, error: 'no-backup' }
@@ -12035,10 +10170,8 @@ function undoConfigImport() {
   return { ok: true, at: b.at }
 }
 
-/**
- * 触发浏览器下载。**返回是否成功**——沙箱 iframe 里 `URL.createObjectURL` 可能不可用，
- * 那种情况下 UI 要退回"把文本显示出来让用户自己复制"（同诊断快照的处理）。
- */
+/** 触发浏览器下载。**返回是否成功**——沙箱 iframe 里 `URL.createObjectURL` 可能不可用，
+ *  那种情况下 UI 要退回"把文本显示出来让用户自己复制"（同诊断快照的处理）。 */
 function downloadConfigFile(text, filename) {
   try {
     if (typeof document === 'undefined' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') return false
@@ -12079,22 +10212,15 @@ function readConfigFile(file) {
 }
 
 // ============================================================================
-// dsh-quake-alert · client/src/13-ui-settings.js
-//
-// 作用：设置页面板（设置 → 灾害预警）的全部 UI。
-// 内容：连接状态与数据源、关注地区（都道府县 + 市区町村搜索多选）、
-//       三类阈值、通知与声音（含音量防抖落盘）、静默时段、免责声明、最近预警记录。
-// 依赖：00-i18n、01-constants、02-storage、03-settings-bridge、04-city-table、07-store、08-audio、09-notify。
-// 约定：所有写入都经 applyCfg，保证内存/镜像/Host 三处一致。
-// 依赖方向：本文件 → 00-i18n（取词），00-i18n 不反向依赖这里，所以没有环。
-// 文案：本文件里**我们生成的文本**一律走 t('settings.*')（表在 00b-texts-settings.js）。
-//       源侧文本（SOURCE_CODE_TEXT / store 的 label 与 detail / 地名 / headline / detail /
-//       kindLabel / res.detail）一律原样透传——DESIGN 11.10 的范围约定。
+// dsh-quake-alert · client/src/13-ui-settings.js — 设置页面板（设置 → 灾害预警）的全部 UI：连接状态与
+// 数据源、关注地区、阈值、通知与声音、静默时段、免责、最近预警记录。所有写入都经 applyCfg（保证内存 /
+// 镜像 / Host 三处一致）；本文件生成的文本一律走 t('settings.*')，源侧文本一律原样透传。
+// 依赖：00-i18n、01-constants、02-storage、03-settings-bridge、04-city-table、07-store、08-audio、
+// 09-notify、05b/05c（测试电文）、11-pipeline、12-websocket、12b/12c/12e（计数）、16-diag、17-config-io。
 // ============================================================================
 
 
-// ---------- 设置页 UI ----------
-// 连接状态 → 颜色 / 文案（设置页与侧边栏状态指示共用）
+// ---------- 设置页 UI（含侧边栏共用的状态映射） ----------
 function statusMetaOf(status, retries) {
   return {
     idle: { color: '#7c8494', text: t('settings.status.idle') },
@@ -12102,8 +10228,7 @@ function statusMetaOf(status, retries) {
     open: { color: '#4ade80', text: t('settings.status.open') },
     reconnecting: { color: '#d9a406', text: t('settings.status.reconnecting', { n: retries }) },
     closed: { color: '#e5484d', text: t('settings.status.closed') },
-    // 0.4.1：轮询源与"消息处理失败"也需要自己的状态。此前只有 WebSocket 的五个状态，
-    // 于是上游被墙 / 路由 500 / 主链抛错时界面上与"没有新闻"完全不可区分。
+    // 轮询源与"消息处理失败"也有自己的状态：否则上游被墙 / 路由 500 / 主链抛错在界面上与"没有新闻"完全不可区分。
     unreachable: { color: '#e5484d', text: t('settings.status.unreachable') },
     degraded: { color: '#d9a406', text: t('settings.status.degraded') },
     stale: { color: '#8b8f98', text: t('settings.status.stale') },
@@ -12120,25 +10245,19 @@ function settingsSyncLabel() {
     local: t('settings.storage.local'),
   }[settingsSync] || String(settingsSync)
 }
-// 历史条目「类型」行显示的 P2PQuake code。气象电文不在此表里（它不是 P2PQuake 来源），
-// 索引一律经 own()，避免外部数据里的 'constructor' 之类的键命中原型链。
+// 历史条目「类型」行显示的 P2PQuake code；气象电文不在此表里。索引一律经 own()，避免外部数据的键命中原型链。
 const P2P_KIND_CODE = { quake: 551, eew: 556, tsunami: 552 };
 /**
- * alert.code → 来源标注的**文案 key**（全球源、JMA 电文与大陆源没有 P2PQuake 的 code）。
- *
- * 0.9.4：值是 key，取词在 `p2pCodeTextOf` 里做。此前这里是**写死的中文**（`JMA 电文` /
- * `CENC 预警` / `中央气象台`），而它进的正是**履历条目的「类型」行**——用户实测在英文 / 日文
- * 界面下看到「JMA 电文」，那是简体中文。机构品牌名（EMSC / USGS / NOAA CAP / NWS / ECCC）与
- * `code N` 这种规范标识不翻：它们在任何语言下都该是同一个写法。
+ * alert.code → 来源标注的**文案 key**（全球源、JMA 电文与大陆源没有 P2PQuake 的 code）。值是 key，
+ * 取词在 `p2pCodeTextOf` 里做——这些字符串进履历条目的「类型」行，写死中文会在英 / 日界面下露出来。
+ * 机构品牌名（EMSC / USGS / NOAA CAP / NWS / ECCC）与 `code N` 这种规范标识不翻。
  */
 const SOURCE_CODE_TEXT = {
   emsc: 'EMSC', usgs: 'USGS', noaa: 'NOAA CAP', jma: 'sourceCode.jma',
   cenc_eew: 'sourceCode.cencEew', cenc_eqlist: 'sourceCode.cencEqlist',
-  // 0.5.2：大陆气象预警的发布主体是各级气象台、由中央气象台汇总。标成「JMA 电文」会让
-  // 一条云南暴雨预警看起来来自日本气象厅（同 SOURCE_CODE_TEXT 存在的理由）。
+  // 大陆气象预警的发布主体是各级气象台、由中央气象台汇总；标成「JMA 电文」会让一条云南暴雨预警指向日本气象厅。
   nmc_alarm: 'sourceCode.nmc',
-  // 0.6.0：海外气象源。机构名不能省——一条多伦多的降雨预警被标成「JMA 电文」是同一类错误，
-  // 而 ECCC 的许可（End-use Licence v2.1.1）本身就要求署名。
+  // 海外气象源同理，机构名不能省——ECCC 的许可（End-use Licence v2.1.1）本身就要求署名。
   nws_alerts: 'NWS', eccc_alerts: 'ECCC',
 };
 /** 表里的值可能是 key（要取词），也可能已经是品牌名（原样返回）。 */
@@ -12148,13 +10267,8 @@ const sourceCodeLabelOf = (value) => {
   return got === s ? s : got
 };
 /**
- * 历史条目「类型」行的来源标注。
- *
- * 0.4.1：优先用 alert.code，而不是 kind。全球地震（EMSC / USGS）的 kind 也是 'quake'，
- * 只看 kind 会把它们标成「code 551」（P2PQuake 的震度速报）——与 0.3.2 修过的
- * "气象条目被标成 code 551"是同一类错误。
- * 0.4.2 补两处兜底：① 数值 code 经 `strOr` 变成字符串后也能显示成 `code N`；
- * ② **旧历史**（0.4.1 之前写入）没有 code 字段，用 id 前缀（emsc: / usgs: / noaa:）认出来源。
+ * 历史条目「类型」行的来源标注：优先用 alert.code（全球地震的 kind 也是 'quake'）；旧历史没有 code
+ * 字段，用 id 前缀（emsc: / usgs: / noaa: / cenc: / nmc: / nws: / eccc:）认出来源。
  */
 function p2pCodeTextOf(kind, code, id) {
   const codeStr = String(code === undefined || code === null ? '' : code);
@@ -12166,28 +10280,18 @@ function p2pCodeTextOf(kind, code, id) {
   if (idStr.indexOf('usgs:') === 0) return 'USGS'
   if (idStr.indexOf('noaa:') === 0) return 'NOAA CAP'
   if (idStr.indexOf('cenc:') === 0) return t('sourceCode.cencMainland')
-  // 0.5.2：大陆气象源（新的历史条目走 code，这里兜住"更早写入的"这条路径）
   if (idStr.indexOf('nmc:') === 0) return t('sourceCode.nmc')
-  // 0.6.0：海外气象源同理（`code` 缺失的历史条目靠 id 前缀认出来源）
   if (idStr.indexOf('nws:') === 0) return 'NWS'
   if (idStr.indexOf('eccc:') === 0) return 'ECCC'
   const c = own(P2P_KIND_CODE, kind);
   if (c) return 'code ' + c
-  // 兜底：气象（kind='weather'）在 0.5.2 之前只有日本这一个来源。现在有了大陆气象源，
-  // 所以这里的兜底必须注明它是**日方**的，而不是把两者混起来（大陆那条在上面的 id / code 分支已拦下）。
+  // 兜底：气象（kind='weather'）在出现大陆气象源之前只有日本这一个来源，故这里必须注明是日方的。
   return kind === 'weather' ? t('sourceCode.jma') : '—'
 }
-// 灾种配色：气象灾害此前没有键，历史条目一律落到灰色兜底，与另外三类不一致
 const KIND_COLORS = { eew: '#e5484d', quake: '#3b82f6', tsunami: '#f76b15', weather: '#8b5cf6' };
 const kindColorOf = (kind) => own(KIND_COLORS, kind) || '#7c8494';
-/**
- * 下拉框的自绘箭头（data URI）。
- *
- * 为什么不用浏览器的原生箭头（0.8.1 修）：原生化箭头的**水平位置由浏览器决定**，而我们的
- * 下拉带 `min-width: 180px`——当选项文字比这短时（例如语言下拉只有"简体中文"），框比内容宽，
- * 箭头看上去就落在框中段而不是贴着右边缘（用户报告："下箭头不贴在框的右边而在中间"）。
- * 自绘的箭头位置由 `background-position` 固定，框多宽都贴右 8px；顺带也让各平台长相一致。
- */
+/** 下拉框的自绘箭头（data URI）：原生箭头的水平位置由浏览器决定，选项文字短于 `min-width: 180px` 时
+ *  它会落在框中段而不是贴着右边缘；自绘的位置由 `background-position` 固定，多宽都贴右 8px。 */
 const SELECT_ARROW = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236b7280' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E\")";
 const s = {
   section: (title, ...children) => h('div', { style: { padding: '14px 16px', borderBottom: '1px solid rgba(148,163,184,0.14)' } },
@@ -12196,14 +10300,8 @@ const s = {
   row: (...children) => h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', margin: '4px 0' } }, ...children),
   checkbox: (checked, onChange, text) => h('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer', color: '#dfe3e8' } },
     h('input', { type: 'checkbox', checked, onChange: (e) => onChange(e.target.checked) }), text),
-  // `label`（第 5 参）渲染成 `aria-label`（0.5.4）。此前每个下拉旁边只有一个视觉上的 div
-  // 文字，两者在 DOM 里没有任何关联——读屏软件念到的是"组合框"，用户无法知道哪个是震度阈值。
-  // 全库此前只有历史条目与状态点两处 aria 属性（CHANGELOG 记过），而 DESIGN 从未把无障碍
-  // 记为"有意不做"，所以这是遗漏而不是取舍。
-  // `extra`（第 6 参）：调用方追加的样式（例如语言下拉要 `flex: 1` 撑满一行）。
-  // 合并顺序有讲究（0.8.2 review）：自绘箭头的三项**写在 `extra` 之后**。`background` 是简写，
-  // 调用方只要带上它就会把 `backgroundImage` 一起清掉、而且不报任何错（0.8.1 修过一次同一个坑），
-  // 所以关键样式最后落，任何 extra 都盖不掉。
+  // `label`（第 5 参）渲染成 `aria-label`：此前下拉的文字与控件在 DOM 里没有关联，读屏只能念"组合框"。
+  // `extra`（第 6 参）是调用方追加的样式；自绘箭头的三项写在 `extra` 之后——`background` 是简写，带上它会清掉 `backgroundImage`。
   select: (value, options, onChange, textOf, label, extra) => h('select', {
     value, onChange: (e) => onChange(e.target.value),
     'aria-label': label || undefined,
@@ -12228,15 +10326,8 @@ const s = {
 };
 
 /**
- * 折叠的次要说明（原生 `<details>`）。
- *
- * 0.8.1 起设置页只把**一句判据**留在主视野里，解释、边界与许可署名收进这里。
- * 此前它们平铺在选项旁边，一条就能占三五行——结果是"要找的开关被埋在说明里"，
- * 而真正需要这些细节的人（排查、合规核对）反而不介意多点一次。
- *
- * 信息一条都没少：`<details>` 的内容始终在 DOM 里（可搜索、可读屏、可复制），
- * 只是默认不占地方。用原生元素而不是 useState，是因为不必维护展开状态，
- * 而且浏览器自带键盘可达与"展开 / 收起"的语义。
+ * 折叠的次要说明（原生 `<details>`）：设置页只把一句判据留在主视野，解释、边界与许可署名收进这里。
+ * 内容始终在 DOM 里（可搜索、可读屏、可复制），用原生元素即自带键盘可达与展开语义。
  */
 const fold = (summary, ...children) => h('details', { style: { marginTop: 6 } },
   h('summary', { style: { fontSize: 11, color: '#8b93a1', cursor: 'pointer', width: 'fit-content' } }, summary),
@@ -12248,36 +10339,22 @@ const fold = (summary, ...children) => h('details', { style: { marginTop: 6 } },
   }, ...children));
 
 /**
- * 源的展示名（状态区块与详情共用）不用在这里定义：映射（源 id → 文案 key）与取词都在
- * `00f-source-labels.js` 的 `sourceLabelOf`。**单一来源是重点**——侧边栏的悬停提示
- * （07-store）与这里必须给同一个答案，各写一份迟早漂开。取词在调用时求值，所以切语言后
- * 这里立刻跟着变（写成模块级常量会把默认语言固化，理由见 00f 的文件头）。
- */
-/**
- * 源状态区块里的源顺序与分组。**一处维护**：此前同样的列表在三个地方各写一遍
- * （状态行、增量计数行、重试按钮），加一个源要改三处——漏掉任何一处就变成
- * "某个源坏了但界面上看不见"，而"让失败可见"正是这个区块存在的全部理由。
+ * 源的展示名（源 id → 文案 key）与取词都在 `00f-source-labels.js` 的 `sourceLabelOf`：单一来源是重点，
+ * 侧边栏的悬停提示（07-store）与这里必须给同一个答案。取词在调用时求值，所以切语言后立刻跟着变。
+ * 下面几组顺序表同理，**一处维护**：加一个源只改这里，漏掉就变成"某个源坏了但界面上看不见"。
  */
 const SOURCE_ORDER = ['p2pquake', 'emsc', 'cenc_eew', 'cenc_eqlist', 'jma', 'usgs', 'noaa', 'nmc_alarm', 'nws_alerts', 'eccc_alerts'];
 /** 走 `/feed` 增量计数的源（feedStatsOf 有快照）。大陆地震源走 SSE，另有自己的计数与链路模式。 */
 const FEED_STAT_ORDER = ['jma', 'usgs', 'noaa', 'nmc_alarm'];
-/** 走 SSE 的源（0.5.0）：状态从 cnStreamRegistry 实时读。 */
+/** 走 SSE 的源：状态从 cnStreamRegistry 实时读。 */
 const STREAM_ORDER = ['cenc_eew', 'cenc_eqlist'];
-/**
- * 海外源（0.6.0）：Client 直连的 REST 轮询，计数从 `overseasStatsOf` 实时读。
- * 单独一张表而不是并进 FEED_STAT_ORDER——那边的字段是"增量 / 游标 / Host 计数"，
- * 语义不同，混在一起就得靠形状判断猜来源。
- */
+/** 海外源：Client 直连的 REST 轮询，计数从 `overseasStatsOf` 实时读。字段语义（轮次 / 请求 / 未覆盖）
+ *  与 FEED_STAT_ORDER 不同，故单独一张表。 */
 const OVERSEAS_STAT_ORDER = ['nws_alerts', 'eccc_alerts'];
 /**
- * 源状态区块（0.4.1）。
- *
- * 拆成独立组件的理由：它显示"最近拉取 N 秒前"，需要自己走时钟；而此前这段逻辑挂在
- * 设置页主组件里，5 秒一次的 setState 会**重建整个设置页**——关注县较多时那意味着
- * 每次最多 47×200 个市町村按钮一起重建，输入明显卡顿。现在只有这一小块重渲。
- *
- * 内容也扩了：除本地的增量 / 失败计数，还显示 Host 侧的失败与放弃数（来自 /feed?stats=1）。
- * 只显示本地计数的话，「上游被墙」与「上游没有新闻」仍然不可区分。
+ * 源状态区块。拆成独立组件是因为它显示"最近拉取 N 秒前"、需要自己走时钟；挂在设置页主组件里会让 5 秒
+ * 一次的 setState 重建整个设置页（关注县较多时那意味着几千个市町村按钮一起重建）。内容含 Host 侧的失败
+ * 与放弃数（来自 /feed?stats=1）：只显示本地计数的话，「上游被墙」与「上游没有新闻」仍然不可区分。
  */
 function SourceStatusBlock() {
   const [, setTick] = useState(0);
@@ -12318,9 +10395,7 @@ function SourceStatusBlock() {
         t('settings.source.lastFetch', { ago }),
     }));
   }
-  // 海外源（0.6.0）：按关注点查询外部 REST。显示"查了几轮 / 发了多少请求 / 收到多少响应条目"，
-  // 以及几个只有这个形态才有的计数：**过老只记历史**（年龄闸门）、**被上游拒绝**（HTTP 400，
-  // 不替上游断言"这个点不在覆盖范围"）、**被分页上限截断的轮数**（ECCC 的 limit=200）。
+  // 海外源：只有这个形态才有的计数——年龄门槛（过老只记历史）、被上游拒绝（HTTP 400）、被分页上限截断。
   for (const id of OVERSEAS_STAT_ORDER) {
     const o = overseasStatsOf[id];
     const st = sources[id];
@@ -12329,8 +10404,7 @@ function SourceStatusBlock() {
       continue
     }
     const ago = o.lastAt ? t('settings.source.secondsAgo', { n: Math.max(0, Math.round((Date.now() - o.lastAt) / 1000)) }) : t('settings.source.dash');
-    // 「响应条目」而不是「收到 N 条」（0.6.1 review）：NWS 是按点的 5 个采样点各查一次，
-    // 同一批预警会被重复计入，写成"收到 35 条"会让用户以为收到了 35 条不同预警。
+    // 「响应条目」而不是「收到 N 条」：NWS 按点的 5 个采样点各查一次，同一批预警会被重复计入。
     rows.push(t('settings.source.keyValue', {
       k: sourceLabelOf(id),
       v: t('settings.source.polls', { n: o.polls || 0 }) +
@@ -12345,8 +10419,7 @@ function SourceStatusBlock() {
         t('settings.source.lastQuery', { ago }),
     }));
   }
-  // 大陆源（0.5.0）：走 SSE，状态从注册表**实时**读。**链路模式必须显示出来**——
-  // 降级到轮询意味着延迟从秒级变成最长 15 秒，用户有权知道自己在哪条路上。
+  // 大陆源走 SSE，状态从注册表实时读。链路模式必须显示出来——降级到轮询意味着延迟从秒级变成最长 15 秒。
   for (const id of STREAM_ORDER) {
     const reg = cnStreamRegistry[id];
     const st = sources[id];
@@ -12373,8 +10446,7 @@ function SourceStatusBlock() {
     }));
   }
   if (rows.length === 0) return null
-  // 数据格式异常（schema-error）：按 DESIGN 5.4 提供**手动重试**——源改版后字段可能又回来了，
-  // 用户不该为了清掉一个蓝点去重装插件。
+  // schema-error 提供手动重试：源改版后字段可能又回来了，用户不该为了清掉一个蓝点去重装插件。
   const retryRows = SOURCE_ORDER
     .filter((id) => sources[id] && sources[id].status === 'schema-error')
     .map((id) => h('div', { key: 'retry-' + id, style: { marginTop: 4 } },
@@ -12385,14 +10457,8 @@ function SourceStatusBlock() {
     retryRows)
 }
 
-/**
- * 设置页默认落在哪个「国家 / 地区」分支下（0.8.0 / DESIGN 9.3）。
- *
- * **由现有配置推断，而不是固定日本**：已经配了中国或海外关注点的用户打开设置页时，
- * 应当直接看到自己在用的那个分支——否则会先看到"日本：未选择"，以为配置丢了。
- * 优先级与 9.3 的展示顺序一致（日本 → 中国 → 其他国家）；三边都空时落在日本
- * （它是默认链路，也是"未选择 = 提醒全日本"唯一有含义的分支）。
- */
+/** 设置页默认落在哪个「国家 / 地区」分支：由现有配置推断，而不是固定日本——否则已配了中国或海外关注点的
+ *  用户打开设置页会先看到"日本：未选择"，以为配置丢了。三边都空时落在日本（默认链路）。 */
 function inferRegionTab(cfg) {
   const w = (cfg && cfg.watch) || {};
   const places = Array.isArray(w.places) ? w.places : [];
@@ -12401,31 +10467,17 @@ function inferRegionTab(cfg) {
   if (places.length > 0) return 'global'
   return 'jp'
 }
-/**
- * 一级「国家 / 地区」的三个分支（0.8.0 / DESIGN 9.3：第一级收成一个唯一的选择器）。
- *
- * **label 存 key、渲染时取词**（0.9.0）：写在模块级对象里的 `t()` 会在模块加载那一刻求值，
- * 而那时配置还没读、语言还是默认值——用户切语言后标签不会跟着变。
- */
+/** 一级「国家 / 地区」的三个分支。**label 存 key、渲染时取词**：模块级对象里的 `t()` 会在模块加载那一刻
+ *  求值，那时语言还是默认值，用户切语言后标签不会跟着变。 */
 const REGION_TABS = [
   { v: 'jp', labelKey: 'settings.region.jp', icon: '🇯🇵' },
   { v: 'cn', labelKey: 'settings.region.cn', icon: '🇨🇳' },
   { v: 'global', labelKey: 'settings.region.global', icon: '🌐' },
 ];
 /**
- * 设置页的选项卡（0.8.1）。
- *
- * 九个区块串成一列时，"只想看一眼履历"要滚过全部设置——包括关注地区里那几千个市町村按钮。
- * 分页依据是**用户要做什么**，不是代码结构：
- *   · 地区 —— 我在乎哪里（配置一次，偶尔改）
- *   · 灾害 —— 哪些灾种、多强才提醒（配置一次）
- *   · 通知 —— 怎么提醒、什么时候别提醒（偶尔改）
- *   · 履历 —— 刚才发生了什么（最常回来的一页）
- *   · 其他 —— 链路、诊断、免责（排障时才来）
- * 每页只渲染自己能看到的区块，所以未选中的页连 DOM 都不产生。
- *
- * **labelKey 而不是 label**（0.9.0，与 REGION_TABS 同一条理由）：模块级求值会在加载那一刻
- * 把默认语言的文字固化下来，切语言就不跟着变。
+ * 设置页的选项卡：分页依据是用户要做什么——地区（我在乎哪里）/ 灾害（哪些灾种、多强）/ 通知（怎么提醒）/
+ * 履历（刚发生了什么）/ 其他（链路、诊断、免责）。每页只渲染自己的区块，未选中的页连 DOM 都不产生；
+ * `labelKey` 而不是 `label` 的理由同 REGION_TABS。
  */
 const SETTINGS_TABS = [
   { v: 'region', labelKey: 'settings.tab.region' },
@@ -12443,22 +10495,19 @@ function SettingsPanel(props) {
   const [expanded, setExpanded] = useState(null);
   const [cityQuery, setCityQuery] = useState({}); // 每个县的市町村搜索词
   const [weatherTestMsg, setWeatherTestMsg] = useState(''); // 「发送测试气象警报」的结果提示
-  const [weatherTestSeq, setWeatherTestSeq] = useState(0); // 测试场景轮换游标
-  // 全球关注点的输入草稿与反馈（0.4.0）：校验失败必须给出文字原因，不能静默吞掉用户输入
-  // 半径默认值 0.5.0 起是 100（DESIGN 9.2）；**既有配置里的 radiusKm 不动**，只影响新建。
+  const [weatherTestSeq, setWeatherTestSeq] = useState(0); // 测试场景轮换序号
+  // 全球关注点的输入草稿与反馈：校验失败必须给出文字原因，不能静默吞掉用户输入。默认半径只影响新建的关注点。
   const [placeDraft, setPlaceDraft] = useState({ name: '', lat: '', lon: '', radiusKm: String(DEFAULT_PLACE_RADIUS_KM) });
   const [placeMsg, setPlaceMsg] = useState('');
-  // 中国大陆的三级级联（0.5.0）：省 → 地级市 → 半径。选完给出**表里的坐标**，
-  // 用户不需要知道经纬度（大陆源是坐标 + 半径匹配，见 DESIGN 8.3）。
+  // 中国大陆的三级级联：省 → 地级市 → 半径。选完给出表里的坐标，用户不需要知道经纬度。
   const [cnPick, setCnPick] = useState({ province: '', city: '', radiusKm: DEFAULT_PLACE_RADIUS_KM });
   const [cnMsg, setCnMsg] = useState('');
-  // 全球链路的测试（0.4.0）：场景轮换游标与结果提示
+  // 全球链路的测试：场景轮换序号与结果提示
   const [geTestSeq, setGeTestSeq] = useState(0);
   const [geTestMsg, setGeTestMsg] = useState('');
-  // 诊断快照（0.5.0）：{ text, msg } | null
+  // 诊断快照：{ text, msg } | null
   const [diag, setDiag] = useState(null);
-  // 配置导出导入（0.9.0）：一条结果提示、下载不可用时的回退文本、以及"能不能撤销"的依据。
-  // 备份时间从 localStorage 现读一次——它在导入那一刻才产生，读完由 setCfgIoBackupAt 更新。
+  // 配置导出导入：结果提示、下载不可用时的回退文本、以及"能不能撤销"的备份时间。
   const [cfgIoMsg, setCfgIoMsg] = useState('');
   const [cfgIoText, setCfgIoText] = useState('');
   const [cfgIoBackupAt, setCfgIoBackupAt] = useState(() => {
@@ -12466,33 +10515,28 @@ function SettingsPanel(props) {
     return b ? b.at : ''
   });
   const cfgIoFileRef = useRef(null);
-  // 「源状态」区块里的相对时间要自己走 —— 见 SourceStatusBlock（独立组件，避免每 5 秒
-  // 重渲整个设置页，尤其是关注县较多时那几千个市町村按钮）
-  // 音量滑块：拖动期间只改本地草稿，停手 300ms 后才落盘（避免每移动 1px 写一次 localStorage）
+  // 「源状态」区块的相对时间要自己走 —— 见 SourceStatusBlock（避免每 5 秒重渲整个设置页）
+  // 音量滑块：拖动期间只改本地草稿，停手 300ms 后才写入本地存储
   const [volDraft, setVolDraft] = useState(null);
-  // 选项卡（0.8.1）。默认「地区」——首次配置的起点。`props.initialTab` 只给回归测试用
-  //（宿主按 `h(SettingsPanel, { close })` 渲染，不会传它）。
+  // 选项卡。默认「地区」——首次配置的起点。`props.initialTab` 只给回归测试用。
   const [tab, setTab] = useState(() => {
     const want = props && props.initialTab;
     return SETTINGS_TABS.some((tab) => tab.v === want) ? want : 'region'
   });
-  // 关注地区的当前分支（0.8.0 / DESIGN 9.3）：地址是"用户视角的一条路径"，不是三块并列。
+  // 关注地区的当前分支：地址是"用户视角的一条路径"，不是三块并列。
   const [regionTab, setRegionTab] = useState(() => inferRegionTab(currentCfg()));
   // 「其他国家 / 地区」分支：所选国家与城市搜索词（城市表按国家分包，见 04-city-table）
   const [country, setCountry] = useState('');
   const [worldCityQuery, setWorldCityQuery] = useState('');
   const volTimer = useRef(null);
-  const volPending = useRef(null); // 尚未落盘的草稿值：卸载时补写，拖完立刻关设置页也不丢改动
+  const volPending = useRef(null); // 尚未写入本地存储的草稿值：卸载时补写，拖完立刻关设置页也不丢改动
   const restartTimer = useRef(null); // 切换数据源后的重启延时（见下方）
   // store 变化（新预警、Host 配置同步）都要重新读一次当前配置
   useEffect(() => store.subscribe(() => { setTick((n) => n + 1); setCfgState(currentCfg()); }), []);
   useEffect(() => () => {
     if (volTimer.current) { clearTimeout(volTimer.current); volTimer.current = null; }
-    // 0.9.4（C11②）：挂起的"切换数据源后重启"要**执行**，而不是丢弃。
-    // 此前直接 clearTimeout：用户切完数据源后 80ms 内关掉设置页 / 停用插件，那次 restart() 就
-    // 永远不会发生，连接要等下一次强制断线（约 10 分钟）才切到新地址。
-    // 清定时器仍然必要（不能让一个已无 fiber 归属的回调复活 socket），所以顺序是
-    // "清掉定时器 → 立刻执行同一动作"，`activeClient` 的复查照旧（插件停用时它是 null）。
+    // 挂起的"切换数据源后重启"要**执行**而不是丢弃：切完数据源 80ms 内关掉设置页，那次 restart() 就永远
+    // 不会发生，连接要等下一次强制断线才切到新地址。清定时器仍然必要（不能让已无 fiber 归属的回调复活 socket）。
     if (restartTimer.current) {
       clearTimeout(restartTimer.current);
       restartTimer.current = null;
@@ -12502,16 +10546,13 @@ function SettingsPanel(props) {
     const v = volPending.current;
     if (v !== null) {
       volPending.current = null;
-      // 卸载中不能 setState，只补写盘。必须经 applyCfg 而不是 saveCfg：
-      // saveCfg 只写 localStorage 镜像，不改内存也不推 Host —— 有 Host settings 时
-      // 下次同步会被 Host 的旧值覆盖回来，音量改动照样丢（0.2.0 声称修过这个场景）。
+      // 卸载中不能 setState，只补写本地存储。必须经 applyCfg 而不是 saveCfg：后者只写 localStorage 镜像，有 Host
+      // settings 时下次同步会被 Host 的旧值覆盖回来。
       const cur = currentCfg();
       applyCfg({ ...cur, notify: { ...cur.notify, volume: v } });
     }
   }, []);
-  // 其它 DSH 标签页改了配置 → 由 15-entry 的常驻 storage 监听统一回读并 store.push()，
-  // 本组件通过下面的 store.subscribe 跟随。监听放在这里（组件内）的话，只有设置页打开着
-  // 才同步；没打开设置页的标签页会一直按旧配置提醒。
+  // 其它 DSH 标签页改了配置 → 由 15-entry 的常驻 storage 监听统一回读并 store.push()，本组件跟随。
 
   // 立即基于最新配置计算（内存 + localStorage 镜像 + Host），再 setState
   const setCfg = (fn) => { const next = applyCfg(fn(currentCfg())); setCfgState(next); };
@@ -12532,9 +10573,7 @@ function SettingsPanel(props) {
     return { ...c, watch: { ...c.watch, cities: next } }
   });
 
-  // ---------- 全球关注点（0.4.0）----------
-  // 全球源给的是震中坐标，没有都道府县，所以关注表达是「位置 + 半径」。
-  // 校验放在这里而不是只靠 normalizeCfg：用户需要看到"为什么没加上"，静默吞掉输入最糟。
+  // ---------- 全球关注点：全球源给的是震中坐标，没有都道府县，所以关注表达是「位置 + 半径」----------
   const addPlace = () => {
     const places = cfg.watch.places || [];
     const lat = Number(String(placeDraft.lat).trim());
@@ -12553,8 +10592,7 @@ function SettingsPanel(props) {
       setPlaceMsg(t('settings.place.max', { n: MAX_WATCH_PLACES })); return
     }
     const name = String(placeDraft.name || '').trim() || (lat.toFixed(2) + ', ' + lon.toFixed(2));
-    // origin（0.8.0 / DESIGN 9.3）：手填坐标与「用我的位置」都归 'global' 分支——这个表单
-    // 不限定国家，而 origin 只做标注（不影响匹配范围），写一个猜出来的国家名反而是错的。
+    // origin：手填坐标与「用我的位置」都归 'global' 分支——origin 只做标注（不影响匹配范围）。
     setCfg((c) => ({ ...c, watch: { ...c.watch, places: (c.watch.places || []).concat([{ name, lat, lon, radiusKm, origin: 'global' }]) } }));
     setPlaceDraft({ name: '', lat: '', lon: '', radiusKm: String(radiusKm) });
     setPlaceMsg(t('settings.place.addedPrefix', { name }) + t('settings.place.addedDedupe'));
@@ -12582,8 +10620,7 @@ function SettingsPanel(props) {
       { timeout: 10000 },
     );
   };
-  /** 定位并**直接添加**一个关注点（大陆级联里的用法：半径已经在级联里选好了，
-   *  再让用户去另一个表单点一次「添加」是多余的一步）。 */
+  /** 定位并**直接添加**一个关注点（半径已在级联里选好，再让用户去另一个表单点「添加」是多余的一步）。 */
   const addMyLocationPlace = () => {
     const geo = (typeof navigator !== 'undefined') ? navigator.geolocation : null;
     if (!geo || typeof geo.getCurrentPosition !== 'function') { setCnMsg(t('settings.place.geoUnsupportedCn')); return }
@@ -12622,16 +10659,11 @@ function SettingsPanel(props) {
     },
   }));
 
-  // ---------- 半径控件（0.5.0 / DESIGN 9.2）----------
+  // ---------- 半径控件 ----------
   /** 当前值是否正好是某个语义档。 */
   const isRadiusPreset = (km) => RADIUS_PRESETS.some((o) => o.v === Number(km));
-  /**
-   * 半径选择：三档**语义标签** + 一个始终可见的数字输入。
-   *
-   * 为什么两者都要：普通用户不必理解"公里"，语义档就够；而"想精确控制的人有出口"
-   * 是 DESIGN 9.2 的硬要求——把数字藏进"自定义…"分支会让改一次半径多两步。
-   * 数字框是真实值，下拉只是快捷键；填了 150 这种非档位值时下拉自动显示「自定义」。
-   */
+  /** 半径选择：三档语义标签 + 一个始终可见的数字输入（数字框是真实值，下拉只是快捷键；非档位值时下拉显示
+   *  「自定义」）。 */
   const radiusControl = (km, onChange, key) => h('div', {
     key: key || 'radius',
     style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#9aa0a6', flexWrap: 'wrap' },
@@ -12675,7 +10707,7 @@ function SettingsPanel(props) {
     setCfg((c) => ({ ...c, watch: { ...c.watch, places: (c.watch.places || []).concat([p]) } }));
     setCnMsg(t('settings.cn.added', { name: p.name, lat: p.lat, lon: p.lon, radius: p.radiusKm }));
   };
-  /** 数据表加载失败时的重试（0.9.4 / P2-18、P2-19）。表到位后 store.push 会触发重渲。 */
+  /** 数据表加载失败时的重试。表到位后 store.push 会触发重渲。 */
   const onRetryCityTable = () => {
     try {
       const p = retryCityTable();
@@ -12685,9 +10717,7 @@ function SettingsPanel(props) {
   /** 国家 / 地区级联的第一级（中国）——省的选项。 */
   const cnCascade = () => {
     if (provinces.length === 0) {
-      // 0.9.4（P2-19）：此前这里只看 cityTableState（它只反映**市町村表**），于是大陆表失败时
-      // 状态仍是 ready → 永远落在"正在加载…"那一支，用户等多久都不会知道是失败了。
-      // 现在按大陆表自己的状态区分"加载中"与"失败"，失败时给一个重试入口。
+      // 按大陆表自己的状态区分"加载中"与"失败"：只看 cityTableState 的话，大陆表失败时仍会显示"正在加载…"。
       const failed = cnAreasStateOf() === 'failed';
       return h('div', { style: { fontSize: 11, color: failed ? '#d9a406' : '#9aa0a6', marginTop: 6 } },
         failed ? t('settings.cn.tableFailed') : t('settings.cn.loading'),
@@ -12712,15 +10742,10 @@ function SettingsPanel(props) {
       cnMsg ? h('div', { role: 'status', style: { fontSize: 11, color: '#93c5fd', marginTop: 6 } }, cnMsg) : null,
     )
   };
-  // 全球源状态（0.4.0）：用户看不出"链路到底在不在拉"，这是最常见的困惑来源——
-  // 尤其全球地震本来就不频繁。feedStatsOf 不经过 store（见 12b 的注释），
-  // 所以由 SourceStatusBlock 自己每 5 秒重读（见文件下方）。
   // 市区町村选择器：数据表到位后，为每个已关注的县提供「搜索 + 多选」
   const cityPicker = () => {
     if (cityTableState === 'failed') {
-      // 0.9.4（P2-18）：失败要能重试。此前 loadCityTable 的唯一调用点是插件装载时那个
-      // ctx.effect，一次瞬时失败（Host 刚起来、一次 500、一次抖动）就让整场会话失去市町村表：
-      // 市级收窄失效（多报）、选不出市町村、pruneUnknownCities 不再运行，而用户只能刷新页面。
+      // 失败要能重试：一次瞬时失败就让整场会话失去市町村表（市级收窄失效、选不出市町村），用户只能刷新页面。
       return h('div', { style: { fontSize: 11, color: '#d9a406', marginTop: 10 } },
         t('settings.cities.failed'),
         h('span', { style: { marginLeft: 8 } },
@@ -12755,8 +10780,7 @@ function SettingsPanel(props) {
               const on = cfg.watch.cities.indexOf(city) !== -1;
               return h('button', {
                 key: city, onClick: () => toggleCity(city),
-                // 0.9.4（P2-28）：选中态此前只靠颜色 / 边框表达（WCAG 4.1.2）。同文件的县按钮
-                // 与页签都有 aria-pressed，市町村这一层漏了——读屏用户无法知道选了哪些市町村。
+                // 选中态也要给 aria-pressed，否则读屏用户无法知道选了哪些市町村。
                 'aria-pressed': on ? 'true' : 'false',
                 style: {
                   fontSize: 11, padding: '2px 8px', borderRadius: 11, cursor: 'pointer',
@@ -12773,17 +10797,11 @@ function SettingsPanel(props) {
       }),
     )
   };
-  // ---------- 关注地区的统合（0.8.0 / DESIGN 9.3）----------
-  // 第一级从三个平铺区块收成一个**唯一的「国家 / 地区」选择器**，选中后只展开该国自己的
-  // 下级控件；代码里仍是三条各自合适的实现（"统合 UI，不统合模型"）：
-  //   · 日本     → 都道府县 + 市区町村（源按行政区名匹配，判据是"该地区观测到的震度"）
-  //   · 中国大陆 → 省 + 地级市 + 半径（源按"震中坐标 + 半径"匹配）
-  //   · 其他国家 → 坐标 + 半径（同坐标型；9.4 的城市表接入后这里多一条城市列表）
-  // 硬把日本改成坐标匹配会让"震中 150km 外、本地却到震度 5 弱"的地震漏掉——那是把日本这一路
-  // **降级**（9.3 明确否决）。所以数据模型一个字段都不动，只统合用户看到的路径。
-  // 县名的**显示名**统一走 01-constants 的 `prefLabelOf`（按当前语言给日文原名 / 中文名 / 罗马字）。
-  // 0.9.0 曾在这里自己写一份 `prefZhOf`（恒取中文名），于是英文 / 日文界面下"地区"页显示的是
-  // 中文县名——同一个能力两份实现，而**没有断言覆盖的那一份**正在界面上生效（11.8 教训 1、4）。
+  // ---------- 关注地区的统合 ----------
+  // 第一级从三个平铺区块收成一个唯一的「国家 / 地区」选择器，选中后只展开该国自己的下级控件；代码里仍是
+  // 三条各自合适的实现（"统合 UI，不统合模型"）：日本 → 都道府县 + 市区町村（源按行政区名匹配）；大陆 →
+  // 省 + 地级市 + 半径；其他国家 → 坐标 + 半径。硬把日本改成坐标匹配会让"震中 150km 外、本地却到震度 5
+  // 弱"的地震漏掉，所以数据模型一个字段都不动。县名的显示名统一走 01-constants 的 `prefLabelOf`。
   /** 按来源分支筛关注点（`origin` 见 02-storage 的 placeOriginOf）。 */
   const placesOfOrigin = (origin) => (cfg.watch.places || [])
     .filter((p) => (origin === 'cn' ? (p && p.origin === 'cn') : (p && p.origin !== 'cn')));
@@ -12806,19 +10824,15 @@ function SettingsPanel(props) {
     }));
 
   /**
-   * 已关注地区的**统一列表**（按来源分支分组）。
-   *
-   * 这是"统合 UI，不统合模型"真正的落点：配置里仍是 prefectures / cities / places 三份数据，
-   * 但用户看到的是一份"我关注了哪里"的清单——此前要滚过三个区块、把三处内容在脑子里拼起来
-   * 才知道自己到底关注了什么。
+   * 已关注地区的统一列表（按来源分支分组）：配置里仍是 prefectures / cities / places 三份数据，
+   * 但用户看到的是一份"我关注了哪里"的清单。
    */
   const watchList = () => {
     const w = cfg.watch || {};
     const places = w.places || [];
     const jpRows = (w.prefectures || []).map((pref) => {
       const cities = (w.cities || []).filter((c) => citiesOfPref(pref).indexOf(c) !== -1);
-      // 显示名随语言：日文界面「東京都」、中文界面「东京」、英文界面「Tokyo」。
-      // 原名只在"显示名与它不同"时括注——同一种语言里不会出现「東京都（東京都）」。
+      // 显示名随语言（日文「東京都」/ 中文「东京」/ 英文「Tokyo」）；原名只在两者不同时括注。
       const label = prefLabelOf(pref);
       return h('div', { key: 'wl-jp-' + pref, style: { display: 'flex', alignItems: 'center', gap: 8, margin: '3px 0', fontSize: 12 } },
         h('span', { style: { flex: 1 } },
@@ -12853,7 +10867,7 @@ function SettingsPanel(props) {
     )
   };
 
-  /** 日本分支：都道府县 + 市区町村细化（交互与 0.5.0 完全一致）。 */
+  /** 日本分支：都道府县 + 市区町村细化。 */
   const jpBranch = () => h('div', null,
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 8 } },
       cfg.watch.prefectures.length === 0
@@ -12878,12 +10892,11 @@ function SettingsPanel(props) {
     cityPicker(),
   );
 
-  /** 中国大陆分支：省 → 地级市 → 半径（交互与 0.5.0 完全一致，说明文字随分支走）。 */
+  /** 中国大陆分支：省 → 地级市 → 半径（说明文字随分支走）。 */
   const cnBranch = () => h('div', null,
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 8 } },
       t('settings.cnBranch.hint')),
-    // 无取消机制是**安全相关**的缺口（DESIGN 8.3 / 10.2 要求 UI 如实说明，不得假装能处理）：
-    // 主视野只留这一行结论，完整边界收进折叠——信息不删，只是不再占地方。
+    // 无取消机制是安全相关的缺口：主视野只留这一行结论，完整边界收进折叠（信息不删，只是不再占地方）。
     h('div', { style: { fontSize: 11, color: '#d9a406', marginBottom: 8 } },
       t('settings.cnBranch.warning')),
     cnCascade(),
@@ -12897,7 +10910,7 @@ function SettingsPanel(props) {
   const addCityPlace = (c) => {
     const places = cfg.watch.places || [];
     if (places.length >= MAX_WATCH_PLACES) { setPlaceMsg(t('settings.place.max', { n: MAX_WATCH_PLACES })); return }
-    // 按**坐标**判重（与 normalizePlaces 的去重口径一致）：否则同一个城市点两次会出现两行
+    // 按**坐标**判重（与 normalizePlaces 的口径一致）：否则同一个城市点两次会出现两行
     if (places.some((p) => p && Math.abs(p.lat - c.lat) < 0.02 && Math.abs(p.lon - c.lon) < 0.02)) {
       setPlaceMsg(t('settings.cn.exists', { name: c.name })); return
     }
@@ -12912,7 +10925,7 @@ function SettingsPanel(props) {
   const globalBranch = () => {
     const hint = { fontSize: 11, color: '#9aa0a6', lineHeight: 1.6 };
     const countries = worldCountriesOf();
-    // 国家名的取词与排序都跟着**当前界面语言**（0.9.4 / PD-3，见 countryNameOf）
+    // 国家名的取词与排序都跟着**当前界面语言**（见 countryNameOf）
     const lang = getLanguage();
     const pack = country ? countryPackOf(country) : null;
     const cityList = (pack && pack.state === 'ready') ? pack.cities : [];
@@ -12972,14 +10985,9 @@ function SettingsPanel(props) {
       s.row(s.select(country,
         [{ v: '', label: countries.length ? t('settings.global.countryAll') : t('settings.global.countryLoading') }]
           .concat(countries
-            // 0.9.4（PD-3）：国家名按**当前界面语言**取（数据里带四种语言的写法），并按该语言的
-            // 排序规则排——中文按拼音、日文按假名、英文按字母，跟着语言换。
-            //
-            // 0.9.4 修订：这里**只映射一次**。此前写成 map→sort→map，而第二次 map 的参数已经不是
-            // 国家条目、而是上一步造的 `{v, name, count}`，于是 `v: c.code` 全是 undefined——
-            // 浏览器里所有 option 的 value 相同，就只能停在第 1 个；onChange 收到字符串 "undefined"，
-            // 拉城市 404、城市列表永远空。排序改为排**原始条目**（按解析出的本地化名字），
-            // 从结构上避开这类"链到第二段时字段名变了"的错误。
+            // 国家名按当前界面语言取（数据里带四种语言的写法），并按该语言的排序规则排——中文按拼音、
+            // 日文按假名、英文按字母。这里**只映射一次**：排原始条目（按解析出的本地化名字），再 map 成
+            // `{v, label}`；链到第二段时字段名变了会让所有 option 的 value 相同。
             .slice()
             .sort((a, b) => countryNameOf(a, lang).localeCompare(countryNameOf(b, lang), lang))
             .map((c) => ({
@@ -12988,8 +10996,7 @@ function SettingsPanel(props) {
             }))),
         (v) => { setCountry(v); setWorldCityQuery(''); if (v) loadCountryCities(v); },
         (o) => o.label, t('settings.global.countryLabel'))),
-      // 半径是**共用**的一个旋钮：城市点选与手填坐标都按它新建关注点。
-      // 两处各放一个会让人以为"半径分两种"，而匹配层只认每个关注点自己的 radiusKm。
+      // 半径是**共用**的一个旋钮：城市点选与手填坐标都按它新建关注点（匹配层只认每个点自己的 radiusKm）。
       h('div', { style: { marginTop: 6 } },
         radiusControl(Number(placeDraft.radiusKm) || DEFAULT_PLACE_RADIUS_KM,
           (v) => setPlaceDraft((d) => ({ ...d, radiusKm: String(v) })), 'place-radius')),
@@ -13014,14 +11021,9 @@ function SettingsPanel(props) {
     watchList(),
   );
 
-  // ---------- 灾害类型与阈值（0.8.0 合并成按灾种的一张表）----------
-  // 0.7.0 及以前，开关在「灾害类型」、阈值在几屏之外的「提醒阈值」——用户想调海啸的强弱，
-  // 得在两个区块之间来回对照自己刚才开的是哪一个。0.8.0 把两者并成一张表：**一行就是一个灾种**，
-  // 它自己的开关与阈值并排。
-  //
-  // 开关的**共享关系如实呈现**（`disasters.earthquake` 一个字段管四行地震），不伪造四个开关：
-  // 那个字段从 0.1.0 起就在配置里，拆开会让老配置的语义漂移；用户的心智也是"要不要地震提醒"，
-  // 而不是"要不要日本实测震度"。
+  // ---------- 灾害类型与阈值（按灾种一张表）----------
+  // 一行就是一个灾种，它自己的开关与阈值并排。开关的共享关系如实呈现（`disasters.earthquake` 一个字段管
+  // 四行地震），不伪造四个开关：拆开会让老配置的语义漂移。
   /** 一行：灾种名 + 口径说明 | 开关 + 阈值。 */
   const disasterRow = (label, note, control) => h('div', {
     style: { display: 'flex', alignItems: 'flex-start', gap: 10, padding: '6px 0', borderBottom: '1px solid rgba(148,163,184,0.10)' },
@@ -13035,8 +11037,7 @@ function SettingsPanel(props) {
     (v) => setCfg((c) => ({ ...c, disasters: { ...c.disasters, [key]: v } })), text);
   const thSelect = (key, options, asNumber, label) => s.select(cfg.thresholds[key], options,
     (v) => setCfg((c) => ({ ...c, thresholds: { ...c.thresholds, [key]: asNumber ? Number(v) : v } })),
-    // 选项文字是 `labelKey`（值的档位表在 01-constants，文字在文案表）：**渲染时取词**，
-    // 所以切语言后下拉里的话立刻跟着换。
+    // 选项文字是 `labelKey`（值的档位表在 01-constants，文字在文案表）：渲染时取词，切语言后跟着换。
     (o) => t(o.labelKey), label);
   /** 分组的标题行：一个开关管这一组的若干行（共享关系写在标题里，别让人以为漏了开关）。 */
   const disasterGroup = (title, switchKey, switchText, extra) => h('div', {
@@ -13049,8 +11050,6 @@ function SettingsPanel(props) {
   const fixedGate = (text) => h('span', { style: { fontSize: 11, color: '#9aa0a6' } }, text);
 
   const sectionDisasters = () => s.section(t('settings.section.disaster'),
-    // 一行就够。原来那句"开关 = 要不要提醒，阈值 = 多强才提醒"是在解释自己的界面——
-    // 开关和下拉就摆在眼前，用户不需要有人告诉他这是什么（0.8.1 去 AI 味时删掉）。
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 4 } },
       t('settings.disaster.hint')),
 
@@ -13064,29 +11063,21 @@ function SettingsPanel(props) {
       h('div', null, t('settings.disaster.foldScale1')),
       h('div', null, t('settings.disaster.foldScale2'))),
 
-    // —— 海啸：日本 552 与 NOAA CAP 共用等级闸门 ——
+    // —— 海啸：日本 552 与 NOAA CAP 共用等级门槛 ——
     disasterGroup(t('settings.disaster.groupTsunami'), 'tsunami', t('settings.disaster.notifySwitch')),
-    // 0.8.2 review：note 要写清全球源看的是**关注点**（`places`），不是日本那 47 个都道府县。
-    // 0.8.1 瘦身时把这句删了，只留"按预警等级"——只配了日本县级关注的用户会以为这一行已经
-    // 覆盖 NOAA 海啸，实际匹配走的是「其他国家 / 地区」里的关注点半径。
+    // note 要写清全球源看的是**关注点**（`places`），不是日本那 47 个都道府县。
     disasterRow(t('settings.disaster.tsunamiJpLabel'), t('settings.disaster.tsunamiJpNote'), [thSelect('tsunamiGrade', TSUNAMI_OPTIONS, false, t('settings.disaster.tsunamiSelect'))]),
 
-    // —— 气象：三家的门槛都固定在该机构真正代表危险的那一档 ——
-    // L1/L2 要求的动作不是桌面弹窗能承载的，L3 面向老年人；L4（避難指示级）才真正涉及人身财产
-    // 损失，所以这里只有"开 / 关"、没有阈值（DESIGN 10.3）。
+    // —— 气象：门槛固定在该机构真正代表危险的那一档（L4 避難指示级才真正涉及人身财产损失）——
     disasterGroup(t('settings.disaster.groupWeatherJp'), 'weather', t('settings.disaster.notifySwitch')),
     disasterRow(t('settings.disaster.weatherJpLabel'), t('settings.disaster.weatherJpNote'), [fixedGate(t('settings.disaster.gateJma4'))]),
 
-    // 中国大陆气象灾害（0.5.2）：**两个灾种分开**。它们来自同一个源（中央气象台汇总的
-    // 预警信号列表），但产出差别很大——暴雨的橙 / 红常年可见，而地质灾害实测全是黄色
-    // （达不到播报门槛，只在历史里留痕）。合成一个开关会让"我只想要暴雨"的用户找不到出口。
-    // 两个开关名沿用解析层的灾害名（`NMC_KIND_TEXT` 的 '暴雨' / '地质灾害'）：那一层还没有
-    // 本地化（DESIGN 11.10 记为"尚未处理"），这里加"预警"两字只是同名的界面说法。
+    // 中国大陆气象灾害：两个灾种分开——它们同源但产出差别很大，合成一个开关会让"我只想要暴雨"的用户找不到出口。
     disasterGroup(t('settings.disaster.groupWeatherCn'), null, null,
       [switchOf('cnRainstorm', t('settings.disaster.cnRainstormSwitch')), switchOf('cnGeology', t('settings.disaster.cnGeologySwitch'))]),
     disasterRow(t('settings.disaster.weatherCnLabel'), t('settings.disaster.weatherCnNote'), [fixedGate(t('settings.disaster.gateOrange'))]),
 
-    // 海外气象灾害（0.6.0）：美国 NWS + 加拿大 ECCC。一个开关覆盖两个源（各自按关注点生效）。
+    // 海外气象灾害：美国 NWS + 加拿大 ECCC。一个开关覆盖两个源（各自按关注点生效）。
     disasterGroup(t('settings.disaster.groupWeatherOverseas'), 'overseasWeather', t('settings.disaster.notifySwitch')),
     disasterRow(t('settings.disaster.weatherOverseasLabel'), t('settings.disaster.weatherOverseasNote'), [fixedGate(t('settings.disaster.gateOverseas'))]),
 
@@ -13100,8 +11091,7 @@ function SettingsPanel(props) {
       h('div', { style: { fontWeight: 600, color: '#c8ccd4', marginTop: 4 } }, t('settings.disaster.tradeoffOverseasTitle')),
       h('div', null, t('settings.disaster.tradeoffOverseas1')),
       h('div', null, t('settings.disaster.tradeoffOverseas2')),
-      // 措辞订正（0.6.1 review）：ECCC 的 wind warning 确实是 warning（只有霜冻 / 雾是 advisory）
-      // ——它被排除是因为**不在本插件的灾种范围内**，不是因为它不危险。
+      // ECCC 的 wind warning 确实是 warning，它被排除是因为**不在本插件的灾种范围内**，不是不危险。
       h('div', null, t('settings.disaster.tradeoffOverseas3')),
       h('div', null, t('settings.disaster.tradeoffOverseas4')),
       h('div', null, t('settings.disaster.tradeoffOverseas5'))),
@@ -13127,14 +11117,8 @@ function SettingsPanel(props) {
   const volShown = volDraft === null ? cfg.notify.volume : volDraft;
 
   const statusMeta = statusMetaOf(store.status, store.retries);
-  // 状态圆点。**不带外边距**：用它的唯一一处（statusStrip，位于页签之外，所以每个页签都能
-  // 看到）是 flex + gap 排的。
-  //
-  // 0.9.5（P3-45）：disabled（用户关掉了灾种 / 全部关掉）在这里也必须画**空心**，与侧边栏的
-  // StatusIndicator（14-ui-status.js:22-24）同一形态。此前这一处无条件实心，于是同一个
-  // "已关闭"在设置页是实心灰点、在侧边栏是空心灰圈——同一个状态两种画法。形状差异不只是
-  // 好看：DESIGN 5 节六态表要求把"已关闭"与 stale / 未启动 的实心灰分开，而颜色之外的
-  // 形状线索正是色觉障碍用户唯一能用的那个判据。
+  // 状态圆点，不带外边距（唯一用它的 statusStrip 是 flex + gap 排的）。disabled（用户关掉了灾种或全部
+  // 关掉）必须画空心，与 14-ui-status.js 的 StatusIndicator 同一形态：形状差异是色觉障碍用户唯一能用的判据。
   const dotStyle = store.status === 'disabled'
     ? { display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: 'transparent', border: '1.5px solid ' + statusMeta.color, flexShrink: 0 }
     : { display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: statusMeta.color, flexShrink: 0 };
@@ -13147,12 +11131,7 @@ function SettingsPanel(props) {
     unsupported: t('settings.perm.unsupported'),
   }[perm] || '';
 
-  // ---------- 选项卡（0.8.1）----------
-  // 九个区块串成一列时，"只想看一眼履历"要滚过全部设置——包括关注地区里那几千个市町村按钮。
-  // 按用途分页后每页**只渲染自己能看到的区块**（未选中的页不产生 DOM），"滚到底"这件事直接消失。
-  //
-  // 分页依据是"用户要做什么"，不是代码结构：地区（我在乎哪里）/ 灾害（哪些灾种、多强）/
-  // 通知（怎么响、什么时候别响）/ 履历（刚才发生了什么）/ 其他（链路、诊断、免责）。
+  // ---------- 选项卡：每页只渲染自己的区块，未选中的页不产生 DOM ----------
   /** 选项卡角标：只有真的有内容时才显示数字，免得三个空数字占视线。 */
   const tabBadgeOf = (v) => {
     if (v === 'region') {
@@ -13169,9 +11148,8 @@ function SettingsPanel(props) {
     return h('button', {
       key: tabDef.v,
       onClick: () => setTab(tabDef.v),
-      // `aria-current` 而不是 `aria-pressed`：这是"当前显示哪一页"，不是开关。
-      // 没有用 role="tablist"/"tab" 是因为那套 ARIA 还要求方向键导航与 tabpanel 关联，
-      // 只加一半会让读屏软件给出错误的交互预期（错误的 ARIA 比没有更糟）。
+      // `aria-current` 而不是 `aria-pressed`：这是"当前显示哪一页"，不是开关。不用 role="tablist" 是因为
+      // 那套 ARIA 还要求方向键导航与 tabpanel 关联，只加一半比没有更糟。
       'aria-current': on ? 'true' : undefined,
       style: {
         fontSize: 12, padding: '7px 13px', cursor: 'pointer', background: 'transparent',
@@ -13182,11 +11160,7 @@ function SettingsPanel(props) {
   }));
 
   /**
-   * 常驻状态条（**在选项卡之外**，0.8.1）。
-   *
-   * 只回答两个问题：通不通、收到多少条。此前这里还跟着一行 `store.detail`（"已连接 EMSC
-   * （全球地震实时推送）"之类），而同一批逐源信息在「其他」页的「源状态」里**一字不差地**
-   * 躺着——同一件事写两遍，既占地方，又让人以为那是两套东西。细节留给那一页。
+   * 常驻状态条（**在选项卡之外**）：只回答"通不通、收到多少条"。逐源细节在「其他」页的「源状态」里。
    */
   const statusStrip = () => h('div', {
     style: {
@@ -13199,22 +11173,12 @@ function SettingsPanel(props) {
     store.received > 0
       ? h('span', { style: { color: '#9aa0a6' } }, t('settings.strip.received', { n: store.received }))
       : null,
-    // 告诉用户"更细的在哪"，但已经在那一页时就不必再说。
-    // 颜色用 #9aa0a6 而不是更暗的灰（0.8.2 review）：11px 小字在深色底上要过 AA 4.5:1，
-    // 原 #6b7280 只有约 3.4:1，和其余次要文字同一档更稳（也让整页少一种灰）。
+    // 告诉用户"更细的在哪"，已经在那一页时就不必再说。颜色用 #9aa0a6 以保证 11px 小字过 AA 4.5:1。
     tab === 'misc' ? null : h('span', { style: { color: '#9aa0a6', fontSize: 11, marginLeft: 'auto' } }, t('settings.strip.more')));
 
-  /**
-   * 界面语言（0.8.1 立选项，0.9.0 落地本地化）。
-   *
-   * 0.9.0 起 zh-CN / ja / en 各有完整文案表（00a / 00b / 00c / 00e 面文件合并而来），
-   * 0.9.3 加上 zh-TW；选中即由 15-entry 写进配置并调 setLanguage —— 界面**当场**跟着换。
-   * 所以这里不再需要"目前只有简体中文"那种解释性说明（11.10 规则 1：界面不解释自己），
-   * 也不该再用文字解释"这个控件是干什么的"。
-   */
+  /** 界面语言：选中即由 15-entry 写进配置并调 setLanguage，界面**当场**跟着换。 */
   const sectionLanguage = () => s.section(t('settings.section.language'),
-    // `flex: 1`：这一行只有标签与一个短下拉（"简体中文" / "繁體中文"），不撑满的话右半边
-    // 空着、加上箭头的位置，观感就像"控件没对齐"。撑满后箭头正好落在行右边缘。
+    // `flex: 1`：这一行只有标签与一个短下拉，不撑满的话右半边空着、观感像"控件没对齐"。
     s.row(s.label(t('settings.language.label')), s.select(cfg.language, LANGUAGE_OPTIONS,
       (v) => setCfg((c) => ({ ...c, language: v })), (o) => o.label, t('settings.language.label'), { flex: 1 })),
   );
@@ -13227,9 +11191,8 @@ function SettingsPanel(props) {
         { v: 'sandbox', label: t('settings.source.sandbox') },
       ], (v) => {
         setCfg((c) => ({ ...c, source: v }));
-        // 延时用 ref 保存并在卸载时清理：否则"切换数据源后 80ms 内离开设置页 / 停用插件"
-        // 会在到点时复活一个已经没有任何 fiber 归属的 socket（它会继续上报状态并经
-        // handleAlert 响铃），直到用户刷新页面。执行前再复查一次 activeClient。
+        // 延时用 ref 保存并在卸载时清理：否则"切换数据源后 80ms 内离开设置页"会在到点时复活一个已无 fiber
+        // 归属的 socket（继续上报状态并响铃）。执行前再复查 activeClient。
         if (restartTimer.current) clearTimeout(restartTimer.current);
         restartTimer.current = setTimeout(() => {
           restartTimer.current = null;
@@ -13242,8 +11205,7 @@ function SettingsPanel(props) {
       t('settings.source.config', { value: settingsSyncLabel() })),
   );
 
-  // 大陆源的链路选择（0.5.0）。这是一个**出口**：自动降级判不出的那几种网络
-  //（能连上、偶尔漏、整体像坏的）需要一个手动开关，否则用户只能重装或等更新。
+  // 大陆源的链路选择是一个出口：自动降级判不出的那几种网络（能连上、偶尔漏、整体像坏的）需要手动开关。
   const sectionCnTransport = () => s.section(t('settings.section.cnTransport'),
     s.row(s.label(t('settings.cnTransport.label')), s.select(cfg.cnTransport || 'auto', [
       { v: 'auto', label: t('settings.cnTransport.auto') },
@@ -13259,8 +11221,7 @@ function SettingsPanel(props) {
       s.checkbox(cfg.notify.sound !== false, (v) => setCfg((c) => ({ ...c, notify: { ...c.notify, sound: v } })), t('settings.notify.sound')),
       s.checkbox(cfg.notify.system !== false, (v) => setCfg((c) => ({ ...c, notify: { ...c.notify, system: v } })), t('settings.notify.system')),
     ),
-    // 0.9.4（C1）：分灾害音效开关。总开关关掉时这三个没有意义，所以**只在总开关打开时显示**
-    // （灰着不禁用更省事，但"显示却无效"正是要避免的那种界面）。默认全开 = 与旧行为一致。
+    // 分灾害音效开关：总开关关掉时这三个没有意义，所以**只在总开关打开时显示**（"显示却无效"是要避免的那种界面）。
     cfg.notify.sound !== false
       ? s.row(
         s.checkbox(cfg.notify.soundQuake !== false, (v) => setCfg((c) => ({ ...c, notify: { ...c.notify, soundQuake: v } })), t('settings.notify.soundQuake')),
@@ -13304,8 +11265,7 @@ function SettingsPanel(props) {
       s.btn(t('settings.notify.testToast'), () => showToast({ title: t('settings.notify.testTitle'), body: t('settings.notify.toastBody'), color: '#4ade80', ttlMs: 4000 })),
     ),
     h('div', { style: { color: '#9aa0a6', fontSize: 11, marginTop: 6 } }, permText),
-    // 提示音未解锁时必须**显式告知**：页面可见时通知路径只用页内 toast（不发系统通知），
-    // 于是"打开 DSH 后从未点过页面"的用户在设置里看到「提示音：开」，实际上一条声音都听不到。
+    // 提示音未解锁时必须**显式告知**：页面可见时通知路径只用页内 toast，用户会看到「提示音：开」却听不到声音。
     audioState() === 'suspended'
       ? h('div', { style: { color: '#d9a406', fontSize: 11, marginTop: 4 } },
           t('settings.notify.audioLocked'))
@@ -13315,7 +11275,7 @@ function SettingsPanel(props) {
     testMsg ? h('div', { role: 'status', style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, testMsg) : null,
   );
 
-  // 静默时段（0.2.0）
+  // 静默时段
   const sectionQuiet = () => s.section(t('settings.section.quiet'),
     s.row(s.checkbox(cfg.quietHours.enabled, (v) => setCfg((c) => ({ ...c, quietHours: { ...c.quietHours, enabled: v } })), t('settings.quiet.enable'))),
     s.row(
@@ -13336,14 +11296,11 @@ function SettingsPanel(props) {
     ),
     s.row(s.checkbox(cfg.quietHours.breakForSevere, (v) => setCfg((c) => ({ ...c, quietHours: { ...c.quietHours, breakForSevere: v } })), t('settings.quiet.breakForSevere'))),
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 6 } },
-      // 时区基准必须写出来（0.8.2 review 补回）：不写的话"23:00"是本地时间还是 JST 全靠猜，
-      // 而这个判定用的是**浏览器本地时间**（inQuietHours），跨时区用户猜错就会在半夜被响铃。
+      // 时区基准必须写出来：这个判定用的是**浏览器本地时间**（inQuietHours），跨时区用户猜错会在半夜被响铃。
       t('settings.quiet.hint')),
   );
 
-  // 测试与诊断（0.8.0 合并）：两类测试按钮都是"无灾情时验证整条链路"的入口，与源状态、
-  // 诊断快照同属排障面——此前它们散在「灾害类型」与「其他地区」两个区块里，用户要确认
-  // "这个源到底在不在拉"，得先滚到对应灾种那一节去找。
+  // 测试与诊断：两类测试按钮都是"无灾情时验证整条链路"的入口，与源状态、诊断快照同属排障面。
   const sectionDiagnostics = () => s.section(t('settings.section.diag'),
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginBottom: 6 } },
       t('settings.diag.hint')),
@@ -13356,15 +11313,11 @@ function SettingsPanel(props) {
       const alert = parseJma(buildTestTelegram(pref, ms, sc.key, city), { id: 'test-weather-' + ms });
       setWeatherTestSeq(weatherTestSeq + 1);
       if (!alert) { setWeatherTestMsg(t('settings.diag.parseFailed')); return }
-      // 事件键改成**每次都不同**（0.5.4），否则同一场景第二次就静默：汇总型电文的事件键是
-      // 「灾种 + 官署」（刻意不含发布时刻，见 05b 的说明），于是连点两次会算出同一个键，
-      // 被 `isEventRepeat` 判成"同一事件的后续发布（强度未升级）"而只记历史——与按钮文案
-      // "可反复点击"直接矛盾。全球链路早就显式改写过事件键（05c 的 parseTestGlobalMessage），
-      // 气象这条漏了。语义上也成立：每次点击本来就是一次独立的演示。
+      // 事件键改成**每次都不同**，否则同一场景第二次就静默：汇总型电文的事件键是「灾种 + 官署」（不含发布时刻），
+      // 连点两次会算出同一个键而被 `isEventRepeat` 判成"强度未升级"、只记历史。
       alert.eventKey = 'test-weather:' + ms + ':' + sc.key;
       const res = handleAlert(alert, currentCfg(), { skipQuietHours: true });
-      // 提示按**实际结果**生成，不写死"应看到弹窗"——开关关闭 / 未达 L4 / 静默 / 其它标签页
-      // 已提醒时，实际就是不会响，提示必须如实说明，否则会让人以为插件坏了。
+      // 提示按**实际结果**生成：开关关闭 / 未达 L4 / 静默 / 其它标签页已提醒时就是不会响，必须如实说明。
       const outcome = res && res.notified
         ? t('settings.diag.outcomeSent')
         : t('settings.diag.outcomeNotSent', { reason: (res && res.detail) || t('settings.diag.outcomeUnknown') });
@@ -13375,8 +11328,7 @@ function SettingsPanel(props) {
     weatherTestMsg
       ? h('div', { role: 'status', style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, weatherTestMsg)
       : null,
-    // 全球链路（0.4.0）：构造的是**源格式原文**（EMSC / USGS / NOAA 各一种），
-    // 因此解析器与匹配引擎都被真实走过。
+    // 全球链路：构造的是**源格式原文**（EMSC / USGS / NOAA 各一种），因此解析器与匹配引擎都被真实走过。
     s.row(s.btn(t('settings.diag.sendGlobal'), () => {
       const places = cfg.watch.places || [];
       if (places.length === 0) { setGeTestMsg(t('settings.diag.needPlace')); return }
@@ -13387,8 +11339,7 @@ function SettingsPanel(props) {
       const alert = parseTestGlobalMessage(msg);
       if (!alert) { setGeTestMsg(t('settings.diag.parseFailed')); return }
       const res = handleAlert(alert, currentCfg(), { skipQuietHours: true });
-      // 提示按**实际结果**生成：开关关闭 / 半径外 / 静默 / 其它标签页已提醒时就是不会响，
-      // 必须如实说明，否则用户会以为插件坏了
+      // 提示按**实际结果**生成：开关关闭 / 半径外 / 静默 / 其它标签页已提醒时就是不会响，必须如实说明。
       const outcome = res && res.notified
         ? t('settings.diag.outcomeSent')
         : t('settings.diag.outcomeNotSent', { reason: (res && res.detail) || t('settings.diag.outcomeUnknown') });
@@ -13397,12 +11348,9 @@ function SettingsPanel(props) {
     h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4 } },
       t('settings.diag.globalScenarios', { list: TEST_GEO_SCENARIOS.map((x) => t('settings.diag.scenario.' + x.key)).join(' / ') })),
     geTestMsg ? h('div', { role: 'status', style: { color: '#93c5fd', fontSize: 11, marginTop: 4 } }, geTestMsg) : null,
-    // 源状态：逐源的连接 / 增量 / 失败计数。放在这里而不是某个地区区块下面——它回答的是
-    // "哪条链路在动"，与关注了哪个国家无关。
+    // 源状态：逐源的连接 / 增量 / 失败计数。它回答的是"哪条链路在动"，与关注了哪个国家无关。
     h(SourceStatusBlock, { key: 'source-status' }),
-    // 诊断快照（0.5.0）：DESIGN 11.3 的交付物——让"运行时自己说话"。
-    // 界面上只做两件事：生成、以及**在剪贴板不可用时把文本显示出来**（沙箱 iframe 里
-    // navigator.clipboard 常常不可用，而"复制不了"不该成为诊断的第一步就卡住）。
+    // 诊断快照：界面上只做两件事——生成，以及在**剪贴板不可用时把文本显示出来**。
     h('div', { style: { marginTop: 12, borderTop: '1px solid rgba(148,163,184,0.18)', paddingTop: 10 } },
       h('div', { style: { fontSize: 11, color: '#9aa0a6' } },
         t('settings.diag.snapshotHint'))),
@@ -13430,11 +11378,8 @@ function SettingsPanel(props) {
       : null,
   );
 
-  // 免责（0.8.1）：核心一句留在主视野（它是安全相关声明），完整来源与免责收进折叠。
-  // ---------- 配置导出与导入（0.9.0） ----------
-  // 导入是**整体替换**：17-config-io 的 `importConfig` 会先把当前配置备份一份再写回；校验失败时
-  // 它什么都不写，这里只负责把**错误码**翻成当前语言的一句话（错误码→文案的映射放在这一层，
-  // 因为 17 不认识界面语言——那边返回拼好的中文句子的话，导入失败提示就永远是中文）。
+  // 导入是**整体替换**：17-config-io 的 `importConfig` 会先把当前配置备份一份再写回，校验失败什么都不写；
+  // 这里只负责把**错误码**翻成当前语言（17 不认识界面语言）。
   const cfgIoErrorText = (res) => {
     const map = {
       json: 'settings.configIo.errJson',
@@ -13454,8 +11399,7 @@ function SettingsPanel(props) {
       setCfgIoText('');
       setCfgIoMsg(t('settings.configIo.exported'));
     } else {
-      // 沙箱 iframe 里 `URL.createObjectURL` 可能不可用：退回"显示出来让用户自己复制"
-      // （同诊断快照的处理），而不是报一句"导出失败"就完了。
+      // 沙箱 iframe 里 `URL.createObjectURL` 可能不可用：退回"显示出来让用户自己复制"（同诊断快照）。
       setCfgIoText(text);
       setCfgIoMsg(t('settings.configIo.exportFallback'));
     }
@@ -13465,17 +11409,12 @@ function SettingsPanel(props) {
       if (!r.ok) { setCfgIoMsg(cfgIoErrorText(r)); return }
       const res = importConfig(r.text);
       if (!res.ok) { setCfgIoMsg(cfgIoErrorText(res)); return }
-      // 配置被**整体替换**了：组件里的 cfg 快照要跟着换，否则界面还显示导入前的关注点与阈值
-      // （语言同理——`applyCfg` 已经让 i18n 切过去了，这里只负责让 React 重渲染）。
+      // 配置被**整体替换**了：组件里的 cfg 快照要跟着换，否则界面还显示导入前的关注点与阈值。
       setCfgState(currentCfg());
-      // 导入是**整体替换**：地区页签要跟着新配置重算（0.9.2 修复）。`regionTab` 只在挂载时
-      // 推导过一次，此后只由页签按钮切换——不重算的话，导入一份"只有全球关注点"的配置后，
-      // 一级选择器仍高亮旧的日本分支，用户会以为关注点没导进来。
+      // 地区页签只在挂载时推导过一次，此后只由页签按钮切换——导入（整体替换）后必须重算。
       setRegionTab(inferRegionTab(currentCfg()));
       setCfgIoBackupAt(res.backupAt);
-      // 0.9.4（P1-6）：导入成功不等于"原样导入"。归一化会丢弃坐标非法的关注点、把非数值的
-      // 半径退回 300km，而此前这里无条件报"已导入配置。"——用户看不出少了几个点，
-      // 配置里、界面里、诊断里都没有痕迹。有账就如实补一句。
+      // 导入成功不等于"原样导入"：规整流程会丢弃坐标非法的关注点、把非数值的半径退回默认值，有账就如实补一句。
       const w = res.warnings || {};
       const parts = [];
       if (w.dropped > 0) parts.push(t('settings.configIo.importedSkipped', { n: w.dropped }));
@@ -13484,9 +11423,7 @@ function SettingsPanel(props) {
         ? t('settings.configIo.imported') + ' ' + parts.join(' ')
         : t('settings.configIo.imported'));
     }).catch((err) => {
-      // 兜底：解析层的异常已经在 17-config-io 里转成错误码，但读文件（`file.text()` /
-      // FileReader）以及将来新增的任何一步仍可能抛。少了这个 catch，用户看到的是
-      // "点了没有任何反应"——那是最难归因的失败形态。
+      // 兜底：解析层的异常已在 17-config-io 转成错误码，但读文件仍可能抛；少了这个 catch，用户看到的是"点了没有任何反应"。
       setCfgIoMsg(t('settings.configIo.errUnexpected', { detail: String((err && err.message) || err) }));
     });
   };
@@ -13494,16 +11431,13 @@ function SettingsPanel(props) {
     const res = undoConfigImport();
     if (!res.ok) { setCfgIoMsg(t('settings.configIo.noBackup')); return }
     setCfgState(currentCfg());
-    // 0.9.4（P3-45）：撤销与导入一样是**整体替换**，地区页签必须跟着新配置重算。
-    // 此前只 setCfgState —— 导入这条路径 0.9.2 已经补了重算，撤销这条漏了：用户导入一份
-    // "只有全球关注点"的配置、再撤销回来，一级选择器仍高亮着导入后的分支，看起来像没恢复。
+    // 撤销与导入一样是**整体替换**，地区页签必须跟着重算（否则选择器仍高亮导入后的分支）。
     setRegionTab(inferRegionTab(currentCfg()));
-    // 撤销是一次性的：备份已被清掉（0.9.2），界面上的按钮与备份时间要跟着消失——否则按钮还挂着，
-    // 再点一次只会得到"没有可撤销的导入记录"。
+    // 撤销是一次性的：备份已被清掉，界面上的按钮与备份时间要跟着消失。
     setCfgIoBackupAt('');
     setCfgIoMsg(t('settings.configIo.undone'));
   };
-  /** 复制当前导出文本（0.9.4 / P3-43）：导出回退路径上的那一步。剪贴板不可用时如实说。 */
+  /** 复制当前导出文本（导出回退路径上的那一步）。剪贴板不可用时如实说。 */
   const onCopyCfg = () => {
     const text = cfgIoText || buildConfigExport(cfg);
     const ok = () => setCfgIoMsg(t('settings.configIo.copied'));
@@ -13521,13 +11455,10 @@ function SettingsPanel(props) {
     s.row(
       s.btn(t('settings.configIo.exportBtn'), onExportCfg),
       s.btn(t('settings.configIo.importBtn'), () => { if (cfgIoFileRef.current) cfgIoFileRef.current.click(); }),
-      // 「撤销上次导入」只在真的有备份时出现：一个点了只会说"没有可撤销的记录"的按钮，
-      // 比没有这个按钮更容易让人以为出了问题。
+      // 「撤销上次导入」只在真的有备份时出现：一个点了只会说"没有可撤销的记录"的按钮比没有更让人以为出了问题。
       cfgIoBackupAt ? s.btn(t('settings.configIo.undoBtn'), onUndoCfg) : null,
     ),
-    // 备份时间要**看得见**（0.9.2 修复）：备份跨会话保留，而"撤销"会把导入之后的所有改动整体
-    // 回滚。此前按钮只说"撤销上次导入"、不显示备份时间，用户无从判断要恢复的是多久之前的快照，
-    // 陈旧备份一旦被误触就是一次静默的配置丢失。
+    // 备份时间要**看得见**：备份跨会话保留，而"撤销"会把导入之后的所有改动整体回滚，用户需要判断要恢复的是多久之前的快照。
     cfgIoBackupAt ? h('div', { style: { fontSize: 11, color: '#9aa0a6', marginTop: 4 } },
       t('settings.configIo.undoAt', { at: formatIssuedLocal(cfgIoBackupAt) })) : null,
     h('input', {
@@ -13537,8 +11468,7 @@ function SettingsPanel(props) {
       style: { display: 'none' },
       onChange: (e) => {
         const f = e.target.files && e.target.files[0];
-        // 清空 value：否则连续导入**同一个文件**时 onChange 不会再触发（浏览器不会为同一个值
-        // 重复派发 change）。
+        // 清空 value：否则连续导入**同一个文件**时 onChange 不会再触发（浏览器不会为同一个值重复派发 change）。
         e.target.value = '';
         if (f) onImportCfg(f);
       },
@@ -13547,9 +11477,7 @@ function SettingsPanel(props) {
     cfgIoText
       ? h('div', null,
         h('div', { style: { fontSize: 11, color: '#d9a406', marginTop: 6 } }, t('settings.configIo.exportFallback')),
-        // 0.9.4（P3-43）：**把"复制"真的做出来**。此前文案说"请手动复制下面的文本"，却只有一个
-        // 只读文本框——而 `configIo.copied` / `copyFailed` 两条文案早就写在表里、没有任何消费者
-        // （诊断那一面有复制按钮，配置这一面只有回退）。现在两个键都用上了，用户少一步全选手抄。
+        // 把"复制"真的做出来：此前文案说"请手动复制下面的文本"，却只有一个只读文本框。
         s.row(s.btn(t('settings.configIo.copyBtn'), onCopyCfg, { fontSize: 11 })),
         h('textarea', {
           readOnly: true, value: cfgIoText, rows: 8,
@@ -13587,13 +11515,11 @@ function SettingsPanel(props) {
               ? t('settings.history.statusHit')
               : (e.suppressed ? t('settings.history.statusSuppressed')
                 : (e.pref ? t('settings.history.statusPrefHit', { pref: e.pref }) : t('settings.history.statusAlerted')));
-            // 气象电文来自気象庁防災情報XML，没有 P2PQuake 的 code：旧写法对 weather 落进
-            // 最后的 else 分支，展开详情时会把泥石流 / 洪水电文标成「code 551」（地震速报）。
+            // 气象电文来自気象庁防災情報XML，没有 P2PQuake 的 code；旧写法会把泥石流 / 洪水电文标成「code 551」。
             const codeText = p2pCodeTextOf(e.kind, e.code, e.id);
             return h('div', {
               key: itemKey,
-              // 可键盘操作（0.4.1）：详情是用户核对"插件到底看到了什么"的唯一入口，
-              // 只在 onClick 上可用等于把键盘 / 读屏用户挡在门外。
+              // 可键盘操作：详情是用户核对"插件到底看到了什么"的唯一入口，只在 onClick 上可用等于把键盘用户挡在门外。
               role: 'button',
               tabIndex: 0,
               'aria-expanded': open,
@@ -13623,8 +11549,7 @@ function SettingsPanel(props) {
                       h('span', { style: { color: '#e6e6e8' } }, t('settings.history.kindValue', { label: String(e.label || ''), code: codeText }))),
                     h('div', { style: { display: 'flex', gap: 6, marginTop: 2 } },
                       h('span', { style: { color: '#9aa0a6', width: 44 } }, t('settings.history.fieldTime')),
-                      // 按**本地时区**渲染（DESIGN 第 4 节）：解析层存的是带偏移的 ISO 8601，
-                      // 直接显示原文会让大陆用户看到一个差 1 小时且无标注的 JST 时间。
+                      // 按**本地时区**渲染：解析层存的是带偏移的 ISO 8601，直接显示原文会让大陆用户看到差 1 小时且无标注的 JST 时间。
                       h('span', { style: { color: '#e6e6e8' } }, formatIssuedLocal(e.issued) || '—')),
                     e.pref ? h('div', { style: { display: 'flex', gap: 6, marginTop: 2 } },
                       h('span', { style: { color: '#9aa0a6', width: 44 } }, t('settings.history.fieldPref')),
@@ -13635,9 +11560,7 @@ function SettingsPanel(props) {
                     h('div', { style: { display: 'flex', gap: 6, marginTop: 2 } },
                       h('span', { style: { color: '#9aa0a6', width: 44 } }, t('settings.history.fieldContent')),
                       h('span', { style: { color: '#e6e6e8', flex: 1, wordBreak: 'break-all' } }, head)),
-                    // 官方正文（0.6.1）：NWS 的 description + instruction、ECCC 的正文 + 署名。
-                    // 此前 alert.detail 在整条链路上**没有任何消费者**——用户看不到洪水预警里
-                    // "该怎么做"那一段，ECCC 许可要求的署名也进不了界面（见 05h 的文件头）。
+                    // 官方正文：NWS 的 description + instruction、ECCC 的正文 + 署名（许可要求署名）。
                     e.detail ? h('div', { style: { display: 'flex', gap: 6, marginTop: 4 } },
                       h('span', { style: { color: '#9aa0a6', width: 44, flexShrink: 0 } }, t('settings.history.fieldDetail')),
                       h('span', { style: { color: '#c8ccd4', flex: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, String(e.detail))) : null,
@@ -13648,13 +11571,9 @@ function SettingsPanel(props) {
     s.row(s.btn(t('settings.history.clear'), () => {
       store.push({ events: [] });
       saveJSON(HISTORY_KEY, []);
-      // 0.9.5（fresh review）：本页的"已播报"记忆也要清，而且要落盘。此前只清了历史列表，
-      // 于是同一条解除到达时本页仍会播「已解除」（记忆还在）、别的标签页却写「无对应提醒」——
-      // 同一条消息两个结论；而且刷新之后记忆会从 ALERTED_KEY 复活。
+      // 本页的"已播报"记忆也要清并写入本地存储：只清历史列表的话，同一条解除到达时本页仍会播「已解除」、别的标签页却写「无对应提醒」。
       forgetAllAlerted();
-      // 还要广播：其它标签页的内存副本不清的话，它们下一次 addEvent 会把整份记录（含刚被
-      // 清掉的条目）重新写回磁盘——用户以为清空了，实际只是本标签页看不见（若清空的动机
-      // 是隐私，这就是实际的信息泄露面）。
+      // 还要广播：其它标签页的内存副本不清的话，它们下一次 addEvent 会把整份记录（含刚被清掉的条目）重新写回磁盘。
       broadcastHistoryCleared();
     })),
   );
@@ -13671,27 +11590,21 @@ function SettingsPanel(props) {
 }
 
 // ============================================================================
-// dsh-quake-alert · client/src/14-ui-status.js
-//
-// 作用：侧边栏底部的连接状态指示（DESIGN 第 6 节）。
-// 内容：状态圆点（绿=已连接 / 黄=连接或重连中 / 红=已停止）+ 悬停详情 + 无障碍标签。
-// 依赖：01-constants、07-store、00-i18n。
+// dsh-quake-alert · client/src/14-ui-status.js — 侧边栏底部的连接状态指示：状态圆点
+// （绿=已连接 / 黄=连接或重连中 / 红=已停止）+ 悬停详情 + 无障碍标签。依赖 01-constants、07-store、00-i18n。
 // ============================================================================
 
 
-// ---------- 侧边栏状态指示（DESIGN 第 6 节：连接状态显示在插件图标与设置页） ----------
 function StatusIndicator(props) {
   const [, setTick] = useState(0);
   useEffect(() => store.subscribe(() => setTick((n) => n + 1)), []);
   const meta = statusMetaOf(store.status, store.retries);
   const wide = Boolean(props && props.wide);
-  // disabled（用户关掉了某个灾种 / 全部关掉）用**空心**圆点表示，与 stale / 未启动 的实心灰区分开
-  // （DESIGN 5 节的六态表格）。轮廓是边框而非填充，深色主题下也不会消失。
+  // disabled（用户关掉了某个灾种）用空心圆点，与 stale / 未启动的实心灰区分开（六态表）。
   const dotStyle = store.status === 'disabled'
     ? { display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: 'transparent', border: '1.5px solid ' + meta.color, flex: '0 0 auto' }
     : { display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: meta.color, flex: '0 0 auto' };
-  // 气象警报的「静默提示」（0.3.0）：只有"命中关注地区但未达 L4、没有播报"时才存在
-  // （L4 以上播报后会清掉，否则这里会与事实矛盾）。不改颜色、不弹窗、不响铃。
+  // 气象警报的静默提示：只有"命中关注地区但未达 L4、没有播报"时才存在（L4 以上播报后清掉）。
   const hint = store.weatherHint;
   const hintText = hint && typeof hint.level === 'number'
     ? t('status.weatherHint', { level: hint.level }) + (hint.label ? t('status.weatherHintLabel', { label: hint.label }) : '')
@@ -13708,16 +11621,12 @@ function StatusIndicator(props) {
 
 // ============================================================================
 // dsh-quake-alert · client/src/15-entry.js
-//
-// 作用：插件入口——apply 与单测钩子。
-// 内容：音效解锁监听、跨标签页通道、settings 绑定、市区町村表拉取、WebSocket 启停、
-//       设置页与状态指示两个 slot 的注册、exports.__test 导出面。
-// 依赖：全部前置文件。
-// 生命周期：所有副作用都包在 ctx.effect 内，插件停用即回收。
+// 作用：插件入口——apply 与单测钩子。注册音效解锁、跨标签页通道、settings 绑定、市区町村表、
+//       各源客户端的启停、设置页与状态指示两个 slot，并导出 exports.__test。
+// 依赖：全部前置文件。所有副作用都包在 ctx.effect 内，插件停用即回收。
 // ============================================================================
 
 
-// ---------- 插件入口 ----------
 const name = 'dsh-quake-alert';
 const inject = ['slots'];
 function apply(ctx) {
@@ -13733,34 +11642,21 @@ function apply(ctx) {
   }, 'dsh-quake-alert: audio unlock');
 
   // 跨标签页去重通道：必须在插件加载时就开始监听，否则会错过其它标签页的广播。
-  // 0.4.1 把它连同关闭一起放进 effect：原来 ensure 在外、close 在内，两代 fiber 会共享
-  // 同一条通道，停用 → 启用时旧 fiber 的 close 会把新 fiber 依赖的通道关掉。
-  // effect 体在 apply 时**同步执行**，所以"加载时就建立"的语义没有变。
+  // ensure 与 close 同处一个 effect（effect 体在 apply 时**同步执行**），两代 fiber 不能共享同一条通道。
   ctx.effect(() => {
     ensureAlertChannel();
     return () => { closeAlertChannel(); }
   }, 'dsh-quake-alert: tab channel');
 
-  // 插件（重新）装载时清空上一代的**连接**状态：clearSources 此前定义了却没有任何调用点，
-  // 与它自己的注释"插件停用 / 重建时把源清空"不符，残留状态会把新会话显示成"已连接"。
-  //
-  // 0.5.3 起**不再清数据健康**（原先是 resetSourceHealth）：那一层已经落了盘，而它表达的是
-  // "上游改了字段、要等插件更新"——这件事与用户刷新页面 / 重新启用插件无关，清掉等于让蓝点
-  // 永远没人看见（DESIGN 11.9 A）。连接与新鲜度才是"重启即无意义"的那两层。
+  // 插件（重新）装载时清空上一代的**连接**状态：残留状态会把新会话显示成"已连接"。
+  // 数据健康不清（已写入本地存储，表达的是"上游改了字段、要等插件更新"，与刷新页面 / 重新启用无关）。
   store.clearSources();
   resetConnHealth();
-  // 立刻把已升级的数据健康重新发布出来（0.5.4）：store 刚被清空，而蓝点存在 localStorage 里。
-  // 不重发的话要等该源下一次上报（feed 首轮 3 秒 + 15 秒一轮）才显示，而"上游改了字段"这件事
-  // 与刷新页面无关——DESIGN 11.9 A 的"蓝点跨刷新存活"应当是立刻成立，而不是十几秒后。
+  // 立刻重新发布已升级的数据健康：store 刚被清空而蓝点存在 localStorage 里，不重发要等该源下一轮上报才显示。
   republishDataHealth();
 
-  // 健康探针（0.5.3 / DESIGN 11.9 B）：按**契约里的阈值**判定各源的数据新鲜度，并驱动蓝点的
-  // TTL 自愈。把它放进 effect 是因为它有一个定时器——定时器归 fiber，停用即回收。
-  // 阈值只从 SOURCE_CONTRACTS 来，这是机制层的全部意义（此前那个字段整个代码库里没人读）。
-  //
-  // 0.9.4（P2-17）：把「这个源现在开着吗」交进去。**开关的映射只有这一份**（与各客户端
-  // 自己的 enabled 同口径），否则探针会隔着一层猜：关掉的源不判 stale，界面才不会把
-  // "我已关闭"改写成"上游数据已过期"。
+  // 健康自检：按 SOURCE_CONTRACTS 里的阈值判定各源的数据新鲜度并驱动蓝点 TTL 自愈。放进 effect
+  // 是因为它有定时器（定时器归 fiber）。sourceEnabled 是「这个源现在开着吗」的唯一映射：关掉的源不判 stale。
   const sourceEnabled = (id) => {
     const d = (currentCfg().disasters) || {};
     if (id === 'jma') return d.weather !== false
@@ -13776,15 +11672,9 @@ function apply(ctx) {
     return () => { try { probe.stop(); } catch (err) { /* 已停 */ } }
   }, 'dsh-quake-alert: health probe');
 
-  // 机器级持久化：settings 服务可用时，配置交给 DSH 的机器级存储（0.1.7 起是 profile patch，
-  // 0.1.6 及以前是 settings.yaml）。服务缺席（或页面非 loopback）时保持 localStorage 路径。
-  //
-  // 0.7.0 适配：两代宿主的**读写入口是两个不同的服务**，而 03-settings-bridge 只认"快照 + 写入"
-  // 这个形状（两者的 getSnapshot/subscribe/mutate 面几乎同形），所以分派放在这里：
-  //   · 0.1.6 及以前：`ctx.settingsScope.bind({ namespace })` → scope
-  //   · 0.1.7 起：`ctx.configForms.get(entryId)` → ConfigForm（`settingsScope` 已被移除）
-  // 两者都 `ctx.inject` 等待，但各自只在服务真的出现时执行，因此同一份代码在两代宿主上都能绑上；
-  // 先到者胜（bound 守卫），都缺席就退回 localStorage。
+  // 机器级持久化：settings 服务可用时配置交给 DSH 的机器级存储，服务缺席（或页面非 loopback）时保持 localStorage。
+  // 两代宿主的读写入口是两个不同的服务（03-settings-bridge 只认"快照 + 写入"）：旧宿主走 settingsScope.bind({ namespace })，
+  // 新宿主走 configForms.get(entryId)；两者都 ctx.inject 等待，先到者胜（bound 守卫）。
   if (typeof ctx.inject === 'function') {
     let bound = false;
     const bindHostSettings = (resolveScope, label) => {
@@ -13796,20 +11686,18 @@ function apply(ctx) {
         unbind = bindSettingsScope(scope);
         bound = true;
       } catch (err) { /* bind 失败 → 继续用 localStorage */ }
-      // 订阅必须随 fiber 释放（0.4.1）：否则同一页面内停用 → 启用 N 次会累积 N 个订阅，
-      // 此后 Host 的每一次配置变更都会触发 N 次写盘与 N 次重渲。
+      // 订阅必须随 fiber 释放：否则同一页面内停用 → 启用 N 次会累积 N 个订阅，此后 Host 每次配置变更都触发 N 次写入本地存储与重渲。
       if (bound && typeof unbind === 'function' && typeof ctx.effect === 'function') {
         ctx.effect(() => () => { try { unbind(); } catch (err) { /* 忽略 */ } }, 'dsh-quake-alert: ' + label + ' unbind');
       }
     };
-    // 0.1.7：命名空间就是本插件在 profile 里的条目 id（与 cordis.patch.yml 的 `- id:` 一致），
-    // 与 Host 侧导出的 Config schema 同名——SETTINGS_NS 不需要改。
+    // 命名空间就是本插件在 profile 里的条目 id（与 cordis.patch.yml 的 `- id:` 一致），与 Host 侧 Config schema 同名。
     ctx.inject(['configForms'], (settingsCtx) => {
       const forms = settingsCtx.configForms;
       if (!forms || typeof forms.get !== 'function') return
       bindHostSettings(() => forms.get(SETTINGS_NS), 'configForms');
     });
-    // 0.1.6 回退路径（0.1.7 下这个服务永远不出现，回调不会执行）。
+    // 旧宿主回退路径：新宿主下这个服务永远不出现，回调不会执行。
     ctx.inject(['settingsScope'], (settingsCtx) => {
       const scope = settingsCtx.settingsScope;
       if (!scope || typeof scope.bind !== 'function') return
@@ -13817,10 +11705,8 @@ function apply(ctx) {
     });
   }
 
-  // 跨标签页配置同步（0.3.2）：storage 事件只在「别的标签页写入」时触发。监听必须常驻——
-  // 原先写在设置页组件里，于是没打开设置页的标签页不会跟随，会一直按旧配置提醒。
-  // 回读走 03 的显式入口（跨模块不能直接给它的模块私有 runtimeCfg 赋值），再 store.push()
-  // 让设置页与状态指示一起刷新。
+  // 跨标签页配置同步：storage 事件只在「别的标签页写入」时触发，监听必须常驻（写在设置页组件里会让没打开
+  // 设置页的标签页不跟随）。回读走 03 的显式入口（跨模块不能直接给它私有的 runtimeCfg 赋值），再 store.push()。
   ctx.effect(() => {
     const onStorage = (e) => {
       if (!e || e.key === null || e.key === STORAGE_KEY) {
@@ -13832,18 +11718,14 @@ function apply(ctx) {
     return () => window.removeEventListener('storage', onStorage)
   }, 'dsh-quake-alert: cross-tab config');
 
-  // 市区町村表：Host 路由提供，拉一次缓存。失败只影响市级细化，不影响任何提醒。
-  // 放进 effect：拉取是异步的，若插件在飞行中被停用，要中止请求并停止写 store / 配置。
+  // 市区町村表：Host 路由提供，拉一次缓存；失败只影响市级细化，不影响任何提醒。放进 effect 以便飞行中停用时中止请求。
   ctx.effect(() => {
     loadCityTable();
     return () => { try { abortCityTableLoad(); } catch (err) {} }
   }, 'dsh-quake-alert: city table');
 
-  // WebSocket 常驻连接（与设置页是否打开无关）。
-  // start() 必须写在 effect 内：若同一 apply 后面的注册抛错，连接也要随 fiber 一起收掉，
-  // 否则会留下一条没有清理器的 socket，直到用户刷新页面。
-  //
-  // onRaw 走解析契约（0.4.1）：结构不符 / 值不可能 → 计入数据健康并**不播报**（蓝点），
+  // WebSocket 常驻连接（与设置页是否打开无关）。start() 必须写在 effect 内：若同一 apply 后面的注册抛错，连接也要
+  // 随 fiber 收掉，否则会留下没有清理器的 socket。onRaw 走解析契约：结构不符 / 值不可能 → 计入数据健康且**不播报**；
   // 与本插件无关的消息（其他 code）判为 empty、静静跳过。
   const client = createWsClient({
     onRaw: (raw, cfg) => {
@@ -13859,32 +11741,26 @@ function apply(ctx) {
     client.start();
     return () => {
       try { client.stop(); } catch (err) {}
-      // 置空：否则设置页里那个 80ms 后触发的 restart()（切换数据源）还能复活一个
-      // 已经没有任何 fiber 归属的 socket，它会继续上报状态并（经 handleAlert）响铃。
+      // 置空：否则设置页里 80ms 后触发的 restart() 还能复活一个已无 fiber 归属的 socket，它会继续上报状态并响铃。
       setActiveClient(null);
     }
   }, 'dsh-quake-alert: ws client');
 
-  /** 轮询源的状态上报：把每个源的连接 / 失败情况送进 store，参与整体状态聚合（0.4.1）。
-   *  经 publishStatus 合成（0.5.4）——12b 自己也算了一遍 effectiveStatusOf（它要用结果做去重键），
-   *  这里再过一次是幂等的，但保证了"写 store 的每一处都走同一个合成规则"。 */
+  /** 轮询源的状态上报：把每个源的连接 / 失败情况经 publishStatus 合成后送进 store（12b 自己也用结果做去重键）。 */
   const feedStatus = (sourceId) => (patch) => publishStatus(sourceId, patch);
   const feedError = (name) => (err) => {
-    // 措辞用"请求失败"而不是"增量拉取失败"（0.6.0 review C-5）：海外源是按点 / 按框查询，
-    // 没有"增量"这个概念，日志里出现"增量拉取失败"会把人引到错误的排查方向。
     try { console.warn('[dsh-quake-alert] ' + name + ' 请求失败：' + String((err && err.message) || err)); } catch (e) {}
   };
 
-  // 気象庁电文增量（0.3.0）：Host 侧负责轮询与去重，这里只拉本地增量并交给主链。
+  // 気象庁电文增量：Host 侧负责轮询与去重，这里只拉本地增量并交给主链。
   const feed = createFeedClient({
     id: 'jma',
     label: '気象庁',
     onStatus: feedStatus('jma'),
     onError: feedError('jma'),
   });
-  // 全球地震（USGS，0.4.0）：Host 轮询 GeoJSON（单级），Client 只拉本地增量。
-  // 与 EMSC 是互补关系——EMSC 是实时推送，USGS 目录更完整、还带修订版（updated 刷新）。
-  // 两者的同类地震靠 geoEventKey 归并，不会重复提醒。
+  // 全球地震（USGS）：Host 轮询 GeoJSON，Client 只拉本地增量。与 EMSC 互补（EMSC 是实时推送，USGS
+  // 目录更完整、还带修订版），两者的同类地震靠 geoEventKey 归并，不会重复提醒。
   const usgsFeed = createFeedClient({
     id: 'usgs',
     label: 'USGS',
@@ -13907,7 +11783,7 @@ function apply(ctx) {
       return true
     },
   });
-  // 海啸（NOAA，0.4.0）：Host 拉事件列表再取 CAP 详情，Client 解析 CAP。
+  // 海啸（NOAA）：Host 拉事件列表再取 CAP 详情，Client 解析 CAP。
   const noaaFeed = createFeedClient({
     id: 'noaa',
     label: 'NOAA',
@@ -13926,10 +11802,8 @@ function apply(ctx) {
       return true
     },
   });
-  // 大陆气象灾害（0.5.2）：中央气象台汇总的预警信号（暴雨 + 地质灾害），走 Host 的 `/feed` **轮询**。
-  // 为什么不是像 cenc 那样用 SSE：气象预警是"提前数十分钟到数小时发布"的警戒级信息，与 JMA 同一
-  // 性质——DESIGN 5.2 的 `/feed` + 15 秒本地拉取本来就是为这类信息设计的，延迟最坏 120+15 秒。
-  // 两个灾种各有开关，但**共用一个 Host 源**（同一个端点、同一份响应），所以只要有一个开着就继续拉。
+  // 大陆气象灾害（CMA）：中央气象台汇总的预警信号（暴雨 + 地质灾害），走 Host 的 `/feed` **轮询**，
+  // 延迟最坏 120+15 秒。两个灾种各有开关，但**共用一个 Host 源**（同端点、同响应），只要有一个开着就继续拉。
   const nmcFeed = createFeedClient({
     id: 'nmc_alarm',
     label: 'CMA',
@@ -13963,11 +11837,8 @@ function apply(ctx) {
     return () => { for (const f of feeds) { try { f.stop(); } catch (err) {} } }
   }, 'dsh-quake-alert: feed clients');
 
-  // 大陆源（0.5.0）：Wolfx 的 cenc_eew（预警）+ cenc_eqlist（速报），走 Host 的 **SSE 推送**。
-  // 为什么不是像上面几行那样用轮询：EEW 的价值在秒级，15 秒一轮等于把预警变成事后通知。
-  // 为什么还留降级：某些网络下长连接会被中间设备掐掉，而普通 HTTPS 轮询仍然通（DESIGN 11.5）；
-  // 12c 在"能证明这条路走不通"时会自动切到 `?source=` 轮询并把降级状态**说出来**。
-  // 两者都跟「地震」开关：预警与速报都是地震，DESIGN 8.4 只给速报单独一个**震级门槛**，不给单独开关。
+  // 大陆源：Wolfx 的 cenc_eew（预警）+ cenc_eqlist（速报），走 Host 的 **SSE 推送**（EEW 的价值在秒级）；
+  // 12c 在"能证明长连接走不通"时自动切到 `?source=` 轮询并把降级状态说出来。两者都跟「地震」开关，只有速报另有**震级门槛**。
   const cencApply = (sourceId, parseEntry) => (entry, cfg) => {
     let raw;
     try {
@@ -14006,10 +11877,9 @@ function apply(ctx) {
     return () => { for (const c of [cencEew, cencEqlist]) { try { c.stop(); } catch (err) {} } }
   }, 'dsh-quake-alert: cn streams');
 
-  // 海外气象（0.6.0）：美国 NWS 与加拿大 ECCC，**Client 直连的外部 REST**（CORS 实测允许）。
-  // 与其它源的形态差别写在 12e 的文件头：按关注点查询、不判停更、年龄闸门在首轮生效。
-  // 两个源各自只对"落在对应国家包围盒内的关注点"发请求——没配那个国家的用户一个请求都不产生，
-  // 所以不需要额外的开关，灾种开关（overseasWeather）关掉时连请求都不发（12e 的 enabled 判定）。
+  // 海外气象：美国 NWS 与加拿大 ECCC，**Client 直连的外部 REST**（CORS 允许），按关注点查询、
+  // 不判停更、年龄门槛在首轮生效。两个源各自只对"落在对应国家包围盒内的关注点"发请求，不需要
+  // 额外开关；灾种开关（overseasWeather）关掉时连请求都不发。
   const nwsSource = createNwsSource({
     onStatus: feedStatus('nws_alerts'),
     onError: feedError('nws_alerts'),
@@ -14019,25 +11889,17 @@ function apply(ctx) {
     onError: feedError('eccc_alerts'),
   });
   ctx.effect(() => {
-    // 清掉上一代的计数快照（0.6.0 review C-4）：`overseasStatsOf` 是模块级的，插件重建后
-    // 到首个轮询完成前，设置页与诊断会显示上一代的数字与 `running: true`。
+    // 清掉上一代的计数快照：overseasStatsOf 与 feedStatsOf 都是模块级的，插件重建后到首个轮询
+    // 完成前，设置页与诊断会显示上一代的数字与 `running: true`。
     for (const k of Object.keys(overseasStatsOf)) delete overseasStatsOf[k];
-    // 0.9.5（fresh review）：`feedStatsOf` 是同一形态，而当时只修了 overseas 那一半——
-    // 页面内「停用 → 启用」时，到新世代首个轮询完成前（首延迟 + 15 秒）设置页显示的是上一代的
-    // "已收到 N 条 / 最近拉取 N 秒前"，16-diag 的 `running` 还是 true。诊断快照的全部意义就是
-    // 消除"用户口述不可靠"，留着上一代的数字正好破坏它。
     for (const k of Object.keys(feedStatsOf)) delete feedStatsOf[k];
     nwsSource.start();
     ecccSource.start();
     return () => { for (const s of [nwsSource, ecccSource]) { try { s.stop(); } catch (err) {} } }
   }, 'dsh-quake-alert: overseas pollers');
 
-  // 全球地震（0.4.0）：EMSC 的 WebSocket，复用与 P2PQuake 同一套连接管理（退避、建连看门狗、
-  // 生命周期归还 fiber）。「久无数据」判据从 0（关闭）改为 3 小时（0.4.1 修正）：
-  // 关掉之后就没有任何半开检测了——半开正是"没有 onclose"，而建连看门狗在 onopen 之后
-  // 就被撤销，连接可以永久停在绿色上（用户以为在被保护），与 DESIGN 5.1「两种静默失效
-  // 必须主动检测」冲突。3 小时远大于正常推送间隔（全球 M4+ 平均约 30 分钟一条，不会误判），
-  // 又能兜住真正的半开；页面从冻结中恢复时会重置计时（见 12-websocket 的 visibilitychange）。
+  // 全球地震：EMSC 的 WebSocket，复用与 P2PQuake 同一套连接管理（重试间隔递增、建连超时监控、生命周期归还 fiber）。
+  // staleAfterMs 取 3 小时（远大于正常推送间隔）：建连超时监控在 onopen 后即撤销，没有它连接可以永久停在绿色上。
   const emsc = createWsClient({
     sourceId: 'emsc',
     label: 'EMSC',
@@ -14076,33 +11938,29 @@ function apply(ctx) {
 
 // 单测钩子（客户端宿主忽略额外导出）
 const __test = {
-  // 0.9.0：本地化机制（语言清单 / BCP 47 回退链 / 取词 / 文案表）
+  // 本地化机制（语言清单 / BCP 47 回退链 / 取词 / 文案表）
   LANGS, DEFAULT_LANGUAGE, LANGUAGE_LABELS, resolveLang, setLanguage, getLanguage, t, tableOf,
-  // 0.9.0：配置导出导入（格式标识 / 校验 / 导入前备份 / 撤销）
+  // 配置导出导入（格式标识 / 校验 / 导入前备份 / 撤销）
   buildConfigExport, parseConfigImport, importConfig, undoConfigImport, loadConfigBackup, configFileName,
   CONFIG_FORMAT, CONFIG_FORMAT_VERSION,
-  // 0.5.3：机制层（统一健康记录 + 探针 + 升级阈值）
+  // 机制层（统一健康记录 + 自检 + 升级阈值）
   createHealthProbe, staleAfterOf, PROBE_INTERVAL_MS,
   resetConnHealth, pruneHealth, noteFreshness, noteStale, loadHealth, publishStatus, republishDataHealth,
   SCHEMA_ESCALATE_COUNT, SCHEMA_ESCALATE_CONSECUTIVE, SCHEMA_ESCALATE_WINDOW_MS, HEALTH_TTL_MS,
-  // 0.5.2：大陆气象源（nmc.cn）—— 解析层 / 契约 / 行政区层级匹配
+  // 大陆气象源（nmc.cn）：解析层 / 契约 / 行政区层级匹配
   parseNmcAlarm, orgOf, parseNmcAlarmResult, matchCnAreaAlert, cnPlaceParts, cnWatchPlaces, cnAreaOf, normAliases,
   NMC_KIND_TEXT, NMC_LEVEL_TEXT, NMC_LEVEL_RANK, NMC_BROADCAST_MIN_RANK,
-  // 0.6.0：海外气象源（美国 NWS / 加拿大 ECCC）—— 解析层 / 契约 / 事件键 / 白名单
+  // 海外气象源（美国 NWS / 加拿大 ECCC）：解析层 / 契约 / 事件键 / 白名单；取数器按关注点查询、查询即匹配、年龄门槛
   parseNwsAlert, parseEcccAlert, parseNwsAlertResult, parseEcccAlertResult,
   ecccKindTextOf, nwsEventKeyOf, nwsVtecKeyOf, ecccEventKeyOf, NWS_EVENT_WHITELIST, nwsKindTextOf, nwsKindTextMap,
   NWS_SEVERITY, NWS_SEV_RANK, ECCC_COLOUR_SEVERITY, ECCC_COLOUR_RANK, ECCC_INCLUDE, ECCC_EXCLUDE,
   OVERSEAS_BROADCAST_MIN_RANK,
-  // 0.6.0：取数器与匹配（按关注点查询 / 查询即匹配 / 年龄闸门）
   createNwsSource, createEcccSource, nwsSamplePoints, ecccBboxOf, placesInBoxes, US_BOXES, CA_BOX, defaultFetchText, matchOverseasAlert,
   NWS_ALERTS_BASE, ECCC_ALERTS_BASE, NWS_EVENT_QUERY,
   MIN_SAMPLE_RADIUS_KM, MAX_REQUESTS_PER_ROUND, OVERSEAS_FRESH_GATE_MS, OVERSEAS_GATE_RESET_MS,
   UNCOVERED_TTL_MS, OVERSEAS_MIN_BACKOFF_MS, OVERSEAS_MAX_BACKOFF_MS,
   overseasStatsOf, defaultFetchText,
   parse, parseQuake, parseEew, parseTsunami, parseJma, parseEmsc, parseUsgsFeature, parseNoaaCap, severityOfMagnitude, geoEventKey, TEST_GEO_SCENARIOS, buildTestGlobalMessage, parseTestGlobalMessage, feedStatsOf, watchlessPoint, buildTestTelegram, TEST_SCENARIOS, jmaMaxLevelIn: maxLevelIn, jmaItemsOf: itemsOf, noticeAreaLevels, applyNoticeLevels, regionKindOf, matchAlert, matchPointAlert, distanceKm, validGeo, normalizePlaces, soundKindOf, soundAllowedFor, playSound, sevColor, p2pCodeTextOf, kindColorOf, alertTitleOf, prefsOfArea, regionsOfArea, AREA_PREF, loadCfg, normalizeCfg, loadHistory, normalizeHistoryEntry, addEvent, withinHistoryAge, handleRaw, handleCancelled, handleAlert, updateWeatherHint, WEATHER_EVENT_WINDOW_MINUTES, hitSeverityOf, createFeedClient, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL, createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY, cnProductName, authorityOf, disclaimerOf, weatherActionHintOf, SOURCE_ORDER, sourceLabelOf, SOURCE_CODE_TEXT, SettingsPanel, statusMetaOf, buildDiagSnapshot, copyDiagSnapshot, DIAG_SNAPSHOT_VERSION, inQuietHours, placeOriginOf, PLACE_ORIGINS, geoOfHypo, sourceIdOf, crossSourceCopyOf, noteAuthoritySuppressed, authorityStatsOf, SOURCE_RANK, sourceNameOf, SOURCE_AGENCY, agencyOf, CROSS_SOURCE_KINDS, rankOfSource, sourceZhOf, alertedEvents, isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, forgetAllAlerted, claimAlertForTab, cancelKeyOf, rememberAlerted, wasRecentlyAlerted, ensureAlertChannel, broadcastHistoryCleared, createWsClient, store, HISTORY_MAX, HISTORY_MAX_AGE_MS, LEGACY_PLACE_RADIUS_KM, requestNotificationPermission, PREFECTURES, prefLabelOf, PREF_EN, PREF_HANT, SCALE_OPTIONS, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, DEFAULT_CFG, STORAGE_KEY, currentCfg, applyCfg, reloadFromLocal, bindSettingsScope, settingsOpsFor, cfgToSection, sectionToCfg, SETTINGS_NS, settingsState, resetSettings, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, lookupAddrCity, buildAddrIndex, normalizePref, prefOfCode, prefCodeOf, pruneUnknownCities, pruneCitiesOfUnwatchedPrefs, loadCityTable, abortCityTableLoad, cityTableState: () => cityTableState, cnAreasStateOf, retryCityTable, resetCityTable, setCnAreas, cnProvinces, cnCitiesOf, cnPlaceOf, setWorldCountries, worldCountriesOf, countryNameOf, countryPackOf, loadCountryCities, resetWorldCities, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, p2pTimeToIso, cnTimeToIso, CN_TIME_RE, CN_REPORT_MAG_OPTIONS, LANGUAGE_OPTIONS, issuedToDate, formatIssuedLocal, audioState, SOURCE_CONTRACTS, parseEpspResult, parseEmscResult, parseUsgsResult, parseNoaaResult, parseJmaResult, parseCencEewResult, parseCencEqlistItemResult, parseCencEqlistResult, parseCencEew, parseCencEqlist, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of, failResult, noteParseResult, noteSourceSuccess, retrySource, sourceHealthOf, effectiveStatusOf, resetSourceHealth, P2P_TIME_RE, MIGRATED_KEY };
-
-// activeClient 是 12-websocket 的模块级 let：给 12 用的赋值出口（跨模块不能写 imported binding）
-// 由 12-websocket 提供 setter；这里仅保留引用以便阅读
 
 exports.__test = __test;
 exports.apply = apply;

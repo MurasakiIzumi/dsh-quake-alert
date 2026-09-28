@@ -1,22 +1,13 @@
 // ============================================================================
 // dsh-quake-alert · client/src/00-i18n.js
 //
-// 作用：界面语言的唯一入口（DESIGN 11.1 的 0.9.0 本地化）。
-// 内容：语言清单与显示名、BCP 47 回退链、文案表汇总与自校验、t() 取词、setLanguage。
-// 依赖：各 `00x-texts-*.js` 面文件（纯数据，不 import 任何模块）。
+// 作用：界面语言的唯一入口——语言清单与显示名、BCP 47 回退链、文案表汇总与自校验、t() 取词。
+// 依赖：各 `00x-texts-*.js` 文案文件（纯数据，不 import 任何模块）。
 //
-// 设计要点（DESIGN 11.9 / 11.10 的定稿）：
-//   · **值域是插件自己的 BCP 47 清单**（zh-CN / zh-TW / ja / en），不对齐宿主的 zh/en——
-//     宿主那份是界面语言包清单，且 zh 分不出简繁。Host 只校验 BCP 47 形状，白名单在这里。
-//   · **加一种语言 = 这里加一项 + 补一份文案表**。每份面文件都必须覆盖 LANGS 的全部语言，
-//     漏一份、漏一条 key 都会在**模块加载期**抛错（响亮的失败，而不是静默回退成中文）。
-//   · **只翻我们生成的文本**：源侧的 headline / detail / 地名 / kindLabel / 各源 reason
-//     一律原样透传（11.10）。所以 t() 里不该出现源的文本。
-//   · **zh-CN 一栏逐字等于 0.8.2 的界面文案**：默认语言下的输出与本地化之前完全一致，
-//     这样既有回归断言（大量以中文字符串为锚点）继续有效，用户可见行为也没变。
-//
-// t() 取不到 key 时**回显 key 本身**（例如 `settings.watch.title`）。宁可让界面上出现一个
-// 明显的占位符，也不要静默显示空白或退回中文——前者一眼能看出来并被抓进测试。
+// 语言值域是本文件自己的 BCP 47 清单，不对齐宿主的 zh / en（宿主只校验 BCP 47 形状）。
+// 加一种语言 = LANGS 加一项 + LANGUAGE_LABELS 加一项 + 每份文案文件补一栏，三者缺一不可；
+// 漏一份语言或漏一条 key 都在加载期抛错。只翻我们生成的文本，源侧 headline / detail /
+// 地名 / kindLabel / reason 一律原样透传。t() 取不到 key 时回显 key 本身。
 // ============================================================================
 
 import { CORE } from './00a-texts-core.js'
@@ -27,38 +18,29 @@ import { EVENTS } from './00g-texts-events.js'
 import { REASONS } from './00h-texts-reasons.js'
 
 // ---------- 语言清单（顺序即设置页下拉顺序） ----------
-/** 支持的语言，BCP 47 完整标识。加语言只改这一行 + 补一份表。 */
+/** 支持的语言，BCP 47 完整标识。加语言要同时改 LANGS、LANGUAGE_LABELS 与每份文案表。 */
 const LANGS = ['zh-CN', 'zh-TW', 'ja', 'en']
 /** 默认语言。也是「配置里的值认不出」时的回退终点。 */
 const DEFAULT_LANGUAGE = 'zh-CN'
-/** 语言显示名：按**该语言自己**的写法（语言选择器不该出现"看不懂自己语言名"的情况）。 */
+/** 语言显示名：按该语言自己的写法（语言选择器里不出现用户看不懂的自己语言名）。 */
 const LANGUAGE_LABELS = { 'zh-CN': '简体中文', 'zh-TW': '繁體中文', ja: '日本語', en: 'English' }
 
 /**
- * 繁体侧的**地区**子标签（小写比较）。脚本子标签 `hant` / `hans` 在 resolveLang 里单独处理，
- * 且**优先于地区**——理由见那里的注释。
- *
- * 为什么要单独一张：中文的"地区变体"不能像 `ja-JP` 那样按主语言匹配——`zh-HK` / `zh-TW` 的
- * 用户要的是**繁体**，而按主语言匹配只会落到清单里第一个 `zh-*`（`zh-CN`）。
- * 那正是"加了繁体却仍然给简体"的静默失败：界面上看不出任何异常，用户只会觉得选错了。
+ * 繁体侧的地区子标签（小写比较）；脚本子标签 `hant` / `hans` 在 resolveLang 里单独处理。
+ * 中文的地区变体不能像 `ja-JP` 那样按主语言匹配：`zh-HK` / `zh-TW` 的用户要繁体，
+ * 而按主语言匹配只会落到清单里第一个 `zh-*`（`zh-CN`），界面上看不出异常。
  */
 const HANT_REGIONS = ['tw', 'hk', 'mo']
 
 // ---------- 文案表汇总 ----------
-/** 全部面文件。新增一个面（如设置页）时加进来即可。 */
 const PARTS = [CORE, SETTINGS, CONFIG_IO, UNITS, EVENTS, REASONS]
 
 /**
- * 把面文件按语言合并成 `{ lang: { key: text } }`，并当场校验：
- *   ① 每份面文件覆盖了 LANGS 的每一种语言；
- *   ② 每份面文件内部，各语言的 key 集合完全相同（防「漏翻一条」）；
- *   ③ 不同面文件之间没有重复 key（防「后一份悄悄覆盖前一份」）。
- * 任一条不满足就抛错——bundle 装载即失败，比一条悄悄失效的断言更早、更明确。
+ * 把文案文件按语言合并成 `{ lang: { key: text } }`，并当场校验：每份文案文件覆盖 LANGS 的每一种语言、
+ * 内部各语言的 key 集合完全相同、不同文案文件之间没有重复 key。任一条不满足就抛错，装载即失败。
  */
 function mergeParts(parts) {
-  // 每个语言还得有**显示名**（语言下拉的 label）。漏了的话 `LANGUAGE_OPTIONS` 会产出
-  // `{ v: 'ko', label: undefined }`——"加一种语言漏一步"的沉默失败，装载期就把它拦住
-  // （加语言 = LANGS 加一项 + LANGUAGE_LABELS 加一项 + 每份面补一栏，三者缺一不可）。
+  // 每个语言还得有显示名（语言下拉的 label），否则 LANGUAGE_OPTIONS 会产出 label: undefined
   for (const lang of LANGS) {
     if (typeof LANGUAGE_LABELS[lang] !== 'string' || !LANGUAGE_LABELS[lang]) {
       throw new Error('i18n 语言缺显示名（LANGUAGE_LABELS）：' + lang)
@@ -97,10 +79,9 @@ const TABLES = mergeParts(PARTS)
 let currentLang = DEFAULT_LANGUAGE
 
 /**
- * 把任意值解析成清单里的语言（BCP 47 惯例的逐级回退）：
- *   精确匹配（大小写不敏感） → 中文按**脚本 / 地区**分流（`zh-TW` / `zh-HK` / `zh-Hant` → `zh-TW`；
- *   `zh` / `zh-CN` / `zh-SG` / `zh-Hans` → `zh-CN`） → 其它主语言匹配（`ja-JP` → `ja`） → 默认语言。
- * 逐级回退的意义：`zh-HK` 的用户拿到繁体、`ja-JP` 的用户拿到日文，而不是双双掉到默认语言（简体）去。
+ * 把任意值解析成清单里的语言，逐级回退：精确匹配（大小写不敏感）→ 中文按脚本 / 地区分流
+ * （`zh-TW` / `zh-HK` / `zh-Hant` → `zh-TW`，`zh` / `zh-CN` / `zh-SG` / `zh-Hans` → `zh-CN`）
+ * → 其它主语言匹配（`ja-JP` → `ja`）→ 默认语言。
  */
 function resolveLang(value) {
   const raw = String(value === undefined || value === null ? '' : value).trim()
@@ -109,11 +90,8 @@ function resolveLang(value) {
   const exact = LANGS.find((l) => l.toLowerCase() === lower)
   if (exact) return exact
   const parts = lower.split('-')
-  // 中文这一支必须先看脚本与地区子标签，再看主语言：清单里有两个 `zh-*`，而主语言匹配只会
-  // 取到第一个（`zh-CN`），繁体用户于是永远拿不到繁体（见 HANT_REGIONS 的说明）。
-  // **脚本优先于地区**（BCP 47）：`zh-Hans-HK` 是"简体字形 + 香港地区"，字形由脚本决定，
-  // 判成繁体是错的（Windows 的「中文(简体, 中国香港特别行政区)」正是这一串）；反过来
-  // `zh-Hant-CN` / `zh-CN-Hant` 也按脚本判成繁体。
+  // 中文这一支必须先看脚本与地区子标签，再看主语言：清单里主语言匹配只取第一个 `zh-*`（简体）。
+  // 且脚本优先于地区：`zh-Hans-HK` 是简体字形 + 香港地区，判成繁体是错的；`zh-Hant-CN` 反之。
   if (parts[0] === 'zh') {
     const subs = parts.slice(1)
     if (subs.indexOf('hant') !== -1) return 'zh-TW'
@@ -132,13 +110,11 @@ function setLanguage(value) {
 
 function getLanguage() { return currentLang }
 
-/** 取词。params 用于替换 `{name}`；缺 key 时回显 key 本身（见文件头）。 */
+/** 取词。params 用于替换 `{name}`；缺 key 时回显 key 本身。 */
 function t(key, params) {
   const k = String(key)
   const table = TABLES[currentLang] || TABLES[DEFAULT_LANGUAGE]
-  // 用 `hasOwnProperty` 而不是直接 `table[k]`：key 恰好是 `constructor` / `toString` / `valueOf`
-  // 这类名字时，后者会命中原型链拿到一个函数——"缺 key 回显 key"的承诺不成立，而且带参数时
-  // 会在 `.replace` 上抛 TypeError。项目在 02-storage 的 `own()` 里立过同一条约定。
+  // 用 hasOwnProperty 而不是 `table[k]`：key 恰好叫 `constructor` / `toString` 时会命中原型链。
   let s = Object.prototype.hasOwnProperty.call(table, k) ? table[k] : undefined
   if (s === undefined) {
     const def = TABLES[DEFAULT_LANGUAGE]

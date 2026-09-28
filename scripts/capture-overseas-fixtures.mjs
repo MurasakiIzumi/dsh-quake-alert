@@ -1,24 +1,10 @@
 #!/usr/bin/env node
-// dsh-quake-alert · 海外气象源 fixture 抓取（0.6.0；0.6.1 追加两条事件链）
-//
-// 用途：把美国 NWS 与加拿大 ECCC 的**真实响应**存进 `samples/`，作为解析器与回归断言的输入。
-// 形态遵循 samples/nmc/ 的既有做法（0.5.2）：**裁剪但保持与真实响应同形**——
-// 只删掉与本插件无关的条目，不重排字段、不改类型，否则测的就不是线上那条路径了。
-//
-// 为什么必须抓真实数据而不是手写 fixture：这两个源的字段名与枚举值（NWS 的 `event` 分类、
-// ECCC 的 `alert_code` / `eventCode` / 双语）都不是猜得出来的，而解析器的白名单必须建立在
-// 实测值域上（DESIGN 4.5「解析层严格，宁可失败也不猜」）。
-//
-// 用法：
-//   node scripts/capture-overseas-fixtures.mjs            # 两个源都抓
-//   node scripts/capture-overseas-fixtures.mjs --source=nws
-//   node scripts/capture-overseas-fixtures.mjs --point=29.7604,-95.3698
-//
-// 退出码：0 = 抓取完成（网络不可达**不算失败**，与其它排障脚本同口径）；1 = 拿到响应但结构不符。
-//
-// 已知限制（不要在下一轮当成新发现）：ECCC 的灾种分布**随季节变化**，当前（北半球秋季）
-// 活跃集里只有霜冻 / 风 / 风暴潮，**没有降雨类** —— 也就是说「ECCC 的降雨预警长什么样」
-// 这份 fixture 回答不了，只能等它真实出现（DESIGN 4.6.3 / 4.7 已如实登记这个缺口）。
+// dsh-quake-alert · 海外气象源 fixture 抓取（美国 NWS / 加拿大 ECCC）
+// 把两个源的真实响应写入 samples/nws/ 与 samples/eccc/，作为解析器与回归断言的输入。
+// 裁剪规则：只删与本插件无关的条目，保持与真实响应同形——不重排字段、不改类型、不裁字段。
+// 用法：node scripts/capture-overseas-fixtures.mjs [--source=all|nws|eccc] [--point=<lat>,<lon>]（默认两个源都抓）
+// 输出 samples/nws/ 与 samples/eccc/；退出码：0 = 抓取完成（网络不可达不算失败），1 = 拿到响应但结构不符。
+// 已知限制：ECCC 的灾种分布随季节变化，当前活跃集里没有降雨类，本 fixture 覆盖不到。
 
 import { writeFileSync, readFileSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -26,24 +12,20 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(HERE, '..')
-const UA = '(dsh-quake-alert 0.6.0 fixture capture)'
+const UA = '(dsh-quake-alert fixture capture)'
 
 const argv = process.argv.slice(2)
 const argOf = (n, d) => { const h = argv.find((a) => a.startsWith('--' + n + '=')); return h ? h.split('=').slice(1).join('=') : d }
 const want = argOf('source', 'all')
 const point = argOf('point', '29.7604,-95.3698')
 
-/** 本插件接的 NWS 事件类型（洪水 / 山洪 / 沿海洪水）。白名单要**精确**，见 DESIGN 4.7。 */
+/** 本插件接的 NWS 事件类型（洪水 / 山洪 / 沿海洪水），必须与 client/src/05h 的白名单一致。 */
 const NWS_EVENTS = [
   'Flood Warning', 'Flash Flood Warning', 'Flood Advisory', 'Flood Watch',
   'Coastal Flood Warning', 'Coastal Flood Watch', 'Coastal Flood Advisory', 'Coastal Flood Statement',
 ]
 
-/**
- * 白名单自检（0.6.2）：上面那份名单是**手抄的第二份**（`client/src` 的 ESM 依赖 `react`，
- * Node 下 import 不进来）。往 05h 的白名单里加一类洪水产品却忘了同步这里时，抓取本身不会报错——
- * 它只是永远抓不回那一类的样本，于是新类型**没有任何回归断点**。这里用读源码文本的方式比对。
- */
+/** 比对 NWS_EVENTS 与 client/src/05h 的洪水白名单（client/src 的 ESM 依赖 react，Node 下只能读源码文本）。 */
 function assertWhitelistInSync() {
   const src = readFileSync(join(ROOT, 'client', 'src', '05h-overseas-parsers.js'), 'utf8')
   const inSource = [...src.matchAll(/^\s*'([^']+)':\s*\{\s*kind:/gm)].map((m) => m[1]).sort()
@@ -64,7 +46,7 @@ function assertWhitelistInSync() {
   return true
 }
 
-/** 从一条 properties 里取 VTEC 的事件追踪号（与 05h 的 nwsVtecKeyOf 同一规则，用于**校验**）。 */
+/** 从一条 properties 里取 VTEC 的事件追踪号（与 05h 的 nwsVtecKeyOf 同一规则，用于校验）。 */
 function vtecOf(props) {
   const list = (props && props.parameters && props.parameters.VTEC) || []
   for (const raw of (Array.isArray(list) ? list : [])) {
@@ -87,7 +69,7 @@ async function get(url) {
 }
 
 // ---------------------------------------------------------------------------
-// 美国 NWS：两个 fixture——① 洪水类列表（解析器的真实输入）② 按点的查询（0.6.0 的取数形态）
+// 美国 NWS：洪水类列表 fixture（解析器的真实输入）+ 按点查询 fixture
 // ---------------------------------------------------------------------------
 async function captureNws() {
   console.log('=== NWS ===')
@@ -99,8 +81,7 @@ async function captureNws() {
   try { j = JSON.parse(r.text) } catch (e) { console.log('  列表不是 JSON（可能被拦截）'); process.exitCode = 1; return }
   if (!Array.isArray(j.features)) { console.log('  列表缺少 features 数组'); process.exitCode = 1; return }
   console.log('  列表：' + j.features.length + ' 条 / ' + r.text.length + ' 字节')
-  // 裁剪：每个 event 类型最多留 1 条（保证覆盖所有接进来的类型），其余删掉。
-  // **保留完整的 properties 与 geometry**——正文（description / instruction）是解析目标。
+  // 裁剪：每个 event 类型最多留 1 条；保留完整的 properties 与 geometry，正文是解析目标。
   const seen = new Set()
   const kept = []
   for (const f of j.features) {
@@ -109,9 +90,7 @@ async function captureNws() {
     seen.add(ev)
     kept.push(f)
   }
-  // numberMatched / numberReturned 要跟着**裁剪后**的条数走（0.6.2）：它们原本留的是全量数字，
-  // 于是 fixture 与"裁剪但保持与真实响应同形"的自我声明冲突——any 拿它当响应体的用例都会
-  // 恒判"被分页截断"（假警报）。
+  // numberMatched / numberReturned 必须跟着裁剪后的条数走：留下全量数字会被响应体用例判成"被分页截断"。
   const sample = Object.assign({}, j, {
     features: kept,
     numberMatched: kept.length,
@@ -129,12 +108,9 @@ async function captureNws() {
 }
 
 /**
- * 两条**事件链** fixture（0.6.1）。存在的理由：0.6.0 的事件键算法是用"同一 serial 递增 version"
- * 的**合成**样本验证的，而实测的链是**逐版串联**的（每条只 `references` 紧邻的上一版）——
- * 合成样本永远发现不了那件事，真实链一抓就露。所以这两条 fixture 是**证据**，不是装饰：
- *   ① 同一次洪水预警的连续两版：identifier / sent 都不同，**VTEC 追踪号相同**；
- *   ② 一条 Cancel + 它 `references` 的那条警报：VTEC 只有 ACTION 段不同（EXT/CON → CAN）。
- * 任何一条重新抓都要能重现"同键"这个结论，否则说明上游换了事件标识的语义（DESIGN 4.7.4）。
+ * 两条事件链 fixture：① 同一次预警的连续两版（identifier / sent 不同，VTEC 追踪号相同）；
+ * ② 一条 Cancel 与它 references 的那条警报（VTEC 只有 ACTION 段不同）。
+ * 写入文件前校验同键；不成立就不写入文件，避免提交自相矛盾的样本。
  */
 async function captureNwsEventChains(activeJson) {
   const feats = (activeJson && activeJson.features) || []
@@ -145,14 +121,12 @@ async function captureNwsEventChains(activeJson) {
   } else {
     const prev = await getAlertJson(upd.properties.references[0].identifier)
     if (!prev) {
-      // 静默跳过一次抓取看起来和成功一样（0.6.2）：明说，且**不写盘**——半成品 fixture 比没有更糟。
-      console.log('  事件链：被引用的上一版拉取失败，跳过（不写盘）')
+      // 被引用的上一版拉取失败：明说并跳过，不写入文件。
+      console.log('  事件链：被引用的上一版拉取失败，跳过（不写入文件）')
     } else if (!vtecOf(prev.properties) || vtecOf(prev.properties) !== vtecOf(upd.properties)) {
-      // 写盘**之前**验证（0.6.2）：note 里断言"两版 VTEC 追踪号相同"，而上游若改了事件标识的
-      // 语义，这里必须当场失败，而不是把一条自相矛盾的"证据"提交进仓库（回归用例会红，
-      // 但 fixture 已经被覆盖了）。
+      // 写入文件之前校验两版 VTEC 追踪号相同；不同则当场失败。
       console.log('  ✗ 事件链的两版 VTEC 追踪号不同（prev=' + (vtecOf(prev.properties) || '(无)') +
-        ' upd=' + (vtecOf(upd.properties) || '(无)') + '）——不写盘，请复核事件键的来源')
+        ' upd=' + (vtecOf(upd.properties) || '(无)') + '）——不写入文件，请复核事件键的来源')
       process.exitCode = 1
     } else {
       write('samples/nws/nws-event-chain.geojson', JSON.stringify({
@@ -198,7 +172,7 @@ async function getAlertJson(id) {
 }
 
 // ---------------------------------------------------------------------------
-// 加拿大 ECCC：每种 alert_code 各留 1 条，**保留 geometry**（它 100% 带 Polygon，是匹配的输入）
+// 加拿大 ECCC：每种 alert_code 各留 1 条，保留 geometry（100% 带 Polygon，是匹配的输入）
 // ---------------------------------------------------------------------------
 async function captureEccc() {
   console.log('=== ECCC ===')
@@ -220,7 +194,7 @@ async function captureEccc() {
   })
   write('samples/eccc/eccc-alerts.geojson', JSON.stringify(sample, null, 1))
   console.log('  裁剪后保留类型：' + Object.keys(byCode).map((c) => c + '→' + byCode[c].properties.alert_name_en).join(' / '))
-  console.log('  ⚠ 当前季节没有降雨类：ECCC 的 rainfall 预警形态**未被本 fixture 覆盖**（DESIGN 4.6.3 已登记）')
+  console.log('  ⚠ 当前季节没有降雨类：ECCC 的 rainfall 预警形态**未被本 fixture 覆盖**')
 }
 
 console.log('dsh-quake-alert · 海外气象源 fixture 抓取\n')

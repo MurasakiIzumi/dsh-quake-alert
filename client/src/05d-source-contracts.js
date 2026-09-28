@@ -1,25 +1,12 @@
 // ============================================================================
 // dsh-quake-alert · client/src/05d-source-contracts.js
 //
-// 作用：**解析契约**与**每源校验约定**（0.4.1 的交付物之一，对应 DESIGN 4.5 与 11.1）。
-// 内容：① 统一的解析返回形态 { ok, alert } | { ok:false, kind:'empty'|'schema'|'value', detail }
-//       ② 五个源各自填写的内容：必需字段清单与类型（schema 判据）、源时区、
-//          新鲜度阈值（stale 判据）、empty 判据
-//       ③ 健康状态记录**已迁出**（0.5.3）：存 / 升级阈值 / 自愈在 05g-source-health.js，
-//          探针调度在 12d-health-probe.js。本文件从此只做"约定"这一层。
+// 作用：**解析契约**与**每源校验约定**——统一返回形态 + 每源的 schema / stale / empty 判据。
 // 依赖：01-constants、02-storage、05/05b/05c（各源的解析器）、07-store（状态上报）。
+// 健康记录（存 / 升级阈值 / 自愈）在 05g-source-health.js，自检调度在 12d-health-probe.js。
 //
-// 三层划分（DESIGN 11.1）：本文件是**约定层**——解析失败的返回形态与"UI 如何表示数据格式异常"，
-// 随源走，所以 0.4.1 一次补齐已有 5 源、0.5.0 / 0.5.2 随新源同步制作。
-// **机制层**（健康数据结构、升级阈值、探针调度、CI 契约测试）已在 0.5.3 落地到
-// `05g-source-health.js`（存与升级 / 自愈）与 `12d-health-probe.js`（探针）；本文件末尾只
-// re-export 那几个入口，让调用方不必改 import 来源。
-//
-// 三类失败的语义与处置（DESIGN 4.5）：
-//   empty  —— 源正常，当前没有与本插件相关的数据。**不计失败**、不显示异常。
-//   schema —— 结构不符（字段缺失 / 类型错误 / 顶层不是预期结构）。计入健康状态、停止播报该源。
-//   value  —— 结构正确但值客观不可能（坐标越界、时间在 100 年后等）。同上，但只查硬边界。
-// 核心原则：解析层严格，匹配层宽松。结构不符时任何"智能猜测"都可能把垃圾数据变成误报。
+// 三类失败：empty 源正常但无相关数据（不计失败）；schema 结构不符；value 值客观不可能。
+// 后两类计入健康状态并停止播报该源。解析层严格，匹配层宽松。
 // ============================================================================
 
 import { isPlainObject, own } from './02-storage.js'
@@ -31,7 +18,6 @@ import { parseCencEew, parseCencEqlistItem, cencEqlistItems, cencEqlistMd5Of } f
 import { parseNmcAlarm, orgOf, NMC_KIND_TEXT, NMC_LEVEL_TEXT } from './05f-nmc-parsers.js'
 import { parseNwsAlert, parseEcccAlert, NWS_EVENT_WHITELIST, ECCC_INCLUDE, ECCC_EXCLUDE, ECCC_COLOUR_SEVERITY } from './05h-overseas-parsers.js'
 
-// ---------------------------------------------------------------- 返回形态
 /** 解析成功。 */
 export const okResult = (alert) => ({ ok: true, alert })
 /** 解析失败 / 无关。kind ∈ 'empty' | 'schema' | 'value'。 */
@@ -49,25 +35,21 @@ const timeMsOf = (v) => {
   const t = Date.parse(String(v === undefined || v === null ? '' : v))
   return Number.isFinite(t) ? t : null
 }
-/** 时间戳是否客观不可能：1970 年以前、或 100 年以后（DESIGN 4.5 的 value 判据）。
- *  **缺失 / 不可解析不算"不可能"**——存在性由各源的 schema 判据负责。传 null 时若返回 true，
- *  会让"没给时间"的地震情报整条被丢掉（parseQuake 本来容忍缺 time，只让 eventKey 留空）。 */
+/** 时间戳是否客观不可能：1970 年以前、或 100 年以后。
+ *  缺失 / 不可解析不算"不可能"——存在性由各源的 schema 判据负责。 */
 const timeIsImpossible = (ms, now) => {
   if (typeof ms !== 'number' || !Number.isFinite(ms)) return false
   return ms < 0 || ms > (now || Date.now()) + 100 * 365 * 24 * 3600 * 1000
 }
 
-// ---------------------------------------------------------------- 每源约定
 /**
- * 五个源的校验约定（0.4.1 补齐）。字段含义：
- *   required    —— 必需字段与类型（schema 判据）。缺一个即判 schema，**不猜、不兜底**。
- *   timezone    —— 源时区。契约要求解析器把时间转成**带偏移**的 ISO 8601（DESIGN 第 4 节）。
- *   staleAfterMs—— 新鲜度阈值（stale 判据）；null = 这条链路不适用，理由写在 staleReason。
+ * 每源校验约定。字段含义：
+ *   required    —— 必需字段与类型（schema 判据）。缺一个即判 schema，不猜、不兜底。
+ *   timezone    —— 源时区。解析器把时间转成带偏移的 ISO 8601。
+ *   staleAfterMs—— 新鲜度阈值（stale 判据）；null = 不适用，理由在 staleReason。
  *   empty       —— 什么形态算"源正常但当前无数据"（不计失败）。
- *   tolerant    —— 可选：**明确不判 schema** 的字段范围。它与 required 是一对——required 只该列
- *                  实现里真的会拦下的字段，否则契约就变成"比实现严"的文档，后来者按它写测试会
- *                  误判"某字段必需"（0.5.1 修正）。
- *   pollMs      —— 传输层的轮询 / 推送周期（诊断文档引用）。
+ *   tolerant    —— 明确**不判 schema** 的字段范围；与 required 互补，required 只列实现真会拦下的字段。
+ *   pollMs      —— 传输层的轮询 / 推送周期。
  */
 export const SOURCE_CONTRACTS = {
   p2pquake: {
@@ -79,9 +61,6 @@ export const SOURCE_CONTRACTS = {
     pollMs: null,
     timezone: 'Asia/Tokyo（+09:00）—— issue.time / earthquake.time / areas[].arrivalTime 都是裸 JST，由 p2pTimeToIso 补偏移',
     required: [
-      // 0.9.4（C2 / P3-41）：这一份此前比实现严——把"实现会容忍的东西"也写成了必需。
-      // 逐条核对过 parseEpspResult（05d）与三个解析器（05-parser）之后改成"实现真的会拦下的"。
-      // 判据本身没变，改的是这份说明：按旧的写法写 fixture 会以为某个字段必需，写出假断言。
       'code：必须是 551 / 552 / 556 之一（其它 code 判 empty，不算故障）',
       '每条都要：id（或 _id）string、issue.time string',
       '551：earthquake 是对象、earthquake.maxScale 是 number、points 是数组，且 points[] 每一项是对象；' +
@@ -97,7 +76,7 @@ export const SOURCE_CONTRACTS = {
     empty: 'code 不是 551/552/556（P2PQuake 还会推火山、其他情报等与本插件无关的消息）',
     staleAfterMs: null,
     staleReason: '推送源没有"数据新鲜度"概念：日本可能数小时没有有感地震。活性由连接层负责' +
-      '（建连看门狗 15 秒 + 半开检测 20 分钟，见 12-websocket）。',
+      '（建连超时监控 15 秒 + 连接假死检测 20 分钟，见 12-websocket）。',
   },
   jma: {
     label: '気象庁 防災情報XML',
@@ -109,15 +88,10 @@ export const SOURCE_CONTRACTS = {
     timezone: 'Asia/Tokyo（+09:00）—— Head/ReportDateTime 带 +09:00；Control/DateTime 是 UTC（Z）。' +
       '两者都带偏移，解析器优先取 ReportDateTime',
     required: [
-      // 0.9.4（C2 / P3-41）：实现真正判 schema 的只有下面三条（parseJmaResult）。
       '电文非空',
       '不是 HTML（返回 `<!DOCTYPE html>` / `<html` 判 schema：拦截页或地址失效最常见）',
       '<Report> 根元素（防災情報XML 的标志）',
     ],
-    // 此前这几条被写在 required 里，但它们**不判 schema**——缺 Items、缺 Area、缺 ReportDateTime
-    // 都会被解析成"与本插件无关 / 区域判不了"，按 empty 归类。P1-8 的实验也印证了这条：
-    // 未知 codeType 的电文仍会在历史里留痕，但那由**匹配层**的 cannotJudge 负责（见 11-pipeline），
-    // 不是在这里判源故障。写在这里而不是删掉：它是读电文结构的人最需要知道的事。
     tolerant: '电文结构本身（Item / Kind、Area / Name / Code、ReportDateTime、Control/Title）' +
       '**不作 schema 判据**：缺 Items、缺 Area、只有注意報或"なし"的电文一律归 empty，' +
       '由匹配层的 cannotJudge 决定要不要留痕。',
@@ -145,7 +119,7 @@ export const SOURCE_CONTRACTS = {
     empty: 'action === "delete"（事件被撤回），或 properties.evtype 不是 "ke"（非地震事件，如爆炸）',
     staleAfterMs: null,
     staleReason: '全球 M4+ 平均约 30 分钟一条，稀疏是常态，不能用消息间隔判死。活性由连接层负责' +
-      '（建连看门狗 15 秒 + 3 小时无消息的半开检测，见 15-entry 的 staleAfterMs）。',
+      '（建连超时监控 15 秒 + 3 小时无消息的连接假死检测，见 15-entry 的 staleAfterMs）。',
   },
   usgs: {
     label: 'USGS',
@@ -156,7 +130,6 @@ export const SOURCE_CONTRACTS = {
     pollMs: 120 * 1000,
     timezone: 'UTC（properties.time/updated 是 epoch 毫秒，经 toIso 转成带 Z 的 ISO）',
     required: [
-      // 0.9.4（C2 / P3-41）：逐条核对 parseUsgsResult（05d）与 Host 侧的取数层后的写法。
       '顶层 GeoJSON：features[] 数组（**Host 侧校验**：lib/global-sources.js 的 parseUsgsEntries）',
       '每个 feature：properties 是对象、mag 是 number、time 是 number（epoch 毫秒或可解析的时间）',
       '震中坐标：geometry.coordinates[0..1] **或** properties.lat/lon（解析器两条都认，' +
@@ -190,11 +163,9 @@ export const SOURCE_CONTRACTS = {
     staleAfterMs: null,
     staleReason: '事件列表只在有海啸时才有内容，"列表为空"是绝大多数时间的正常形态，不能据此判 stale。',
   },
-  // ---- 中国大陆源（0.5.0）----
-  // 与其它源的两处结构性差异，写在契约里而不是埋在解析器里：
-  //   ① 传输是 **Host 单点常连**（Wolfx 限 5–7 连接/IP），不是 Client 直连——见 DESIGN 5.3。
-  //   ② cenc_eqlist 的字段**全是字符串**，而 cenc_eew 的字段是 number；两个源来自同一上游，
-  //      所以不能按"同一家的风格"写解析，只能按实测样本写。
+  // ---- 中国大陆源 ----
+  // 两处结构性差异：① 传输是 **Host 单点常连**（Wolfx 限 5–7 连接/IP），不是 Client 直连。
+  // ② cenc_eqlist 的字段**全是字符串**，cenc_eew 的字段是 number，同一上游两种序列化风格。
   cenc_eew: {
     label: 'Wolfx CENC EEW',
     region: 'cn',
@@ -231,7 +202,6 @@ export const SOURCE_CONTRACTS = {
     pollMs: null,
     timezone: 'Asia/Shanghai（+08:00，无夏令时）—— time / ReportTime 是裸北京时间，由 cnTimeToIso 补偏移',
     required: [
-      // 0.9.4（C2 / P3-41）：核对 parseCencEqlistItemResult / parseCencEqlistResult 之后的写法。
       '整表载荷：No1…NoN（数值序，No1 最新）；**md5 不是判据**——它只作诊断读数与' +
       '（P3-31 之前）的整表短路，缺了照常逐条比对',
       '每项：EventID string 非空',
@@ -248,11 +218,10 @@ export const SOURCE_CONTRACTS = {
       '所以"超过 48 小时没有新批次"即判中继异常（fj_eew 那种连接正常但停更 4 个月的形态，' +
       '靠连接检测完全发现不了）。实测发布 lag 209–1643 秒，阈值不能贴着 lag 取留出余量。',
   },
-  // ---- 中国大陆气象源（0.5.2）----
-  // 一条 Host 源（`nmc_alarm`）承载**两个灾种**（暴雨 / 地质灾害）。契约按"一个端点 + 一种载荷"
-  // 划分，而这两个灾种来自同一个 `rest/findAlarm` 响应、只有 `pic` 编码不同，所以是一条契约。
-  // 与其它源的差异：匹配走**行政区层级**（locator:'area'），因此"title 能解析出机构名"是
-  // **必需字段**——解析不出就等于这条预警无法归属，而不是"少了一个可选字段"。
+  // ---- 中国大陆气象源 ----
+  // 一条 Host 源（`nmc_alarm`）承载**两个灾种**（暴雨 / 地质灾害）：两者来自同一个
+  // `rest/findAlarm` 响应、只有 `pic` 编码不同，所以是一条契约。匹配走**行政区层级**
+  // （locator:'area'），因此"title 能解析出机构名"是**必需字段**——解析不出就归不了属。
   nmc_alarm: {
     label: 'CMA warning signals (nmc.cn)',
     region: 'cn',
@@ -285,11 +254,9 @@ export const SOURCE_CONTRACTS = {
       '拿到缓存。与 JMA 同档；实测 40 分钟窗口里新增 11 条、相邻两次新增的最长间隔只有 10 分钟，' +
       '余量近 20 倍。',
   },
-  // 海外气象源（0.6.0，DESIGN 4.7）。两条都是 **Client 直连的 REST 轮询**（CORS 实测允许），
-  // 而且都是**按关注点查询**（NWS 按点、ECCC 按 bbox）——这一点决定了它们与其它源的三处不同：
-  //   · locator 是 'overseas'（命中在取数时就已发生，匹配层不算距离）；
-  //   · staleAfterMs 只能是 null（空响应是常态，判不出上游停更）；
-  //   · 时间语义相反（NWS 自带偏移、ECCC 是 UTC `Z`，都不需要补本地时区）。
+  // 海外气象源：两条都是 **Client 直连的 REST 轮询**（CORS 实测允许），且都是**按关注点查询**
+  // （NWS 按点、ECCC 按 bbox）——locator 是 'overseas'（命中在取数时已发生，匹配层不算距离）、
+  // staleAfterMs 只能是 null（空响应是常态）、时间语义相反（NWS 自带偏移、ECCC 是 UTC Z）。
   nws_alerts: {
     label: 'NWS alerts (api.weather.gov)',
     region: 'us',
@@ -303,9 +270,8 @@ export const SOURCE_CONTRACTS = {
     required: [
       'properties 是对象（一条 CAP 电文）',
       'properties.event string 且**精确命中 8 类洪水白名单**（未命中判 empty，见下）',
-      // 0.6.1 review 订正：实现会退回 GeoJSON 外层的 `id`（实测外层给的是
-      // `https://api.weather.gov/alerts/urn:oid:…`，解析器会剥掉 URL 前缀），所以
-      // "properties.id 必需"是**比实现更严**的声明——后来者按它写测试会误判某个字段必需。
+      // 实现会退回 GeoJSON 外层的 `id`（实测是 URL，解析器会剥掉前缀），所以"properties.id 必需"
+      // 是比实现更严的声明——后来者按它写测试会误判某个字段必需。
       '`properties.id` 或 GeoJSON 外层的 `id` 至少有一个非空（去重与消息级 id 的基础）',
       'properties.sent 可解析的 ISO 时间（带偏移）',
     ],
@@ -367,21 +333,13 @@ export const SOURCE_CONTRACTS = {
 }
 
 // ---------------------------------------------------------------- Result 包装
-// 每个包装函数先把"结构不符 / 值不可能"挡在解析器之前，再调用**真实解析器**（单一实现，
-// 不复制业务逻辑）。这样既得到契约要求的失败分类，又保证线上链路与测试走同一段代码。
+// 包装函数先把"结构不符 / 值不可能"挡在解析器之前，再调用真实解析器（单一实现）。
 
 /**
  * P2PQuake（551/552/556）。
  *
- * **它确实在运行时链路里**（0.9.5 / X-6 订正）：一份审查报告的"措辞校正"里写着这个包装函数
- * 「只被 scripts/check-contracts.mjs 使用，**没进运行时链路**」—— 那是错的。真实调用点是
- * `client/src/15-entry.js` 里 P2PQuake 的 `onRaw`（WebSocket 的每一帧；EMSC 那一侧同形），
- * 而且调用之后立刻 `noteParseResult('p2pquake', res)`（05g-source-health），schema / value
- * 失败会升级成界面上的**蓝点**（"数据格式异常，等插件更新"）并计入数据健康，不是被静静丢掉。
- *
- * 为什么把这句话留在这里：C2 / P3-41 的修法是"把 required 改成实现真的会拦下的"，那件事只
- * 关系文档与 fixture 的可信度；而上面那条错误前提会让人以为"schema 失败没人看得见"，进而去
- * 补一个并不存在的守卫。**要改这块之前先读这一段。**
+ * 运行时调用点是 15-entry.js 里 P2PQuake 的 onRaw（每帧一次），调用后立刻记入数据健康：
+ * schema / value 失败会升级成界面蓝点，不是被丢掉。
  */
 export function parseEpspResult(raw) {
   if (!isPlainObject(raw)) return failResult('schema', '顶层不是对象')
@@ -438,7 +396,7 @@ export function parseEpspResult(raw) {
     }
   }
   const alert = parse(raw)
-  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  if (!alert) return failResult('schema', '解析器未能生成 Alert（结构通过校验但字段映射失败）')
   return okResult(alert)
 }
 
@@ -447,7 +405,6 @@ export function parseJmaResult(xml, entry) {
   const text = String(xml === undefined || xml === null ? '' : xml)
   if (!text) return failResult('schema', '电文为空')
   if (text.indexOf('<Report') === -1) {
-    // extra.xml 的详情地址偶尔会返回错误页 / 拦截页（HTTP 200 的 HTML），那种情况是 schema
     if (/^\s*<(!doctype|html)/i.test(text) || text.indexOf('<html') !== -1) {
       return failResult('schema', '返回的是 HTML 而不是 XML 电文（可能被拦截或地址失效）')
     }
@@ -479,7 +436,7 @@ export function parseEmscResult(raw) {
     return failResult('empty', '非地震事件（evtype=' + String(p.evtype) + '）')
   }
   const alert = parseEmsc(raw)
-  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  if (!alert) return failResult('schema', '解析器未能生成 Alert（结构通过校验但字段映射失败）')
   return okResult(alert)
 }
 
@@ -499,7 +456,7 @@ export function parseUsgsResult(feature) {
   if (t === null) return failResult('schema', '缺少 properties.time（epoch 毫秒或可解析的时间）')
   if (timeIsImpossible(t)) return failResult('value', '发震时刻客观不可能：' + String(p.time))
   const alert = parseUsgsFeature(feature)
-  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  if (!alert) return failResult('schema', '解析器未能生成 Alert（结构通过校验但字段映射失败）')
   return okResult(alert)
 }
 
@@ -516,7 +473,7 @@ export function parseNoaaResult(xml, entry) {
   const msgType = (/<msgType>([^<]*)<\/msgType>/.exec(text) || [])[1] || ''
   if (String(msgType).trim() === 'Test') return failResult('empty', '演练电文（msgType=Test）')
   const alert = parseNoaaCap(text, entry)
-  if (!alert) return failResult('schema', '缺少 <identifier> 或解析器未能归一')
+  if (!alert) return failResult('schema', '缺少 <identifier> 或解析器未能生成 Alert')
   if (alert.geoList && alert.geoList.length) {
     for (const g of alert.geoList) {
       if (Math.abs(g.lat) > 90 || Math.abs(g.lon) > 180) return failResult('value', 'circle 坐标越界：' + g.lat + ',' + g.lon)
@@ -536,7 +493,7 @@ export function parseCencEewResult(raw) {
   if (raw.type !== undefined && String(raw.type) !== 'cenc_eew') {
     return failResult('schema', 'type 不是 cenc_eew（收到 ' + String(raw.type) + '）')
   }
-  // empty 判据：10 个字段一个都没有。理由与证据等级见 SOURCE_CONTRACTS.cenc_eew.empty。
+  // empty 判据：10 个字段一个都没有。理由见 SOURCE_CONTRACTS.cenc_eew.empty。
   const fields = ['ID', 'EventID', 'OriginTime', 'ReportTime', 'Latitude', 'Longitude', 'Magnitude', 'Depth', 'MaxIntensity', 'HypoCenter']
   const hasAny = fields.some((k) => {
     const v = raw[k]
@@ -554,7 +511,7 @@ export function parseCencEewResult(raw) {
   if (t === null) return failResult('schema', '缺少 OriginTime（可解析的北京时间）')
   if (timeIsImpossible(t)) return failResult('value', '发震时刻客观不可能：' + String(raw.OriginTime))
   const alert = parseCencEew(raw)
-  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  if (!alert) return failResult('schema', '解析器未能生成 Alert（结构通过校验但字段映射失败）')
   return okResult(alert)
 }
 
@@ -575,17 +532,15 @@ export function parseCencEqlistItemResult(item) {
   if (t === null) return failResult('schema', '缺少 time（可解析的北京时间）')
   if (timeIsImpossible(t)) return failResult('value', '发震时刻客观不可能：' + String(item.time))
   const alert = parseCencEqlistItem(item)
-  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  if (!alert) return failResult('schema', '解析器未能生成 Alert（结构通过校验但字段映射失败）')
   return okResult(alert)
 }
 
 /**
  * 速报整表 → 批量结果 `{ ok, alerts, dropped, md5 }`。
  *
- * **为什么批量与单项分开判**：整表 50 条，一条缺坐标就让整表作废等于漏掉另外 49 条真实地震
- * ——0.4.2 已经就 551 的观测点定过同一口径（"存在则类型必须正确"，缺失容忍）。
- * 所以：坏条目**逐条丢弃并计数**（`dropped`，不是静默），只有**一条都没解析出来**才判整表 schema。
- * 整表一条都没有则判 empty——源正常但当前没有速报数据。
+ * 坏的条目逐条丢弃并计数（`dropped`，不是静默），只有一条都没解析出来才判整表 schema——
+ * 一条缺坐标就让整表作废等于漏掉其余真实地震。整表一条都没有则判 empty。
  */
 export function parseCencEqlistResult(json) {
   if (!isPlainObject(json)) return failResult('schema', '顶层不是对象')
@@ -613,21 +568,17 @@ export function parseCencEqlistResult(json) {
 /**
  * 中央气象台预警（`nmc_alarm`）。
  *
- * 与其它源的两处判据差异（都由"匹配依赖机构名"这一条推出）：
- *   · `title` 里**必须**能解析出机构名——解析不出就等于这条预警无法归属（DESIGN 8.5），
- *     宁可点亮蓝点让用户知道"数据格式变了"，也不要静默播报一条不知道发给谁的预警。
- *   · 灾种不在本插件范围内时判 **empty 而不是 schema**：Host 已按灾种过滤，正常收不到这类
- *     条目；判 empty 是为了让"Host 将来转发更多灾种"这件事对旧 Client 是静默跳过。
+ * `title` 里**必须**能解析出机构名——匹配依赖它。灾种不在范围内时判 empty 而不是 schema：
+ * Host 已按灾种过滤，正常收不到，判 empty 使"Host 将来转发更多灾种"对旧 Client 是静默跳过。
  */
 export function parseNmcAlarmResult(raw) {
   if (!isPlainObject(raw)) return failResult('schema', '顶层不是对象')
   const alertid = String(raw.alertid === undefined || raw.alertid === null ? '' : raw.alertid).trim()
   if (!alertid) return failResult('schema', '缺少 alertid（string）')
   if (typeof raw.kind !== 'string' || !raw.kind) return failResult('schema', '缺少 kind（string）')
-  // 查表一律走 own()（0.5.4）：`NMC_KIND_TEXT['constructor']` 会命中原型链返回 Object 构造函数
-  // （truthy），于是 `kind: 'constructor'` 这样的脏数据会**绕过 empty / schema 判据**被放行，
-  // 一路带进 Alert 的 kindLabel / severity（实测能得到「大陆function Object()…预警」这种文案）。
-  // 契约层存在的意义就是"Host 的 JSON 属于不可信输入"，所以这里不能直查。
+  // 查表一律走 own()：`NMC_KIND_TEXT['constructor']` 会命中原型链返回 Object 构造函数（truthy），
+  // 于是 `kind: 'constructor'` 这样的格式不合法的数据会绕过 empty / schema 判据被放行。Host 的 JSON 属于
+  // 不可信输入，不能直查。
   if (!own(NMC_KIND_TEXT, raw.kind)) return failResult('empty', '灾种不在本插件范围内：' + raw.kind)
   if (typeof raw.level !== 'string' || !own(NMC_LEVEL_TEXT, raw.level)) {
     return failResult('schema', '缺少或无法识别的 level：' + String(raw.level))
@@ -639,15 +590,15 @@ export function parseNmcAlarmResult(raw) {
   if (t === null) return failResult('schema', '缺少 issued（可解析的 ISO 时间）')
   if (timeIsImpossible(t)) return failResult('value', '发布时间客观不可能：' + String(raw.issued))
   const alert = parseNmcAlarm(raw)
-  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  if (!alert) return failResult('schema', '解析器未能生成 Alert（结构通过校验但字段映射失败）')
   return okResult(alert)
 }
 
 /**
  * 美国 NWS 洪水类预警（`nws_alerts`）。
  *
- * `opts.place` 是取数器查这条时用的关注点——它让匹配层不必再算距离（DESIGN 4.7.3）。
- * 判据顺序与其它源一致：先把"不在范围内"与"结构不符"分开，再交给解析器（单一实现）。
+ * `opts.place` 是取数器查这条时用的关注点——它让匹配层不必再算距离。判据顺序：先把
+ * "不在范围内"与"结构不符"分开，再交给解析器（单一实现）。
  */
 export function parseNwsAlertResult(raw, opts) {
   if (!isPlainObject(raw)) return failResult('schema', '顶层不是对象')
@@ -655,7 +606,7 @@ export function parseNwsAlertResult(raw, opts) {
   if (!isPlainObject(p)) return failResult('schema', '缺少 properties（对象）')
   const event = typeof p.event === 'string' ? p.event : ''
   // 走 own()：`event: 'constructor'` 这类键直查会命中原型链返回函数对象（truthy），
-  // 于是脏数据绕过白名单被放行（与 0.5.4 修的 nmc 查表是同一个坑）。
+  // 于是格式不合法的数据绕过白名单被放行（与 nmc 查表是同一个坑）。
   if (!own(NWS_EVENT_WHITELIST, event)) {
     return failResult('empty', '事件类型不在本插件范围内：' + (event || '(空)'))
   }
@@ -665,15 +616,15 @@ export function parseNwsAlertResult(raw, opts) {
   if (t === null) return failResult('schema', '缺少或无法解析 properties.sent（ISO 时间）')
   if (timeIsImpossible(t)) return failResult('value', '发布时间客观不可能：' + String(p.sent))
   const alert = parseNwsAlert(raw, opts)
-  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  if (!alert) return failResult('schema', '解析器未能生成 Alert（结构通过校验但字段映射失败）')
   return okResult(alert)
 }
 
 /**
  * 加拿大 ECCC 预警（`eccc_alerts`）。
  *
- * 两道过滤器都在契约层做（与解析器里的同一份名单），这样"不在范围内"这件事在
- * **进入解析器之前**就有明确的归类，而不是靠解析器返回 null 再反推是 schema 还是 empty。
+ * 两道过滤器都在契约层做（与解析器里的同一份名单），让"不在范围内"在**进入解析器之前**就有
+ * 明确归类，而不是靠解析器返回 null 再反推是 schema 还是 empty。
  */
 export function parseEcccAlertResult(raw, opts) {
   if (!isPlainObject(raw)) return failResult('schema', '顶层不是对象')
@@ -685,7 +636,7 @@ export function parseEcccAlertResult(raw, opts) {
   }
   const nameEn = typeof p.alert_name_en === 'string' ? p.alert_name_en.trim() : ''
   if (!nameEn) return failResult('schema', '缺少 alert_name_en（string）')
-  // 先排除、再包含——与 05h 里的顺序一致（那边是解析器的最后一道）。
+  // 先排除、再包含——与 05h 里的顺序一致。
   if (ECCC_EXCLUDE.test(nameEn) || !ECCC_INCLUDE.test(nameEn)) {
     return failResult('empty', '灾种不在本插件范围内：' + nameEn)
   }
@@ -699,12 +650,6 @@ export function parseEcccAlertResult(raw, opts) {
     return failResult('schema', 'risk_colour_en 缺失或越界：' + String(p.risk_colour_en))
   }
   const alert = parseEcccAlert(raw, opts)
-  if (!alert) return failResult('schema', '解析器未能归一（结构通过校验但映射失败）')
+  if (!alert) return failResult('schema', '解析器未能生成 Alert（结构通过校验但字段映射失败）')
   return okResult(alert)
 }
-
-// ---------------------------------------------------------------- 健康状态（机制层）
-// 0.5.3：实现已在 **05g-source-health.js**（DESIGN 11.1 的"约定层 / 机制层"划分），调用方
-// 直接从那里 import。**不要在本文件 re-export**：同一个导出名出现两个来源会被
-// `scripts/check-imports.mjs` 直接判失败（它就是这么设计的），而且会让"契约"与"机制"重新
-// 混在一起——那正是 0.5.3 要修的东西（见 DESIGN 11.9）。

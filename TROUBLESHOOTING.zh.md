@@ -72,7 +72,7 @@ Invoke-RestMethod "http://127.0.0.1:3080/dsh-quake-alert/feed?source=jma&since=t
 | `stats.detailDropped > 0` | 详情电文反复抓取失败后已放弃 | 说明"有几条电文没取到"，并检查第 2 节 |
 | `stats.lastError` 非空 | 最近一次失败的原因（含 `HTTP 4xx/5xx`、`ECONNRESET`、`响应体过大` 等） | 按关键字对照第 2 节 |
 
-> `stats` 里的 `cursor` / `dropped` / `seenSize` / `bufferSize` 是内部游标与环缓冲状态，
+> `stats` 里的 `cursor` / `dropped` / `seenSize` / `bufferSize` 是内部读取位置与缓冲状态，
 > 只在判断"是否有增量缺口"时用，不要拿来当故障证据。
 
 ---
@@ -158,7 +158,7 @@ curl -v -m 20 https://www.data.jma.go.jp/developer/xml/feed/extra.xml 2>&1 | hea
 - 源改版导致的"数据格式异常"（蓝点）——用户处理不了，等插件更新；设置页有**重试**按钮，
   但那只在"源把字段改回来"时有意义。
   > 0.5.3 起蓝点的行为有两处变化，排查时要如实告诉用户：① **单条坏数据不再点亮蓝点**——线上
-  > 是逐条 entry，上游一条脏数据不该让整个源变蓝，现在是"同一失败原因 10 分钟内累计 ≥5 条"
+  > 是逐条 entry，上游一条格式不合法的数据不该让整个源变蓝，现在是"同一失败原因 10 分钟内累计 ≥5 条"
   > 或"连续 10 条全失败"才升级；② 蓝点**跨刷新存活**（它表达的"等插件更新"与刷新页面无关），
   > 同时**24 小时没有复现会自动清除**。所以"昨天看到的蓝点今天没了"既可能是插件更新修好了，
   > 也可能是自愈了——诊断快照里的 `dataHealth` 会写清是哪一种。
@@ -273,7 +273,7 @@ AI 完成上述检查后，按这个结构回答：
 |---|---|---|
 | `GET /dsh-quake-alert/feed?source=jma\|usgs\|noaa&since=tail&stats=1` | 读 Host 侧健康计数 | 0.4.1 可用 |
 | `GET /dsh-quake-alert/feed?source=cenc_eew\|cenc_eqlist&since=tail&stats=1` | 读大陆源的 WS 健康计数（`connected` / `messages` / `reconnects` / `lastError` / `dataTime` / `stale` / `ageSkipped`）。`stale` 由时钟推动，中继真停更时也会变 true | 0.5.0 可用 |
-| `GET /dsh-quake-alert/stream?source=cenc_eew\|cenc_eqlist` | 大陆源的 SSE 推送（`event: sync` 首帧给出游标、缓冲状态与数据健康；此后每 15 秒一帧 `event: status`，兼作 keep-alive 并承载"中继停更"） | 0.5.0 可用 |
+| `GET /dsh-quake-alert/stream?source=cenc_eew\|cenc_eqlist` | 大陆源的 SSE 推送（`event: sync` 第一条数据给出读取位置、缓冲状态与数据健康；此后每 15 秒一帧 `event: status`，兼作 keep-alive 并承载"中继停更"） | 0.5.0 可用 |
 | `GET /dsh-quake-alert/feed?source=nmc_alarm&since=tail&stats=1` | 读大陆**气象**源（中央气象台 nmc.cn）的健康计数与条目载荷。载荷是 JSON：`alertid` / `title` / `issued` / `kind`（rainstorm / geology）/ `level`（red / orange / yellow / blue）/ `detail`（只有橙 / 红才有正文）。`stats.stale` 由**列表里最新一条的发布时间**推动（超 3 小时），`stats.errors` 增长说明列表请求失败或响应结构变了 | 0.5.2 可用 |
 | `GET /dsh-quake-alert/areas` | 验证本地回环 webServer 是否活着（返回市区町村表 / 河川予報区域表 / 中国行政区划表 / 国家地区清单） | 可用 |
 | `GET /dsh-quake-alert/areas?country=US` | 取某一国的城市包（0.8.0，人口 10 万以上的城镇，不含日本与中国）。未知国家码答 **404**——"这个国家没收录"与"国家码写错"据此分开 | 0.8.0 可用 |
@@ -283,12 +283,12 @@ AI 完成上述检查后，按这个结构回答：
 | `node scripts/check-cn-e2e.mjs` | Host↔Client 端到端复验：真实 Wolfx → 真实 HTTP SSE → Client 契约 | 0.5.0 可用，**仅仓库内**，需能连上 Wolfx |
 | `node scripts/check-contracts.mjs` | **契约检查**：拉 10 个源的真实数据过一遍解析器，看上游是否改版（`schema` / `value` → 退出码 1，并打印契约里的 `required` 原文供对照）。网络不可达**不算失败**（只有"上游改版"值得处理）。`--offline` 用 `samples/` 的快照跑，不联网 | 0.5.3 可用，**仅仓库内**（CI 里也跑：手动触发 + PR） |
 | 设置页「测试与诊断」里的大陆源行 | 显示**当前链路模式**（SSE 推送 / 已降级为轮询 / 已关闭）与收到、失败、降级次数 | 0.5.0 可用 |
-| Client 侧只读诊断快照 | 设置页「其他 → 测试与诊断」一键生成并复制：聚合状态、逐源状态与数据健康、增量计数、大陆源链路模式、**被跨源权威源压掉的条数**、关注点摘要（含每个点的来源分支 `origin`，大陆点还有 `province` / `city`）、最近几条记录为什么没响铃。快照格式版本 **3**（0.8.2 起；2 = 0.8.0/0.8.1） | 0.5.0 可用，0.8.0 加 `authority` 段，0.8.2 加省市与提号 |
-| WS → HTTP 轮询降级开关 | 中间设备重置长连接时的降级路径 | Host 侧**已可用**（`/feed?source=cenc_*`）；Client **已自动降级**（EventSource 不可用 / 连续拿不到首帧 / 连上不推流）；手动强制开关在设置页「大陆源链路」 | 0.5.0 可用 |
+| Client 侧只读诊断快照 | 设置页「其他 → 测试与诊断」一键生成并复制：聚合状态、逐源状态与数据健康、增量计数、大陆源链路模式、**被跨源优先源压掉的条数**、关注点摘要（含每个点的来源分支 `origin`，大陆点还有 `province` / `city`）、最近几条记录为什么没响铃。快照格式版本 **3**（0.8.2 起；2 = 0.8.0/0.8.1） | 0.5.0 可用，0.8.0 加 `authority` 段，0.8.2 加省市与提号 |
+| WS → HTTP 轮询降级开关 | 中间设备重置长连接时的降级路径 | Host 侧**已可用**（`/feed?source=cenc_*`）；Client **已自动降级**（EventSource 不可用 / 连续拿不到第一条数据 / 连上不推流）；手动强制开关在设置页「大陆源链路」 | 0.5.0 可用 |
 | 插件内代理支持 | 需要走代理的网络 | **0.5.x 补齐** |
 | 设置页「测试与诊断」里的海外源行 | 海外源是 **Client 直连**（不经 Host），所以没有 `/feed` 路由可查。这一行显示：已查询轮数 · 请求次数 · **响应条目数** · 交给主链条数 · **过老只记历史** · **被上游拒绝** · 上游结果被分页上限截断的轮数 · 超上限跳过 · 失败次数 · 最近查询时间。「响应条目数」比真实预警条数大（NWS 按 5 个采样点各查一次，同一批会被重复计入）；「被上游拒绝」涨说明有关注点被上游拒了（例如多伦多不在美国 NWS 内，NWS 对覆盖外坐标回 400——那不是故障），**代码与文案都不替上游断言"这个点不在覆盖范围"** | 0.6.0 可用，0.6.1 订正字段与文案 |
-| 诊断快照里的 `overseas` 段 | 与 `feed` / `streams` 并列的一张表，逐源给出 `requests` / `received` / `applied` / `rejected` / `ageSkipped` / `truncated` / `gated` / `throttledLast` / `throttledTotal` / `lastDataAt` / `lastError`。**`ageSkipped` 解释"我看到预警但没响"**（打开页面时已发布超 6 小时、或页面休眠超 30 分钟后恢复，只记历史）；**`gated` 是"进入过几次首轮 / 休眠恢复状态"**，不是"闸门激活的轮数"（0.6.1 订正；此前那份注释写的字段名 `uncovered` 在快照里根本不存在，实际是 `rejected`） | 0.6.0 可用，0.6.1 订正 |
-| 诊断快照里的 `authority` 段 | **0.8.0 新增**：被跨源权威源压掉了多少条跨源副本（`suppressed`）、按**已播报的那个源**分组（`bySource`——它回答"是不是 USGS 总抢在日本源前面"）、以及最近一条的原因（`lastDetail`）。这些副本**连历史都不进**（同一场地震被多源各报一次会把那 30 条挤满），所以这一段是它们唯一的痕迹：权威源一旦判错（把两场不同地震并成一个 = 真漏报），先看这里。判据是「±2 分钟 + 50 km + 跨机构」——同一机构内部的"预警 → 速报"仍会进历史，不算抑制 | 0.8.0 可用 |
+| 诊断快照里的 `overseas` 段 | 与 `feed` / `streams` 并列的一张表，逐源给出 `requests` / `received` / `applied` / `rejected` / `ageSkipped` / `truncated` / `gated` / `throttledLast` / `throttledTotal` / `lastDataAt` / `lastError`。**`ageSkipped` 解释"我看到预警但没响"**（打开页面时已发布超 6 小时、或页面休眠超 30 分钟后恢复，只记历史）；**`gated` 是"进入过几次首轮 / 休眠恢复状态"**，不是"门槛激活的轮数"（0.6.1 订正；此前那份注释写的字段名 `uncovered` 在快照里根本不存在，实际是 `rejected`） | 0.6.0 可用，0.6.1 订正 |
+| 诊断快照里的 `authority` 段 | **0.8.0 新增**：被跨源优先源压掉了多少条跨源副本（`suppressed`）、按**已播报的那个源**分组（`bySource`——它回答"是不是 USGS 总抢在日本源前面"）、以及最近一条的原因（`lastDetail`）。这些副本**连历史都不进**（同一场地震被多源各报一次会把那 30 条挤满），所以这一段是它们唯一的痕迹：优先源一旦判错（把两场不同地震并成一个 = 真漏报），先看这里。判据是「±2 分钟 + 50 km + 跨机构」——同一机构内部的"预警 → 速报"仍会进历史，不算抑制 | 0.8.0 可用 |
 | `node scripts/check-overseas-sources.mjs` | 海外候选源的**调研复现**：四个源的可达性 / 灾种分布 / 体积 / CORS / 空间粒度，与 `DESIGN.md` 4.6 的表格逐条对应。网络不可达不算失败 | 0.6.0 可用，**仅仓库内** |
 | `node scripts/capture-overseas-fixtures.mjs` | 重抓海外源的真实 fixture（`samples/nws/`、`samples/eccc/`），用于确认"结构是否变了"。注意 **ECCC 的灾种分布随季节变化** | 0.6.0 可用，**仅仓库内** |
 
@@ -309,10 +309,10 @@ AI 完成上述检查后，按这个结构回答：
 > 0.6.1 追加了 `samples/nws/nws-event-chain.geojson` 与 `nws-cancel-chain.geojson`：
 > 怀疑"同一场洪水重复响铃"或"取消没提醒"时，用它们对着 `nwsVtecKeyOf` 复算事件键最快。
 >
-> 0.8.0 追加了**跨源权威源**与**全球城市表**，两处都有新的排查口径：
+> 0.8.0 追加了**跨源优先源**与**全球城市表**，两处都有新的排查口径：
 > · 怀疑"同一场地震响两次"或反过来"某条明明该响却没响"时，先看诊断快照的 `authority` 段——
 >   被压掉的副本**不在历史里**，这是它们唯一的痕迹；`config.watch.places[].origin` 会告诉你
->   每个关注点被算作了哪个分支（权威源判错往往就错在这里）。
+>   每个关注点被算作了哪个分支（优先源判错往往就错在这里）。
 > · 城市列表拉不起来时，直接打 `GET /dsh-quake-alert/areas?country=US`：**404 = 这个国家没被
 >   收录**（表里只有人口 10 万以上的城镇，客户端会退化成手填坐标），不是故障；网络失败才是。
 > · 设置页的排障面统一收进了「测试与诊断」：两个本地测试按钮（气象 / 全球）与逐源状态都在那里，

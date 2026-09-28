@@ -1,38 +1,19 @@
 // ============================================================================
 // dsh-quake-alert · client/src/05-parser.js
-//
-// 作用：把 P2PQuake 的原始消息解析成统一 Alert（适配器层）。
-// 内容：code 551/552/556 的字段映射、区域名归一 prefsOfArea（显式表 → 47 县前缀 →
-//       府県予報区兜底）、跨县区域展开、震度/海啸文案、headline 组装。
-// 依赖：01-constants、02-storage（归一化相关工具）。
-// 注意：551 的 points[].pref 实测存在「京都」这类简写，已在常量层归一为全称。
-// ============================================================================
+// 作用：P2PQuake 原始消息（code 551/552/556）→ 统一 Alert：字段映射、区域名对齐 prefsOfArea、
+//       跨县区域展开、震度/海啸文案与 headline 组装。依赖 01-constants、02-storage、00-i18n。
 
 import { PREFECTURES, SCALE_TEXT, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, normalizePref, p2pTimeToIso } from './01-constants.js'
 import { own } from './02-storage.js'
 import { t } from './00-i18n.js'
 
 // ---------- 解析器：P2PQuake code → Alert ----------
-// Alert = { id, code, kind, kindLabel, severity, issued, headline, maxScale, hypo, geo,
-//           regions:[{pref, area, scale?, grade?}], cancelled, eventKey, strength }
-//           eventKey 归并同一地震的多次发布，strength 用于强度升级判定
-//           geo（0.8.0）= 震中坐标，**只服务跨源事件归并**，不参与匹配（理由见 geoOfHypo）
+// Alert 字段：id/code/kind/kindLabel/severity/issued/headline/maxScale/hypo/geo/cancelled/raw，
+// 加 regions:[{pref, area, scale?, grade?}]、eventKey（归并同一地震的多次发布）、strength（判强度升级）。
 
-/**
- * 电文里的震中坐标（0.8.0 / DESIGN 3.4）。
- *
- * `earthquake.hypocenter` 一直带着 latitude / longitude，此前只取了 name / magnitude。
- * 补它的唯一目的是**跨源权威源**：同一场地震会被 P2PQuake 与 USGS / EMSC / 大陆源各报一次，
- * 判"这几条是不是同一事件"需要震中（判据是「±2 分钟 + 50km + 跨源」，见 10-dedupe）。
- *
- * **不设 `locator: 'point'`**：那会让 06-matcher 把它送进 matchPointAlert，于是日本这一路
- * 从"该地区观测到的震度是否达阈值"降级成"震中距 ≤ 半径"——一场震中在 150km 外、却让本地
- * 达到震度 5 弱的地震会被漏掉。DESIGN 9.3 明确否决这种"为了模型统一而降级匹配"。
- * 坐标在这里与匹配完全解耦：有它只是让事件能被归并，没有它链路照常。
- *
- * 缺一个 / 越界 / 非有限数一律不产出 geo：**半个坐标比没有坐标更糟**——跨源归并会把
- * 两场不相关的地震并成一个，那是漏报方向（DESIGN 3.4 的"时间或震中缺一不可判时一律不归并"）。
- */
+// 电文里的震中坐标 → { lat, lon }；缺一个 / 越界 / 非有限数一律返回 null（半个坐标会让跨源归并把
+// 两场不相关的地震并成一个，属漏报方向）。只服务跨源事件归并（±2 分钟 + 50km，见 10-dedupe）：
+// **不设 locator:'point'**，否则 06-matcher 按"震中距 ≤ 半径"匹配，漏掉震中远而本地震度达阈值的。
 function geoOfHypo(hypo) {
   const lat = hypo ? hypo.latitude : null
   const lon = hypo ? hypo.longitude : null
@@ -41,17 +22,11 @@ function geoOfHypo(hypo) {
   if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null
   return { lat, lon }
 }
-// 区域名 → 都道府县全称。
-// 551 的 points[].pref 本身就是县全称，可直接用；但 556 的 areas[].name 与 552 的
-// areas[].name 是「区域名」，其中一部分不含都道府县名（北海道用地方名、东京都用岛屿名、
-// 海啸予報区用海域/群岛名），必须显式映射，否则关注对应县的用户会静默漏报。
-// 数据来源：気象庁「緊急地震速報や震度情報で用いる区域の名称」区域名一覧、
-//          「津波予報区について」境界一覧（全 66 区）。
+// 区域名 → 都道府县全称。551 的 points[].pref 本身是县全称（偶有「京都」这类简写，由 normalizePref 统一为全称）；
+// 556/552 的 areas[].name 是「区域名」，一部分不含都道府县名（北海道用地方名、东京都用岛屿名、海啸予報区用海域名），不映射就会静默漏报。
 const AREA_PREF = {
-  // —— 紧急地震速报区域名：东京都岛屿（名称不含「東京」）——
   '伊豆大島': ['東京都'], '新島': ['東京都'], '神津島': ['東京都'],
   '三宅島': ['東京都'], '八丈島': ['東京都'], '小笠原': ['東京都'],
-  // —— 海啸予報区：名称不含都道府县（66 区中的 17 个）——
   'オホーツク海沿岸': ['北海道'],
   '陸奥湾': ['青森県'],
   '東京湾内湾': ['千葉県', '東京都', '神奈川県'],
@@ -70,8 +45,7 @@ const AREA_PREF = {
   '大東島地方': ['沖縄県'],
   '宮古島・八重山地方': ['沖縄県'],
 }
-// 556 的 areas[].pref 是府県予報区名（简写："茨城"/"東京"/"北海道道北"/"宮古島"…），
-// 仅作为区域名归一失败时的兜底。
+// 556 的 areas[].pref 是府県予報区名（简写："茨城"/"東京"/"北海道道北"…），仅作区域名对不上时的兜底。
 const FORECAST_PREF = {
   '伊豆諸島': ['東京都'], '小笠原': ['東京都'], '奄美群島': ['鹿児島県'],
   '沖縄本島': ['沖縄県'], '大東島': ['沖縄県'], '宮古島': ['沖縄県'], '八重山': ['沖縄県'],
@@ -85,10 +59,9 @@ const HOKKAIDO_AREA_PREFIX = [
 // 县名按长度降序：保证「京都府」先于「京都」被匹配（否则京都府会被截成京都）
 const PREF_BY_LENGTH = PREFECTURES.map((p) => p.jp).sort((a, b) => b.length - a.length)
 const startsWith = (s, p) => s.lastIndexOf(p, 0) === 0
-// 安全字典查找 own() 见 02-storage：外部数据里的 'constructor' / 'toString' 等键会命中原型链，
-// 例如 AREA_PREF['constructor'] 会返回 Object 构造函数并让 .slice() 抛错。
+// 字典查找一律用 own()（见 02-storage）：外部键会命中原型链，AREA_PREF['constructor'] 会让 .slice() 抛错。
 
-// 归一区域名，返回它可能覆盖的全部都道府县（海啸「有明・八代海」等跨多个县）
+// 对齐区域名，返回它可能覆盖的全部都道府县（海啸「有明・八代海」等跨多个县）
 function prefsOfArea(name, forecastPref) {
   const s = String(name || '')
   const exact = own(AREA_PREF, s)
@@ -104,7 +77,7 @@ function prefsOfArea(name, forecastPref) {
   }
   return []
 }
-// 把一个区域展开成 region 条目；跨县区域展开为多条，无法归一时 pref='' 并标记
+// 把一个区域展开成 region 条目；跨县区域展开为多条，对不上时 pref='' 并标记
 function regionsOfArea(name, forecastPref, value, valueKey) {
   const area = name || ''
   const prefs = prefsOfArea(area, forecastPref)
@@ -119,8 +92,7 @@ function regionsOfArea(name, forecastPref, value, valueKey) {
     return region
   })
 }
-// 震度 / 海啸等级的文字：**按当前界面语言取词**（0.9.4 起，见 00g-texts-events）。
-// 取不到该档位的键时退回数字形态（`震度N` 也走文案，别在这里写死中文）。
+// 震度 / 海啸等级文字：按界面语言取词；取不到该档位的键时退回数字形态（别在这里写死中文）。
 const scaleText = (v) => {
   const key = 'scale.' + v
   const own1 = (typeof v === 'number') ? t(key) : ''
@@ -128,14 +100,10 @@ const scaleText = (v) => {
   if (typeof v === 'number' && v > 0) return t('scale.number', { n: Math.floor(v / 10) })
   return t('scale.unknown')
 }
-// 震度后缀：只在有效震度时追加，避免「最大震度未公布」这类噪音。
-// 震度是用户判断严重性的关键信息（阈值也是按震度设的），必须出现在 headline 里。
-// prefix 例：'最大' → 「最大震度3」；'预测最大' → 「预测最大震度5强」。
-// 注意：prefix 与 scaleText 之间**不留空格**——日语与中文都不该有，英文靠 scaleText 自带
-// （`Intensity 3`）读得通，所以这里保持原样拼接。
+// 震度后缀：只在有效震度（>0）时追加；震度是用户判断严重性的关键信息（阈值也按震度设），必须出现在
+// headline 里。prefix 例：'最大' → 「最大震度3」。prefix 与 scaleText 之间不留空格（英文靠 scaleText 自带空格）。
 const scaleSuffix = (v, prefix) => (typeof v === 'number' && v > 0 ? ' · ' + prefix + scaleText(v) : '')
-// severity → 颜色。'yellow' 必须显式处理：默认阈值 40 下最常见的命中（震度4）就是它，
-// 落到默认分支会显示成"信息蓝"，与「中等严重度」的语义不符。
+// severity → 颜色。'yellow'（默认阈值 40 下最常见的命中，震度4）必须显式处理，否则落到默认的"信息蓝"。
 const sevColor = (s) => (
   s === 'red' ? '#e5484d'
     : (s === 'orange' ? '#f76b15'
@@ -151,7 +119,7 @@ const severityOfScale = (v) => {
 
 function parseQuake(raw) {
   const type = (raw.issue && raw.issue.type) || ''
-  // 分类名是**我们给起的**（不是电文原文）→ 取词按界面语言（0.9.4 起，见 00g-texts-events）
+  // 分类名是我们给起的（不是电文原文）→ 按界面语言取词
   const labelMap = {
     ScalePrompt: 'kind.quakeScale', Destination: 'kind.quakeHypo', ScaleAndDestination: 'kind.quakeScaleHypo',
     DetailScale: 'kind.quakeDetail', Foreign: 'kind.quakeForeign', Other: 'kind.quakeInfo',
@@ -161,7 +129,7 @@ function parseQuake(raw) {
   const hypo = eq.hypocenter || {}
   const pts = raw.points || []
   const hasHypo = typeof hypo.name === 'string' && hypo.name !== ''
-  // 有震源名时用模板拼（`震源 {name} · M{mag}`）；**震源名与机构名是上游原文，原样透传**。
+  // 有震源名时用模板拼（`震源 {name} · M{mag}`）；震源名与机构名是上游原文，原样透传。
   const headBase = hasHypo
     ? t('kind.quakeHeadline', { name: hypo.name, mag: (typeof hypo.magnitude === 'number' ? hypo.magnitude : '—') })
     : t(labelKeyOf())
@@ -170,9 +138,8 @@ function parseQuake(raw) {
     id: String(raw.id || raw._id || ''), code: 551, kind: 'quake',
     kindLabel: t(labelKeyOf()),
     severity: severityOfScale(eq.maxScale),
-    // 时间统一转成**带偏移**的 ISO 8601（源时区见 DESIGN 第 4 节 / 05d 的 SOURCE_CONTRACTS）。
-    // P2PQuake 的时间是裸 JST（"2026/09/07 23:25:14"），不补偏移的话大陆浏览器上会显示成
-    // 一个差 1 小时、且没有任何标注的时间；旧历史数据没有偏移，由 formatIssuedLocal 按 JST 解释。
+    // 时间统一转成带偏移的 ISO 8601。P2PQuake 给的是裸 JST（"2026/09/07 23:25:14"），不补偏移
+    // 在其它时区会差 1 小时且无标注；旧历史数据没有偏移，由 formatIssuedLocal 按 JST 解释。
     issued: p2pTimeToIso((raw.issue && raw.issue.time) || raw.time || ''),
     headline,
     maxScale: typeof eq.maxScale === 'number' ? eq.maxScale : -1,
@@ -180,14 +147,13 @@ function parseQuake(raw) {
     eventKey: eq.time ? 'quake:' + eq.time : '',
     strength: typeof eq.maxScale === 'number' ? eq.maxScale : -1,
     hypo: { name: hypo.name || '', magnitude: typeof hypo.magnitude === 'number' ? hypo.magnitude : null },
-    // 震中坐标（0.8.0）：只给跨源事件归并用，**不参与匹配**（见 geoOfHypo）
+    // 震中坐标：只给跨源事件归并用，不参与匹配（见 geoOfHypo）
     geo: geoOfHypo(hypo),
     regions: pts.map((p) => ({
       pref: normalizePref(p.pref),
       area: p.addr || '',
       scale: typeof p.scale === 'number' ? p.scale : -1,
-      // isArea=true 的条目是区域名（如「熊本県天草・芦北」），无法对应到具体市区町村；
-      // false/缺省才是观测点（如「白河市新白河」），可以做市级收窄。
+      // isArea=true 是区域名（无法对应到具体市区町村），false/缺省才是观测点，可做市级收窄。
       cityKnown: p.isArea !== true,
     })),
     cancelled: false,
@@ -215,8 +181,7 @@ function parseEew(raw) {
     eventKey: (raw.issue && raw.issue.eventId) ? 'eew:' + raw.issue.eventId : '',
     strength: maxTo,
     hypo: { name: hypo.name || '', magnitude: typeof hypo.magnitude === 'number' ? hypo.magnitude : null },
-    // 震中坐标（0.8.0）：同 551（见 geoOfHypo）。EEW 是秒级信息，它是"日本这一路先播"的
-    // 主要来源，因此跨源归并恰恰最依赖它带坐标。
+    // 震中坐标：同 551（见 geoOfHypo）。EEW 是日本这一路最先播出的来源，跨源归并最依赖它带坐标。
     geo: geoOfHypo(hypo),
     regions: areas.flatMap((a) => regionsOfArea(a.name, a.pref, typeof a.scaleTo === 'number' ? a.scaleTo : -1, 'scale')),
     cancelled,
@@ -227,8 +192,7 @@ function parseEew(raw) {
 function parseTsunami(raw) {
   const cancelled = raw.cancelled === true
   const areas = raw.areas || []
-  // 两侧的分隔符与「高さ」前缀都是**我们拼的** → 模板化（`{area}：{grade}{height}`）。
-  // 预报区名与浪高描述是电文原文，原样透传。
+  // 两侧分隔符与「高さ」前缀是我们拼的，走模板（`{area}：{grade}{height}`）；预报区名与浪高描述是电文原文。
   const gradeKeyOf = (grade) => {
     const k = 'tsunami.' + grade
     const got = grade ? t(k) : ''
@@ -250,11 +214,9 @@ function parseTsunami(raw) {
     issued: p2pTimeToIso((raw.issue && raw.issue.time) || raw.time || ''),
     headline: cancelled ? t('kind.tsunamiCleared') : lines.join('；'),
     maxScale: worst,
-    // 海啸预报没有可归并的事件 id（issue 只有 source/time/type），但**绝不能留空**：
-    // cancelKeyOf 会退回 kind（'tsunami'），于是任意海域的解除都被当成"此前提醒过的事件"，
-    // 播出一条与用户无关的「海啸预报已解除 …此前发出的警报已作废」——海啸域的**假安全**
-    // 是最危险的误报。用「预报区名集合」当事件键：只有针对同一批预报区的发布与解除
-    // 才归并为同一个事件（区域不一致时匹配不上 → 不提示，安全侧）。
+    // 事件键用「预报区名集合」。海啸预报没有可归并的 id（issue 只有 source/time/type），绝不能留空：
+    // cancelKeyOf 会退回 kind（'tsunami'），任意海域的解除都被当成"此前提醒过的事件"，播出一条无关的
+    // 「海啸预报已解除」（海啸域的假安全）。区域不一致时匹配不上 → 不提示（安全侧）。
     eventKey: areas.length ? 'tsunami:' + areas.map((a) => String(a.name || '')).sort().join(',') : '',
     strength: worst,
     regions: areas.flatMap((a) => regionsOfArea(a.name, a.pref, a.grade || '', 'grade')),

@@ -1,32 +1,7 @@
 // ============================================================================
-// dsh-quake-alert · client/src/12e-overseas-poll.js
-//
-// 作用：海外气象源（美国 NWS / 加拿大 ECCC）的**取数器**——按关注点查询外部 REST，
-//       逐条交给解析契约，命中门槛的交给主链。设计与实测依据见 DESIGN 4.7。
-// 依赖：02-storage（own）、03-settings-bridge（currentCfg）、05d（契约包装）、
-//       05g（健康）、07-store（读当前状态）、11-pipeline（handleAlert）。
-//
-// 为什么是 Client 直连、而不是像 JMA / nmc 那样走 Host（DESIGN 4.7.1）：
-//   ① 两个源都返回 `Access-Control-Allow-Origin: *`，浏览器可直连；
-//   ② **只有"按关注点查询"才可用**——全量分别是 1.2GB/天（NWS）与 144MB/天（ECCC），
-//      而 Host 的既有纪律是"不知道 Client 配置、靠 idleMs 自然停下"，它拿不到关注点；
-//   ③ NWS 官方"必须带 User-Agent 标识应用"实测不阻断浏览器（带 Chrome UA 与不带 UA 都 200）。
-//
-// 两个源的取数语义**刻意不统一**（DESIGN 4.7.2），因为它们的能力本来就不同：
-//   · NWS 只支持按点查（`?point=`），它返回的是"该点所在县 / 区划"的预警，**不做半径扩张**。
-//     所以半径 ≥ 25km 时补 4 个方位采样点——注意这是**近似**（100km 内可能有十几个县），
-//     设置页文案必须如实说明。半径 < 25km 只查中心点：NWS 的县通常比它大，采样点会落进同一个县。
-//   · ECCC 的 OGC API 支持 `bbox`，于是半径**直接参与**查询；语义是"与这个矩形相交"（比圆略宽），
-//     方向是多报不漏报（DESIGN 3.2），可以接受。
-//
-// 三个共同的纪律（与 12b / 12c / 12-websocket 一致）：
-//   · **每轮读一次配置**（getCfg）：关注点变了下一轮就生效，不需要重建取数器；
-//   · **串行请求**：对上游礼貌（DESIGN 4.2 对 JMA 定的口径，这里沿用）；
-//   · **排新定时器前先清旧的**（0.5.4 对 12b 的修正）：少这一行就意味着以后谁改了一处控制流
-//     就多一条自续的轮询链。
-//
-// 一个刻意的取舍（DESIGN 4.7.7 第 2 条）：`staleAfterMs` 是 null，本模块**不判停更**，
-// 因为按点 / 框查询天然可能是空响应。活性只由"请求是否成功"表达。
+// dsh-quake-alert · client/src/12e-overseas-poll.js — 海外气象源（美国 NWS / 加拿大 ECCC）的取数器：
+// 按关注点查询外部 REST，逐条交给解析契约，命中门槛的交给主链；每轮读一次配置、串行请求，
+// `staleAfterMs` 为 null 故不判停更。依赖 02-storage、03-settings-bridge、05d、05g、07-store、11-pipeline。
 // ============================================================================
 
 import { t } from './00-i18n.js'
@@ -37,65 +12,48 @@ import { NWS_EVENT_WHITELIST, OVERSEAS_BROADCAST_MIN_RANK } from './05h-overseas
 import { store } from './07-store.js'
 import { handleAlert } from './11-pipeline.js'
 
-/** NWS 的洪水类查询端点（全量 `/alerts/active` 1.67MB 不可用，见文件头）。 */
+/** NWS 的洪水类查询端点（全量 `/alerts/active` 1.67MB 不可用）。 */
 export const NWS_ALERTS_BASE = 'https://api.weather.gov/alerts/active'
 /** ECCC 的预警集合（OGC API - Features）。 */
 export const ECCC_ALERTS_BASE = 'https://api.weather.gc.ca/collections/weather-alerts/items'
 /**
- * NWS 的 `?event=` 白名单参数——**从 05h 的白名单派生**，不再手抄一份（0.6.1 review）。
- *
- * 为什么必须派生：这个参数是**发给上游的服务端过滤**。将来往白名单里加一类（例如新出现的
- * 洪水类产品）而忘了同步这里，上游不会报错、只是永远不返回那一类；客户端白名单也不会因为
- * "缺了它"而报 schema / empty —— 整条链路静默漏报（DESIGN 3.2 最反对的形态）。
- * 派生成同一个集合之后，"加灾种"这件事只剩一处可改。
+ * NWS 的 `?event=` 白名单参数——从 05h 的白名单派生（同一个集合）。它是发给上游的服务端过滤：
+ * 漏同步不会报错，只是那一类永远不返回（静默漏报）。
  */
 export const NWS_EVENT_QUERY = Object.keys(NWS_EVENT_WHITELIST).join(',')
 
 export const NWS_POLL_MS = 120 * 1000
 export const ECCC_POLL_MS = 300 * 1000
-/** 首轮延迟：错开启动窗口，也让设置页先渲染出来（与 12b 的 FEED_FIRST_DELAY_MS 同取向）。 */
+/** 首轮延迟：错开启动窗口，也让设置页先渲染出来。 */
 export const OVERSEAS_FIRST_DELAY_MS = 4000
-/** 单次请求超时（Client 侧统一 10 秒，DESIGN 4.2）。 */
+/** 单次请求超时（Client 侧统一 10 秒）。 */
 export const OVERSEAS_TIMEOUT_MS = 10 * 1000
-/** 单次响应体上限。ECCC 的 bbox 查询在预警密集时实测可到 200KB（几何 + 双语正文），512KB 有余量。 */
+/** 单次响应体上限。ECCC 的 bbox 查询在预警密集时实测可到 200KB（几何 + 双语正文）。 */
 export const OVERSEAS_MAX_BODY_CHARS = 512 * 1024
-/** 半径小于它时只查中心点（见文件头：采样点会落进同一个县，白花请求）。 */
+/** 半径小于它时只查中心点：NWS 的县通常比它大，采样点会落进同一个县，白花请求。 */
 export const MIN_SAMPLE_RADIUS_KM = 25
 /** 每轮请求数上限：20 个关注点 × 5 个采样点 = 100，串行跑完会超过一轮的间隔。 */
 export const MAX_REQUESTS_PER_ROUND = 40
-/** 年龄闸门：首轮（或距上次成功超过 GATE_RESET）时，只播报发布在这么久以内的条目。 */
+/** 时效门槛：首轮（或距上次成功超过 GATE_RESET）时，只播报发布在这么久以内的条目。 */
 export const OVERSEAS_FRESH_GATE_MS = 6 * 60 * 60 * 1000
 /** 距上次成功超过这么久，就重新按"首轮"处理（页面休眠恢复后不该把几小时前的当新警报）。 */
 export const OVERSEAS_GATE_RESET_MS = 30 * 60 * 1000
 /**
- * HTTP 400 之后的冷却期（0.6.0 review A-2）。**不永久拉黑**：400 也可能表示"我们的参数被上游
- * 拒绝"（event 名改了、中间设备改写、WAF），一次误判不该让某个点在本会话里永远查不到。
- * 冷却期内跳过该 URL，到期后自动重试一次。
+ * HTTP 400 之后的冷却期：冷却期内跳过该 URL，到期自动重试一次（400 也可能是我们的参数被上游拒绝）。
  */
 export const UNCOVERED_TTL_MS = 60 * 60 * 1000
-/** 整轮全部失败时的退避起点与上限（DESIGN 4.7.2 对轮询源的通用约束）。 */
+/** 整轮全部失败时，重试间隔逐次延长的起点与上限。 */
 export const OVERSEAS_MIN_BACKOFF_MS = 1000
 export const OVERSEAS_MAX_BACKOFF_MS = 60 * 1000
 
 /**
- * 海外源的计数快照（供设置页的状态区块与诊断快照读取）。
- *
- * 与 12b 的 `feedStatsOf` **分成两张表**：那张表的字段是"增量 / 游标 / Host 计数"，
- * 语义与这里的"轮次 / 请求数 / 未覆盖 / 年龄闸门"完全不同——混在一张表里会让渲染代码
- * 靠 `if (f.host)` 之类的形状判断去猜来源（0.5.4 修过的那类问题）。两张表各自由自己的
- * 渲染分支读，互不干扰。
+ * 海外源的计数快照（供设置页的状态区块与诊断快照读取）：轮次 / 请求数 / 未覆盖 / 时效门槛。
  */
 export const overseasStatsOf = {}
 
-/**
- * 覆盖范围包围盒。**宁可宽一点也不精确**：盒外的关注点不产生请求（用户没配那个国家就不查），
- * 盒内重叠（美加边境）会让同一个点查两个源——多一次请求，NWS 对覆盖外的点回 400，
- * 由 pollOnce 的 `uncovered` 分类兜住（不会显示成故障）。
- *
- * 0.6.1 review 补上三个**海外领地**（此前只有本土 / 阿拉斯加 / 夏威夷）：波多黎各与美属维尔京群岛、
- * 关岛与北马里亚纳、美属萨摩亚都是 NWS 的正式预报区（各有 WFO），但原先全部落在盒外 →
- * 配了圣胡安的用户会看到「未设置美国关注点」，而那个点明明就在设置页的列表里。
- */
+/** 覆盖范围包围盒：盒外的关注点不产生请求。NWS 对覆盖外的点回 400，由 pollOnce 的 `uncovered`
+ *  分类捕获；盒内重叠（美加边境）会让同一个点查两个源。含波多黎各与美属维尔京群岛、关岛与
+ *  北马里亚纳、美属萨摩亚（都是 NWS 的正式预报区）。 */
 const US_BOXES = [
   { minLat: 24, maxLat: 50, minLon: -125, maxLon: -66 }, // 本土
   { minLat: 51, maxLat: 72, minLon: -170, maxLon: -129 }, // 阿拉斯加
@@ -128,14 +86,11 @@ function lonDegreesOf(km, lat) {
   return km / (KM_PER_DEG * Math.max(0.05, c))
 }
 
-// 采样点 / bbox 的坐标夹取（0.6.1 review）：半径最大 2000km 时，高纬度的方位点会算出
-// `lon < -180`（安克雷奇 → -186 之类）。那样的 URL 会被上游回 400，于是我们自己生成的
-// 非法参数被归类成"被上游拒绝"——诊断会把错误指向对方。夹到合法范围即可（方位点略微
-// 偏离本意，但不会凭空多查一个错误的位置）。
+// 采样点 / bbox 的坐标夹取：半径 2000km 时高纬度的方位点会算出 `lon < -180`，那样的 URL 会被上游回 400。
 const clampLat = (v) => Math.max(-90, Math.min(90, v))
 const clampLon = (v) => Math.max(-180, Math.min(180, v))
 
-/** ECCC 的 bbox：坐标 ± 半径（经度按纬度修正）。 */
+/** ECCC 的 bbox：坐标 ± 半径（经度按纬度修正）。NWS 不支持 bbox，只按点查（`?point=`）。 */
 export function ecccBboxOf(place) {
   const dLat = Number(place.radiusKm || 0) / KM_PER_DEG
   const dLon = lonDegreesOf(Number(place.radiusKm || 0), place.lat)
@@ -167,27 +122,20 @@ async function defaultFetchText(url, ctx) {
   const work = (async () => {
     const res = await fetch(url, { signal, headers: { Accept: 'application/json' } })
     if (!res.ok) {
-      // 带上状态码：NWS 对"覆盖范围之外"的坐标返回 400（实测多伦多 / 温哥华 / 伦敦都是），
-      // 那与"网络不通"是两回事，见 pollOnce 里的分类。
+      // 带上状态码：NWS 对覆盖范围之外的坐标返回 400，那与"网络不通"是两回事（见 pollOnce）。
       const err = new Error('HTTP ' + res.status)
       err.status = res.status
-      // 400 的响应体自带原因（NWS 是 `Invalid Parameter` + parameterErrors）——**只留给诊断**，
-      // 不参与任何判据（按错误文本做分支就是"猜"，DESIGN 4.5 明确反对）。
-      // 截 160 字：与下面 catch 里展示时的切片长度一致（两处不一致会让读码的人以为丢了信息）。
+      // 400 的响应体自带原因（NWS 是 `Invalid Parameter` + parameterErrors），只留给诊断、不参与判据。
       if (res.status === 400) {
         try { err.bodyHint = String(await res.text()).slice(0, 160) } catch (e) { /* 读不到就算了 */ }
       }
       throw err
     }
-    // 0.9.4（C12⑦ / 同 C7② 的做法）：**按流读取并在超限处立刻停**。
-    // 此前是 `await res.text()` 之后才比长度——那时整个响应体已经在内存里了，上限只保护了
-    // "后续 JSON.parse 的代价"，峰值内存根本没被保护（与 Host 轮询器修过的是同一个形态）。
-    // 单位说明：这里比的是**字符数**（历史原因，`OVERSEAS_MAX_BODY_CHARS` 的名字也这么写），
-    // 而流的每一块用字节数计——对 UTF-8 中文两者差 3 倍，取字节数偏保守（宁可早停）。
+    // 按流读取并在超限处立刻停：`await res.text()` 之后才比长度时整个响应体已进内存，上限只
+    // 保护了后续 JSON.parse 的代价。比的是字符数，而流按字节计——取字节数偏保守（宁可早停）。
     const stream = res.body
     const dec = typeof TextDecoder !== 'undefined' ? new TextDecoder('utf-8') : null
-    // 没有 TextDecoder 就不走流式路径：那样只能 `String(chunk)`（字节数组的逗号串），
-    // 解出来的 JSON 一定是坏的——退化成"读全文再比长度"比产出垃圾要好（老环境罕见但真实）。
+    // 没有 TextDecoder 就只能 `String(chunk)`（字节数组的逗号串），解出来一定是坏 JSON，故退化。
     if (dec && stream && typeof stream.getReader === 'function') {
       const reader = stream.getReader()
       let out = ''
@@ -213,9 +161,8 @@ async function defaultFetchText(url, ctx) {
     return await res.text()
   })()
   if (signal) return await work
-  // 没有 AbortController 时用 Promise.race 兜住超时（0.6.0 review C-7）：否则单次请求可以永久
-  // 挂住，而下一轮只在上一轮结束之后才排 → 整条轮询链会静默停摆、状态还保持绿色。
-  // （无法真正取消那个 fetch，但至少让失败可见、让下一轮照常排。）
+  // 没有 AbortController 时用 Promise.race 实现超时保护：否则单次请求可以永久挂住，下一轮不再排，
+  // 整条轮询链静默停摆、状态还保持绿色。
   return await Promise.race([
     work,
     new Promise((_, reject) => {
@@ -224,18 +171,11 @@ async function defaultFetchText(url, ctx) {
   ])
 }
 
-/** 会话内的"覆盖外"标记以 **URL 本身**为键：坐标或半径一变，旧标记自然失效，不必手动清理。 */
-
 /**
- * 通用海外取数器。与 12b 的 createFeedClient **接口同形**（start / stop / pollOnce / pollSerial /
- * stats），差别只在"数据从哪来"：那边是 Host 的增量游标，这边是按关注点的外部查询。
- *
- * @param {object} opts
- *   id / label / intervalMs / firstDelayMs / enabled / getCfg
- *   placesFor(cfg) -> place[]          该国关注点
- *   urlsFor(place, cfg) -> string[]    该关注点的查询 URL（NWS 多个采样点、ECCC 一个 bbox）
- *   parseOne(feature, place) -> result 契约包装（05d）
- *   onStatus(patch) / onError(err) / fetchText(url, ctx)
+ * 通用海外取数器，与 12b 的 createFeedClient 接口同形（start / stop / pollOnce / pollSerial / stats）。
+ * @param {object} opts 另有 id / label / intervalMs / firstDelayMs / enabled / getCfg / placesFor(cfg)
+ *   -> place[]（该国关注点）/ urlsFor(place, cfg) -> string[]（该点的查询 URL，NWS 多个采样点、
+ *   ECCC 一个 bbox）/ parseOne(feature, place) -> result / onStatus(patch) / onError(err) / fetchText(url, ctx)
  */
 export function createOverseasSource(opts = {}) {
   const id = opts.id || 'overseas'
@@ -251,16 +191,11 @@ export function createOverseasSource(opts = {}) {
   const placesFor = opts.placesFor || (() => [])
   const urlsFor = opts.urlsFor || (() => [])
   const parseOne = opts.parseOne || (() => ({ ok: false, kind: 'schema', detail: 'no parser configured' }))
-  // 单次请求的超时可注入（0.6.1）：好让回归测试能在毫秒级验"超时"这条路径的文案与分类
-  // ——否则它得真的等 10 秒（默认沙箱此前连 AbortController 都没有，这条路径从未被跑过）。
-  // 用 Number.isFinite 而不是 typeof：`NaN` 也是 number，而 `setTimeout(fn, NaN)` 会**立即**触发
-  //（0.6.2 review）。
+  // 超时与 400 冷却期时长可注入，便于回归测试在毫秒级验这两条路径（`NaN` 也是 number 而
+  // `setTimeout(fn, NaN)` 会立即触发，故用 Number.isFinite 判）。
   const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : OVERSEAS_TIMEOUT_MS
-  // 400 冷却期的时长可注入（0.6.1）：好让回归测试真的能走到"TTL 到期后自动重试"那一侧
-  // ——此前只有常量自证（`UNCOVERED_TTL_MS > 0`），把实现改成永久拉黑也测不出来。
   const uncoveredTtlMs = Number.isFinite(opts.uncoveredTtlMs) ? opts.uncoveredTtlMs : UNCOVERED_TTL_MS
-  // 交给主链的出口做成可注入：默认就是 11-pipeline 的 handleAlert，测试注入 spy 之后
-  // 就能只验"取数器交出了什么"，而不必把整条通知链（音频 / 通知 / toast）拖进单测。
+  // 交给主链的出口可注入：默认是 11-pipeline 的 handleAlert，测试注入 spy 后只验取数器交出了什么。
   const onAlert = opts.onAlert || handleAlert
 
   let timer = null
@@ -271,38 +206,28 @@ export function createOverseasSource(opts = {}) {
   let lastStatusKey = ''
   let lastSuccessAt = 0
   let lastError = ''
-  /** 年龄闸门上一轮是否处于激活状态（用于"只在进入时计数"，见 pollOnce 里的 gated）。 */
+  /** 时效门槛上一轮是否处于激活状态（用于"只在进入时计数"，见 pollOnce 里的 gated）。 */
   let gateActive = false
-  /** 整轮全部失败时的退避（0 = 没有退避，用正常间隔）。 */
+  /** 整轮全部失败时的重试间隔递增量（0 = 不递增，用正常间隔）。 */
   let backoffMs = 0
   const stats = {
     polls: 0, requests: 0, received: 0, applied: 0, errors: 0,
     ageSkipped: 0, throttledLast: 0, throttledTotal: 0, gated: 0, rejected: 0,
     truncated: 0, lastAt: 0, lastDataAt: 0,
   }
-  // 会话内记住"这些 URL 暂时别查"（键 = URL，值 = 可以再试的时刻）。0.6.0 review A-2：
-  // 原来是永久拉黑，一次误判（上游改参数名 / WAF 回 400）就让那个点在本会话里永远查不到；
-  // 现在带 TTL，到点自动重试一次。
+  // 会话内记住"这些 URL 暂时别查"（键 = URL，值 = 可以再试的时刻），到期自动重试一次。
   const uncovered = new Map()
 
-  /**
-   * 状态上报：只在**变化**时送出，且除自己上一轮的值还比 **store 里的当前值**
-   * （0.5.4 的修正：探针 / 健康层也会写同一个源，只比自己会把别人的状态永久盖住）。
-   */
+  /** 状态上报：只在变化时送出；除自己上一轮的值，还比 store 里的当前值（自检 / 健康层也写同一个源）。 */
   function reportStatus(patch) {
     const eff = effectiveStatusOf(id, patch.status, patch.detail)
     const cur = ((store.sources || {})[id] || {})
-    // 去重键 = **status + detail**（0.6.0 review 修正）。此前只比 status，于是"同一状态下的
-    // 语义变化"永远推不出去：用户刚加了一个关注点，状态仍是 open，而 detail 从
-    // 「未设置美国关注点（设置 → …）」变成了「已查询」——旧文案会一直挂在设置页上，
-    // 用户以为没配成功（这正是 0.5.4「信号被覆盖」那一类）。
-    // 代价是 **detail 里不能放单调计数**：那会让每轮都判定为变化、整页反复重渲。
-    // 所以计数一律不进 detail，由 13-ui 的 OVERSEAS_STAT_ORDER 从 stats 直接读。
+    // 去重键 = status + detail：只比 status 会让"同一状态下的语义变化"永远推不出去；代价是
+    // detail 里不能放单调计数（那会让每轮都判为变化、整页重渲），计数由 13-ui 直接读 stats。
     const key = eff.status + '|' + String(eff.detail || '')
     if (key === lastStatusKey && cur.status === eff.status && String(cur.detail || '') === String(eff.detail || '')) return
     lastStatusKey = key
-    // 与 12b 同形：**由调用方（15-entry 的 feedStatus）落库**，本模块不直接写 store
-    // ——两处都写会让同一个状态在一轮里被 publish 两次，也会让"谁写的"变得不可追。
+    // 与 12b 同形：由调用方（15-entry 的 feedStatus）统一写入，本模块不直接写 store（否则一轮 publish 两次）。
     try { onStatus(Object.assign({ label }, eff)) } catch (err) { /* UI 回调异常不影响轮询 */ }
   }
 
@@ -316,12 +241,8 @@ export function createOverseasSource(opts = {}) {
     }
     const places = placesFor(cfg)
     if (places.length === 0) {
-      // 与坐标型源同一条原则（06-matcher 的 noWatch）：**不静默**——"配错了关注点"看起来像
-      // "根本没有预警"是这套系统最该避免的误解。这里不产生任何网络请求。
-      //
-      // 两种"0 个关注点"必须分开说（0.6.1 review）：是配置里根本没有点，还是**有**点但都落在
-      // 本源的覆盖盒之外（关岛之类，或纯加拿大用户看美国源）？此前一律说"未设置"，
-      // 而用户明明在设置页的列表里看得见那个点。
+      // 与坐标型源同一条原则（06-matcher 的 noWatch）：不静默——"配错了关注点"看起来像"根本
+      // 没有预警"。这里不产生任何网络请求。是"配置里没有点"还是"有点但都在覆盖盒外"必须分开说。
       const anyPlaces = ((cfg.watch || {}).places || []).length > 0
       reportStatus({
         status: 'open',
@@ -332,14 +253,9 @@ export function createOverseasSource(opts = {}) {
       })
       return { applied: 0, noPlaces: true }
     }
-    // 请求清单（0.6.0 review 修正）：**先保证每个关注点都被查一次，再补采样点**。
-    // 此前是按关注点顺序平铺后整段截断——10 个关注点 × 5 个采样点 = 50 > 上限 40 时，
-    // 排在后面的两个关注点**每一轮都被截断、永远查不到**，而用户看不出任何异常
-    //（这正是 3.2 最反对的"静默漏报"）。现在：
-    //   · 每个关注点的第一个 URL（NWS 的中心点 / ECCC 的 bbox）无条件排上；
-    //   · 剩下的额度才按顺序补方位采样点。
-    // 关注点上限是 20（MAX_WATCH_PLACES），远小于请求上限，所以正常配置下**不会再丢关注点**；
-    // 万一真的超出，`skippedPlaces` 会如实计数并写进状态（不静默）。
+    // 请求清单：先保证每个关注点都被查一次，再补采样点——按顺序平铺后整段截断会让排在后面的
+    // 关注点每轮都被截断、永远查不到（静默漏报）。每个关注点的第一个 URL 无条件排上，剩下的
+    // 额度才补方位采样点；真超出时 `skippedPlaces` 如实计数。
     const now = Date.now()
     // 暂时被上游拒绝的 URL 先跳过（TTL 到期后会自动重试一次，见下面 400 分支）
     const groups = places
@@ -348,9 +264,7 @@ export function createOverseasSource(opts = {}) {
     const reqs = []
     for (const g of groups) reqs.push({ place: g.place, url: g.urls[0] })
     const coreCount = reqs.length
-    // 剩余额度补方位采样点，**起点按轮次轮转**（0.6.0 review B-2）：固定顺序会让排在后面的
-    // 关注点每一轮都只拿到中心点（实测 10 个点时尾部两点永远只有 1 个采样点，等效半径退化成
-    // "那一个县"）。轮转之后长期看每个点都能轮到方位采样。
+    // 补方位采样点的起点按轮次轮转：固定顺序会让排在后面的关注点每轮都只拿到中心点，等效半径退化成"那一个县"。
     const offset = groups.length > 0 ? (stats.polls % groups.length) : 0
     const rotated = groups.slice(offset).concat(groups.slice(0, offset))
     for (const g of rotated) {
@@ -361,22 +275,18 @@ export function createOverseasSource(opts = {}) {
       if (reqs.length >= MAX_REQUESTS_PER_ROUND) break
     }
     const capped = reqs.slice(0, MAX_REQUESTS_PER_ROUND)
-    // 被截断的采样点数要按"本该有多少"算，而不是用 reqs.length——补采样点时就已经 break 在
-    // 上限上了，剩下的采样点根本没进 reqs（用 reqs.length 会永远算出 0，设置页那一行就成了摆设）。
+    // 被截断的采样点数要按"本该有多少"算：补采样点时已 break 在上限上，剩下的没进 reqs。
     const wantSamples = groups.reduce((n, g) => n + Math.max(0, g.urls.length - 1), 0)
     const gotSamples = Math.max(0, capped.length - Math.min(coreCount, capped.length))
     const skippedPlaces = Math.max(0, coreCount - capped.length)
     const skippedSamples = Math.max(0, wantSamples - gotSamples)
-    // 两个计数分开（0.6.0 review B-6）：`Last` 是本轮值（设置页看当下）、`Total` 是累计
-    // （诊断里看趋势）——此前只有一个覆盖式的值，会出现"忽有忽无、也不知道累计跳了多少"。
+    // `Last` 是本轮值（设置页看当下）、`Total` 是累计值（诊断里看趋势），两个计数分开。
     stats.throttledLast = skippedPlaces + skippedSamples
     stats.throttledTotal += stats.throttledLast
 
-    // 年龄闸门（DESIGN 4.7.6）：首轮或"距上次成功超过 30 分钟"（页面休眠恢复）时，
-    // 只把发布在 6 小时以内的条目当新警报播；更早的仍进历史，但不打扰。
+    // 时效门槛：首轮或"距上次成功超过 30 分钟"（页面休眠恢复）时，只把发布在 6 小时以内的当新警报。
     const gated = (now - lastSuccessAt) > OVERSEAS_GATE_RESET_MS
-    // 只在**进入**闸门的那一刻计数（0.6.1 review）：此前统计的是"闸门处于激活状态的轮数"，
-    // 而源持续不可达时 lastSuccessAt 一直不更新 → 每轮都 +1，诊断里会读成"进入过几百次首轮"。
+    // 只在进入门槛的那一刻计数：源持续不可达时 lastSuccessAt 一直不更新，否则每轮都会 +1。
     if (gated && !gateActive) stats.gated += 1
     gateActive = gated
 
@@ -393,10 +303,7 @@ export function createOverseasSource(opts = {}) {
     const seen = new Set()
     for (const item of capped) {
       if (stopped) break
-      // 超时标记（0.6.1 review）：`AbortController.abort()` 造成的错误与"用户停用插件"
-      // 在 fetch 层完全同形（Chrome 的文案甚至是 "The user aborted a request."）。
-      // 只靠 `stopped` 区分不了，于是真实超时会被诊断成"用户主动中止"——正是 A-1 想消灭的
-      // 那条误导信息。这里自己记一笔，好在 catch 里给出正确的文案。
+      // 超时标记：`AbortController.abort()` 的错误与"用户停用插件"在 fetch 层完全同形，只靠 `stopped` 区分不了。
       let timedOut = false
       abortCtl = typeof AbortController === 'function' ? new AbortController() : null
       const timerId = abortCtl
@@ -415,33 +322,24 @@ export function createOverseasSource(opts = {}) {
         try {
           json = JSON.parse(text)
         } catch (err) {
-          // 与下面"缺 features"同一类（0.6.1 review）：HTTP 200 却不是 JSON，最常见的原因是
-          // 拦截页 / 上游改版。此前它按**链路故障**上报，于是同一份证据在同一个函数里得出两个
-          // 相反的六态（蓝点 vs 红点）——而 JMA / NOAA 对"返回 HTML 而不是电文"一律判 schema。
+          // HTTP 200 却不是 JSON（拦截页 / 上游改版）按 schema 上报，不按链路故障（否则同一份证据两个六态）。
           noteParseResult(id, failResult('schema', 'response is not JSON (blocked page or upstream change?)'))
           throw new Error('response is not JSON (blocked page or upstream change?)')
         }
         const feats = json && Array.isArray(json.features) ? json.features : null
         if (!feats) {
-          // 顶层结构不符 = **契约漂移**，不是链路故障（0.6.0 review 修正）。按 DESIGN 4.5 的六态
-          // 语义它该点亮**蓝点**（用户处理不了、等插件更新），而不是红点（让用户去折腾自己的网络）。
-          // 此前这里只抛普通 Error，于是整轮被归成 unreachable —— 与 check-contracts 把同一个
-          // 条件判成"结构变了"的结论自相矛盾。
+          // 顶层结构不符 = 契约漂移（蓝点：用户处理不了、等插件更新），不是链路故障（红点）。
           noteParseResult(id, failResult('schema', 'response lacks features[]'))
           throw new Error('response lacks features[]')
         }
-        // 结构正确但**空数组**（NWS 按点查询的常态）交给**轮末**统一判定（0.6.2 修正，见下）。
-        // 0.6.1 曾在这里逐响应上报 `empty`，而 05g 的 empty 会 `clearData`（清蓝点 + 归零连续
-        // 失败计数）——同一轮里只要有一条 URL 返回空数组，其它 URL 的同类 schema 失败就被清零：
-        // 实测（每轮 1 个拦截页 + 4 个空响应 × 6 轮）schema 计数涨到 6 而 consecutiveFail 恒为 0，
-        // **蓝点永不点亮**。局部改版 / 局部拦截于是变成静默漏报（DESIGN 3.2 最反对的形态）。
+        // 结构正确但空数组（NWS 按点查询的常态）交给轮末统一判定：逐响应上报 `empty` 会
+        // `clearData`（清蓝点 + 归零连续失败计数），同轮其它 URL 的 schema 失败就被清零。
         if (typeof json.numberMatched === 'number' && json.numberMatched > feats.length) truncatedNow += 1
         okCount += 1
         stats.received += feats.length
         for (const feature of feats) {
-          // **单条各自兜错**（0.6.0 review B-3）：此前整个 features 循环与 fetch 共用一个 try，
-          // 一条 entry 的解析 / 主链异常会被记成"这个请求失败"，还会静默丢掉该响应里剩下的条目
-          //（12b 的既有纪律正是"单条失败不阻断其余条目"，见其 apply 循环）。
+          // 单条各自捕获异常：整个 features 循环与 fetch 共用一个 try，会让一条 entry 的解析 /
+          // 主链异常被记成"这个请求失败"，还会静默丢掉该响应里剩下的条目。
           let res = null
           try {
             res = parseOne(feature, item.place)
@@ -450,10 +348,8 @@ export function createOverseasSource(opts = {}) {
             lastError = 'item parse threw: ' + String((parseErr && parseErr.message) || parseErr)
             continue
           }
-          // 契约分类：empty（不在本插件范围 / 该点无预警）不计失败，schema / value 计入健康。
-          // **逐条 empty 传 `perItem`**：只计数、不清蓝点——单条"不在范围内"不能证明同轮其它
-          // 条目的 schema 失败已恢复（不传的话，1 个被拦截的 URL + N 个非白名单事件的 URL
-          // 会让蓝点永不点亮。0.6.2 只把"空数组"挪到了轮末，这里是同型的另一半）。
+          // 逐条 empty 必须传 `perItem`：只计数、不清蓝点——单条"不在范围内"不能证明同轮其它
+          // 条目的 schema 失败已恢复。
           if (noteParseResult(id, res, undefined, { perItem: true })) continue
           if (!res.ok) continue
           const alert = res.alert
@@ -463,13 +359,12 @@ export function createOverseasSource(opts = {}) {
           const issued = Date.parse(alert.issued)
           if (Number.isFinite(issued) && issued > newestDataAt) newestDataAt = issued
           const stale = gated && Number.isFinite(issued) && (now - issued) > OVERSEAS_FRESH_GATE_MS
-          // 只统计**本来会被播报**的那些（0.6.1 review）：Watch / Advisory 由档位决定
-          // （`overseasRank < 3`）本来就不播报，把它们算进"过老只记历史"会让设置页那个
-          // 数字失去解释力（用户会以为有那么多条被闸门拦下了播报）。
+          // 只统计本来会被播报的那些：Watch / Advisory 由档位决定（`overseasRank < 3`）本来就
+          // 不播报，算进"过老只记历史"会让设置页那个数字失去解释力。
           const rank = typeof alert.overseasRank === 'number' ? alert.overseasRank : 0
           if (stale && rank >= OVERSEAS_BROADCAST_MIN_RANK) stats.ageSkipped += 1
-          // 过老的条目仍然交给主链，但带 staleOnArrival：主链会走"命中 + 只记历史"的那条分支
-          // （与"跨会话重放"同形）。丢掉它会让用户看不到"就在打开页面前刚发布的洪水预警"。
+          // 过老的条目仍然交给主链（带 staleOnArrival，主链走"命中 + 只记历史"那条分支），
+          // 丢掉它会让用户看不到"就在打开页面前刚发布的洪水预警"。
           try {
             onAlert(alert, cfg, stale ? { staleOnArrival: Math.round((now - issued) / 3600000) } : undefined)
           } catch (alertErr) {
@@ -480,29 +375,19 @@ export function createOverseasSource(opts = {}) {
           applied += 1
         }
       } catch (err) {
-        // **用户主动停用不是故障**（0.6.0 review A-1，照搬 12b 的既有守卫）：stop() 会 abort
-        // 在途请求，于是 catch 会收到一个 AbortError。若照常累加，停用插件就会在侧边栏留下
-        // 一个红点、并往诊断里写一条 "The user aborted a request."——而重载时旧 fiber 的这次
-        // 上报还会把新会话短暂染红。这里直接返回，让本轮当作"被中止"处理。
+        // 用户主动停用不是故障：stop() 会 abort 在途请求，照常累加会在侧边栏留下红点并往诊断里写中止信息。
         if (stopped) return { applied, aborted: true }
-        // 400 = "这个坐标不在我的服务范围内"（NWS 实测对加拿大 / 英国的点都这么答）。
-        // 这是**参数问题，不是链路故障**：按 DESIGN 4.5 的状态语义，把它显示成红色"不可达"
-        // 会让一个多伦多用户以为插件坏了（实际是"你关注的地方没有这个源"）。
-        // 三个约束（0.6.0 review A-2）：
-        //   ① **不替上游断言原因**——400 也可能是"我们的参数被拒"（上游改了 event 名、
-        //      中间设备改写、WAF），文案只说"被上游拒绝（HTTP 400）"，并把响应体前 160 字
-        //      留在诊断里供人判断，不写"这个点不在覆盖范围"这种我们无法证实的话；
-        //   ② **拉黑带 TTL**——记的是"这个 URL 暂时别查"，1 小时后自动重试一次，
-        //      避免一次误判让某个点在本会话里永远查不到；
-        //   ③ **按请求（URL）记，不是按关注点**：NWS 的"覆盖外"是逐点的，一个美加边境的点的
-        //      中心点可能 400，而它的四个方位点里有落在美国境内、本该查得到的。
+        // 400 = "这个坐标不在我的服务范围内"（NWS 实测对加拿大 / 英国的点都这么答）：参数问题、
+        // 不是链路故障，显示成红色"不可达"会让用户以为插件坏了。① 不替上游断言原因（文案只说
+        // "被上游拒绝（HTTP 400）"，响应体前 160 字留在诊断里）；② 拉黑带 TTL，1 小时后重试一次；
+        // ③ 按请求（URL）记而不是按关注点——NWS 的覆盖外是逐点的。
         if (err && err.status === 400) {
           stats.rejected += 1
           rejectedNow += 1
           uncovered.set(item.url, now + uncoveredTtlMs)
           if (!lastError) lastError = 'HTTP 400（' + String(err.bodyHint || '').slice(0, 160) + '）'
-          // 400 也是"上游有响应"，同样算一次成功接触：否则只配了覆盖外坐标的用户
-          // `lastSuccessAt` 永远不更新、年龄闸门恒处于"首轮"。
+          // 400 也是"上游有响应"，同样算一次成功接触：否则只配了覆盖外坐标的用户 lastSuccessAt
+          // 永远不更新、时效门槛恒处于"首轮"。
           lastSuccessAt = Date.now()
           continue
         }
@@ -521,39 +406,27 @@ export function createOverseasSource(opts = {}) {
     }
     if (newestDataAt) {
       stats.lastDataAt = newestDataAt
-      // 上报"最后一次拿到数据的时刻"：契约里这条源的 staleAfterMs 是 null（探针不判），
+      // 上报"最后一次拿到数据的时刻"：契约里这条源的 staleAfterMs 是 null（自检不判），
       // 但诊断快照与排障要看得到它。
       noteFreshness(id, newestDataAt)
     }
-    // 轮末的两条**轮级**判定（0.6.2 修正）。
-    // ① 分页截断：按**轮**计数（此前按响应累加——加拿大用户有 N 个关注点时一轮会 +N，
-    //    与 UI / 诊断里"多少轮被截断"的说法不符）。
+    // 轮末的两条轮级判定：① 分页截断按轮计数（按响应累加时 N 个关注点的一轮会 +N，与 UI 说法
+    // 不符）；② 结构正常的空结果只在整轮无失败时才判"结构没问题"（05g 的 empty 语义，清蓝点）。
     if (truncatedNow) stats.truncated += 1
-    // ② 结构正常的空结果：**只有整轮一条失败都没有**时，才把这一轮判成"结构没问题"。
-    //    这正是 05g 的 empty 语义（empty 也算结构是好的 → 清蓝点），但它必须以**轮**为单位：
-    //    逐响应上报会让局部失败（5 个采样点里 1 个被拦截）永远升不了级，见上面的说明。
-    //    `applied === 0` 时才需要它——有成功解析的条目时 `noteSourceSuccess` 已经清过蓝点。
+    // `applied === 0` 时才需要它：有成功解析的条目时 `noteSourceSuccess` 已经清过蓝点。
     if (okCount > 0 && failCount === 0 && applied === 0) {
-      // 轮级判定：整轮无失败、只是没有本插件范围内的条目 → 结构正常，照旧清蓝点（不传 perItem）。
       noteParseResult(id, failResult('empty', 'ok structure, nothing in scope'))
     }
-    // 停用之后不再写状态（0.6.0 review A-1）：否则"用户主动关掉插件"会在侧边栏留下红点，
-    // 诊断里也会多一条 "The user aborted a request."
+    // 停用之后不再写状态，否则"用户主动关掉插件"会在侧边栏留下红点、诊断里多一条中止信息。
     if (stopped) return { applied, aborted: true }
-    // 成功一轮就清掉上次的失败文案（0.6.0 review B-6）：否则一次瞬时 500 会永远挂在诊断里。
+    // 成功一轮就清掉上次的失败文案，否则一次瞬时 500 会永远挂在诊断里。
     if (okCount > 0 && failCount === 0) lastError = ''
-    // 状态分类（DESIGN 4.5 的六态语义）：
-    //   · 有响应且没有失败 → open
-    //   · 有响应但也有失败 → degraded（部分链路有问题，但仍在工作）
-    //   · 全部失败 → unreachable（红色：环境问题，用户或许能处理）
-    //   · 全部被 400 拒绝 → **仍然是 open**（400 是参数问题，不是链路故障，见上面的分档）
+    // 状态分类：有响应且无失败 → open；有响应也有失败 → degraded（仍在工作）；
+    // 全部失败 → unreachable（红色，环境问题）；全部被 400 拒绝 → 仍是 open（参数问题）。
     if (okCount > 0 && failCount === 0) {
       lastSuccessAt = Date.now()
-      // detail 只放**非单调**的语义信息（0.6.0 review 修正 + B-1）：它进了上报去重键，
-      // 含单调计数会让每轮都判为"变化"、设置页反复重渲。但也**不能留空**——空 detail 会让
-      // 侧边栏悬停与设置页顶部回退成裸状态词（出现「NWS：open」这种英文）。"已按 N 个关注点
-      // 查询"里的 N 只在用户改配置时变，正是想推出去的语义变化；计数由设置页的
-      // OVERSEAS_STAT_ORDER 从 stats 直接读。
+      // detail 只放非单调的语义信息（它进去重键），但也不能留空——空 detail 会让侧边栏悬停与
+      // 设置页顶部回退成裸状态词。计数由设置页从 stats 直接读。
       const notes = []
       if (skippedPlaces) notes.push('too many watch points · queried ' + capped.length)
       else if (skippedSamples) notes.push('sample points capped')
@@ -566,8 +439,7 @@ export function createOverseasSource(opts = {}) {
     } else if (failCount > 0) {
       reportStatus({ status: 'unreachable', detail: 'all requests failed: ' + lastError })
     } else if (rejectedNow > 0) {
-      // 不替上游断言原因（0.6.0 review A-2）：400 也可能是"我们的参数被拒"，
-      // 文案只说被拒绝 + 多久后重试，响应体前 160 字在诊断里。
+      // 不替上游断言原因：400 也可能是"我们的参数被拒"，文案只说被拒绝 + 多久后重试。
       reportStatus({
         status: 'open',
         detail: 'rejected x' + rejectedNow + ' (HTTP 400) · retry in ' + Math.round(uncoveredTtlMs / 60000) + 'm',
@@ -584,8 +456,7 @@ export function createOverseasSource(opts = {}) {
     if (inFlight) return inFlight
     inFlight = pollOnce().finally(() => {
       inFlight = null
-      // 给设置页的「源状态」与诊断快照留一份快照（与 12b 对 feedStatsOf 的做法一致：
-      // 不触发 store 重渲，渲染侧每 5 秒自己读一次）。
+      // 给设置页的「源状态」与诊断快照留一份快照（不触发 store 重渲，渲染侧每 5 秒自己读）。
       overseasStatsOf[id] = Object.assign({}, stats, { running, lastError })
     })
     return inFlight
@@ -593,17 +464,14 @@ export function createOverseasSource(opts = {}) {
 
   function schedule(delay) {
     if (!running) return
-    // 排新的之前先清旧的（0.5.4 对 12b 的修正，这里同纪律）
+    // 排新的定时器之前先清旧的
     if (timer) { clearTimeout(timer); timer = null }
     timer = setTimeout(async () => {
       timer = null
       let res = null
       try { res = await pollSerial() } catch (err) { onError(err) }
-      // 失败退避（0.6.0 review B-5；语义在 0.6.2 修正）：整轮全部失败才退避，成功即回正常间隔。
-      // **必须加在正常间隔之上**：退避上限是 60 秒，而两个源的真实间隔是 120 / 300 秒——
-      // 0.6.1 写成 `max(退避, 正常间隔)` 之后，在真实间隔下它恒等于正常间隔，退避阶梯成了
-      // 死代码（0.6.0 承诺的"1s→60s 退避"实际不存在；两条退避用例注入的都是毫秒级间隔，
-      // 永远发现不了）。现在失败时是 `正常间隔 + 退避`，对上游礼貌的方向不变、强度回来了。
+      // 失败后的重试间隔递增：整轮全部失败才递增，成功即回正常间隔。递增必须加在正常间隔之上——上限
+      // 60 秒而真实间隔是 120 / 300 秒，取 max 会让递增恒等于正常间隔（等于死代码）。
       const allFailed = !!(res && res.requests > 0 && res.failed === res.requests)
       if (allFailed) backoffMs = backoffMs ? Math.min(backoffMs * 2, OVERSEAS_MAX_BACKOFF_MS) : OVERSEAS_MIN_BACKOFF_MS
       else backoffMs = 0
@@ -619,9 +487,8 @@ export function createOverseasSource(opts = {}) {
       stopped = false
       running = true
       backoffMs = 0
-      // 闸门标志也要复位（0.6.2 review）：它记的是"上一轮闸门是否激活"。若在闸门激活期间
-      // stop()（或测试里 resetGate()）之后重新开始，闸门重新为真而标志仍是 true →
-      // "进入过几次闸门"少计一次，正是本模块要修的那类"数字不可解释"。
+      // 门槛标志也要复位：它记的是"上一轮门槛是否激活"，在门槛激活期间 stop() 之后重新开始
+      // 会让"进入过几次门槛"少计一次。
       gateActive = false
       schedule(firstDelayMs)
     },
@@ -631,7 +498,7 @@ export function createOverseasSource(opts = {}) {
       if (timer) { clearTimeout(timer); timer = null }
       // 中止在途请求：插件停用后回来的响应不该再进主链（响铃 / 弹窗 / 写历史）
       if (abortCtl) { try { abortCtl.abort() } catch (err) { /* 已结束等忽略 */ } abortCtl = null }
-      // 停用后也刷新一次快照（0.6.0 review B-6）：否则诊断里 `running` 会一直停在 true。
+      // 停用后也刷新一次快照，否则诊断里 `running` 会一直停在 true。
       overseasStatsOf[id] = Object.assign({}, stats, { running: false, lastError })
     },
     pollOnce,
@@ -671,13 +538,13 @@ export function createEcccSource(opts = {}) {
   }, opts))
 }
 
-/** URL 里的值只做最小转义：**保留逗号**。NWS 的 `point=lat,lon` 与 ECCC 的 `bbox=a,b,c,d`
- *  都靠逗号分隔，转成 `%2C` 之后 URL 在排障日志里几乎没法读；两个源都接受裸逗号（实测）。 */
+/** URL 里的值只做最小转义：保留逗号（`point=lat,lon` 与 `bbox=a,b,c,d` 都靠逗号分隔，
+ *  两个源都接受裸逗号，转成 `%2C` 之后 URL 在排障日志里几乎没法读）。 */
 function encodeValue(v) {
   return encodeURIComponent(v).replace(/%2C/g, ',')
 }
 
-/** 模块级 URL 拼装（两个 profile 共用；createOverseasSource 内部不再各写一份）。 */
+/** 模块级 URL 拼装（两个 profile 共用）。 */
 function urlOfLocal(base, params) {
   const qs = Object.keys(params).map((k) => k + '=' + encodeValue(params[k])).join('&')
   return base + '?' + qs

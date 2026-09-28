@@ -1,25 +1,11 @@
 // ============================================================================
 // dsh-quake-alert · client/src/16-diag.js
-//
-// 作用：**只读诊断快照**（DESIGN 11.3 的交付物之一）。
-// 内容：把 Client 侧的实时状态压成一份 JSON——聚合状态、逐源状态与数据健康、增量计数、
-//       大陆源的链路模式、关注点摘要、最近几条历史。
-// 依赖：03-settings-bridge、05d-source-contracts、07-store、12b-feed-poll、12c-cn-stream。
-//
-// 为什么需要它：`TROUBLESHOOTING.zh.md` 的读者是 **AI**，而 AI 只能看到用户粘贴给它的东西。
-// Host 侧的 `/feed?stats=1` 已经能读，但"浏览器这一半到底收到了什么、卡在哪一步"此前
-// 完全在界面里、靠人肉描述——而人肉描述恰恰是最不可靠的一环（"没响"可能是没收到、
-// 可能是解析失败、可能是没命中关注点、可能是被静默时段吞掉，四种原因在用户叙述里长得一样）。
-//
-// 三条纪律：
-//   ① **只读**：不修改任何状态、不发任何请求。诊断本身不能改变被诊断的东西。
-//   ② **永不抛错**：每个片段各自 try/catch。一个会抛错的诊断工具在真出事时最没用。
-//   ③ **只放可 JSON 化的叶子字段**：store / registry / cfg 都是活对象，直接 JSON.stringify
-//      会拖出整个模块图（也能成环）。逐字段取。
-//
-// 关于版本号：快照里**不含插件版本**——本项目的版本号只在 package.json / CHANGELOG /
-// README 三处（见约定），把它复制进 client bundle 会多出一个会漂移的位置。
-// `snapshot` 是这份**快照格式**的版本，用来判断字段含义。
+// 作用：**只读诊断快照**——把 Client 侧的实时状态压成一份 JSON：聚合状态、逐源状态与数据健康、
+//       增量计数、大陆源的链路模式、关注点摘要、最近几条历史、投递面。
+// 依赖：03-settings-bridge、05g-source-health、07-store、08-audio、09-notify、10-dedupe、
+//       12b-feed-poll、12c-cn-stream、12e-overseas-poll。
+// 三条纪律（对外契约）：① **只读**——不改状态、不发请求；② **永不抛错**——每个片段各自 try/catch，
+//       异常进 `warnings` 一并返回；③ **只放可 JSON 化的叶子字段**——活对象必须逐字段取，不能直接 stringify。
 // ============================================================================
 
 import { currentCfg, settingsSync } from './03-settings-bridge.js'
@@ -32,22 +18,14 @@ import { audioState } from './08-audio.js'
 import { notificationPermission } from './09-notify.js'
 import { cnStreamRegistry } from './12c-cn-stream.js'
 
-/** 快照格式版本（与插件版本无关，见文件头）。逐版对应：
- *  · 1 = 0.5.0 起的初始形状
- *  · 2 = 0.8.0（新增 `authority` 段 + `config.watch.places[].origin`）；0.8.1 把 `config.language`
- *    加在了 2 里没提号（review 时发现两种形状都自称 2，所以下面这条规则要真的执行）
- *  · 3 = 0.8.2（`config.watch.places[]` 再增 `province` / `city`）
- *  · 4 = 0.9.2 新增 `delivery` 段（段是 0.9.2 加的，但号当时忘了提——0.9.4 补上，
- *    并把"加段也要提号"写进规则：读快照的一方据此知道"这份快照有哪些键"，
- *    缺键 = 来自更早的版本，而不是"这一项没配"）
- *
- *  **加字段就提号**（0.8.0 的先例）。 */
+/** 快照格式版本（与插件版本无关）。**加字段就提号**：读快照的一方据此知道"这份快照有哪些键"，
+ *  缺键 = 来自更早的版本，而不是"这一项没配"。 */
 export const DIAG_SNAPSHOT_VERSION = 4
 
 const str = (v) => String(v === undefined || v === null ? '' : v)
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
 
-/** 每个片段都各自兜错：诊断工具在任何状态下都必须能产出东西。 */
+/** 每个片段各自捕获异常，异常写进 warnings：一个会抛错的诊断工具在真出事时最没用。 */
 function safe(fn, fallback, warnings, label) {
   try {
     return fn()
@@ -57,7 +35,7 @@ function safe(fn, fallback, warnings, label) {
   }
 }
 
-/** 来源标注：让 AI 知道这条状态是哪条链路报的，不用去猜字段顺序。 */
+/** 来源标注：让读快照的一方知道这条状态是哪条链路报的，不用去猜字段顺序。 */
 function sourceRows() {
   const out = {}
   const srcs = (store && store.sources) || {}
@@ -85,19 +63,9 @@ function feedRows() {
   return out
 }
 
-/**
- * 海外源（12e，0.6.0）：Client 直连的 REST 轮询。
- *
- * 三个字段是这个形态**独有**的，也是排障时最先要看的：
- *   · `rejected` —— 被上游用 HTTP 400 拒绝的请求数（实测多伦多 / 温哥华 / 伦敦的坐标都被
- *     NWS 这样答过）。**它不代表"这个点不在覆盖范围"**（也可能是我们的参数被拒），
- *     文案与代码都不替上游断言原因。（0.6.1 review：此处此前写作 `uncovered` ——
- *     那是 12e 内部 Map 的名字，快照里从来没有这个字段。）
- *   · `ageSkipped` —— 被年龄闸门拦下的、**本来会播报**的条数（打开页面时已发布超过 6 小时
- *     的那些，只进历史不响铃）。它解释"为什么我看到预警但没响"。
- *   · `gated` —— 这个源**进入**过几次"首轮 / 休眠恢复"状态（每次进入都会重新按 6 小时判）。
- *   · `truncated` —— 上游返回的条目数超过每次请求上限、被我们截断的轮数（ECCC 的 limit=200）。
- */
+/** 海外源（12e）：Client 直连的 REST 轮询，字段语义与 feed / streams 两张表不同。`rejected` 是被上游
+ *  HTTP 400 拒绝的请求数，**不代表"这个点不在覆盖范围"**（也可能是参数被拒）；`ageSkipped` 是被年龄门槛
+ *  拦下、本来会播报的条数（只进历史不响铃）；`gated` 是进入首轮 / 休眠恢复状态的次数。 */
 function overseasRows() {
   const out = {}
   for (const id of Object.keys(overseasStatsOf)) {
@@ -105,13 +73,12 @@ function overseasRows() {
     out[id] = {
       polls: num(o.polls), requests: num(o.requests), received: num(o.received), applied: num(o.applied),
       errors: num(o.errors),
-      // `rejected` = 被上游用 HTTP 400 拒绝的请求数（**不代表"这个点不在覆盖范围"**，
-      // 也可能是我们的参数被拒；响应体前 160 字在 lastError 里）。
+      // 被上游用 HTTP 400 拒绝的请求数（**不代表"这个点不在覆盖范围"**，响应体前 160 字在 lastError 里）
       rejected: num(o.rejected),
       ageSkipped: num(o.ageSkipped),
       // 上游条目数超过每次请求上限、被我们截断的轮数（ECCC 的 limit=200）
       truncated: num(o.truncated),
-      // 两个 throttle 计数分开：Last 是本轮、Total 是累计（0.6.0 review B-6）
+      // 两个 throttle 计数分开：Last 是本轮、Total 是累计
       throttledLast: num(o.throttledLast), throttledTotal: num(o.throttledTotal), gated: num(o.gated),
       lastAt: o.lastAt ? new Date(o.lastAt).toISOString() : null,
       lastDataAt: o.lastDataAt ? new Date(o.lastDataAt).toISOString() : null,
@@ -125,9 +92,6 @@ function overseasRows() {
 /** 大陆源（12c）：**链路模式是这里最要紧的一列**——降级意味着延迟从秒级变成最长 15 秒。 */
 function streamRows(warnings) {
   const out = {}
-  // 0.9.4（P2-26）：这里（以及 mode / stringify 两处）此前把 `[]` 当 warnings 传进去 —— 而 safe()
-  // 是往里 push 的，于是"诊断片段自己抛错"这条信息被丢进一个没人看的空数组，与文件头
-  // "诊断工具在任何状态下都必须能产出东西、失败也要可见"直接冲突。改成把调用方的 warnings 传下去。
   const warn = Array.isArray(warnings) ? warnings : []
   for (const id of Object.keys(cnStreamRegistry)) {
     const reg = cnStreamRegistry[id]
@@ -151,8 +115,7 @@ function streamRows(warnings) {
   return out
 }
 
-/** 关注点摘要。**坐标是有意保留的**：匹配失败通常就要靠"震中距最近关注点多少公里"来判，
- *  去掉坐标等于把最有用的那一列删了。用户是主动粘贴这份快照的，界面上也写明了含坐标。 */
+/** 关注点摘要。**坐标是有意保留的**：匹配失败通常就要靠"震中距最近关注点多少公里"来判。 */
 function watchSummary(cfg) {
   const w = (cfg && cfg.watch) || {}
   const places = Array.isArray(w.places) ? w.places : []
@@ -162,25 +125,17 @@ function watchSummary(cfg) {
     cities: Array.isArray(w.cities) ? w.cities.slice(0, 30) : [],
     places: places.slice(0, 20).map((p) => ({
       name: str(p && p.name), lat: num(p && p.lat), lon: num(p && p.lon), radiusKm: num(p && p.radiusKm),
-      // 0.8.0：来源分支（jp / cn / global）。它决定"这个关注点归哪个源"（DESIGN 9.3 → 3.4），
-      // 诊断里必须能看到——权威源判错时，第一个要核的就是"这个点被算作了谁的分支"。
+      // 来源分支（jp / cn / global）：决定"这个关注点归哪个源"；优先源判错时第一个要核的就是它。
       origin: str(p && p.origin) || 'global',
-      // 0.8.2：大陆关注点的省 / 市（DESIGN 11.9 B）。行政区层级匹配现在读它，不再从名字反推，
-      // 所以诊断里也要看得到——"为什么这条大陆预警没命中"的第一个要核的就是这两个值。
-      // 非大陆点不写这两个键，免得快照里多出一堆空字段。
+      // 大陆关注点的省 / 市：行政区层级匹配读它而不从名字反推。非大陆点不写这两个键，免得快照里多出空字段。
       ...(str(p && p.origin) === 'cn' ? { province: str(p && p.province), city: str(p && p.city) } : {}),
     })),
     placesCount: places.length,
   }
 }
 
-/**
- * 跨源权威源（0.8.0 / DESIGN 3.4）：被权威源压掉的条数。
- *
- * 这一段的**唯一**存在理由：被抑制的条目连历史都不进，用户没有任何别的途径看到它们。
- * 权威源一旦判错（把两场不同地震并成一个 = 真漏报），这个数字与 `lastDetail` 是唯一的痕迹。
- * `bySource` 按**已播报的那个源**分组——它能回答"是不是 USGS 总在抢在日本源前面"。
- */
+/** 跨源优先源：被优先源压掉的条数。被抑制的条目连历史都不进，这一段是它们的**唯一**痕迹；
+ *  `bySource` 按**已播报的那个源**分组，能回答"是不是 USGS 总在抢在日本源前面"。 */
 function authorityRow() {
   const a = authorityStatsOf()
   const bySource = {}
@@ -226,11 +181,8 @@ function pageEnv() {
   return out
 }
 
-/**
- * 生成诊断快照。
- * @param {number} [now] 注入点（测试用）
- * @returns {object} 可直接 JSON.stringify 的纯数据对象
- */
+/** 生成诊断快照。@param {number} [now] 注入点（测试用）
+ *  @returns {object} 可直接 JSON.stringify 的纯数据对象；被捕获的异常在 `warnings` 里 */
 export function buildDiagSnapshot(now) {
   const warnings = []
   const cfg = safe(() => currentCfg() || {}, {}, warnings, 'cfg') || {}
@@ -267,12 +219,8 @@ export function buildDiagSnapshot(now) {
         breakForSevere: cfgQuiet.breakForSevere !== false,
       },
       cnTransport: str(cfg.cnTransport) || 'auto', // 'auto'（默认，SSE 可自动降级）| 'poll'（用户强制轮询）
-      // 界面语言（0.8.1 先立字段，0.9.0 落地本地化，0.9.3 加上繁体）。"界面没跟着切"
-      // 这类问题第一个要核的就是这一项。
-      // **它是归一后的生效值，不是持久层原值**（0.8.2 review 订正）：`cfg` 来自 `currentCfg()`，
-      // 而那条路一定过 `normalizeCfg`，所以手改配置写进去的、或将来降级留下的非法值在这里
-      // 已经被换成默认值——这一项能回答"界面现在按哪个语言渲染"，回答不了"配置里原本写了什么"。
-      // 要区分后者得带 Host user 层的原值，那是 0.9.0 本地化落地时一并决定的事。
+      // 界面语言：**规整后的生效值，不是持久层原值**（cfg 来自 currentCfg()，一定过 normalizeCfg），
+      // 所以它只能回答"界面现在按哪个语言渲染"。
       language: str(cfg.language),
       watch: safe(() => watchSummary(cfg), {}, warnings, 'watch'),
     }), {}, warnings, 'config'),
@@ -281,42 +229,33 @@ export function buildDiagSnapshot(now) {
     dataHealth: safe(() => sourceHealthOf() || {}, {}, warnings, 'health'),
     feed: safe(feedRows, {}, warnings, 'feed'),
     streams: safe(() => streamRows(warnings), {}, warnings, 'streams'),
-    // 海外源（0.6.0）：Client 直连的 REST 轮询。与 feed / streams 并列而不是塞进任一张表
-    // ——它们的字段语义不同（见 overseasRows 的注释）。
+    // 海外源：Client 直连的 REST 轮询，与 feed / streams 并列（字段语义不同，见 overseasRows）。
     overseas: safe(overseasRows, {}, warnings, 'overseas'),
-    // 跨源权威源（0.8.0）：被压掉的跨源副本条数。**这一段是那些条目的唯一痕迹**——
-    // 它们不进历史（DESIGN 3.4），所以诊断里没有的话就彻底不可见。
+    // 跨源优先源：被压掉的跨源副本条数——那些条目不进历史，这里是它们唯一的痕迹。
     authority: safe(authorityRow, {}, warnings, 'authority'),
     history: safe(historySummary, {}, warnings, 'history'),
-    // 投递面（0.9.2）：**"收到并命中但没响"与"根本没收到"在用户叙述里长得一样**。音频未解锁
-    // （用户从未点过页面）与系统通知权限被拒都**无法从 config 推导**——config.notify.system 是
-    // "用户想不想要"，这里是"浏览器允不允许 / 解锁没解锁"。两者都是只读探测，符合快照的只读纪律。
+    // 投递面：音频未解锁（用户从未点过页面）与系统通知权限被拒都**无法从 config 推导**——
+    // config.notify.system 是"用户想不想要"，这里是"浏览器允不允许 / 解锁没解锁"。
     delivery: safe(() => ({
       audio: str(audioState()),
       notificationPermission: str(notificationPermission()),
     }), {}, warnings, 'delivery'),
-    // 生成过程中被兜住的异常：诊断工具自身的失败也要可见，不能假装一切正常
+    // 生成过程中被捕获的异常：诊断工具自身的失败也要可见，不能假装一切正常
     warnings,
   }
 }
 
-/**
- * 复制诊断快照到剪贴板。剪贴板不可用（沙箱 iframe / 权限被拒）时**不抛错**，
- * 而是把文本交回调用方去显示成可手动复制的文本框——诊断的第一步不该卡在复制上。
- * @returns {Promise<{ ok: boolean, text: string, error?: string }>}
- */
+/** 复制诊断快照到剪贴板。剪贴板不可用（沙箱 iframe / 权限被拒）时**不抛错**，而是把文本交回调用方去显示成可手动复制的文本框。
+ *  @returns {Promise<{ ok: boolean, text: string, warning?: string, error?: string }>} */
 export async function copyDiagSnapshot(now) {
-  // 0.9.4（P2-26）：stringify 失败时把原因**带回去**，而不是 `[]` 丢掉 + 返回 ok:true。
-  // 诊断工具自己失败却报"复制成功、内容是 {}"，是最难归因的一种形态。
   const warnings = []
   const text = safe(() => JSON.stringify(buildDiagSnapshot(now), null, 2), '{}', warnings, 'stringify')
   try {
     if (typeof navigator !== 'undefined' && navigator && navigator.clipboard &&
         typeof navigator.clipboard.writeText === 'function') {
       await navigator.clipboard.writeText(text)
-      // 快照生成时被兜住的异常要**跟着结果回给界面**（0.9.4 / P2-26）：复制确实成功了，
-      // 所以不能报 ok:false（那会被界面读成"剪贴板不可用"），但也绝不能只说"已复制"——
-      // 用户以为手里是一份完整诊断，而里面其实少了几个片段。
+      // 快照生成时被捕获的异常要**跟着结果回给界面**：复制确实成功了，所以不能报 ok:false；
+      // 但也绝不能只说"已复制"——用户以为手里是一份完整诊断，而里面其实少了几个片段。
       return warnings.length
         ? { ok: true, text, warning: warnings.join('；') }
         : { ok: true, text }

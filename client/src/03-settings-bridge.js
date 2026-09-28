@@ -1,13 +1,8 @@
 // ============================================================================
 // dsh-quake-alert · client/src/03-settings-bridge.js
-//
-// 作用：机器级持久化桥——把配置交给 DSH 的 Host settings（settings.yaml）。
-// 内容：内存镜像 currentCfg、写入入口 applyCfg、差异计算 settingsOpsFor、
-//       异步推送 pushCfgToHost、首次迁移与降级 bindSettingsScope、
-//       本地镜像回读 reloadFromLocal（其它标签页改配置后），
-//       以及 Host section ⇄ 本地配置的转换（cfgToSection / sectionToCfg）。
-// 依赖：01-constants、02-storage、00-i18n（07-store 的 store.push 在运行时才用到）。
-// 降级：没有 settings 服务 / 页面非 loopback / Host 不持久化时自动退回 localStorage。
+// 机器级持久化桥：把配置交给 DSH Host settings（settings.yaml），localStorage 作回退与镜像。
+// 含 currentCfg / applyCfg / settingsOpsFor / pushCfgToHost / bindSettingsScope / reloadFromLocal。
+// 没有 settings 服务 / 页面非 loopback / Host 不持久化时，整条链路退化为纯 localStorage。
 // ============================================================================
 
 import { DEFAULT_CFG } from './01-constants.js'
@@ -15,20 +10,14 @@ import { isPlainObject, normalizeCfg, loadCfg, saveCfg, freshCfg, loadJSON, save
 import { setLanguage, getLanguage } from './00-i18n.js'
 import { store } from './07-store.js'
 
-// ---------- 机器级持久化（0.2.0）：Host 存储为主，localStorage 为回退与镜像 ----------
-// 本模块只认一个**形状**（两代宿主都提供它），不关心它来自哪个服务：
-//   · DSH 0.1.6 及以前：`ctx.settingsScope.bind({ namespace })` 返回的 scope
-//   · DSH 0.1.7 起：`ctx.configForms.get('quake-alert')` 返回的 ConfigForm
-//     （`settingsScope` 已被移除；表单由 Host 侧导出的 Config schema 派生）
-// 用到的成员两边同名同义：`getSnapshot()` / `subscribe(fn)` / `mutate(ops)`，快照字段
-// `status / value / user / writable / mode` 也一一对应；`mutate` 接收的
-// `{op:'set'|'unset', path, value}` 就是 settings 服务自己的 SettingsPathOp。
-// 分派在 client/src/15-entry.js（哪个服务出现就用哪个）。
-// scope 快照是**同步**可读的，所以内部读取（WebSocket 重连、handleRaw）仍然同步；写入先更新
-// 内存与 localStorage 镜像，再异步推给 Host。没有对应服务、页面非 loopback、或 Host 只做进程内
-// 存储时，整条链路自动退化为 M1 的 localStorage 行为。
+// ---------- 机器级持久化：Host 存储为主，localStorage 为回退与镜像 ----------
+// 本模块只认一个**形状**（两代宿主都提供它），不关心它来自哪个服务：DSH 0.1.6 及以前是
+// `ctx.settingsScope.bind({ namespace })` 返回的 scope，0.1.7 起是 `ctx.configForms.get('quake-alert')`
+// 返回的 ConfigForm。两边同名同义：`getSnapshot()` / `subscribe(fn)` / `mutate(ops)`，快照字段
+// `status / value / user / writable / mode` 一一对应。分派在 15-entry.js。scope 快照是**同步**可读的，
+// 所以内部读取（重连、handleRaw）仍然同步；写入先更新内存与 localStorage 镜像，再异步推给 Host。
 const SETTINGS_NS = 'quake-alert'
-/** 「本地配置已迁移到 Host」的落盘标记：迁移只能发生一次，见 bindSettingsScope。 */
+/** 「本地配置已迁移到 Host」写在本地的标记：迁移只能发生一次，见 bindSettingsScope。 */
 const MIGRATED_KEY = 'dsh.quakeAlert.hostMigrated'
 let runtimeCfg = null // 内存中的当前配置
 let settingsScope = null // bind 成功后的 scope handle
@@ -44,29 +33,20 @@ function sectionToCfg(section) {
   try {
     return normalizeCfg(Object.assign({ version: DEFAULT_CFG.version }, isPlainObject(section) ? section : {}))
   } catch (err) {
-    // 同 loadCfg 的理由（0.9.5 / fresh review）：Host 下发的 section 也是外部输入
-    // （settings.yaml / profile 都能手写），归一化抛错不该让调用方的渲染期炸掉。
+    // 与 loadCfg 同理：Host 下发的 section 也是外部输入（settings.yaml / profile 都能手写），
+    // 规整的过程抛错不该让调用方的渲染期炸掉。
     try { console.warn('[dsh-quake-alert] Host section 归一化失败，本次改用默认配置：' + String((err && err.message) || err)) } catch (e) { /* 忽略 */ }
     return freshCfg()
   }
 }
-// 同步读取入口：保持 M1 的同步语义，调用方无需感知 Host 的存在
+// 同步读取入口：调用方无需感知 Host 的存在
 function currentCfg() {
   if (runtimeCfg === null) runtimeCfg = loadCfg()
   return runtimeCfg
 }
 // 本地镜像被**其它 DSH 标签页**改写后（storage 事件），把 localStorage 重新读回内存副本。
-// 跨模块不能直接给本模块私有的 runtimeCfg 赋值：拆分前它同处一个作用域，拆分后就成了
-// 自由变量，打包进 'use strict' 的 bundle 会抛 ReferenceError（0.2.1 拆分时漏改过一处），
-// 所以这里给出显式入口。
-/**
- * 语言变化后，**由语言派生出来的文本**要重算，并让订阅者重渲染。
- *
- * `store.detail` 是 `recomputeStatus` 拼好的一个字符串（源名 + 状态文字），而切语言只改 i18n 的
- * 当前值——不重算的话，侧边栏悬停提示、状态点的读屏标签、诊断快照里的状态摘要会一直停在旧语言，
- * 直到下一次源状态汇报（ws 事件 / 15 秒的 feed / 30 秒的探针）；而状态点本身只订阅 store，
- * 收不到通知就不会重渲染。两件事一起做才完整（0.9.0 review 的 A-1 / A-2）。
- */
+// 跨模块不能直接给本模块私有的 runtimeCfg 赋值（打包进 'use strict' 的 bundle 会抛 ReferenceError）。
+/** 语言变化后，**由语言派生出来的文本**要重算，并让订阅者重渲染：`store.detail` 是 `recomputeStatus` 拼好的字符串（源名 + 状态文字），而状态点只订阅 store，不通知就不会重渲染。 */
 function syncDerivedTextAfterLanguageChange() {
   try {
     store.recomputeStatus()
@@ -78,27 +58,21 @@ function syncDerivedTextAfterLanguageChange() {
 function reloadFromLocal() {
   const prevLang = getLanguage()
   runtimeCfg = loadCfg()
-  // 别的标签页可能只改了关注点、也可能改了语言——只在语言真的变了时才做重算与通知。
   if (getLanguage() !== prevLang) syncDerivedTextAfterLanguageChange()
   return runtimeCfg
 }
 // 写入入口：内存立即生效 → localStorage 镜像 → Host（可用时异步持久化）
 function applyCfg(cfg) {
   const prevLang = getLanguage()
-  // 写入路径也归一（0.4.1）：此前只有读取路径（loadCfg / sectionToCfg）归一，于是
-  // 「坐标相同的关注点自动合并」「name 截断到 30 字」这类不变量在内存与 localStorage 里
-  // 都不成立——同一次会话里重复添加同一个点会真的存两份，直到下次加载才被悄悄合并。
+  // 写入路径也要规整，否则「坐标相同的关注点自动合并」「name 截断到 30 字」这类不变量在内存与 localStorage 里都不成立——同一次会话里重复添加同一个点会真的存两份。
   runtimeCfg = saveCfg(normalizeCfg(cfg))
-  // 语言在**写入路径**也要生效：用户在设置页切换语言时走的就是这里，而设置页是用
-  // setCfgState(next) 触发重渲染的——语言若不在此刻落到 i18n 的当前值，界面会等到
-  // 下一次配置加载才切换（表现为"改了语言当场没反应"）。
+  // 语言在**写入路径**也要生效：设置页切换语言走的就是这里，语言不在此刻落到 i18n 的当前值， 界面会等下一次配置加载才切换。
   setLanguage(runtimeCfg.language)
   if (getLanguage() !== prevLang) syncDerivedTextAfterLanguageChange()
   pushCfgToHost(runtimeCfg)
   return runtimeCfg
 }
-// 只提交与默认值不同的字段；等于默认值的字段用 unset 交还 schema 默认层，
-// 这样 settings.yaml 里只留下用户真正改过的东西。
+// 只提交与默认值不同的字段；等于默认值的字段用 unset 交还 schema 默认层， 这样 settings.yaml 里只留下用户真正改过的东西。
 function settingsOpsFor(cfg) {
   const cur = cfgToSection(cfg)
   const def = cfgToSection(freshCfg())
@@ -116,10 +90,7 @@ function settingsOpsFor(cfg) {
   walk(cur, def, [])
   return ops
 }
-/**
- * 把配置推给 Host。返回 `scope.mutate()` 的 pending（没有真正发出写请求时返回 null），
- * 调用方据此判断"Host 是否确认接收"——迁移标记要靠它，见 bindSettingsScope。
- */
+/** 把配置推给 Host。返回 `scope.mutate()` 的 pending（没有真正发出写请求时返回 null）， 调用方据此判断"Host 是否确认接收"——迁移标记要靠它，见 bindSettingsScope。 */
 function pushCfgToHost(cfg) {
   const scope = settingsScope
   if (!scope || settingsSync !== 'host') return null
@@ -133,15 +104,9 @@ function pushCfgToHost(cfg) {
     return (pending && typeof pending.then === 'function') ? pending : null
   } catch (err) { return null }
 }
-// 绑定 Host settings。三种来源的优先关系：
-//   ① Host 用户层已有内容 → 以 Host 为准（机器级配置是 source of truth）
-//   ② Host 为空、本地已有非默认配置 → 一次性把本地配置迁移到 Host
-//   ③ Host 不可用 → 保持 localStorage（settingsSync 停留在 local / memory）
-/**
- * 迁移的尝试上限（0.5.4）。Host 持续拒绝写入时（revision 冲突等），不设上限会变成
- * "每来一次 sync 就写一次"的循环；用尽之后保留本地镜像、交由用户下一次改配置时经
- * `applyCfg` 直接写入 Host。
- */
+// 绑定 Host settings。三种来源的优先关系：① Host 用户层已有内容 → 以 Host 为准（机器级配置是 source of truth）；② Host 为空、本地已有非默认配置 → 一次性迁移到 Host；
+// ③ Host 不可用 → 保持 localStorage。
+/** 迁移的尝试上限。Host 持续拒绝写入时（revision 冲突等）不设上限会变成"每来一次 sync 就写一次" 的循环；用尽之后保留本地镜像，用户下一次改配置时经 applyCfg 直接写进 Host。 */
 const MIGRATE_MAX_ATTEMPTS = 3
 
 function bindSettingsScope(scope) {
@@ -156,27 +121,20 @@ function bindSettingsScope(scope) {
     const user = isPlainObject(snap.user) ? snap.user : {}
     const claimed = loadJSON(MIGRATED_KEY, null) === 1
     if (Object.keys(user).length === 0 && !claimed) {
-      // 迁移**只能发生一次**，而且这个"一次"必须落盘（0.4.1 修正）。原来只在本次 bind 里记
-      // 一个局部标志，于是每次重载页面 / Host settings 重建都会重新判断，结果是"用户显式清空
-      // Host"会被本地镜像静默恢复——Host 作为 source of truth 的优先级被本地反超
-      // （实测可复现：清空 Host 后重新 bind，Host 又变回 {quakeScale:55}）。
+      // 迁移**只能发生一次**，而且这个"一次"必须写入本地存储：只在本次 bind 里记局部标志的话，每次重载 页面都会重新判断，"用户显式清空 Host"会被本地镜像静默恢复。
       const local = loadCfg()
       if (JSON.stringify(cfgToSection(local)) !== JSON.stringify(cfgToSection(freshCfg()))) {
         if (migrateAttempts >= MIGRATE_MAX_ATTEMPTS) {
-          // 重试用尽：**不落标记、也不用 Host 的空值覆盖本地镜像**——那等于把用户配置丢掉。
-          // 本地镜像保持原样，用户下一次改配置会经 applyCfg 直接写进 Host。
+          // 重试用尽：**不落标记、也不用 Host 的空值覆盖本地镜像**（那等于丢掉用户配置）， 用户下一次改配置会经 applyCfg 直接写进 Host。
           store.push({})
           return
         }
         migrateAttempts += 1
         runtimeCfg = saveCfg(local)
         const pending = pushCfgToHost(runtimeCfg)
-        // **等 Host 真的接收之后再落"已认领"标记**。两点都不能省（0.5.4）：
-        //  ① 先落标记再写的话，写入失败（磁盘 / 权限 / 瞬时冲突）会让本地配置既没进 Host、
-        //     又因为标记而不再重试，随后被 Host 的空值覆盖——永久且静默地丢配置；
-        //  ② **不能把 `pending` 的 resolve 当成功**：平台的 mutate 在 Host 拒绝时（`!response.ok`）
-        //     也是 resolve（它内部 recover 并重新推送）。所以 settle 之后回读一次：迁移的字段
-        //     确实出现在 Host 用户层里，才算迁移完成；否则不落标记，下一次 sync 重试。
+        // **等 Host 真的接收之后再落"已完成迁移"标记**：先落标记再写的话，写入失败会让本地配置既没进
+        // Host、又因为标记而不再重试，随后被 Host 的空值覆盖；也不能把 `pending` 的 resolve 当成功
+        //（平台的 mutate 在 Host 拒绝时也是 resolve），所以 settle 之后回读一次才算完成。
         if (pending) {
           pending.then(() => {
             let landed = false
@@ -191,25 +149,16 @@ function bindSettingsScope(scope) {
         store.push({})
         return
       }
-      // 本地就是默认值：Host 为空与本地等价，直接认领
+      // 本地就是默认值：Host 为空与本地等价，直接标记为已处理
       saveJSON(MIGRATED_KEY, 1)
     } else if (!claimed) {
-      // 走到这里说明"以 Host 为准"（Host 用户层已有内容）。**认领标记也必须在这一条路径上落**
-      // （0.5.4）：此前它只在"Host 为空 + 本地非默认"那条分支里写，于是"首次 bind 时 Host 已非空"
-      //（第二个浏览器 / 另一台配置 / 手写过 settings.yaml——settings.yaml 是机器级共享的）
-      // 永远不落标记。此后 Host 一旦变空（用户在别处恢复默认），本浏览器会把**过期**的本地镜像
-      // 重新迁回 Host，静默复活旧配置。实测：fresh localStorage + Host 非空 → 标记未落；
-      // 再把 Host 置空 → 本地旧值被写回 Host。
+      // **这个标记也要在这一条路径上写**：只在上一条分支里写的话，"首次 bind 时 Host 已非空" （第二个浏览器 / 手写过 settings.yaml）就永远不落标记，此后 Host 一旦变空，
+      // 本浏览器会把 **过期**的本地镜像重新迁回 Host，静默复活旧配置。
       saveJSON(MIGRATED_KEY, 1)
     }
     const next = sectionToCfg(snap.value)
     runtimeCfg = saveCfg(next) // localStorage 保持为镜像：Host 掉线时仍能工作
-    // **语言也必须在这条路径上落地**（0.9.3 修）。Host 是配置的权威源，而 `loadCfg` 读的是
-    // localStorage 镜像：在"另一个浏览器 / 清过 localStorage / 手改过 settings.yaml"这条路径上，
-    // runtimeCfg（语言下拉显示的值）与诊断快照都已经是 Host 的值，界面却仍停在启动时镜像解析出的
-    // 语言——而且**不会自愈**，因为 sync 是"值没变就不重算"的幂等路径。表现是下拉写着「繁體中文」、
-    // 整页还是简体中文，排查时 `config.language` 恰好给出与界面相反的答案。
-    // 与 applyCfg 同一形态（同值不动，所以两条路径不会互相打架）。
+    // **语言也必须在这条路径上落地**：Host 是优先源而 `loadCfg` 读的是 localStorage 镜像，这条路径上 runtimeCfg 已是 Host 的值，界面却仍停在启动时的语言，且不会自愈（sync 是"值没变就不重算"的幂等路径）。
     if (getLanguage() !== runtimeCfg.language) {
       setLanguage(runtimeCfg.language)
       syncDerivedTextAfterLanguageChange()
@@ -219,8 +168,7 @@ function bindSettingsScope(scope) {
   let disposer = null
   try { disposer = scope.subscribe(sync) } catch (err) { /* 订阅失败只是失去实时同步 */ }
   sync()
-  // 返回解除函数（0.4.1）：调用方要把它注册进 ctx.effect，否则同一页面内停用 → 启用 N 次
-  // 会累积 N 个订阅，此后 Host 每一次配置变更都会触发 N 次写盘与 N 次重渲。
+  // 返回解除函数：调用方要把它注册进 ctx.effect，否则同一页面内停用 → 启用 N 次会累积 N 个订阅。
   return () => {
     try { if (typeof disposer === 'function') disposer() } catch (err) { /* 忽略 */ }
     if (settingsScope === scope) settingsScope = null
@@ -228,7 +176,6 @@ function bindSettingsScope(scope) {
 }
 
 
-// 供单测钩子与 UI 读取：模块作用域的私有状态不直接对外暴露写入口
 const settingsState = () => ({ sync: settingsSync, bound: settingsScope !== null, runtime: runtimeCfg })
 const resetSettings = () => { runtimeCfg = null; settingsScope = null; settingsSync = 'local' }
 

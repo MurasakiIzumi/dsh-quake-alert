@@ -1,23 +1,13 @@
 // ============================================================================
 // dsh-quake-alert · client/src/00h-texts-reasons.js
 //
-// 作用：**匹配层与流水线自己写下的原因文案**的四语表——「未命中：…」那一串、
-//       「本条为震源情报，无震度数据…」这类判不了时的说明、静默时段抑制说明等。
-// 内容：REASONS（四种语言各一份，键集必须完全一致）。
-// 依赖：无（纯数据）。
+// 作用：匹配层与流水线自己写下的原因文案的四语表——「未命中：…」那一串、判不了时的说明、
+//       静默时段抑制说明等，进履历条目的「说明」字段。
+// 内容：REASONS（四种语言各一份，键集必须完全一致，见 00-i18n 的校验）。纯数据，无依赖。
 //
-// 为什么要有这个文件（0.9.4）：
-//   用户实测的原话最能说明问题——"特别是（未命中：取消 / 解除消息，且此前未提醒过该事件）
-//   这句，或者说最主要的就是这句，这很明显不是电文内容吧"。
-//   这些字**全部是我们自己写的**（不是任何电文里的字），却写死在 06-matcher / 11-pipeline 里，
-//   0.9.0〜0.9.3 一直登记为"解析层不翻"。现在撤销那条决定：我们写的字跟界面语言走。
-//
-// 与本文件相邻的边界（别混进来）：
-//   · 上游电文原文（JMA 的 `注意報を解除します`、USGS 的地名、NWS 的官方事件名）**不翻**，
-//     它们由各自的解析器原样透传——用户明确要求"电文原文是什么语言就用什么语言"。
-//   · 取数层（12b〜12e / 05g）的连接与降级说明（「久无连接，正在重连」这类）是**另一批**，
-//     它们进的是侧边栏状态与诊断快照，本次未动（见 CHANGELOG 的同条说明）。
-//   · 正则匹配用的字不许动（`/注意報に切り替え/` 之类）；本文件只放**取词**。
+// 这些字全部是我们自己写的，跟界面语言走；上游电文原文（JMA 的 `注意報を解除します`、
+// USGS 的地名、NWS 的官方事件名）不翻，由各自的解析器原样透传。
+// 正则匹配用的字不许动（`/注意報に切り替え/` 之类），本文件只放取词。
 // ============================================================================
 
 const REASONS = {
@@ -93,7 +83,7 @@ const REASONS = {
     'reason.quietNoRedPierce': '（未开启红色等级穿透）',    'reason.quietHoursDetail': '当前处于静默时段',
     'reason.otherTab': '其它 DSH 标签页已提醒',
     'reason.otherTabDetail': '其它 DSH 标签页已提醒同一条',
-    'reason.authoritySuppressed': '{source} 已播报同一事件，本条（{mine}）按权威源规则只计数、不进历史',
+    'reason.authoritySuppressed': '{source} 已播报同一事件，本条（{mine}）按优先源规则只计数、不进历史',
     'reason.placeUnnamed': '未命名',
     // —— 历史条目上的后缀（用户点名的那一句就在这儿）——
     'hist.missSuffix': '（未命中：{reason}）',
@@ -165,7 +155,7 @@ const REASONS = {
     'reason.quietHoursDetail': '目前處於靜默時段',
     'reason.otherTab': '其它 DSH 分頁已提醒',
     'reason.otherTabDetail': '其它 DSH 分頁已提醒同一則',
-    'reason.authoritySuppressed': '{source} 已播報同一事件，本則（{mine}）依權威源規則只計數、不進歷史',
+    'reason.authoritySuppressed': '{source} 已播報同一事件，本則（{mine}）依優先源規則只計數、不進歷史',
     'reason.placeUnnamed': '未命名',
     'hist.missSuffix': '（未命中：{reason}）',
     'hist.hit': '已提醒',
@@ -236,7 +226,7 @@ const REASONS = {
     'reason.quietHoursDetail': '現在はサイレント時間帯です',
     'reason.otherTab': '他の DSH タブが通知済み',
     'reason.otherTabDetail': '他の DSH タブが同じ電文を通知済み',
-    'reason.authoritySuppressed': '{source} が同じ事象を通知済みのため、本件（{mine}）は権威源ルールにより計数のみで履歴に入れません',
+    'reason.authoritySuppressed': '{source} が同じ事象を通知済みのため、本件（{mine}）は優先ソースのルールにより計数のみで履歴に入れません',
     'reason.placeUnnamed': '名称未設定',
     'hist.missSuffix': '（未命中：{reason}）',
     'hist.hit': '通知済み',

@@ -35,28 +35,20 @@ function loadClientEx(seedStorage, opts) {
     console,
     setTimeout: o.setTimeout || setTimeout,
     clearTimeout: o.clearTimeout || clearTimeout,
-    // 0.5.3：健康探针（12d）在 apply 里排一个 30 秒的 setInterval。沙箱此前没有这两个全局，
-    // 于是"插件能不能装载"这件事本身就会失败。默认给真实实现即可——探针的 timer 带 unref，
-    // 不会把测试进程钉住；要推进判定就用 createHealthProbe 注入假时钟直接调 tick()。
+    // 12d 健康自检在 apply 里排一个 30 秒周期的 setInterval，沙箱必须提供；它的 timer 带 unref，
+    // 不会钉住测试进程。要推进判定就用 createHealthProbe 注入假时钟直接调 tick()。
     setInterval: o.setInterval || setInterval,
     clearInterval: o.clearInterval || clearInterval,
-    // 0.6.1：AbortController 是浏览器标准全局，而 12e 的请求超时正是靠它实现的
-    // （abort 之后 fetch 抛 AbortError）。沙箱此前没有它 → `abortCtl` 恒为 null →
-    // "10 秒超时"那条路径在 1242 条用例里从未被跑过，连它的错误文案都没人看见。
-    // 0.6.2：写成 `'AbortController' in o ? …` 而不是 `o.AbortController || …`——
-    // 后者无法表达"注入 undefined"（`undefined || AbortController` 仍是真实实现），
-    // 于是 12e 里"没有 AbortController 时用 Promise.race 兜超时"那条分支**不可测**。
-    // 0.9.4：把 `fetch` 注入沙箱 —— 12e 的默认取数走**裸 fetch**（不是 window.fetch），
-    // 所以"默认路径"此前在测试里根本执行不到（C12⑦ 的流式读取就测不了）。
+    // AbortController：12e 的请求超时靠它实现（abort 后 fetch 抛 AbortError）；一律写
+    // `'X' in o ? o.X : X` 而不是 `o.X || X`，否则无法表达「注入 undefined」。
+    // fetch：12e 的默认取数走裸 fetch（不是 window.fetch），提供它默认路径才跑得到。
     fetch: ('fetch' in o) ? o.fetch : (typeof fetch === 'function' ? fetch : undefined),
-    // TextDecoder / TextEncoder 也是浏览器标准全局（读流要用），沙箱此前没有：
-    // 于是"按流读取"那段只能退化成 String(chunk)（字节数组的逗号串），测试写出假绿。
+    // TextDecoder / TextEncoder：读流要用；缺失时只能退化成 String(chunk)，测试写出假绿。
     TextDecoder: ('TextDecoder' in o) ? o.TextDecoder : (typeof TextDecoder === 'function' ? TextDecoder : undefined),
     TextEncoder: ('TextEncoder' in o) ? o.TextEncoder : (typeof TextEncoder === 'function' ? TextEncoder : undefined),
     AbortController: ('AbortController' in o) ? o.AbortController : AbortController,
-    // 0.9.4：`Date` 注入点。bundle 跑在**自己的 vm realm** 里，宿主侧改 `Date.now` 对它没有影响，
-    // 于是"去重窗口是否随命中刷新"这类依赖时钟推进的判定在此前根本测不了。
-    // 与 AbortController 同一写法（`'Date' in o` 才能表达"注入 undefined"）。
+    // Date：bundle 跑在自己的 vm realm 里，宿主侧改 Date.now 对它无效，
+    // 依赖时钟推进的判定（去重窗口是否随命中刷新等）只能靠注入。
     Date: ('Date' in o) ? o.Date : Date,
   }
   // client.js 的 handleRaw 用裸 `document` 判断页面可见性（浏览器里就是 window.document），
@@ -65,27 +57,24 @@ function loadClientEx(seedStorage, opts) {
   sandbox.window.window = sandbox.window
   windowStub.__ModuleLoader__ = {
     load: ({ id, factory }) => {
-      // reactStub：默认是空对象（parse/match 不渲染 React）。需要**真的渲染** UI 的用例
-      // 用 o.react 传一个极简实现进来——本项目的测试历来不渲染 UI，于是"设置页能不能渲染"
-      // 从来没被守过（0.5.0 加了级联那块新 UI，一个拼错的 h(...) 会让整页白屏）。
+      // reactStub：默认空对象（parse/match 不渲染 React）；渲染设置页的用例用 o.react
+      // 注入极简实现——一个拼错的 h(...) 会让整页白屏而不触发任何断言。
       const reactStub = o.react || {}
       sandbox.__exports = factory((req) => (req === 'react' ? reactStub : undefined))
     },
   }
   vm.createContext(sandbox)
   vm.runInContext(CLIENT_CODE, sandbox, { filename: 'client.js' })
-  // sandbox 也交出去（0.6.2）：要在加载**之后**注入 `fetch` 才能测到 12e 的 defaultFetchText
-  // ——26 处取数器用例全都注入 fetchText，那条默认路径在测试里原本永远不执行。
+  // sandbox 也交出去：部分用例要在加载**之后**注入 `fetch`，才能走到 12e 的 defaultFetchText。
   return { exports: sandbox.__exports, storage: memStore, sandbox }
 }
 function loadClient(seedStorage) { return loadClientEx(seedStorage).exports }
 
 const T = loadClient().__test
 
-// ---- 0.7.0：volatile 字段是**响应式引用** ----
-// DSH 0.1.7 的 settings 契约要求可编辑字段标 `.volatile()`，而 schemastery 会把标了的字段
-// 解析成带 `.get()` 的引用（官方插件的读法就是 `config.fontSize.get()`），JSON 序列化后是 `{}`。
-// 所以凡是**直接调用 Host schema** 取配置值的断言，都要先 unwrap 再比较。
+// ---- volatile 字段是响应式引用 ----
+// settings 契约要求可编辑字段标 `.volatile()`，schemastery 会把它们解析成带 `.get()` 的引用
+// （JSON 序列化后是 `{}`），所以直接调 Host schema 取配置值的断言要先 unwrap 再比较。
 const unwrapRefs = (v) => {
   if (Array.isArray(v)) return v.map(unwrapRefs)
   if (v && typeof v === 'object') {
@@ -97,13 +86,7 @@ const unwrapRefs = (v) => {
   return v
 }
 if (!T) { console.error('FAIL: __test 未导出'); process.exit(1) }
-/**
- * 极简 React stub：够跑完一次渲染即可（useState 有状态、useEffect 不执行）。
- *
- * 提到顶层是因为**两个测试块都要渲染设置页**（0.5.0 的级联控件、0.8.0 的国家 / 城市入口）。
- * 而"能不能渲染"这件事一旦有第二份实现，就会出现"一处修好、另一处仍白屏"的盲区——
- * 那正是 0.5.0 加级联 UI 时踩过的坑（一个拼错的 h(...) 让整页白屏而没有任何断言会失败）。
- */
+/** 极简 React stub：够跑完一次渲染即可（useState 有状态、useEffect 不执行）。 */
 const mkTestReact = () => {
   const states = []
   let idx = 0
@@ -134,13 +117,7 @@ const textsOfTree = (tree) => {
   walk(tree)
   return texts
 }
-/**
- * 按元素类型收集节点（断言**属性**用）。
- *
- * 为什么需要它：`textsOfTree` 只看得见文本节点，而 `<option>` 的 `value`、`<select>` 的
- * `onChange` 都是属性。0.9.4 出过一次只有它能发现的真缺陷——国家下拉每个 option 的 value
- * 全是 `undefined`（链式 map 第二段取错字段），标签却完全正常，所以"只查标签"的断言全绿。
- */
+/** 按元素类型收集节点（断言属性用）：`textsOfTree` 只看得见文本节点，而 `value` / `onChange` 都是属性。 */
 const nodesOfType = (tree, type) => {
   const out = []
   const walk = (node) => {
@@ -161,19 +138,9 @@ const optionsOfTree = (tree) => nodesOfType(tree, 'option').map((n) => ({
 const selectsOfTree = (tree) => nodesOfType(tree, 'select')
 const { EEW_AREA_EXPECT, TSUNAMI_AREA_EXPECT } = require('./area-tables.cjs')
 
-// ---- 简体专有字表（0.9.3 review）----
-/**
- * 「漏翻的简体字形」判据用的**手写冻结**字表：只收 zh-CN 文案里真实出现过的简体专有字
- * （zh-CN 表共 549 个汉字，这里是其中的简体专有部分）。它不随四张表变化，因此"把繁体值
- * 本身改成简体"这种改法也照得出来。
- *
- * 为什么不"从各语言表派生"：派生集合会被被改坏的那一栏**自己**污染（自指）——实测把
- * `settings.tab.history` 的 `紀錄` 抄成 `履历`、`settings.status.open` 的 `已連線` 抄成
- * `已连接`，派生判据一条都报不出来（这两处正是 0.9.1 拓出过的形态）。
- *
- * 取舍：宁可保守（漏检某个偏门简体字），也不要误报——简繁同形且繁体里合法的
- * `只` / `里` / `台` / `制` / `准`（准许义）**故意不收**。
- */
+// ---- 简体专有字表 ----
+/** zh-CN 文案里真实出现过的简体专有字，手写冻结（不随四张表变化；派生集合会被改坏的那栏自污染）。
+ *  简繁同形且繁体里合法的 `只` / `里` / `台` / `制` / `准` 不收，宁可漏检不可误报。 */
 const CN_ONLY_CHARS = '灾预陆报紧欧国质调啸网气环与变仅请发为废关难离确认区远连实时闭动历条设选择询级迟长从盖范围无链数据过异这个浏览储录风态败标弃详响应绝结页断开帧试纬经径复会并获后义划载辖别县输键词还话积销来终补尔滨万镇东类阈测观编么两换门槛单独险电则几蓝进铃弹扰红构宁证冻雾属于虽种处达权许统语优强坏抢络备际声听锁静诊联况馈击场贴责转厅暂触车样说导读号满错边较准内当参称点机轮状黄温额钟细'
 const CN_ONLY_RE = new RegExp('[' + CN_ONLY_CHARS + ']')
 
@@ -207,7 +174,7 @@ console.log('== 解析器：551 震度速报（区域观测点） ==')
   assert(a && a.kind === 'quake' && a.kindLabel.indexOf('震度速报') !== -1, '速报 kindLabel 正确')
   assert(a && a.regions[0] && a.regions[0].area === '熊本県天草・芦北', '速报区域名保留')
 }
-console.log('== 解析器：556 EEW（pref 简写归一为全称） ==')
+console.log('== 解析器：556 EEW（pref 简写统一为全称） ==')
 {
   const a = T.parse(eew)
   assert(a && a.kind === 'eew', '556 → kind=eew')
@@ -267,7 +234,7 @@ console.log('== 匹配引擎：海啸 ==')
   assert(T.matchAlert(T.parse(tsunami), cfg(['北海道'], 'Watch')).hit === false, '关注北海道 → 不提醒')
 }
 
-console.log('== 区域名归一：EEW 全量区域名（気象庁 188 个） ==')
+console.log('== 区域名对齐：EEW 全量区域名（気象庁 188 个） ==')
 {
   const bad = []
   for (const name of Object.keys(EEW_AREA_EXPECT)) {
@@ -276,12 +243,11 @@ console.log('== 区域名归一：EEW 全量区域名（気象庁 188 个） =='
     if (got.join(',') !== want.join(',')) bad.push(name + ' 期望 ' + want.join('/') + ' 实得 ' + (got.join('/') || '空'))
   }
   const total = Object.keys(EEW_AREA_EXPECT).length
-  // 「全量」要**被断言守住**，不能只出现在日志里（0.9.2 review）：此前只遍历已存在的 key，
-  // 从表里删掉任意一个区域名测试仍然全绿——"188 个全集"于是成了一句无人守护的注释。
+  // 全量必须被断言守住：只遍历已存在的 key 时，从表里删掉任一区域名测试仍然全绿。
   assert(total === 188, 'EEW 区域名表覆盖気象庁全量 188 个（实际 ' + total + '）')
-  assert(bad.length === 0, total + ' 个 EEW 区域名全部归一正确' + (bad.length ? '（失败 ' + bad.length + ' 个：' + bad.slice(0, 5).join(' | ') + '）' : ''))
+  assert(bad.length === 0, total + ' 个 EEW 区域名全部对齐正确' + (bad.length ? '（失败 ' + bad.length + ' 个：' + bad.slice(0, 5).join(' | ') + '）' : ''))
 }
-console.log('== 区域名归一：海啸全量予報区（気象庁 66 个） ==')
+console.log('== 区域名对齐：海啸全量予報区（気象庁 66 个） ==')
 {
   const bad = []
   for (const name of Object.keys(TSUNAMI_AREA_EXPECT)) {
@@ -291,33 +257,30 @@ console.log('== 区域名归一：海啸全量予報区（気象庁 66 个） ==
   }
   const total = Object.keys(TSUNAMI_AREA_EXPECT).length
   assert(total === 66, '津波予報区表覆盖気象庁全量 66 个（实际 ' + total + '）')
-  assert(bad.length === 0, total + ' 个津波予報区全部归一正确' + (bad.length ? '（失败 ' + bad.length + ' 个：' + bad.slice(0, 5).join(' | ') + '）' : ''))
+  assert(bad.length === 0, total + ' 个津波予報区全部对齐正确' + (bad.length ? '（失败 ' + bad.length + ' 个：' + bad.slice(0, 5).join(' | ') + '）' : ''))
 }
-console.log('== 回归：本轮修复的漏报场景 ==')
+console.log('== 回归：区域名对齐与未识别区域 ==')
 {
   const cfg = (watch, tg) => ({ disasters: { earthquake: true, tsunami: true }, dedupe: { windowMinutes: 10 }, watch: { prefectures: watch }, thresholds: { quakeScale: 40, eewScale: 45, tsunamiGrade: tg || 'Watch' }, notify: {} })
-  // 1) 京都府曾被正则截断为「京都」，与关注列表永不相等
   assert(T.prefsOfArea('京都府').join() === '京都府', '京都府 → 京都府（不再截断为 京都）')
   assert(T.prefsOfArea('京都府南部').join() === '京都府', '京都府南部 → 京都府')
-  // 2) 東京湾内湾等 17 个不含县名的海啸予報区曾完全无法归一
+  // 部分海啸予報区名不含县名，要靠区域表展开到多个县
   const tw = T.parse({ code: 552, id: 't-tw', cancelled: false, issue: { time: 'x' }, areas: [{ grade: 'MajorWarning', name: '東京湾内湾', maxHeight: { description: '３ｍ' } }] })
   assert(T.matchAlert(tw, cfg(['東京都'])).hit === true, '東京湾内湾 大海啸警报 → 关注東京都命中')
   assert(T.matchAlert(tw, cfg(['千葉県'])).hit === true, '東京湾内湾 → 关注千葉県命中')
   assert(T.matchAlert(tw, cfg(['神奈川県'])).hit === true, '東京湾内湾 → 关注神奈川県命中')
   const izu = T.parse({ code: 552, id: 't-izu', cancelled: false, issue: { time: 'x' }, areas: [{ grade: 'Warning', name: '伊豆諸島' }] })
   assert(T.matchAlert(izu, cfg(['東京都'])).hit === true, '伊豆諸島 → 关注東京都命中')
-  // 3) 北海道 EEW 区域名是地方名，曾无法归一
   const hk = T.parse({ code: 556, id: 'e-hk', cancelled: false, issue: { time: 'x' }, earthquake: { hypocenter: { name: '上川地方北部', magnitude: 5.5 } }, areas: [{ pref: '北海道道北', name: '上川地方北部', scaleFrom: 45, scaleTo: 45 }] })
   assert(T.matchAlert(hk, cfg(['北海道'])).hit === true, '上川地方北部 EEW → 关注北海道命中')
   const ok = T.parse({ code: 556, id: 'e-ok', cancelled: false, issue: { time: 'x' }, earthquake: { hypocenter: { name: '宮古島近海', magnitude: 6 } }, areas: [{ pref: '宮古島', name: '沖縄県宮古島', scaleFrom: 45, scaleTo: 45 }] })
   assert(T.matchAlert(ok, cfg(['沖縄県'])).hit === true, '沖縄県宮古島 EEW → 关注沖縄県命中')
-  // 4) 跨县区域展开为多条 region
+  // 跨县区域展开为多条 region
   const ar = T.parse({ code: 552, id: 't-ar', cancelled: false, issue: { time: 'x' }, areas: [{ grade: 'Warning', name: '有明・八代海' }] })
   assert(ar.regions.length === 4, '有明・八代海 展开为 4 条 region（福岡/佐賀/長崎/熊本）')
   assert(['福岡県', '佐賀県', '長崎県', '熊本県'].every((p) => ar.regions.some((r) => r.pref === p)), '四个县都在 regions 中')
   assert(T.matchAlert(ar, cfg(['熊本県'])).hit === true, '有明・八代海 → 关注熊本県命中')
-  // 5) 未识别区域名（0.4.1 起**放行**）：原本被直接否决，与气象侧（regionInWeatherWatch
-  //    有 region.pref && 保护）语义相反，也让"新设的观测点 / 未收录的预报区名"变成静默漏报。
+  // 未识别区域名一律放行（宁可多报绝不漏报）；气象侧的 regionInWeatherWatch 相反，要求 region.pref 存在
   const unk = T.parse({ code: 552, id: 't-unk', cancelled: false, issue: { time: 'x' }, areas: [{ grade: 'Warning', name: '謎の海域' }] })
   assert(T.matchAlert(unk, cfg(['東京都'])).hit === true, '未识别区域名不再被否决（宁可多报绝不漏报）')
   assert(T.matchAlert(unk, cfg([])).hit === true, '全日本模式（未选地区）下未识别区域仍可提醒')
@@ -399,15 +362,15 @@ console.log('== 存储健壮性：配置字段被污染时逐项退回默认值 
 }
 console.log('== 原型链污染：外部数据里的 constructor/toString 键 ==')
 {
-  assert(T.prefsOfArea('constructor').length === 0, '区域名 constructor → 归一为空（不再返回 Object 函数）')
-  assert(T.prefsOfArea('toString').length === 0, '区域名 toString → 归一为空')
+  assert(T.prefsOfArea('constructor').length === 0, '区域名 constructor → 统一为空（不再返回 Object 函数）')
+  assert(T.prefsOfArea('toString').length === 0, '区域名 toString → 统一为空')
   const evil = T.parse({ code: 552, id: 't-evil', cancelled: false, issue: { time: 'x' }, areas: [{ grade: 'constructor', name: 'constructor' }] })
   assert(evil && evil.kind === 'tsunami' && evil.regions.length === 1, '恶意 grade/name 的消息解析不抛错')
   const q = T.parse({ code: 551, id: 'q-evil', cancelled: false, issue: { type: 'constructor', time: 'x' }, earthquake: { maxScale: 50, hypocenter: {} }, points: [] })
   assert(q && q.kindLabel === '地震情报', '551 issue.type=constructor → 回退默认标签')
 }
 
-console.log('== 历史记录：内存与写盘都保留 30 条 ==')
+console.log('== 历史记录：内存与本地存储都保留 30 条 ==')
 {
   const { exports: ex, storage } = loadClientEx({})
   const t = ex.__test
@@ -416,14 +379,14 @@ console.log('== 历史记录：内存与写盘都保留 30 条 ==')
   }
   assert(t.store.events.length === t.HISTORY_MAX, '内存保留 ' + t.HISTORY_MAX + ' 条')
   const saved = JSON.parse(storage.get('dsh.quakeAlert.history'))
-  assert(Array.isArray(saved) && saved.length === t.HISTORY_MAX, '写盘同样保存 ' + t.HISTORY_MAX + ' 条（此前只存 20 条，刷新后掉一半）')
+  assert(Array.isArray(saved) && saved.length === t.HISTORY_MAX, '写入本地存储同样保存 ' + t.HISTORY_MAX + ' 条（此前只存 20 条，刷新后掉一半）')
 }
 console.log('== 音量：0 原样保留，不被默认值顶掉 ==')
 {
   const cfg = loadClient({ 'dsh.quakeAlert.v1': JSON.stringify({ version: 1, notify: { volume: 0 } }) }).__test.loadCfg()
   assert(cfg.notify.volume === 0, 'volume=0 保留（滑块不再回弹显示 70%）')
 }
-console.log('== 重连：计数从第 1 次开始，restart 重置退避 ==')
+console.log('== 重连：计数从第 1 次开始，restart 重置重连间隔 ==')
 {
   const sockets = []
   class FakeWS {
@@ -441,7 +404,7 @@ console.log('== 重连：计数从第 1 次开始，restart 重置退避 ==')
   sockets[0].onclose()
   assert(t.store.retries === 2, '连续断开 → 计数递增')
   client.restart()
-  assert(t.store.retries === 0, 'restart() 重置退避计数（切数据源后不再等满 60s）')
+  assert(t.store.retries === 0, 'restart() 重置重连计数（切数据源后不再等满 60s）')
   assert(sockets.length === 2, 'restart() 重新建立连接')
   client.stop()
   assert(t.store.status === 'closed', 'stop() 后状态为 closed')
@@ -530,19 +493,16 @@ console.log('== 震源情报（无 points）给出明确说明 ==')
   assert(m.hit === false && m.reason.indexOf('震源情报') !== -1, '未命中原因说明「震源情报，无震度数据，无法按阈值判定」')
 }
 
-console.log('== 0.9.4：weakenEvent 不推广到地震（P2-21 的结论是"不能改"） ==')
+console.log('== weakenEvent 不推广到地震 ==')
 {
-  // 一份审查报告建议把 `weakenEvent` 从"只对气象"推广到全部灾种。**不能推广**：
-  // 551 震源情报的 strength 是 -1，而与各地震度共用同一个事件键（都取自 earthquake.time），
-  // 于是"速报 → 震源情报 → 各地震度"这条正常序列里，震源情报会把记忆强度拉到 -1，
-  // 随后的各地震度被判成升级、**同一次地震再响一次**。这条断言就是那个反面：
-  // 真把 weakenEvent 推广到地震，它会红。
+  // weakenEvent 只对气象生效。551 震源情报的 strength 是 -1，且与各地震度共用同一个事件键
+  // （都取自 earthquake.time）：推广到地震会让「速报 → 震源情报 → 各地震度」再响一次。
   const t = loadClient().__test
   const raw = readSample('quake-kumamoto-detailscale-20260907.json')
   const cfg = JSON.parse(JSON.stringify(t.DEFAULT_CFG))
   cfg.notify = { sound: false, system: false, volume: 0 }
   cfg.watch = { prefectures: ['熊本県'], cities: [], places: [] }
-  // 样本是熊本県的震度3（maxScale 30）；阈值设 10 让它命中，断言与"样本恰好是几级"解耦
+  // 阈值设 10 让这条样本命中，断言与「样本恰好是几级」解耦
   cfg.thresholds.quakeScale = 10
   const r1 = t.handleAlert(t.parseQuake(raw), cfg)
   assert(r1.notified === true, '（前置）各地震度 → 播报：' + JSON.stringify(r1))
@@ -552,23 +512,22 @@ console.log('== 0.9.4：weakenEvent 不推广到地震（P2-21 的结论是"不�
     earthquake: { time: raw.earthquake.time, hypocenter: raw.earthquake.hypocenter },
   }
   const origin = t.parseQuake(originRaw)
-  assert(origin.strength === -1, '震源情报的 strength 是 -1（"没有震度"的哨兵值）：' + origin.strength)
+  assert(origin.strength === -1, '震源情报的 strength 是 -1（"没有震度"的特殊标记值）：' + origin.strength)
   assert(origin.eventKey === t.parseQuake(raw).eventKey, '震源情报与各地震度**共用事件键**（都取自 earthquake.time）')
   const r2 = t.handleAlert(origin, cfg)
   assert(r2.notified === false, '震源情报不播报（无震度数据）')
-  // 修订版各地震度：新 id（真·重新发布，不走消息级去重），同事件键、同强度
+  // 修订版各地震度：新 id（真·重新发布），同事件键、同强度
   const again = Object.assign({}, raw, { id: String(raw.id) + '-v2' })
   const r3 = t.handleAlert(t.parseQuake(again), cfg)
   assert(r3.notified === false,
     '随后的各地震度不再响铃（若把 weakenEvent 推广到地震，这里会因为"从 -1 升级"而再响一次）')
 }
 
-console.log('== 0.9.4：消息级去重窗口"命中即刷新"，且记录用自己的窗口（P2-20 / P3-39） ==')
+console.log('== 消息级去重窗口「命中即刷新」，且记录用自己的窗口 ==')
 {
   const t = loadClient().__test
-  // 同一条被持续投递：每 9 分钟来一次（窗口 10 分钟）。固定窗口下第 2 次会跨过窗口边界被
-  // 当成新消息重走整条主链；"命中即刷新"之后它一直是同一条。
-  // 时钟必须注入到**沙箱自己的 realm**（bundle 在那里跑，宿主侧改 Date.now 对它无效）。
+  // 同一条消息每 9 分钟投递一次（窗口 10 分钟）：命中即刷新时它始终是同一条。
+  // 时钟必须注入到沙箱自己的 realm（bundle 在那里跑，宿主侧改 Date.now 无效）。
   const clockRef = { t: Date.UTC(2026, 8, 21, 0, 0, 0) }
   class SandboxDate extends Date {
     constructor(...args) { if (args.length === 0) super(clockRef.t); else super(...args) }
@@ -583,8 +542,7 @@ console.log('== 0.9.4：消息级去重窗口"命中即刷新"，且记录用自
   assert(td.isDuplicate(id, 10) === true, '再 9 分钟（合计 18 分钟）仍判重复 —— 命中刷新了窗口')
   clockRef.t += 11 * 60 * 1000
   assert(td.isDuplicate(id, 10) === false, '真正静默 11 分钟后才重新走主链（刷新不是"永不过期"）')
-  // 记录用自己的窗口（P3-39）：先用 60 分钟的窗口登记，再用 1 分钟的窗口调用，
-  // 这条记录**不该**被后者的窗口清掉（否则真正的重复会重走主链）
+  // 记录用自己的窗口：先用 60 分钟窗口登记，再用 1 分钟窗口调用，这条记录不该被后者清掉。
   const id2 = 'dup-own-window-94'
   clockRef.t += 1000
   assert(td.isDuplicate(id2, 60) === false, '（前置）用 60 分钟窗口登记')
@@ -655,9 +613,8 @@ console.log('== EEW 取消 / 海啸解除在「此前提醒过」时补提醒 ==
   assert(t.store.events[0].hit === false && t.store.events[0].headline.indexOf('此前未提醒过') !== -1, '未提醒过的事件取消 → 只记历史，不打扰')
   t.handleRaw(tsunami, cfg)
   assert(t.store.events[0].hit === true, '海啸警报 → 提醒')
-  // 0.4.1：552 的事件键改为「预报区名集合」（原来是空串 → cancelKeyOf 退化成 'tsunami'，
-  // 任意海域的解除都会被当成"此前提醒过的事件"，播出一条假解除——海啸域的假安全）。
-  // 解除电文会列出被解除的预报区，名字集合与发布一致时才算同一事件。
+  // 552 的事件键是「预报区名集合」：解除电文列出的预报区与发布一致时才算同一事件，
+  // 否则任意海域的解除都会被当成"此前提醒过的事件"，播出一条假解除。
   const cleared = Object.assign({}, tsunami, {
     id: 't-clear',
     cancelled: true,
@@ -739,7 +696,7 @@ console.log('== toast 颜色按命中区域强度，而非全日本最大值 =='
     points: [{ pref: '熊本県', addr: '熊本市', scale: 20 }, { pref: '福岡県', addr: '福岡市', scale: 60 }],
   }, cfg)
   assert(t.store.events[0].severity === 'info', '命中熊本（震度2）→ severity=info，而不是全日本最大 6弱 的 red')
-  // EEW 即使预测震度刚过阈值，也必须保持 red（警报本质，不能因为达标而降级）
+  // EEW 即使预测震度刚过阈值，也必须保持 red（警报本质）
   const cfgEew = Object.assign({}, cfg, { watch: { prefectures: ['茨城県'] } })
   t.handleRaw({
     code: 556, id: 'sev-eew', cancelled: false, issue: { time: 't', eventId: 'EV-SEV', serial: '1' },
@@ -881,7 +838,7 @@ console.log('== 市区町村匹配：551 观测点按市收窄，区域级条目
   assert(t.matchAlert(t.parse(tsunami), cfg(['架空市'], ['福島県'])).hit === true, '海啸是予報区级数据 → 市级选择不收窄，不漏报')
 }
 
-console.log('== 市区町村表：注入 / 归一 / 配置清理 ==')
+console.log('== 市区町村表：注入 / 规整 / 配置清理 ==')
 {
   const t = loadClientEx({}).exports.__test
   assert(t.cityTableState() === 'idle', '初始状态 idle')
@@ -900,7 +857,7 @@ console.log('== 市区町村表：注入 / 归一 / 配置清理 ==')
   assert(t2.currentCfg().watch.cities.join() === '白河市', '表到位后清掉配置里不存在的市町村名')
   assert(t2.currentCfg().watch.prefectures.join() === '福島県', '清理市町村不影响都道府县')
 }
-console.log('== 市级匹配：addr 归一（短名 / 消歧 / 支庁名 / 仮名表记） ==')
+console.log('== 市级匹配：addr 对齐（短名 / 消歧 / 支庁名 / 仮名表记） ==')
 {
   const t = loadClient().__test
   t.setCityTable({
@@ -923,10 +880,10 @@ console.log('== 市级匹配：addr 归一（短名 / 消歧 / 支庁名 / 仮�
   assert(look('宮古市区界') === '宮古市', '宮古市区界 → 岩手県宮古市（不与宮古島市撞车）')
   assert(look('宮古島市城辺福北') === '宮古島市', '宮古島市城辺福北 → 宮古島市')
   assert(look('龍ケ崎市') === '龍ヶ崎市', '仮名表记差异：龍ケ崎市 → 龍ヶ崎市')
-  assert(look('新千歳空港') === null, '机场观测点归一不到市町村 → null（调用方放行）')
-  assert(look('熊本県天草・芦北') === null, '区域名归一不到市町村 → null')
+  assert(look('新千歳空港') === null, '机场观测点认不出市町村 → null（调用方放行）')
+  assert(look('熊本県天草・芦北') === null, '区域名认不出市町村 → null')
 }
-console.log('== 县级匹配：551 的 pref 简写归一（此前的静默漏报） ==')
+console.log('== 县级匹配：551 的 pref 简写统一 ==')
 {
   const t = loadClient().__test
   assert(t.normalizePref('京都') === '京都府', '「京都」→「京都府」')
@@ -975,7 +932,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
   const localCfg = JSON.stringify({ version: 1, watch: { prefectures: ['東京都'] }, thresholds: { quakeScale: 55 } })
   const pathOf = (o) => o.path.join('.')
 
-  // ① Host 用户层为空 + 本地已有非默认配置 → 一次性迁移
   {
     const t = loadClientEx({ 'dsh.quakeAlert.v1': localCfg }).exports.__test
     const scope = fakeScope()
@@ -990,7 +946,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(!!unsetDefault, '等于默认值的字段用 unset 交还 schema 默认层')
     assert(t.currentCfg().watch.prefectures.join() === '東京都', '迁移后内存配置仍是本地值')
   }
-  // ② Host 用户层已有内容 → 以 Host 为准，且不回写
   {
     const t = loadClientEx({ 'dsh.quakeAlert.v1': localCfg }).exports.__test
     const host = hostValue()
@@ -1002,7 +957,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.currentCfg().watch.prefectures.join() === '熊本県', 'Host 的关注地区生效')
     assert(scope.writes.length === 0, '以 Host 为准时不回写 Host')
   }
-  // ③ Host 不可用 → 保持 localStorage
   {
     const t = loadClientEx({ 'dsh.quakeAlert.v1': localCfg }).exports.__test
     const scope = fakeScope({ status: 'unavailable', value: undefined })
@@ -1011,7 +965,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.currentCfg().watch.prefectures.join() === '東京都', '仍读 localStorage 配置')
     assert(scope.writes.length === 0, '不回写不可用的 Host')
   }
-  // ④ 页面不支持 Host 持久化（memory 模式）→ 只读不写
   {
     const t = loadClientEx({}).exports.__test
     const scope = fakeScope({ mode: 'memory', writable: false })
@@ -1019,7 +972,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.settingsState().sync === 'memory', 'Host 只做进程内存储 → memory 模式')
     assert(scope.writes.length === 0, 'memory 模式不写 Host')
   }
-  // ⑤ 写入路径：applyCfg 立即生效并推给 Host
   {
     const t = loadClientEx({}).exports.__test
     const scope = fakeScope()
@@ -1042,10 +994,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     t.applyCfg(Object.assign({}, cur, { notify: Object.assign({}, cur.notify, { volume: 0.2 }) }))
     const ops = scope.writes[0] || []
     const vol = ops.find((o) => o.op === 'set' && pathOf(o) === 'notify.volume')
-    assert(!!vol && vol.value === 0.2, '音量兜底落盘经 applyCfg → 同时推给 Host（saveCfg 不推）')
+    assert(!!vol && vol.value === 0.2, '音量兜底值经 applyCfg 存到本地 → 同时推给 Host（saveCfg 不推）')
     assert(t.currentCfg().notify.volume === 0.2, '音量兜底同时更新内存副本（下一次同步不会被 Host 旧值顶回）')
   }
-  // ⑦ 跨标签页同步：reloadFromLocal 回读本地镜像（0.2.1 曾在这里跨模块给 runtimeCfg 赋值）
+  // ⑦ 跨标签页同步：reloadFromLocal 回读本地镜像
   {
     const seed = JSON.stringify({ version: 1, watch: { prefectures: ['東京都'] }, notify: { volume: 0.4 } })
     const loaded = loadClientEx({ 'dsh.quakeAlert.v1': seed })
@@ -1058,7 +1010,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.currentCfg().watch.prefectures.join() === '熊本県', '内存副本同步更新（UI 据此重渲染）')
     assert(typeof t.reloadFromLocal === 'function', '回读入口已导出（跨模块只能走显式入口，不能直接赋值）')
   }
-  // ⑧ 没有 Host 时一切照旧
   {
     const t = loadClientEx({}).exports.__test
     let err = ''
@@ -1066,7 +1017,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(err === '', '没有 Host 时 applyCfg 不抛错')
     assert(t.currentCfg().source === 'sandbox', '没有 Host 时配置仍即时生效')
   }
-  // ⑨ scope 异常不拖垮插件
   {
     const t = loadClientEx({}).exports.__test
     let err = ''
@@ -1096,18 +1046,15 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, 'Host schema 加载失败：' + e.message)
   }
 
-  console.log('== 0.7.0：DSH 0.1.7-rc.2 适配（Config / volatile / settings 两代 API / client 入口） ==')
+console.log('== DSH settings 适配：Config / volatile / settings 两代 API / client 入口 ==')
   try {
     const mod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
 
-    // ① 0.1.7 的 settings 表单**从插件导出的 `Config` schema 派生**，命名空间就是 profile
-    //    条目 id（cordis.patch.yml 的 `- id: quake-alert`），所以 Client 侧寻址名不用改。
+    // ① settings 表单从插件导出的 Config schema 派生，命名空间就是 profile 条目 id。
     assert(mod.Config === mod.QuakeAlertSettingsSchema, '导出 Config（0.1.7 宿主按这个名字取 schema）')
     assert(mod.SETTINGS_NAMESPACE === 'quake-alert', '命名空间仍是 profile 条目 id（quake-alert）')
 
-    // ② 每个可编辑字段都要标 volatile。漏标一个不会报错，后果是"改这一项会重启 Host 半边"
-    //    （重建四个轮询器 + 断开 Wolfx 常连）——用户只会觉得"改个阈值卡了一下"。
-    //    期望条数从 Client 的 DEFAULT_CFG 递归数出来：加字段忘了标时这条会红。
+    //    （重建四个轮询器 + 断开 Wolfx 常连）。期望条数从 Client 的 DEFAULT_CFG 递归数出来。
     const countLeaves = (node) => Object.keys(node).reduce((n, k) => {
       const v = node[k]
       return n + ((v && typeof v === 'object' && !Array.isArray(v)) ? countLeaves(v) : 1)
@@ -1117,7 +1064,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(volatileCount === expectedVolatile,
       '配置 schema 的每个叶子都标了 volatile（' + volatileCount + '/' + expectedVolatile + '）')
 
-    // ③ settings 两代 API 的分派（0.7.0 的核心适配）
     const mk = (settings) => ({ settings, effect(fn) { fn(); return () => {} } })
     const seen = { configure: [], register: [] }
     const newer = mk({ configure: (presentation, owner) => { seen.configure.push([presentation, owner]) } })
@@ -1139,14 +1085,13 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       '两代 API 都没有：不抛错，如实返回 none（配置退回 localStorage）')
     const broken = mk({ register: () => { throw new Error('quake-alert 段类型不符') } })
     assert(mod.applySettingsService(broken, { effect() {} }) === 'register-failed',
-      'register 抛错被兜住（0.1.6 的容错仍然生效，插件照常可用）')
+      'register 抛错被捕获（0.1.6 的容错仍然生效，插件照常可用）')
   } catch (e) {
     assert(false, 'Host 侧 0.7.0 适配验证失败：' + e.message)
   }
 
   try {
-    // ④ Client 侧：0.1.7 的入口是 ConfigForm（`ctx.configForms.get(entryId)`），它的
-    //    快照 / 写入面与 0.1.6 的 settingsScope 同形 —— 03-settings-bridge 因此不必改。
+    // ④ Client 侧入口是 ConfigForm，其快照 / 写入面与旧的 settingsScope 同形。
     const src = fs.readFileSync(path.join(ROOT, 'client', 'src', '15-entry.js'), 'utf8')
     assert(src.indexOf("ctx.inject(['configForms']") !== -1, 'client 侧用 ctx.configForms 作为 0.1.7 入口')
     assert(src.indexOf("ctx.inject(['settingsScope']") !== -1, 'settingsScope 回退路径保留（可退回 0.1.6）')
@@ -1197,7 +1142,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const liveAddrs = ['白河市新白河', '宮古島市城辺福北', '大阪北区茶屋町', '仙台宮城野区苦竹', '熊本南区城南町',
       '神戸東灘区住吉東町', '京都上京区薗ノ内町', '東京千代田区大手町', '成田市名古屋', '宮古市区界']
     const missed = liveAddrs.filter((addr) => t.lookupAddrCity(addr) === null)
-    assert(missed.length === 0, '实测直播 addr 全部可归一（未命中：' + missed.join('/') + '）')
+    assert(missed.length === 0, '实测直播 addr 全部可对齐（未命中：' + missed.join('/') + '）')
     assert(t.citiesOfPref('架空県').length === 0, '不存在的县仍返回空')
 
     // Host 侧：假 ctx 走一遍 apply，检查路由输出
@@ -1205,7 +1150,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const routes = []
     const registered = []
     const fakeCtx = {
-      // 顶层 effect：0.3.0-b 起 apply 用它管理轮询器的启停
+      // 顶层 effect：apply 用它管理轮询器的启停
       effect(fn) { fn(); return () => {} },
       inject(names, cb) {
         if (names.indexOf('settings') !== -1) {
@@ -1234,8 +1179,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(status === 200, '/areas 返回 200')
     assert(parsed.prefectures && Object.keys(parsed.prefectures).length === 47, '路由返回 47 个县的市町村表')
     assert(parsed.prefectures['福島県'].indexOf('白河市') !== -1, '路由返回的表含白河市')
-    // 0.3.2（P1）：河川予報区域表必须随同一份响应下发。此前它只生成不下发，Client 侧永远为空，
-    // 洪水电文因此全部退化为"归不到市町村"而放行 —— 关注任何地区的用户都会收到无关县的警报。
+    // /areas 必须随同一份响应下发河川予報区域表，否则洪水电文全部退化为「归不到市町村」而放行。
     assert(Array.isArray(parsed.riverAreas) && parsed.riverAreas.length >= 300,
       '/areas 同时下发河川予報区域表（' + (parsed.riverAreas ? parsed.riverAreas.length : 0) + ' 个区域）')
     assert(parsed.riverAreas.every((a) => typeof a.code === 'string' && /^\d{12}$/.test(a.code) &&
@@ -1250,20 +1194,19 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     feedCall('/dsh-quake-alert/feed?since=0&stats=1')
     const feedPayload = JSON.parse(feedRes.body)
     assert(feedRes.status === 200 && Number.isFinite(feedPayload.cursor) && feedPayload.cursor > 0 && Array.isArray(feedPayload.entries),
-      '/feed 返回游标与增量数组（游标是时间戳基数，Host 重启后仍单调）')
+      '/feed 返回读取位置与增量数组（读取位置是时间戳基数，Host 重启后仍单调）')
     assert(feedPayload.stats && typeof feedPayload.stats.polls === 'number', '?stats=1 附带轮询统计（便于诊断）')
     feedCall('/dsh-quake-alert/feed?since=abc')
     assert(JSON.parse(feedRes.body).entries.length === 0, '非法 since 参数按 0 处理（不抛错）')
     feedCall('/dsh-quake-alert/feed')
-    assert(JSON.parse(feedRes.body).cursor === feedPayload.cursor, '省略 since 时同样按 tail 处理（游标不变、不回历史）')
-    // 0.3.2：Client 首次启动的 tail 语义，以及 Host 重启 / 时钟回拨的 reset 标记
+    assert(JSON.parse(feedRes.body).cursor === feedPayload.cursor, '省略 since 时同样按 tail 处理（读取位置不变、不回历史）')
     feedCall('/dsh-quake-alert/feed?since=tail')
     const tailPayload = JSON.parse(feedRes.body)
     assert(tailPayload.tail === true && tailPayload.entries.length === 0 && tailPayload.cursor === feedPayload.cursor,
       '?since=tail 只回当前位置、不回条目（Client 首次启动用）')
     feedCall('/dsh-quake-alert/feed?since=' + (feedPayload.cursor + 1))
     assert(JSON.parse(feedRes.body).reset === true, 'since > cursor（Host 重启 / 时钟回拨）→ reset 标记')
-    // 非法游标一律按 tail：若按 0 处理，等于让任何请求者一次把整个环缓冲拿走
+// 非法读取位置一律按 tail：按 0 处理等于让任何请求者一次拿走整个固定长度缓冲
     feedCall('/dsh-quake-alert/feed?since=1e999')
     assert(JSON.parse(feedRes.body).tail === true, 'Infinity（1e999）按 tail 处理，不吐出全部缓冲')
     feedCall('/dsh-quake-alert/feed?since=-1')
@@ -1283,8 +1226,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const smallPayload = { cursor: 2, entries: [{ seq: 1, id: 'a' }] }
     capFeedEntries(smallPayload)
     assert(smallPayload.more === undefined && smallPayload.entries.length === 1, '正常增量不受截断影响')
-    // 0.9.4（P2-22）：**字节**上限。只限条数挡不住"50 条 × 98KB ≈ 5MB"（JMA 单条实测 98KB），
-    // 而 JSON.stringify 还会让 Host 内存再翻一倍。这条路由没有来源校验。
+    // **字节**上限：只限条数挡不住「50 条 × 98KB」，而本路由没有来源校验。
     {
       const many = { cursor: 500, entries: Array.from({ length: 50 }, (_, i) => ({ seq: i + 1, id: 'b' + i, xml: 'x'.repeat(60 * 1024) })) }
       capFeedEntries(many, 50, 1024 * 1024)
@@ -1304,7 +1246,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '真实市区町村表 / Host 路由验证失败：' + e.message)
   }
 
-  console.log('== 0.3.0-a：河川予報区域表（指定河川洪水予報 → 市町村）==')
+console.log('== 河川予報区域表（指定河川洪水予報 → 市町村）==')
   try {
     const river = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'river-areas.js')).href)
     const areas = river.RIVER_AREAS
@@ -1320,7 +1262,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const citySet = new Set()
     for (const a of areas) for (const c of a.cities) citySet.add(c)
     assert(citySet.size === meta.cityCount, '去重市町村数与 META 一致（' + citySet.size + '）')
-    // 重名实证：同名河川存在于多个区域代码下 —— 这正是主键必须是 code 而不是 name 的原因
+    // 同名河川存在于多个区域代码下，所以主键必须是 code 而不是 name
     const arakawa = areas.filter((a) => a.name === '荒川')
     assert(arakawa.length >= 2 && new Set(arakawa.map((a) => a.code)).size === arakawa.length,
       '同名区域（荒川）对应多个不同代码 → 主键用 code（' + arakawa.length + ' 个）')
@@ -1335,7 +1277,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const { unzip } = await import(pathToFileURL(path.join(ROOT, 'scripts', 'lib', 'zip.mjs')).href)
     const zlib = require('node:zlib')
     // 手工构造最小 zip：覆盖 store / deflate 两条路径与日文 UTF-8 文件名
-    // withCrc=true 时写入**正确的 CRC32**（下面用它验证"坏数据必须被拦下"）
     const crc32Of = (buf) => {
       let crc = -1
       for (const b of buf) {
@@ -1375,9 +1316,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     try { unzip(Buffer.from('not a zip at all')) } catch (err) { threw = true }
     assert(threw, '非 zip 输入抛出明确错误（不静默返回空）')
 
-    // 0.9.4（P3-49）：CRC32 与"解压后长度"必须校验。此前只按 compSize 切片——下载被截断 /
-    // 中间层注入坏字节时，坏数据会"成功地"进入 lib/data/（生成的区域表看着正常，
-    // 运行时才发现某些区域归不到市町村）。
+    // CRC32 与「解压后长度」必须校验：只按 compSize 切片时，被截断或注入坏字节的包会「成功地」进入 lib/data/
     {
       const crcName = 'c.csv'
       const good = buildZip(crcName, 'payload-12345', false, true)
@@ -1400,7 +1339,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, 'zip 读取器验证失败：' + e.message)
   }
 
-  console.log('== 0.3.0-b：Host 电文轮询器（冷启动 / 去重 / 增量 / 环缓冲）==')
+console.log('== Host 电文轮询器（首次启动 / 去重 / 增量 / 固定长度缓冲）==')
   try {
     const { createPoller, parseAtomEntries, createFetchText } = await import(pathToFileURL(path.join(ROOT, 'lib', 'poller.js')).href)
     const FEED = 'https://example.test/feed.xml'
@@ -1421,52 +1360,44 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     }
     const T0 = Date.parse('2026-09-11T12:00:00Z')
 
-    // ① Atom 解析（只需要 id/title/updated）
     const parsed = parseAtomEntries(atom([entry(1, '2026-09-11T11:00:00Z'), { id: 'x', title: '', updated: '' }]))
     assert(parsed.length === 2 && parsed[0].id === 'detail-1' && parsed[0].title === '电文1', 'Atom 解析出 id/title/updated')
     assert(parseAtomEntries('<feed></feed>').length === 0, '空 feed 返回空数组')
     assert(parseAtomEntries('<entry><title>无 id</title></entry>').length === 0, '缺 id 的 entry 被跳过')
 
-    // ② 冷启动：把 feed 里的历史全部记为已见，但不拉详情、不产事件
     let feedXml = atom([entry(1, '2026-09-11T11:00:00Z'), entry(2, '2026-09-11T11:30:00Z')])
     let clock = T0
     const f1 = fakeFetch({ [FEED]: () => feedXml, 'detail-1': '<Report/>', 'detail-2': '<Report/>', 'detail-3': '<Report/>', 'detail-4': '<Report/>' })
     const p1 = createPoller({ feedUrl: FEED, fetchText: f1.fn, now: () => clock })
     const r1 = await p1.pollOnce()
-    assert(r1.coldStart === true && r1.added === 0, '冷启动不产生事件（不把 feed 里的历史当新闻）')
-    assert(f1.calls.length === 1 && f1.calls[0] === FEED, '冷启动只拉 feed，不拉任何详情')
-    const p1Base = p1.snapshot(0).cursor // 0.3.2：游标以时间戳为起点，断言一律基于这个基数
-    assert(p1.snapshot(0).entries.length === 0 && p1Base >= T0, '冷启动后缓冲为空、游标停在起点（时间戳基数）')
+    assert(r1.coldStart === true && r1.added === 0, '首次启动不产生事件（不把 feed 里的历史当新闻）')
+    assert(f1.calls.length === 1 && f1.calls[0] === FEED, '首次启动只拉 feed，不拉任何详情')
+    const p1Base = p1.snapshot(0).cursor // 0.3.2：读取位置以时间戳为起点，断言一律基于这个基数
+    assert(p1.snapshot(0).entries.length === 0 && p1Base >= T0, '首次启动后缓冲为空、读取位置停在起点（时间戳基数）')
 
-    // ③ 增量：只为新 entry 拉详情，已见过的绝不重拉
     clock += 60 * 1000
     feedXml = atom([entry(3, '2026-09-11T12:01:00Z'), entry(2, '2026-09-11T11:30:00Z'), entry(1, '2026-09-11T11:00:00Z')])
     const r2 = await p1.pollOnce()
     assert(r2.added === 1, '新一轮只处理新 entry（+1）')
     assert(f1.calls.filter((u) => u === 'detail-3').length === 1, '为新 entry 拉了一次详情')
     assert(f1.calls.filter((u) => u === 'detail-1' || u === 'detail-2').length === 0,
-      '冷启动时已见过的 entry 永不重拉（気象庁「不重复获取同一文件」）')
+      '首次启动时已见过的 entry 永不重拉（気象庁「不重复获取同一文件」）')
     const snap1 = p1.snapshot(0)
     assert(snap1.cursor === p1Base + 1 && snap1.entries.length === 1 && snap1.entries[0].id === 'detail-3', '增量快照含新条目与其原文')
 
-    // ④ feed 未变时只拉一次 feed，不碰详情
     const callsBefore = f1.calls.length
     const r3 = await p1.pollOnce()
     assert(r3.added === 0 && f1.calls.length === callsBefore + 1, 'feed 无变化时只拉 feed 本身')
 
-    // ⑤ since 游标：只返回更新的条目
     clock += 60 * 1000
     feedXml = atom([entry(4, '2026-09-11T12:02:00Z'), entry(3, '2026-09-11T12:01:00Z')])
     await p1.pollOnce()
     assert(p1.snapshot(p1Base + 1).entries.length === 1 && p1.snapshot(p1Base + 1).entries[0].id === 'detail-4',
-      'since=上一条游标 → 只返回更新的条目')
-    assert(p1.snapshot(p1Base + 2).entries.length === 0, 'since=最新游标 → 返回空')
+      'since=上一条的读取位置 → 只返回更新的条目')
+    assert(p1.snapshot(p1Base + 2).entries.length === 0, 'since=最新读取位置 → 返回空')
     assert(p1.snapshot(0).truncated === false, '没发生淘汰时不标记截断')
 
-    // ⑥ 详情拉取失败：不产事件、记 error，并**有界重试**（0.4.1 修正）
-    //    旧实现把失败的 entry 也记为已见，于是一次瞬时故障（超时 / 连接被重置 / 5xx，
-    //    大陆网络下是常态）就让这条警报永久漏报——extra.xml 是滚动 feed，同一 id 不会再出现。
-    //    気象庁约束的是「一度**取得**したファイルを再度取得しない」，没取得就没有可复用之物。
+    // ⑥ 详情拉取失败：不产事件、记 error，并有界重试；未取得的 id 不能记为已见（extra.xml 是滚动 feed）。
     clock += 60 * 1000
     const feedFail = atom([entry(7, new Date(clock).toISOString())])
     const f2 = fakeFetch({ [FEED]: () => feedFail }) // detail-7 未登记 → 详情请求抛错
@@ -1488,11 +1419,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     await pFail.pollOnce()
     assert(f2.calls.filter((u) => u === 'detail-7').length === failTries, '放弃之后不再重复请求同一个坏 URL')
 
-    // ⑥b 0.9.4（P1-1）：详情重试用尽、而 entry **自带回退载荷**时，不许丢整条
-    //     nmc.cn 的橙 / 红档是唯一会响铃、唯一能穿透静默时段的一档，也正是 needDetail 挑出来
-    //     拉详情的那一档。旧实现在详情 503 时一律 detailDropped + 记已见 —— 那条预警从 Host 起
-    //     就不存在，用户界面与"当时没有预警"完全同形。parseNmcList 早把列表字段拼成了同形
-    //     payload，用它入库即可：少的是"防御指南"那一段正文，不是这条预警本身。
+    // ⑥b 详情重试用尽而 entry 自带回退载荷时不许丢整条（nmc.cn 的橙 / 红档是唯一会响铃的那一档）。
     clock += 60 * 1000
     const feedFallback = atom([entry(9, new Date(clock).toISOString())])
     const fFb = fakeFetch({ [FEED]: () => feedFallback }) // detail-9 未登记 → 详情请求抛错
@@ -1514,7 +1441,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     await pFb.pollOnce()
     assert(fFb.calls.filter((u) => u === 'detail-9').length === fbTries, '回退入库后不再反复请求同一个坏 URL')
 
-    // ⑥c 0.9.4（C7①）：失败路径要有退避，且一轮成功立刻回到正常间隔
+    // ⑥c 失败路径要逐次延长重试间隔，且一轮成功立刻回到正常间隔
     {
       const realSetTimeout = globalThis.setTimeout
       const delays = []
@@ -1528,16 +1455,16 @@ console.log('== 机器级持久化：Host settings 桥 ==')
           now: () => clock, intervalMs: 60 * 1000, maxBackoffMs: 10 * 60 * 1000,
         })
         pB.start()
-        assert(delays.length === 1 && delays[0] === 1500, '启动后首轮延迟不受退避影响')
+        assert(delays.length === 1 && delays[0] === 1500, '启动后首轮延迟不受重试间隔递增影响')
         await pending()
-        assert(delays[1] === 120 * 1000, '第 1 次失败：间隔翻倍（旧实现恒为 60s，永不收敛）')
+        assert(delays[1] === 120 * 1000, '第 1 次失败：间隔翻倍（旧实现恒为 60s，间隔永不回落）')
         await pending()
         assert(delays[2] === 240 * 1000, '第 2 次失败：继续翻倍')
         for (let i = 0; i < 5; i += 1) await pending()
-        assert(delays[delays.length - 1] === 10 * 60 * 1000, '连续失败退避到上限后封顶（不再放大）')
+        assert(delays[delays.length - 1] === 10 * 60 * 1000, '连续失败间隔递增到上限后封顶（不再放大）')
         failing = false
         await pending()
-        assert(delays[delays.length - 1] === 60 * 1000, '一轮成功立刻回到 intervalMs（恢复不被退避拖住）')
+        assert(delays[delays.length - 1] === 60 * 1000, '一轮成功立刻回到 intervalMs（恢复不被重试间隔拖住）')
         assert(pB.stats().lastError.indexOf('feed fetch failed') === 0,
           '抓取失败也写 lastError（此前只有解析 / 详情失败写）：' + pB.stats().lastError)
         pB.stop()
@@ -1546,7 +1473,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       }
     }
 
-    // ⑥d 0.9.4（C7 附）：stop() 要中止**在飞**的请求，而不是让它在超时里跑完
+    // ⑥d stop() 要中止在飞的请求，而不是让它在超时里跑完
     {
       let sawSignal = null
       let release = null
@@ -1592,13 +1519,13 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     revUpdated = new Date(clock + 60 * 1000).toISOString()
     assert((await pNoDedupe.pollOnce()).added === 0, '（对照）按 entry id 去重：修订版被永久挡住（旧行为）')
 
-    // ⑦ 环缓冲上限：连续入 3 条、容量 1 → 只留最后 1 条，且更旧的游标标记截断
+    // ⑦ 缓冲长度上限：连续入 3 条、容量 1 → 只留最后 1 条，且更旧的读取位置标记截断
     clock += 60 * 1000
     let feedRotate = atom([entry(40, new Date(clock).toISOString())])
     const routes7 = { [FEED]: () => feedRotate, 'detail-41': '<Report/>', 'detail-42': '<Report/>' }
     const f3 = fakeFetch(routes7)
     const pRing = createPoller({ feedUrl: FEED, fetchText: f3.fn, now: () => clock, maxEntries: 1 })
-    await pRing.pollOnce() // 冷启动：detail-40 记为已见
+    await pRing.pollOnce() // 首次启动：detail-40 记为已见
     const ringBase = pRing.snapshot(0).cursor
     for (const n of [41, 42]) {
       clock += 60 * 1000
@@ -1606,19 +1533,17 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       await pRing.pollOnce()
     }
     const snapRing = pRing.snapshot(0)
-    assert(snapRing.cursor === ringBase + 2, '游标只统计真正入缓冲的条目（冷启动不计）')
-    assert(snapRing.entries.length === 1 && snapRing.entries[0].id === 'detail-42', '环缓冲按 maxEntries 淘汰最旧的')
+    assert(snapRing.cursor === ringBase + 2, '读取位置只统计真正入缓冲的条目（首次启动不计）')
+    assert(snapRing.entries.length === 1 && snapRing.entries[0].id === 'detail-42', '缓冲只保留最近 maxEntries 条（淘汰最旧的）')
     assert(pRing.snapshot(0).truncated === true, '有条目被淘汰后从头拉取 → 标记 truncated')
-    assert(pRing.snapshot(ringBase + 2).truncated === false, '游标正好等于最新 → 不标记截断')
+    assert(pRing.snapshot(ringBase + 2).truncated === false, '读取位置正好等于最新 → 不标记截断')
 
-    // ⑧ feed 拉取失败：记 error、不抛、游标不动
     const f4 = fakeFetch({})
     const p6 = createPoller({ feedUrl: FEED, fetchText: f4.fn, now: () => clock })
     const r8 = await p6.pollOnce()
     assert(r8.added === 0 && p6.stats().errors === 1 && p6.snapshot(0).cursor >= T0 && p6.snapshot(0).entries.length === 0,
-      'feed 失败时记 error、不产事件、游标停在起点')
+      'feed 失败时记 error、不产事件、读取位置停在起点')
 
-    // ⑨ 回填窗口：显式配置时才处理"启动前刚发布"的那一段
     clock = T0
     const f5 = fakeFetch({
       [FEED]: () => atom([entry(30, new Date(T0 - 2 * 60 * 1000).toISOString()), entry(31, new Date(T0 - 60 * 60 * 1000).toISOString())]),
@@ -1629,10 +1554,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(r9.added === 1 && p7.snapshot(0).entries[0].id === 'detail-30',
       'backfillMs 窗口内的 entry 仍处理，窗口外的（1 小时前）跳过')
 
-    // ⑪ 按需轮询：没人经 /feed 读取就不拉源（气象灾害关闭时 Client 不再拉 → Host 自然停下）
+    // ⑪ 按需轮询：没人经 /feed 读取就不拉源
     clock = T0
-    // entry 取"进程启动之前"的时间：这一节只验证按需轮询本身。
-    // 「启动之后发布的电文在冷启动时仍要处理」另有断言（见 0.3.2 的冷启动窗口一节）。
     const f6 = fakeFetch({ [FEED]: () => atom([entry(50, new Date(clock - 60 * 60 * 1000).toISOString())]) })
     const pIdle = createPoller({ feedUrl: FEED, fetchText: f6.fn, now: () => clock, idleMs: 10 * 60 * 1000 })
     const rIdle = await pIdle.pollOnce()
@@ -1645,20 +1568,18 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const rIdle2 = await pIdle.pollOnce()
     assert(rIdle2.skipped === true && pIdle.stats().idleSkips === 2, '超过 idleMs 无人读 → 再次跳过')
 
-    // ⑫ 启停：stop 后 snapshot 标记 frozen
     p7.start()
     assert(p7.snapshot(0).frozen === false, 'start 后状态为运行中')
     p7.stop()
     assert(p7.snapshot(0).frozen === true, 'stop 后 snapshot 标记 frozen')
 
-    // ⑬ 0.3.2：snapshot 的 tail / reset 语义（Client 游标生命周期的 Host 半边）
     let clock13 = T0
     const f13 = fakeFetch({ [FEED]: () => atom([entry(1, new Date(clock13).toISOString())]), 'detail-1': '<Report/>' })
     const p8 = createPoller({ feedUrl: FEED, fetchText: f13.fn, now: () => clock13, backfillMs: 60 * 60 * 1000, idleMs: 0 })
     await p8.pollOnce()
     assert(p8.snapshot(0).entries.length === 1, '（前置）缓冲里已有 1 条')
     const base8 = p8.snapshot(0).cursor
-    assert(base8 > 0 && base8 >= T0, '游标以时间戳为起点（跨进程单调，Host 重启后不会与旧游标撞车）')
+    assert(base8 > 0 && base8 >= T0, '读取位置以时间戳为起点（跨进程单调，Host 重启后不会与旧位置撞车）')
     const tailSnap = p8.snapshot(0, { tail: true })
     assert(tailSnap.tail === true && tailSnap.entries.length === 0 && tailSnap.cursor === base8,
       'snapshot(tail) 只回当前位置、不回任何条目')
@@ -1666,11 +1587,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(resetSnap.reset === true && resetSnap.entries.length === 1,
       'since > cursor（时钟回拨等异常）→ reset 且按 0 补齐缓冲')
     assert(p8.snapshot(base8).reset === false && p8.snapshot(0).tail === false,
-      'reset 只在游标倒退时为真，普通请求不带 reset / tail 标记')
+      'reset 只在读取位置倒退时为真，普通请求不带 reset / tail 标记')
     assert(p8.snapshot(0).truncated === false && resetSnap.truncated === false,
       '没发生过淘汰时不报 truncated（seq 从时间戳起算，不能拿 seq 连续编号的假设去比）')
 
-    // ⑭ 真淘汰：maxEntries=2 却拉到 3 条 → 缺口要被报出来
     let clock14 = T0
     const feed14 = () => atom([1, 2, 3].map((n) => entry(n, new Date(clock14 + n * 1000).toISOString())))
     const f14 = fakeFetch({ [FEED]: feed14, 'detail-1': '<Report/>', 'detail-2': '<Report/>', 'detail-3': '<Report/>' })
@@ -1678,12 +1598,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     await p9.pollOnce()
     const base9 = p9.snapshot(0).cursor - 2
     assert(p9.snapshot(0).entries.length === 2 && p9.snapshot(0).truncated === true,
-      '环缓冲淘汰后 truncated 仍能正确报出（dropped > 0 且 from 落在缺口里）')
+      '缓冲淘汰旧条目后 truncated 仍能正确报出（dropped > 0 且 from 落在缺口里）')
     assert(p9.snapshot(base9 + 2).truncated === false, '从缺口之后取值不再报 truncated')
 
-    // ⑮ 0.3.2：冷启动只丢「进程启动之前」的历史，启动之后发布的照常处理。
-    //     真正的冷启动发生在 Host 启动约 1 分钟后（首轮被按需轮询 skip，要等 Client 首次读 /feed），
-    //     旧实现把那一轮看到的一切都当历史 → 启动后新发布的真实警报被永久记为已见。
+    // ⑮ 首次启动只丢「进程启动之前」的历史：真正的首次启动发生在 Host 启动约 1 分钟后（首轮被按需轮询 skip）。
     const f15 = fakeFetch({
       [FEED]: () => atom([
         entry(60, new Date(T0 - 60 * 60 * 1000).toISOString()),
@@ -1694,11 +1612,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const p15 = createPoller({ feedUrl: FEED, fetchText: f15.fn, now: () => T0 + 90 * 1000, startedAt: T0 })
     const r15 = await p15.pollOnce()
     assert(r15.added === 1 && p15.snapshot(0).entries[0].id === 'detail-61',
-      '冷启动：进程启动之后发布的电文照常处理（旧实现会当历史永久丢掉）')
-    assert(f15.calls.indexOf('detail-60') === -1, '冷启动：启动之前的历史仍然只记已见、不拉详情')
+      '首次启动：进程启动之后发布的电文照常处理（旧实现会当历史永久丢掉）')
+    assert(f15.calls.indexOf('detail-60') === -1, '首次启动：启动之前的历史仍然只记已见、不拉详情')
 
-    // ⑮' 时钟容差：启动前 1 分钟发布的仍在窗口内（避免启动瞬间的边界丢失），
-    //     启动前 10 分钟的历史仍然跳过（不刷屏）
+    // ⑮' 时钟容差：启动前 1 分钟发布的仍在窗口内，启动前 10 分钟的历史仍跳过
     const f15b = fakeFetch({ [FEED]: () => atom([entry(62, new Date(T0 - 60 * 1000).toISOString())]), 'detail-62': '<Report/>' })
     const p15b = createPoller({ feedUrl: FEED, fetchText: f15b.fn, now: () => T0, startedAt: T0 })
     assert((await p15b.pollOnce()).added === 1, '启动前 1 分钟发布的电文仍在容差内 → 处理')
@@ -1706,7 +1623,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const p15c = createPoller({ feedUrl: FEED, fetchText: f15c.fn, now: () => T0, startedAt: T0 })
     assert((await p15c.pollOnce()).added === 0, '启动前 10 分钟的历史仍然跳过（容差没有放大成刷屏）')
 
-    // ⑯ 0.3.2：默认抓取实现的超时信号与响应体上限
+    // ⑯ 默认抓取实现的超时信号与响应体上限
     const realFetch = globalThis.fetch
     let seenInit = null
     globalThis.fetch = async (url, init) => {
@@ -1726,8 +1643,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       try { await ft2('https://example.test/bad') } catch (e) { msg2 = e.message }
       assert(msg2.indexOf('503') !== -1, '非 2xx 仍然抛错（原有行为不变）')
 
-      // 0.9.4（C7②）：content-length 说的是**压缩前**的长度，而 fetch 交给我们的是解压后的正文
-      // ——几 KB 的 gzip 炸弹能解出几百 MB。改为按 body 流读取、边读边计数、超限即 cancel。
+      // content-length 说的是**压缩前**的长度，而 fetch 交给我们的是解压后的正文：按 body 流读取、
+      // 边读边计数、超限即 cancel。
       const enc = new globalThis.TextEncoder()
       const streamRes = (chunks) => ({
         ok: true, status: 200, headers: { get: () => null },
@@ -1746,8 +1663,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert((await ftStreamOk('https://example.test/stream-ok')) === 'héllo',
         '流式读取正确解码（多字节字符跨块不被打断）')
 
-      // 0.9.4：外部中止信号与超时信号**两个都要带上**——漏掉超时则对端挂起能拖停整条轮询，
-      // 漏掉外部则 stop() 形同虚设。AbortSignal.any 不可用时优先保外部信号（其调用方是 stop()）。
+      // 外部中止信号与超时信号两个都要带上——漏掉超时则对端挂起能拖停整条轮询，漏掉外部则 stop() 形同虚设。
       const ftExt = createFetchText({ timeoutMs: 1234 })
       const acExt = new globalThis.AbortController()
       globalThis.fetch = async (url, init) => { seenInit = init; return { ok: true, status: 200, text: async () => 'ok' } }
@@ -1771,19 +1687,18 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, 'Host 轮询器验证失败：' + e.message)
   }
 
-  console.log('== 0.4.0：Host 侧全球源（USGS 单级 / NOAA 两级）==')
+console.log('== Host 侧全球源（USGS 单级 / NOAA 两级）==')
   try {
     const pollerMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'poller.js')).href)
     const gs = await import(pathToFileURL(path.join(ROOT, 'lib', 'global-sources.js')).href)
     const { createPoller } = pollerMod
     const { parseUsgsEntries, parseNoaaEntries, USGS_FEED_URL, NOAA_FEED_URL } = gs
 
-    // ① USGS：GeoJSON → entry（单级，entry 自带 payload）
     const usgsText = fs.readFileSync(path.join(ROOT, 'samples', 'global', 'usgs-all-hour.geojson'), 'utf8')
     const usgsEntries = parseUsgsEntries(usgsText)
     assert(usgsEntries.length >= 3, 'USGS feed → 解析出 ' + usgsEntries.length + ' 条 entry')
     assert(usgsEntries.every((e) => e.id && e.payload && e.updated), 'USGS entry 自带 id / payload / updated')
-    // 0.4.1：结构不符必须**抛错**（由 poller 计入 errors），不能与"没有数据"同形
+    // 结构不符必须抛错（由 poller 计入 errors），不能与「没有数据」同形
     let usgsThrew = 0
     try { parseUsgsEntries('not json') } catch (err) { usgsThrew += 1 }
     try { parseUsgsEntries('{}') } catch (err) { usgsThrew += 1 }
@@ -1802,11 +1717,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     await pUsgs.pollOnce()
     assert(callsU.length === 1, 'USGS 单级源只请求 1 次（不拉详情）')
     const snapU = pUsgs.snapshot(0)
-    assert(snapU.entries.length === usgsEntries.length, 'USGS 条目全部进入环缓冲')
+    assert(snapU.entries.length === usgsEntries.length, 'USGS 条目全部进入缓冲')
     assert(snapU.entries[0].xml.indexOf('"mag"') !== -1, 'USGS 缓冲里存的是 feature 的 JSON 正文')
     assert(pUsgs.stats().detailsFetched === 0, 'USGS 不增加详情抓取计数')
 
-    // ② NOAA：Atom → entry（详情 URL 在 link 里，不是 urn:uuid 形式的 id）
     const noaaText = fs.readFileSync(path.join(ROOT, 'samples', 'global', 'noaa-pheb-atom.xml'), 'utf8')
     const noaaEntries = parseNoaaEntries(noaaText)
     assert(noaaEntries.length === 1, 'NOAA 事件列表 → 1 条 entry')
@@ -1829,9 +1743,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(pNoaa.snapshot(0).entries[0].xml === '<alert>cap</alert>', 'NOAA 缓冲里存的是 CAP 原文')
     assert(NOAA_FEED_URL.indexOf('tsunami.gov') !== -1, 'NOAA feed 常量指向 tsunami.gov')
 
-    // ③ 多源并存：各源独立缓冲，互不影响（一个源被限流不能拖住另一个）
     assert(pUsgs.snapshot(0).entries.length !== pNoaa.snapshot(0).entries.length ||
-      pUsgs.snapshot(0).cursor !== pNoaa.snapshot(0).cursor, '两个源的缓冲 / 游标互相独立')
+      pUsgs.snapshot(0).cursor !== pNoaa.snapshot(0).cursor, '两个源的缓冲 / 读取位置互相独立')
     const hostMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
     assert(hostMod.FEED_PATH === '/dsh-quake-alert/feed', 'FEED_PATH 未变（旧版 Client 不带 source 参数仍可用）')
     assert(typeof hostMod.apply === 'function', 'lib/index.js 仍导出 apply')
@@ -1839,12 +1752,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, 'Host 全球源验证失败：' + err.message)
   }
 
-  console.log('== 0.4.0：/feed 多源分派（不触网）==')
+console.log('== /feed 多源分派（不触网）==')
   try {
     const hostMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
     const routes = []
-    // 假 ctx：顶层 effect（poller.start）**故意不执行**，否则轮询器会在测试里真的发外部请求；
-    // webServer 的 effect 必须执行，路由才注册得上。
+    // 假 ctx：顶层 effect（poller.start）故意不执行，否则会在测试里真的发外部请求；webServer 的 effect 必须执行。
     const fakeCtx = {
       effect() { return () => {} },
       inject(names, cb) {
@@ -1870,16 +1782,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(call('?since=tail').tail === true, 'since=tail → 只对齐位置、不回历史')
     assert(call('?source=usgs&since=tail').source === 'usgs', '?source=usgs 分派到 USGS 轮询器')
     assert(call('?source=noaa&since=tail').source === 'noaa', '?source=noaa 分派到 NOAA 轮询器')
-    // 0.4.1：显式给了认不出的 source 必须 400，而不是静默退回 jma——静默兜底会让 Client
-    // 拿到另一个源的原文去解析（必然失败）却照样推进游标，条目被永久跳过而表面一切正常。
+    // 认不出的 source 必须 400：静默退回 jma 会让 Client 拿另一个源的原文去解析却照样推进读取位置，条目被永久跳过。
     const badProto = callRaw('?source=constructor&since=tail')
     assert(badProto.status === 400 && badProto.body.error === 'unknown source',
       '原型链键（constructor）不再命中原型链，直接 400（不是 TypeError、也不再静默兜底）')
     const badUnknown = callRaw('?source=%3BDROP&since=tail')
     assert(badUnknown.status === 400, '未知 source → 400，不再静默退回 jma')
     assert(call('?source=%20noaa%20&since=tail').source === 'noaa', 'source 两侧空白被裁剪（" noaa " 仍可识别）')
-    // 0.4.1：跨站 GET 会被拒绝。/feed 的 markRead 副作用不需要读响应就能触发，
-    // 任意网页一个 <img> 就能把三个源的按需轮询永久压住（对気象庁是封 IP 风险）。
+    // 跨站 GET 会被拒绝：/feed 的 markRead 副作用不读响应也能触发，任意网页一个 <img> 就能压住按需轮询。
     const crossSite = callRaw('?source=jma&since=tail', { 'sec-fetch-site': 'cross-site' })
     assert(crossSite.status === 403, '跨站请求（sec-fetch-site: cross-site）被拒')
     assert(callRaw('?source=jma&since=tail', { 'sec-fetch-site': 'same-origin' }).status === 200,
@@ -1896,7 +1806,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '/feed 分派验证失败：' + err.message)
   }
 
-  console.log('== 0.3.0-c：JMA 电文解析（泥石流 / 洪水 / 大雨 / 高潮）==')
+console.log('== JMA 电文解析（泥石流 / 洪水 / 大雨 / 高潮）==')
   try {
     const riverMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'river-areas.js')).href)
     const citiesMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cities.js')).href)
@@ -1905,7 +1815,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     t.setRiverAreas(riverMod.RIVER_AREAS)
     const jma = (n) => fs.readFileSync(path.join(ROOT, 'samples', n), 'utf8')
 
-    // ① 土砂災害警戒情報（VXWW50）：电文本身就是 L4 相当，区域全是市町村
     const w = t.parseJma(jma('jma-vxww50-landslide.xml'), { id: 'vxww50' })
     assert(w && w.kind === 'weather', 'VXWW50 → kind=weather')
     assert(w.level === 4, 'VXWW50 → 警戒レベル4（电文本身即 L4 相当）')
@@ -1915,18 +1824,13 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(w.regions.every((r) => r.pref === '福岡県' && r.city), 'VXWW50 → 全部归到福岡県的市町村（按 code 前两位判县）')
     assert(w.eventKey.indexOf('福岡県土砂災害警戒情報') !== -1, 'VXWW50 → 事件键取自 EventID')
 
-    // ② 指定河川洪水予報（VXKO）：区域是河川予報区域（12 位码），级别写在 Headline 主文里
     const f = t.parseJma(jma('jma-vxko-flood.xml'), { id: 'vxko' })
     assert(f && f.level === 2, 'VXKO → 从「警戒レベル２相当情報」读出级别')
     assert(f.kindLabel === '洪水预报', 'VXKO → 中文标签为洪水预报')
     assert(f.regions.length >= 1 && f.regions.some((r) => r.prefUnknown),
       'VXKO → 样本用占位码认不出归属时标记 prefUnknown（放行而不是漏报）')
 
-    // ②' 0.9.4（P1-8）：**一条电文的所有区域都不认识**时，不许既不播报也不留痕
-    //     一份只读审查报告断言这种情况"从界面上与当时没有预警完全同形"。实测**不成立**：
-    //     regions 为空时 matchAlert 返回 hit:false + 原因，handleAlert 的 !m.hit 分支仍会写历史
-    //     （11-pipeline 的 pushEvent），条目上带着「（未命中：本条电文未携带可判定的区域）」。
-    //     这条断言就是为了把"留痕"钉住——将来谁把这行改成直接 return，用户就真的看不见了。
+    //     regions 为空时 matchAlert 返回 hit:false + 原因，主链仍会写一条带「未命中」说明的历史。
     {
       const allUnknown = jma('jma-vxko-flood.xml').replace(/codeType="[^"]*"/g, 'codeType="水位観測所"')
       const u = t.parseJma(allUnknown, { id: 'unknown-areas' })
@@ -1943,7 +1847,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         'regions 全空时仍进历史（"区域一个都不认识"不能让用户以为当时没有预警）')
     }
 
-    // ③ 新体系分灾种电文（Ｒ０６）：级别写在 <Kind><Name> 里
     const s = t.parseJma(jma('jma-vpww56-landslide.xml'), { id: 'vpww56' })
     assert(s && s.level === 4 && s.kindLabel === '泥石流警报', 'VPWW56（土砂）→ L4 / 泥石流警报')
     const hr = t.parseJma(jma('jma-vpww55-heavyrain.xml'), { id: 'vpww55' })
@@ -1953,13 +1856,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(s.regions.some((r) => r.pref === '北海道'), '细分区域（宗谷北部）按 code 前两位归到北海道')
     assert(s.regions.every((r) => r.pref), 'VPWW56 → 没有 prefUnknown（细分区全部识别）')
 
-    // ④ 与预警无关的电文（天气预报等）不进主链
     const nothing = t.parseJma('<?xml version="1.0"?><Report><Control><Title>府県天気予報</Title></Control>' +
       '<Head><Title>東京都府県天気予報</Title></Head><Body><Item><Kind><Name>天気概況</Name><Code>1</Code></Kind>' +
       '<Area><Name>東京地方</Name><Code>130010</Code></Area></Item></Body></Report>', { id: 'x' })
     assert(nothing === null, '无警戒级别的电文（天气预报）→ null')
 
-    // ⑤ 解除电文复用既有的取消 / 解除链路
     const cancelXml = '<?xml version="1.0"?><Report><Control><Title>土砂災害警戒情報</Title></Control>' +
       '<Head><Title>福岡県土砂災害警戒情報</Title><EventID>福岡県土砂災害警戒情報</EventID>' +
       '<ReportDateTime>2026-09-11T10:00:00+09:00</ReportDateTime><Headline><Text>解除</Text>' +
@@ -1973,7 +1874,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, 'JMA 解析验证失败：' + e.message)
   }
 
-  console.log('== 0.3.4：旧格式 / 报知电文的级别识别（特別警報漏报修复）==')
+console.log('== 旧格式 / 报知电文的级别识别（特別警報漏报修复）==')
   try {
     const citiesMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cities.js')).href)
     const t = loadClient().__test
@@ -2001,8 +1902,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       '副本先后到达时只有第一条播报，其余按同事件重复只记历史')
 
     const cxl = t.parseJma(jma('jma-vpno50-tokyo-cancel-20260907.xml'), { id: 'https://x/20260907190104_0_VPNO50_130000.xml' })
-    // 0.9.4：这条电文的正文是「東京都の特別警報を警報に切り替えました。」——是**降级**不是解除：
-    // 特別警報结束，但警報（L4）仍然有效。按解除处理会在历史里写「已解除」，事实相反。
+    // 这条电文的正文是「…を警報に切り替えました。」——是**降级**不是解除：按解除处理会在历史里写「已解除」，事实相反。
     assert(cxl && cxl.cancelled === false && cxl.downgraded === true && cxl.level === 4,
       'VPNO50 的「特別警報 → 警報」切换 → 判为降级（L4 仍有效），不再当解除（DESIGN 11.9 #5）')
     assert(cxl.kindLabel.indexOf('降级') !== -1, '降级报知 → 标签如实写「降级」而不是「已解除」')
@@ -2025,7 +1925,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '旧格式电文解析验证失败：' + e.message)
   }
 
-  console.log('== 0.3.0-c：气象警报的匹配与播报边界（L4 起）==')
+console.log('== 气象警报的匹配与播报边界（L4 起）==')
   try {
     const riverMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'river-areas.js')).href)
     const citiesMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cities.js')).href)
@@ -2060,7 +1960,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '气象警报匹配验证失败：' + e.message)
   }
 
-  console.log('== 0.4.0：全球源的坐标匹配（震中距 + 震级阈值）==')
+console.log('== 全球源的坐标匹配（震中距 + 震级阈值）==')
   try {
     const t = loadClient().__test
     const cfgWith = (places, mag) => ({
@@ -2071,15 +1971,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     })
     const tokyo = { name: '东京', lat: 35.6812, lon: 139.7671, radiusKm: 300 }
 
-    // ① Haversine：用已知城市对校验量级（东京—大阪约 400km，东京—札幌约 830km）
     const dOsaka = t.distanceKm(35.6812, 139.7671, 34.6937, 135.5023)
     assert(Math.abs(dOsaka - 400) < 25, '东京→大阪距离约 400km（实测 ' + Math.round(dOsaka) + 'km）')
     const dSapporo = t.distanceKm(35.6812, 139.7671, 43.0618, 141.3545)
     assert(Math.abs(dSapporo - 830) < 40, '东京→札幌距离约 830km（实测 ' + Math.round(dSapporo) + 'km）')
     assert(t.distanceKm(35.6812, 139.7671, 35.6812, 139.7671) === 0, '同点距离为 0')
 
-    // ② 坐标合法性：-200 是 P2PQuake/部分源表示「未知」的哨兵值，必须挡下
-    assert(t.validGeo({ lat: -200, lon: -200 }) === false, '哨兵坐标 -200 判为不可用')
+    // ② 坐标合法性：-200 是 P2PQuake/部分源表示「未知」的特殊标记值，必须挡下
+    assert(t.validGeo({ lat: -200, lon: -200 }) === false, '特殊标记坐标 -200 判为不可用')
     assert(t.validGeo({ lat: NaN, lon: 139 }) === false, 'NaN 判为不可用')
     assert(t.validGeo({ lat: 91, lon: 0 }) === false, '越界纬度判为不可用')
     assert(t.validGeo({ lat: 35.68, lon: 139.77 }) === true, '正常坐标判为可用')
@@ -2091,15 +1990,13 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       regions: [], eventKey: '', strength: mag, cancelled: false,
     })
 
-    // ③ 半径内命中 / 半径外不命中 / 震级不足
     const near = point(35.0, 140.0, 5.2) // 距东京约 90km
     const m1 = t.matchPointAlert(near, cfgWith([tokyo]))
     assert(m1.hit === true && m1.place.name === '东京' && m1.distanceKm < tokyo.radiusKm,
       '震中在关注点半径内 → 命中（距东京 ' + Math.round(m1.distanceKm) + 'km）')
     const far = point(43.0618, 141.3545, 6.0) // 札幌，距东京约 830km
     const m2 = t.matchPointAlert(far, cfgWith([tokyo]))
-    // 0.9.4：未命中原因改为按界面语言取词（reason.nearestWatch），所以断言改成查**结构化的事实**
-    // （距离数字与半径都在理由里），而不是钉一句中文散文——钉散文的断言在本地化之后必然假红。
+    // 未命中原因按界面语言取词（reason.nearestWatch），所以断言查**结构化的事实**（距离与半径），不钉中文散文。
     assert(m2.hit === false && /约 \d+ km/.test(m2.reason) && m2.reason.indexOf('东京') !== -1 &&
       m2.reason.indexOf(String(tokyo.radiusKm)) !== -1,
       '震中在半径外 → 不命中，理由里给出实际距离与半径：' + m2.reason)
@@ -2114,12 +2011,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const m5 = t.matchPointAlert(Object.assign({}, near, { geo: null }), cfgWith([tokyo]))
     assert(m5.hit === false && m5.reason.indexOf('未携带可用坐标') !== -1, '坐标缺失 → 不命中并说明原因')
 
-    // ⑤ 多关注点：任一命中即可，且报出最近的那个
     const osaka = { name: '大阪', lat: 34.6937, lon: 135.5023, radiusKm: 100 }
     const m6 = t.matchPointAlert(point(34.7, 135.5, 5.0), cfgWith([tokyo, osaka]))
     assert(m6.hit === true && m6.place.name === '大阪', '多个关注点时任一点命中即提醒')
 
-    // ⑥ matchAlert 应按 locator 分派：point 型走坐标，area 型仍走行政区
     const pointCfg = cfgWith([tokyo])
     assert(t.matchAlert(point(35.0, 140.0, 5.5), pointCfg).hit === true, 'matchAlert → point 型地震走坐标匹配')
     const quakeArea = loadClient().__test.parse(JSON.parse(fs.readFileSync(
@@ -2131,7 +2026,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     jpCfg.thresholds.quakeScale = 30 // 样本最大震度3；行政区模式的阈值是震度，与全球震级是两套旋钮
     assert(t.matchAlert(quakeArea, jpCfg).hit === true, 'matchAlert → 行政区模式仍然照旧工作（震度阈值那套）')
 
-    // ⑦ places 归一化：脏数据不能进配置，重复点合并，半径夹取，数量封顶
+    // ⑦ places 规整：格式不合法的数据不能进配置，重复点合并，半径夹取，数量封顶
     const dirty = [
       { name: '东京', lat: 35.6812, lon: 139.7671, radiusKm: 300 },
       { name: '重复的东京', lat: 35.6812, lon: 139.7671, radiusKm: 500 },
@@ -2141,7 +2036,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       { name: '', lat: 34.69, lon: 135.5, radiusKm: 99999 },
     ]
     const places = t.normalizePlaces(dirty)
-    assert(places.length === 2, '脏数据被过滤、重复点合并（7 项 → 2 项）')
+    assert(places.length === 2, '格式不合法的数据被过滤、重复点合并（7 项 → 2 项）')
     assert(places[0].name === '东京' && places[1].name === '34.69, 135.50', '缺名字时用坐标生成默认名')
     assert(places[1].radiusKm === 2000, '半径超上限被夹到 2000km')
     assert(t.normalizePlaces(new Array(30).fill(0).map((_, i) => ({ lat: i, lon: 0, radiusKm: 100 }))).length === 20,
@@ -2150,12 +2045,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '坐标匹配验证失败：' + e.message)
   }
 
-  console.log('== 0.4.0：全球源解析（EMSC / USGS / NOAA CAP）==')
+console.log('== 全球源解析（EMSC / USGS / NOAA CAP）==')
   try {
     const t = loadClient().__test
     const gf = (n) => fs.readFileSync(path.join(ROOT, 'samples', 'global', n), 'utf8')
 
-    // ① EMSC：顶层 { action, data }，data 是 GeoJSON **Feature**（不是 FeatureCollection）
     const e = t.parseEmsc(JSON.parse(gf('emsc-ws-sample.json')))
     assert(e && e.kind === 'quake' && e.source === 'emsc' && e.locator === 'point', 'EMSC → 坐标型地震 Alert')
     assert(e.geo.lat === 37.9921 && e.geo.lon === 22.2789, 'EMSC → 从 properties.lat/lon 取到震中')
@@ -2166,9 +2060,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.parseEmsc({ action: 'delete' }) === null, 'EMSC → 没有 data 的消息返回 null')
     assert(t.parseEmsc(null) === null && t.parseEmsc('x') === null, 'EMSC → 脏输入不抛错')
 
-    // ② USGS：FeatureCollection，geometry.coordinates = [经度, 纬度, 深度km]
-    // 0.9.4（P3-42）：整文件映射器已删（生产路径是 Host 逐条给原文、Client 逐条 parseUsgsFeature）。
-    // 覆盖不变：这里自己 map 真实样本的每个 feature。
+    // ② USGS：FeatureCollection，geometry.coordinates = [经度, 纬度, 深度km]；生产路径是逐条 parseUsgsFeature。
     const usFeed = JSON.parse(gf('usgs-all-hour.geojson'))
     const us = usFeed.features.map(t.parseUsgsFeature).filter(Boolean)
     assert(us.length >= 3 && us.length === usFeed.features.length,
@@ -2179,7 +2071,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       'USGS → 经纬度没写反（coordinates 顺序是 lon,lat）')
     assert(u0.issued.indexOf('T') !== -1 && u0.issued.indexOf('Z') !== -1, 'USGS → epoch 毫秒已转成 ISO 字符串')
     assert(us.every((a) => a.regions.length === 0), 'USGS → 全部没有行政区区域')
-    // 0.9.4（P3-30）：缺坐标不再造"看起来有效"的事件对象
+    // 缺坐标不造「看起来有效」的事件对象
     assert(t.parseUsgsFeature(null) === null && t.parseUsgsFeature([]) === null, 'USGS → 脏输入返回 null')
     assert(t.parseUsgsFeature({ properties: { mag: 5 } }) === null,
       'USGS → 有 properties 但**没有 geometry** → null（此前会产出 geo:{lat:null,lon:null} 与 id:"usgs:null,null,…"）')
@@ -2198,7 +2090,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const usgsTwin = t.parseUsgsFeature({ id: 'x', geometry: { coordinates: [22.28, 37.99, 10] }, properties: { mag: 3.4, time: Date.parse(sameTime) } })
     assert(emscTwin.eventKey === usgsTwin.eventKey, 'EMSC 与 USGS 对同一场地震给出同一个事件键（跨源归并）')
 
-    // ③ NOAA CAP：海啸；位置在 area.circle（"纬,经 半径"），震级在 parameter 里
     const n = t.parseNoaaCap(gf('noaa-pheb-cap.xml'), { id: 'e1' })
     assert(n && n.kind === 'tsunami' && n.source === 'noaa' && n.locator === 'point', 'NOAA CAP → 坐标型海啸 Alert')
     assert(n.cancelled === false, 'NOAA CAP → msgType=Alert 不是解除')
@@ -2215,7 +2106,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(nc.eventKey === 'noaa:PHEB-26234000', 'NOAA CAP → 解除与发布归并到同一个事件键（取消链路才找得到原事件）')
     assert(t.parseNoaaCap('not xml', {}) === null, 'NOAA CAP → 非 CAP 文本返回 null')
 
-    // ④ 端到端：全球源 Alert 走坐标匹配，震级阈值独立于日本的震度阈值
     const gcfg = {
       watch: { prefectures: [], cities: [], places: [{ name: '雅典', lat: 37.98, lon: 23.73, radiusKm: 500 }] },
       disasters: { earthquake: true, tsunami: true, weather: true },
@@ -2228,8 +2118,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.matchAlert(e, strict).hit === false, '端到端：M3.3 低于默认全球阈值 M4.5 → 不打扰')
     const tsunamiCfg = JSON.parse(JSON.stringify(gcfg))
     tsunamiCfg.watch.places = [{ name: ' Scotia 海', lat: -60.48, lon: -47.19, radiusKm: 300 }]
-    // 0.4.1：NOAA 的「Tsunami Information」等级为 0，默认 tsunamiGrade=Watch(1) 之下不命中。
-    // 它是"没有破坏性海啸"的信息类电文，在半径内响铃会直接摧毁用户对整条链路的信任。
+    // NOAA 的「Tsunami Information」等级为 0，默认 tsunamiGrade=Watch(1) 之下不命中：半径内响铃会摧毁用户对整条链路的信任。
     assert(t.matchAlert(n, tsunamiCfg).hit === false, '端到端：NOAA「海啸信息」不再响铃（等级低于 tsunamiGrade）')
     const nAdv = t.parseNoaaCap(
       fs.readFileSync(path.join(ROOT, 'samples', 'global', 'noaa-pheb-cap.xml'), 'utf8')
@@ -2241,9 +2130,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '全球源解析验证失败：' + err.message)
   }
 
-  console.log('== 0.4.0：多源连接状态与全球链路装配 ==')
+console.log('== 多源连接状态与全球链路装配 ==')
   try {
-    // ① 多源状态聚合：任一源异常，整体就不该显示成"一切正常"
     const sockets = []
     class FakeWS {
       constructor(url) { this.url = url; sockets.push(this) }
@@ -2290,7 +2178,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     emsc.stop(); jp.stop()
     assert(t.store.status === 'closed', '所有源停止 → 聚合状态为 closed')
 
-    // ② 未配置全球关注点时，坐标型消息整条丢弃（连历史都不记）
     const t2 = loadClientEx({}, {}).exports.__test
     const emscAlert = t2.parseEmsc(JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'global', 'emsc-ws-sample.json'), 'utf8')))
     const noPlaces = {
@@ -2318,7 +2205,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '多源装配验证失败：' + err.message)
   }
 
-  console.log('== 0.4.0：全球链路的本地测试消息 + 海啸不受震级阈值限制 ==')
+console.log('== 全球链路的本地测试消息 + 海啸不受震级阈值限制 ==')
   try {
     const t = loadClient().__test
     const place = { name: '测试点', lat: 35.6812, lon: 139.7671, radiusKm: 300 }
@@ -2330,8 +2217,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     })
     assert(t.TEST_GEO_SCENARIOS.length === 4, '测试场景 4 个（覆盖 EMSC / USGS / NOAA 与"半径外"）')
 
-    // 每个场景都必须经**真实解析器**得到坐标型 Alert —— 这正是测试按钮的意义：
-    // 它走的是与线上完全相同的代码路径，而不是直接构造一个 Alert 绕开解析器。
+    // 每个场景都必须经**真实解析器**得到坐标型 Alert：测试按钮走的是与线上完全相同的代码路径。
     const srcs = []
     for (const sc of t.TEST_GEO_SCENARIOS) {
       const msg = t.buildTestGlobalMessage(place, 1700000000000, sc.key)
@@ -2355,16 +2241,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.matchAlert(farMsg, gcfg(4.5, 1500)).hit === true,
       '把半径调到 1500km → 同一条远地消息命中（证明是半径在起作用，不是消息无效）')
 
-    // 连点两次不会被去重吞掉，且**两次都会播报**——测试事件键必须每次不同，
-    // 否则第二次会被判成"同一场地震的重复发布"而静默，用户会以为按钮坏了。
+    // 连点两次都会被播报：测试事件键必须每次不同，否则第二次会被判成「同一场地震的重复发布」而静默。
     const g1 = t.parseTestGlobalMessage(t.buildTestGlobalMessage(place, 1700000000010, 'emsc'))
     const g2 = t.parseTestGlobalMessage(t.buildTestGlobalMessage(place, 1700000000011, 'emsc'))
     assert(g1.id !== g2.id && g1.eventKey !== g2.eventKey, '两次点击的 id 与事件键都不同（不会被去重吞掉）')
     assert(t.isEventRepeat(g1, 10) === false && t.isEventRepeat(g2, 10) === false,
       '连点两次都能播报（不会被事件级去重判成重复发布）')
 
-    // 海啸不受全球震级阈值限制（本次 0.4.0 修掉的隐患）：NOAA 电文里的前震震级只是参考值，
-    // 用同一个阈值卡海啸，会让"把全球阈值调到 M9 的用户"连海啸警报一起静默掉。
+    // 海啸不受全球震级阈值限制：NOAA 电文里的前震震级只是参考值。
     const noaaTest = t.parseTestGlobalMessage(t.buildTestGlobalMessage(place, 1700000000003, 'noaa'))
     assert(t.matchAlert(noaaTest, gcfg(9)).hit === true, '海啸不受 globalMagnitude 限制（阈值 M9.0 时仍命中）')
     const quakeTest = t.parseTestGlobalMessage(t.buildTestGlobalMessage(place, 1700000000004, 'emsc'))
@@ -2372,8 +2256,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const realCap = t.parseNoaaCap(fs.readFileSync(path.join(ROOT, 'samples', 'global', 'noaa-pheb-cap.xml'), 'utf8'), { id: 'x' })
     const capCfg = gcfg(9)
     capCfg.watch.places = [{ name: 'Scotia', lat: -60.48, lon: -47.19, radiusKm: 300 }]
-    // 0.4.1：真实样本是「Tsunami Information」→ 等级 0，默认 tsunamiGrade=Watch 之下不响铃。
-    // 「海啸不受震级阈值限制」这一点改由同一份 CAP 的 Advisory 版本验证（震级阈值仍为 M9.0）。
     assert(realCap.tsunamiRank === 0, 'NOAA Information → tsunamiRank=0（与日本 TSUNAMI_RANK 同一把尺）')
     assert(t.matchAlert(realCap, capCfg).hit === false, 'NOAA「海啸信息」不再命中（等级低于阈值）')
     const capAdv = t.parseNoaaCap(
@@ -2381,10 +2263,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         .replace('<event>Tsunami Information</event>', '<event>Tsunami Advisory</event>'),
       { id: 'adv' })
     assert(t.matchAlert(capAdv, capCfg).hit === true, '同一份 CAP 改成 Advisory → 在 M9.0 阈值下仍命中（海啸不受震级限制）')
-    // 0.9.2：**标签必须与档位同口径**。Advisory / Watch 的等级是 2（警报档），标签曾写作「注意报」
-    // ——把阈值收紧到「警报及以上」的用户会在警报档收到一条显示为注意报的提醒，两边互相打脸。
-    // 这里把四种事件的「等级」（tsunamiRank / maxScale / strength 三处）与「标签里的档位词」
-    // 钉在一起，防止任一边单独漂走。
+    // 标签必须与档位同口径：Advisory / Watch 的等级是 2（警报档），标签若写作「注意报」，
+    // 把阈值收紧到警报档的用户会收到一条显示为注意报的提醒。
     {
       const capSrc = fs.readFileSync(path.join(ROOT, 'samples', 'global', 'noaa-pheb-cap.xml'), 'utf8')
       const cases = [
@@ -2400,16 +2280,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         assert(one && one.kindLabel.indexOf(word) === 0,
           ev + ' 的标签以「' + word + '」开头，与档位同口径（实际：' + (one && one.kindLabel) + '）')
       }
-      // 0.9.4（P2-11）：event 名改为**整串锚定**匹配。子串匹配会把下面这些抬到最高档（3）
-      // 并通过等级闸门 —— 而海啸的误报会让用户按"大海啸"行动。
+      // event 名必须**整串锚定**匹配：子串匹配会把下面这些抬到最高档（3）、并越过等级门槛。
       const notWarning = t.parseNoaaCap(capSrc.replace(/<event>[^<]*<\/event>/, '<event>Not a Tsunami Warning</event>'), { id: 'not' })
       assert(notWarning && notWarning.tsunamiRank === 0 && notWarning.kindLabel.indexOf('未识别') !== -1,
         '"Not a Tsunami Warning" 不再被抬成大海啸警报（子串匹配的误报方向）')
       const cancelWorded = t.parseNoaaCap(capSrc.replace(/<event>[^<]*<\/event>/, '<event>Tsunami Warning Cancellation</event>'), { id: 'cx' })
       assert(cancelWorded && cancelWorded.tsunamiRank === 0,
         '"Tsunami Warning Cancellation" 不再被抬成大海啸警报（作废电文按最高档提示是反的）')
-      // 未识别的 event 名：等级仍是 0（不会响铃），但标签**如实**带出原始 event 名，
-      // 而不是冒充"海啸信息"——上游加了新事件名这件事必须看得见。
+      // 未识别的 event 名：等级仍是 0（不响铃），但标签**如实**带出原始 event 名。
       const unknownEv = t.parseNoaaCap(capSrc.replace(/<event>[^<]*<\/event>/, '<event>Tsunami Threat Message</event>'), { id: 'unk' })
       assert(unknownEv && unknownEv.tsunamiRank === 0 && unknownEv.kindLabel.indexOf('Tsunami Threat Message') !== -1,
         '未识别的 event 名如实出现在标签里：' + (unknownEv && unknownEv.kindLabel))
@@ -2420,11 +2298,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '全球测试消息验证失败：' + err.message)
   }
 
-  console.log('== 0.3.0-c：Client 电文增量拉取（游标 / 容错 / 开关）==')
+console.log('== Client 电文增量拉取（读取位置 / 容错 / 开关）==')
   try {
     const t = loadClient().__test
-    // 显式注入游标存取：0.3.2 起游标会落盘，若用默认实现，c1 写进沙箱 localStorage 的值会串到
-    // c2/c3，使它们的初始游标不再是 0 —— 用例之间不该通过存储隐式耦合。
+    // 显式注入读取位置存取：读取位置会写入本地存储，用默认实现会让 c1 写进沙箱的值串到 c2/c3。
     const noStore = { loadCursor: () => 0, saveCursor: () => {} }
     const calls = []
     let payload = { cursor: 0, entries: [] }
@@ -2437,10 +2314,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     payload = { cursor: 2, entries: [{ id: 'e1' }, { id: 'e2' }] }
     const r1 = await c1.pollOnce()
     assert(r1.applied === 2 && seen.join() === 'e1,e2', '增量按序应用')
-    assert(c1.cursor() === 2, '游标推进到 Host 返回值')
+    assert(c1.cursor() === 2, '读取位置推进到 Host 返回值')
     payload = { cursor: 3, entries: [{ id: 'e3' }], truncated: true }
     await c1.pollOnce()
-    assert(calls[1].indexOf('since=2') !== -1, '后续请求带上游标（?since=2）')
+    assert(calls[1].indexOf('since=2') !== -1, '后续请求带上读取位置（?since=2）')
     assert(c1.stats().truncated === 1, 'truncated 如实计数（有缺口仍继续前进）')
 
     // Host 不可达：记 error、不抛
@@ -2454,9 +2331,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     fail = false
     await c2.pollOnce()
     assert(c2.stats().errors === 1, '恢复后错误计数不再增长（errors=' + c2.stats().errors + '）')
-    assert(c2.cursor() === 1, '恢复后游标推进到 Host 返回值（cursor=' + c2.cursor() + '）')
+    assert(c2.cursor() === 1, '恢复后读取位置推进到 Host 返回值（cursor=' + c2.cursor() + '）')
 
-    // 单条失败不影响其余条目与游标
+    // 单条失败不影响其余条目与读取位置
     const applied = []
     const c3 = t.createFeedClient(Object.assign({
       fetchJson: async () => ({ cursor: 3, entries: [{ id: 'ok' }, { id: 'bad' }, { id: 'ok2' }] }),
@@ -2465,7 +2342,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     }, noStore))
     const r3 = await c3.pollOnce()
     assert(r3.applied === 2 && applied.join() === 'ok,ok2', '单条失败不影响其余条目')
-    assert(c3.cursor() === 3 && c3.stats().errors === 1, '单条失败不阻断游标前进')
+    assert(c3.cursor() === 3 && c3.stats().errors === 1, '单条失败不阻断读取位置前进')
 
     // 气象灾害关闭时不发起本地拉取
     let fetched = 0
@@ -2482,11 +2359,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, 'Client 增量拉取验证失败：' + e.message)
   }
 
-  console.log('== 0.3.2：feed 游标持久化（P2）与 Host 重启恢复（P3）==')
+console.log('== feed 读取位置持久化与 Host 重启恢复 ==')
   try {
     const t = loadClient().__test
 
-    // ① 首次启动（本地没有游标）→ 用 tail 对齐位置，不把 Host 缓冲里的历史当新闻重放
     const firstUrls = []
     const firstSaved = []
     let appliedFirst = 0
@@ -2497,12 +2373,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       getCfg: () => ({ disasters: { weather: true } }),
     })
     const r1 = await c1.pollOnce()
-    assert(firstUrls[0].indexOf('since=tail') !== -1, '首次启动（无游标）→ 请求 since=tail')
+    assert(firstUrls[0].indexOf('since=tail') !== -1, '首次启动（没有读到的位置）→ 请求 since=tail')
     assert(appliedFirst === 0 && r1.applied === 0 && r1.tail === true, 'tail 响应不应用任何条目（响应里带了也不应用）')
-    assert(c1.cursor() === 7 && firstSaved.join() === '7', 'tail 对齐后立即持久化游标')
-    assert(c1.hasCursor() === true, 'tail 之后不再是"没有游标"状态')
+    assert(c1.cursor() === 7 && firstSaved.join() === '7', 'tail 对齐后立即持久化读取位置')
+    assert(c1.hasCursor() === true, 'tail 之后不再是"没有读取位置"状态')
 
-    // ①' 旧版 Host（不认 since=tail）会把整个缓冲按 0 吐回来：只对齐游标，不重放
     const legacyApplied = []
     let legacyCursor = null
     const cLegacy = t.createFeedClient({
@@ -2513,9 +2388,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     })
     const rLegacy = await cLegacy.pollOnce()
     assert(legacyApplied.length === 0 && rLegacy.legacyHost === true && legacyCursor === 7,
-      '旧版 Host（响应没有 tail 标记）也不重放历史：只取游标对齐')
+      '旧版 Host（响应没有 tail 标记）也不重放历史：只取读取位置对齐')
 
-    // ② 有持久化游标（刷新 / 新标签页）→ 直接从该游标拉增量
     const secondUrls = []
     let appliedSecond = 0
     const c2 = t.createFeedClient({
@@ -2525,10 +2399,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       getCfg: () => ({ disasters: { weather: true } }),
     })
     await c2.pollOnce()
-    assert(secondUrls[0].indexOf('since=5') !== -1, '有持久化游标 → 首次请求直接带该游标（不重放）')
-    assert(appliedSecond === 1 && c2.cursor() === 9, '只应用游标之后的增量')
+    assert(secondUrls[0].indexOf('since=5') !== -1, '有持久化的读取位置 → 首次请求直接带上它（不重放）')
+    assert(appliedSecond === 1 && c2.cursor() === 9, '只应用读取位置之后的增量')
 
-    // ③ 端到端复现 P2：同一个"浏览器"里两次页面加载共享一个游标（模拟刷新）
     let shared = null
     const pageSeen = []
     const openPage = () => t.createFeedClient({
@@ -2546,10 +2419,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     await openPage().pollOnce() // 页面 A：首次加载
     await openPage().pollOnce() // 页面 B：模拟刷新后的第二次加载
     assert(pageSeen.length === 0, '刷新页面不重放 Host 缓冲里的历史（P2：修复前会重放并再次响铃）')
-    assert(shared === 12, '两次加载后游标仍是 12（没有因为重放而前进）')
+    assert(shared === 12, '两次加载后读取位置仍是 12（没有因为重放而前进）')
 
-    // ③' Host 截断（more）：游标必须停在「最后一条实际返回的 seq」，不能直接跳到 cursor，
-    //     否则被截断掉的条目会被静默跳过
+    // ③' Host 截断（more）：读取位置必须停在最后一条实际返回的 seq，否则被截断的条目会被静默跳过。
     const moreUrls = []
     const moreSaved = []
     const cMore = t.createFeedClient({
@@ -2567,12 +2439,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     })
     const rMore = await cMore.pollOnce()
     assert(cMore.cursor() === 4 && rMore.more === true,
-      'Host 截断（more）→ 游标停在最后一条的 seq（不跳过没拿到的条目）')
+      'Host 截断（more）→ 读取位置停在最后一条的 seq（不跳过没拿到的条目）')
     await cMore.pollOnce()
     assert(moreUrls[1].indexOf('since=4') !== -1 && cMore.cursor() === 12,
       '下一轮从截断处继续，最终追平 cursor')
 
-    // ④ P3：Host 重启 → 游标回退 → 本轮补齐缓冲并对齐
     const p3Applied = []
     const p3Saved = []
     const c3 = t.createFeedClient({
@@ -2583,10 +2454,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     })
     const r3 = await c3.pollOnce()
     assert(p3Applied.join() === 'a,b', 'Host 重启（reset）→ 本轮应用缓冲里的条目')
-    assert(c3.cursor() === 2 && p3Saved.join() === '2', 'reset 后游标对齐到 Host 当前值并持久化')
+    assert(c3.cursor() === 2 && p3Saved.join() === '2', 'reset 后读取位置对齐到 Host 当前值并持久化')
     assert(r3.reset === true && c3.stats().resets === 1, 'reset 如实计数（诊断可见）')
 
-    // ⑤ 兜底：Host 没带 reset 标记但游标明显回退 → 同样自愈，不静默失联
     const c4 = t.createFeedClient({
       fetchJson: async () => ({ cursor: 1, entries: [] }),
       apply: () => true,
@@ -2594,9 +2464,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       getCfg: () => ({ disasters: { weather: true } }),
     })
     const r4 = await c4.pollOnce()
-    assert(r4.reset === true && c4.cursor() === 1, 'Host 未标记 reset 但游标回退 → 仍然自愈')
+    assert(r4.reset === true && c4.cursor() === 1, 'Host 未标记 reset 但读取位置回退 → 仍然自愈')
 
-    // ⑥ 脏游标（字符串 / 负数 / null / 对象 / 数组）→ 当作无记录，用 tail（既不重放也不卡死）
     for (const dirty of ['abc', -5, null, undefined, {}, []]) {
       const dirtyUrls = []
       const c5 = loadClientEx({ 'dsh.quakeAlert.feedCursor': JSON.stringify(dirty) }).exports.__test.createFeedClient({
@@ -2605,10 +2474,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         getCfg: () => ({ disasters: { weather: true } }),
       })
       await c5.pollOnce()
-      assert(dirtyUrls[0].indexOf('since=tail') !== -1, '脏游标 ' + JSON.stringify(dirty) + ' → 当作无记录，用 tail')
+      assert(dirtyUrls[0].indexOf('since=tail') !== -1, '格式不合法的读取位置 ' + JSON.stringify(dirty) + ' → 当作无记录，用 tail')
     }
 
-    // ⑦ 真实落盘：用默认的 loadCursor / saveCursor 走一遍 localStorage
     const s7 = loadClientEx()
     const c6 = s7.exports.__test.createFeedClient({
       fetchJson: async () => ({ cursor: 4, entries: [], tail: true }),
@@ -2616,7 +2484,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       getCfg: () => ({ disasters: { weather: true } }),
     })
     await c6.pollOnce()
-    assert(s7.storage.get(t.FEED_CURSOR_KEY) === '4', '游标真实写入 localStorage（键 ' + t.FEED_CURSOR_KEY + '）')
+    assert(s7.storage.get(t.FEED_CURSOR_KEY) === '4', '读取位置真实写入 localStorage（键 ' + t.FEED_CURSOR_KEY + '）')
 
     const s8 = loadClientEx({ [t.FEED_CURSOR_KEY]: 4 })
     const reloadUrls = []
@@ -2626,16 +2494,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       getCfg: () => ({ disasters: { weather: true } }),
     })
     await c7.pollOnce()
-    assert(reloadUrls[0].indexOf('since=4') !== -1, '重新加载后从 localStorage 读回游标（刷新不重放）')
+    assert(reloadUrls[0].indexOf('since=4') !== -1, '重新加载后从 localStorage 读回读取位置（刷新不重放）')
   } catch (e) {
-    assert(false, 'feed 游标持久化验证失败：' + e.message)
+    assert(false, 'feed 读取位置持久化验证失败：' + e.message)
   }
 
-  console.log('== 0.9.4：本地请求超时不能被丢掉（P1-3）==')
+console.log('== 本地请求超时不能被丢掉 ==')
   try {
-    // 有 AbortSignal.timeout 却没有 AbortSignal.any 的浏览器（Chrome 103-115 / Firefox 100-123）：
-    // 旧代码 `else if (signal) sig = signal` 会把**超时整个丢掉**，只剩"停用插件才 abort"的业务信号。
-    // 挂死的本地请求让 inFlight 永不 settle，而 schedule() 在 await 之后才重排 —— 四源一起永久停摆。
+    // 有 AbortSignal.timeout 却没有 AbortSignal.any 的浏览器：超时信号不能被丢掉，否则挂死的请求会让四源一起永久停摆。
     const seenSignals = []
     const instances = []
     class RecorderAC extends AbortController { constructor() { super(); instances.push(this) } }
@@ -2676,14 +2542,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '0.9.4 本地请求超时验证失败：' + e.message)
   }
 
-  console.log('== 0.3.2：河川区域表端到端装配（P1）与地名假名归一（P4）==')
+console.log('== 河川区域表端到端装配与地名假名写法对齐 ==')
   try {
     const citiesMod2 = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cities.js')).href)
     const riverMod2 = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'river-areas.js')).href)
 
-    // ① 端到端装配：模拟真实 Client —— 只经 /areas 的响应装载两张表，**不手工 setRiverAreas**。
-    //    这正是此前缺失的一环：旧断言直接 import 数据表后调用 setRiverAreas，绕过了
-    //    "Host 是否真的把表发下来"这个唯一的断点，所以 P1 逃过了 346 项回归。
     const hostMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
     const routes2 = []
     hostMod.apply({
@@ -2715,7 +2578,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       '河川区域表随响应到位：目黒川 → ' + t2.riverAreaCities(meguro.code).join('/'))
     assert(t2.citiesOfPref('東京都').indexOf('目黒区') !== -1, '市区町村表同时到位（東京都含目黒区）')
 
-    // ①' 0.9.4（P2-18 / P2-19）：一次瞬时失败要能重试，且失败**看得见**
     {
       const calls = []
       let fail = true
@@ -2730,14 +2592,13 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       }).exports.__test
       const st1 = await tR.loadCityTable()
       assert(st1 === 'failed' && tR.cityTableState() === 'failed', '一次瞬时失败 → 状态 failed（不静默）')
-      // 0.9.4 之前唯一的调用点是插件装载时的 ctx.effect：这一次失败就让整场会话没有市町村表，
-      // 用户只能刷新页面。现在有重试入口。
+    // 装载时那一次失败会让整场会话没有市町村表，用户只能刷新页面；现在有重试入口。
       fail = false
       const st2 = await tR.retryCityTable()
       assert(st2 === 'ready' && calls.length === 2, '重试后装载成功（不必刷新页面）')
       assert(tR.citiesOfPref('東京都').indexOf('目黒区') !== -1, '重试成功后表真的可用')
 
-      // P2-19：cnAreas 缺失时状态要能区分"失败"与"加载中"（此前界面永远显示"正在加载…"）
+    // cnAreas 缺失时状态要能区分「失败」与「加载中」
       const tN = loadClientEx(undefined, {
         window: { fetch: async () => ({ ok: true, status: 200, json: async () => ({ prefectures: areasPayload.prefectures, riverAreas: areasPayload.riverAreas }) }) },
       }).exports.__test
@@ -2759,7 +2620,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '正常响应 → ready（' + tOk.cnProvinces().length + ' 个省级项）')
     }
 
-    // ② 两表名称一致性（P4 根因）：河川表里每个市町村都要能反查到市区町村表的规范写法
     const unresolved = []
     const seenCity = new Set()
     for (const a of riverMod2.RIVER_AREAS) {
@@ -2770,22 +2630,19 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       }
     }
     assert(unresolved.length === 0,
-      '河川表的 ' + seenCity.size + ' 个市町村全部可归一到市区町村表（未收录：' + unresolved.join('/') + '）')
+      '河川表的 ' + seenCity.size + ' 个市町村全部可统一到市区町村表（未收录：' + unresolved.join('/') + '）')
 
-    // ③ 假名归一（P4）：小写法（け/ゖ ↔ ケ/ヶ）与假名种类（あるぷす ↔ アルプス）都要等价
     assert(t2.normKana('金け崎町') === t2.normKana('金ケ崎町') && t2.normKana('金ケ崎町') === '金ヶ崎町',
-      'け / ケ / ヶ 归一到同一形式（金け崎町 ↔ 金ケ崎町）')
-    assert(t2.normKana('南あるぷす市') === t2.normKana('南アルプス市'), '平假名 ↔ 片假名归一（南あるぷす市 ↔ 南アルプス市）')
+      'け / ケ / ヶ 统一到同一形式（金け崎町 ↔ 金ケ崎町）')
+    assert(t2.normKana('南あるぷす市') === t2.normKana('南アルプス市'), '平假名 ↔ 片假名写法对齐（南あるぷす市 ↔ 南アルプス市）')
     assert(t2.prefsOfCity('金ケ崎町').join() === '岩手県', '河川表写法也能反查到县（金ケ崎町 → 岩手県）')
     assert(t2.prefsOfCity('南アルプス市').join() === '山梨県', '假名种类不同也能反查到县（南アルプス市 → 山梨県）')
-    // 0.9.4（P2-29）：市区町村表的写法已修正（金け崎町 → 金ケ崎町、南あるぷす市 → 南アルプス市），
-    // 所以现在两张表给出的是同一个规范名——这正是"规范名取市区町村表的写法"这条断言要的语义。
+    // 两张表给出的是同一个规范名，规范写法取市区町村表那一份
     assert(t2.canonicalCityOf('金ケ崎町') === '金ケ崎町' && t2.canonicalCityOf('南アルプス市') === '南アルプス市',
       '规范名取市区町村表的写法（两张表已一致，不再有"河川表对、市町村表错"的第二种答案）')
     assert(t2.canonicalCityOf('金け崎町') === '金ケ崎町',
-      '旧的错写法（金け崎町）仍能归一到规范名——用户配置里可能存着它')
+      '旧的错写法（金け崎町）仍能统一到规范名——用户配置里可能存着它')
 
-    // ④ 端到端匹配：真实 12 位河川区域码 + L4（氾濫危険情報）电文
     const vxkoXml = (code, name) => '<?xml version="1.0" encoding="UTF-8"?>' +
       '<Report xmlns="http://xml.kishou.go.jp/jmaxml1/"><Control><Title>指定河川洪水予報</Title>' +
       '<DateTime>2026-09-11T11:40:00Z</DateTime></Control>' +
@@ -2810,7 +2667,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t2.matchAlert(flood, cfgOf(['東京都'], ['目黒区'])).hit === true, '市级收窄命中目黒区 → 提醒')
     assert(t2.matchAlert(flood, cfgOf(['東京都'], ['札幌市'])).hit === false, '市级收窄未命中 → 不提醒（修复前收窄完全失效）')
 
-    // ⑤ 跨表假名差异的端到端匹配：河川表「金ケ崎町」vs 市区町村表「金け崎町」
     const kin = riverMod2.RIVER_AREAS.find((a) => a.cities.indexOf('金ケ崎町') !== -1)
     assert(!!kin, '河川表里有使用「金ケ崎町」写法的区域')
     const kinAlert = t2.parseJma(vxkoXml(kin.code, kin.name), { id: 'p4-verify' })
@@ -2822,18 +2678,18 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '河川区域表端到端验证失败：' + e.message)
   }
 
-  console.log('== 0.3.2：UI 文案与配色（气象 code / severity 配色 / 标题分隔符）==')
+console.log('== UI 文案与配色（气象 code / severity 配色 / 标题分隔符）==')
   try {
     const t = loadClient().__test
 
-    // 气象电文的来源标注：此前一律落到 else 分支，展开详情会标成「code 551」（地震速报）
+    // 气象电文的来源标注：落到 else 分支会标成「code 551」（地震速报）
     assert(t.p2pCodeTextOf('weather') === 'JMA 电文', '气象条目显示「JMA 电文」而不是 code 551')
     assert(t.p2pCodeTextOf('quake') === 'code 551' && t.p2pCodeTextOf('eew') === 'code 556' &&
       t.p2pCodeTextOf('tsunami') === 'code 552', 'P2PQuake 三类仍显示各自的 code')
     assert(t.p2pCodeTextOf('constructor') === '—' && t.p2pCodeTextOf(undefined) === '—',
       '未知 kind 不命中原型链，显示占位符')
 
-    // 灾种配色：气象此前没有键，历史条目一律落到灰色兜底
+    // 灾种配色：气象缺键时历史条目会落到灰色兜底
     assert(typeof t.kindColorOf('weather') === 'string' && t.kindColorOf('weather') !== t.kindColorOf('未知'),
       '气象条目有专属配色（不再落灰色兜底）')
 
@@ -2842,7 +2698,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.sevColor('red') === '#e5484d' && t.sevColor('orange') === '#f76b15' && t.sevColor('info') === '#3b82f6',
       '其余档位配色不变')
 
-    // 标题：旧写法在非「各地」分支会留下悬空的「 · 」
+    // 标题在非「各地」分支不得留下悬空的「 · 」
     assert(t.alertTitleOf({ kind: 'quake', kindLabel: '地震情报·各地震度' }) === '🌐 地震情报·各地震度',
       'quake 标题直接用 kindLabel（没有悬空分隔符）')
     assert(t.alertTitleOf({ kind: 'quake', kindLabel: '地震情报' }) === '🌐 地震情报', '非「各地」分支同样干净')
@@ -2852,9 +2708,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, 'UI 文案与配色验证失败：' + e.message)
   }
 
-  console.log('== 0.3.2：WebSocket 半开检测 / 音频节点回收 / 城市表请求可中止 ==')
+console.log('== WebSocket 连接假死检测 / 音频节点回收 / 城市表请求可中止 ==')
   try {
-    // P7-a：久无数据 → 主动重连（半开连接不会触发 onclose）
+    // 久无数据 → 主动重连（连接假死时不会触发 onclose）
     const socketsA = []
     class FakeWSA {
       constructor(url) { this.url = url; socketsA.push(this) }
@@ -2865,10 +2721,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     cA.start()
     socketsA[0].onopen()
     await new Promise((r) => setTimeout(r, 90))
-    assert(socketsA.length === 2, '久无数据 → 主动重连（半开连接不会触发 onclose）')
+    assert(socketsA.length === 2, '久无数据 → 主动重连（连接假死时不会触发 onclose）')
     cA.stop()
 
-    // P7-b：持续有消息时不误判
+    // 持续有消息时不误判
     const socketsB = []
     class FakeWSB {
       constructor(url) { this.url = url; socketsB.push(this) }
@@ -2881,10 +2737,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const keep = setInterval(() => socketsB[0].onmessage({ data: '{"code":551}' }), 10)
     await new Promise((r) => setTimeout(r, 90))
     clearInterval(keep)
-    assert(socketsB.length === 1, '持续有消息时不误判为半开（不重连）')
+    assert(socketsB.length === 1, '持续有消息时不误判为连接假死（不重连）')
     cB.stop()
 
-    // P12：播完 disconnect，长期运行不再累积节点
+    // 播完 disconnect：长期运行不再累积节点
     const audioNodes = []
     class FakeAudioContext {
       constructor() { this.state = 'running'; this.currentTime = 0; this.destination = {} }
@@ -2954,9 +2810,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, 'WebSocket / 音频 / 城市表验证失败：' + e.message)
   }
 
-  console.log('== 0.3.3：WebSocket 建连看门狗 ==')
+console.log('== WebSocket 建连超时监控 ==')
   try {
-    // ① 建连阶段既无 onopen 也无 onclose（浏览器半开时不给任何事件）→ 超时后放弃并重连
     const socketsKA = []
     class FakeWSA {
       constructor(url) { this.url = url; socketsKA.push(this) }
@@ -2969,12 +2824,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     await new Promise((r) => setTimeout(r, 90))
     assert(socketsKA[0].closed === true, '超时后立即关闭卡住的连接（不留下无人回收的 socket）')
     assert(tKA.store.detail.indexOf('connect timeout') !== -1 && tKA.store.retries === 1,
-      '状态文案写明连接超时并计入退避：' + tKA.store.detail)
-    await new Promise((r) => setTimeout(r, 1100)) // 退避 1s 后才真正重连
-    assert(socketsKA.length === 2, '退避结束后重新发起连接（此前会永远卡在「连接中…」）')
+      '状态文案写明连接超时并计入重试间隔：' + tKA.store.detail)
+    await new Promise((r) => setTimeout(r, 1100)) // 重试间隔 1s 到点后才真正重连
+    assert(socketsKA.length === 2, '重试间隔到点后重新发起连接（此前会永远卡在「连接中…」）')
     cKA.stop()
 
-    // ② 正常 onopen → 看门狗解除
     const socketsKB = []
     class FakeWSB {
       constructor(url) { this.url = url; socketsKB.push(this) }
@@ -2985,10 +2839,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     cKB.start()
     socketsKB[0].onopen()
     await new Promise((r) => setTimeout(r, 90))
-    assert(socketsKB.length === 1 && exKB.__test.store.status === 'open', '正常建连后看门狗解除，不误触发重连')
+    assert(socketsKB.length === 1 && exKB.__test.store.status === 'open', '正常建连后超时监控解除，不误触发重连')
     cKB.stop()
 
-    // ③ onclose 先到 → 只按一次退避重连，看门狗不重复计数
     const socketsKC = []
     class FakeWSC {
       constructor(url) { this.url = url; socketsKC.push(this) }
@@ -2999,10 +2852,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     cKC.start()
     socketsKC[0].onclose()
     await new Promise((r) => setTimeout(r, 90))
-    assert(exKC.__test.store.retries === 1 && socketsKC.length === 1, 'onclose 先到 → 看门狗解除，不重复触发')
+    assert(exKC.__test.store.retries === 1 && socketsKC.length === 1, 'onclose 先到 → 超时监控解除，不重复触发')
     cKC.stop()
 
-    // ④ connectTimeoutMs=0 关闭看门狗（回到 0.3.2 行为）
     const socketsKD = []
     class FakeWSD {
       constructor(url) { this.url = url; socketsKD.push(this) }
@@ -3012,13 +2864,13 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const cKD = exKD.__test.createWsClient({ connectTimeoutMs: 0 })
     cKD.start()
     await new Promise((r) => setTimeout(r, 90))
-    assert(socketsKD.length === 1, 'connectTimeoutMs=0 可关掉看门狗')
+    assert(socketsKD.length === 1, 'connectTimeoutMs=0 可关掉建连超时监控')
     cKD.stop()
   } catch (e) {
-    assert(false, '建连看门狗验证失败：' + e.message)
+    assert(false, '建连超时监控验证失败：' + e.message)
   }
 
-  console.log('== 0.3.0-c：气象灾害配置字段 ==')
+console.log('== 气象灾害配置字段 ==')
   {
     const dirty = loadClient({
       'dsh.quakeAlert.v1': JSON.stringify({ version: 1, disasters: { earthquake: false, weather: 'yes' } }),
@@ -3029,7 +2881,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(legacy.disasters.weather === true, '旧配置缺 weather 字段 → 取默认值（不误关）')
   }
 
-  console.log('== 0.3.1：设置页「发送测试气象警报」的轮换场景 ==')
+console.log('== 设置页「发送测试气象警报」的轮换场景 ==')
   try {
     const citiesMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cities.js')).href)
     const t = loadClient().__test
@@ -3093,10 +2945,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '测试电文验证失败：' + e.message)
   }
 
-  console.log('== 0.4.1：源时区与全局严重度 ==')
+console.log('== 源时区与全局严重度 ==')
   try {
     const t = loadClient().__test
-    // ① P2PQuake 的时间是裸 JST，解析层必须补上 +09:00 偏移（DESIGN 第 4 节）
     assert(t.p2pTimeToIso('2026/09/07 23:25:14') === '2026-09-07T23:25:14+09:00',
       'P2PQuake 裸 JST → 带 +09:00 偏移的 ISO 8601')
     assert(t.p2pTimeToIso('2026/09/08 00:03:16.886') === '2026-09-08T00:03:16.886+09:00', '毫秒被保留')
@@ -3106,11 +2957,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(q.issued.indexOf('+09:00') !== -1, '551 的 issued 带 +09:00（此前是裸 JST 字符串）')
     const e = t.parse(eew)
     assert(e.issued.indexOf('+09:00') !== -1, '556 的 issued 带 +09:00')
-    // 旧历史数据没有偏移 → 按 JST 解释（DESIGN 334）
+    // 旧历史数据没有偏移 → 按 JST 解释
     assert(typeof t.formatIssuedLocal('2026/09/07 23:25:14') === 'string', '旧历史（裸 JST）也能格式化，不抛错')
 
-    // ② 全球点型地震的严重度（0.4.0 的隐患）：maxScale 恒为 -1，若走震度路径会算成 info，
-    //    既显示不出严重性、又让静默时段的红色穿透失效（一场 M7 被静默）。
+    // ② 全球点型地震的严重度：maxScale 恒为 -1，走震度路径会算成 info，既显示不出严重性，又让静默时段的红色穿透失效。
     const prog = { prefectures: [], cities: [], places: [{ name: 'P', lat: 35.68, lon: 139.77, radiusKm: 300 }] }
     const m7 = { kind: 'quake', locator: 'point', severity: 'red', maxScale: -1, magnitude: 7.4, geo: { lat: 35.68, lon: 139.77 }, regions: [] }
     const m5 = Object.assign({}, m7, { severity: 'yellow', magnitude: 5.2 })
@@ -3123,7 +2973,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.hitSeverityOf({ kind: 'eew', severity: 'red', maxScale: 45 }, { region: { scale: 45 } }) === 'red',
       'EEW 恒为 red')
 
-    // ③ 同一消息 id 的强度升级要能穿透消息级去重（EMSC 的 unid / USGS 的 feature id 都是稳定的）
     const ev = { id: 'emsc-1', eventKey: 'geo:x', strength: 5.2, locator: 'point', issued: '2026-09-12T02:15:12Z', geo: { lat: 38, lon: 22.3 } }
     assert(t.isDuplicate(ev.id, 10) === false, '（前置）首次见到该 id')
     assert(t.isStrengthUpgrade(Object.assign({}, ev, { strength: 6.4 })) === false,
@@ -3134,9 +2983,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.isStrengthUpgrade(ev) === false, '同强度不算升级')
     assert(t.isDuplicate(ev.id, 10) === true, '同一 id 第二次确实被消息级去重挡住（升级由调用方放行）')
 
-    // ③b 同 id 的强度升级要**绕过跨标签页认领**（0.9.2 修复）。认领键是消息 id、记忆保留 10 分钟，
-    //     而 EMSC 的修订版复用同一个 unid——不绕开的话"震级上修"会被本标签页自己上一次的认领
-    //     当成"其它标签页已提醒"抑制，成为一条静默漏报（单标签页即可复现）。
+      // ③b 同 id 的强度升级要绕过跨标签页抢占：抢占键是消息 id 且记忆保留 10 分钟，而 EMSC 的修订版复用同一个 unid。
     {
       const ucfg = {
         watch: { prefectures: [], cities: [], places: [{ name: '雅典', lat: 37.98, lon: 23.73, radiusKm: 500 }] },
@@ -3144,10 +2991,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         thresholds: { globalMagnitude: 4.5, quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch' },
         dedupe: { windowMinutes: 10 }, notify: {}, quietHours: { enabled: false },
       }
-      // 用**真实解析器**产出的 Alert（手构的容易缺 matchAlert 要的字段），再模拟"同一 unid 的
-      // 修订版"——id 相同、强度更高，正是 EMSC 修订版（action: 'update'）的形态。
-      // 另起一个**干净实例**：③/④ 段已经调过 isDuplicate / isEventRepeat 登记过去重与事件记忆，
-      // 复用同一个 `t` 会让"首次播报"这条前置断言被前面的登记干扰（实测被判 event-repeat）。
+      // 用**真实解析器**产出的 Alert，并另起一个干净实例：前面已登记的去重 / 事件记忆会干扰「首次播报」这条前置断言。
       const tu = loadClientEx({}, {}).exports.__test
       const base = tu.parseEmsc(JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'global', 'emsc-ws-sample.json'), 'utf8')))
       const up1 = Object.assign({}, base, { strength: 5.2, magnitude: 5.2, severity: 'yellow' })
@@ -3156,10 +3000,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(rr1.notified === true, '（前置）M5.2 首次播报（实际：' + JSON.stringify(rr1) + '）')
       const rr2 = tu.handleAlert(up2, ucfg, { skipQuietHours: true })
       assert(rr2.notified === true && rr2.reason !== 'other-tab',
-        '同 id 的震级上修绕过跨标签页认领 → 仍然播报（修复前被判 other-tab 静默；实际：' + JSON.stringify(rr2) + '）')
+        '同 id 的震级上修绕过跨标签页抢占 → 仍然播报（修复前被判 other-tab 静默；实际：' + JSON.stringify(rr2) + '）')
     }
 
-    // ④ 坐标型的近似事件归并：跨源 / 修订会让「分钟 + 0.1 度」指纹换键
     const a1 = { id: 'e1', eventKey: 'geo:k1', strength: 5.0, locator: 'point', issued: '2026-09-13T10:00:00Z', geo: { lat: 10.1, lon: 100.2 } }
     const a2 = { id: 'u1', eventKey: 'geo:k2', strength: 5.0, locator: 'point', issued: '2026-09-13T10:00:30Z', geo: { lat: 10.15, lon: 100.25 } }
     assert(t.isEventRepeat(a1, 10) === false, '（前置）第一源播报')
@@ -3168,7 +3011,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const a3 = Object.assign({}, a2, { eventKey: 'geo:k3', issued: '2026-09-13T12:30:00Z' })
     assert(t.isEventRepeat(a3, 10) === false, '时间差 2.5 小时 → 按新事件处理')
 
-    // ④b 事件记忆按**各自**的窗口过期（0.5.1 修 D 类残留）
+    // ④b 事件记忆按**各自**的窗口过期：清理不能用「本次调用的窗口」
     // 此前清理用的是"本次调用的窗口"：一条按 3 小时窗口记住的气象事件，会被 10 分钟后任意一条
     // "命中"地震带着的 10 分钟窗口清掉，随后 L4 的更新被判成新事件 → 重复响铃。
     {
@@ -3189,7 +3032,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '超过自己的 3 小时窗口后确实过期，按新事件处理')
     }
 
-    // ⑤ 解析契约：empty / schema / value 三类的区分（DESIGN 4.5）
+    // ⑤ 解析契约：empty / schema / value 三类的区分
     const emptyCode = t.parseEpspResult({ code: 554, id: 'x' })
     assert(emptyCode.ok === false && emptyCode.kind === 'empty', 'P2PQuake 其他 code → empty（不计故障）')
     const badQuake = t.parseEpspResult({ code: 551, id: 'x', issue: { time: 't' }, earthquake: {}, points: [] })
@@ -3210,8 +3053,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.parseNoaaResult('<alert><msgType>Test</msgType></alert>').kind === 'empty', 'NOAA 演练电文 → empty')
     assert(t.parseNoaaResult('<html>nope</html>').kind === 'schema', 'NOAA 拿到 HTML → schema')
 
-    // ⑥ 每源约定（四要素）必须齐全：字段清单、源时区、新鲜度阈值、empty 判据
-    // cenc_eew / cenc_eqlist 是 0.5.0 新增（DESIGN 11.1：约定**必须与解析函数同时定下**）
     const ids = ['p2pquake', 'jma', 'emsc', 'usgs', 'noaa', 'cenc_eew', 'cenc_eqlist']
     const missing = ids.filter((id) => {
       const c = t.SOURCE_CONTRACTS[id]
@@ -3221,13 +3062,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(missing.length === 0, '七个源的校验约定齐全（必需字段 / 源时区 / 新鲜度阈值 / empty 判据）' +
       (missing.length ? '（缺：' + missing.join(',') + '）' : ''))
 
-    // ⑦ 健康状态（0.5.3 机制化）：**单条失败不升级**、同因累计到阈值才进 schema-error、
-    //    坏法不重样时按连续失败升级；empty 不进（且清掉异常）；恢复后回到 open。
     t.store.clearSources()
     t.resetSourceHealth()
     t.noteParseResult('usgs', t.failResult('schema', '缺 properties.mag'))
     assert(!t.store.sources.usgs || t.store.sources.usgs.status !== 'schema-error',
-      '单条坏数据**不**点亮蓝点（线上是逐条 entry，一条脏数据不该让整个源变蓝——0.5.3 修的就是这个）')
+      '单条坏数据**不**点亮蓝点（线上是逐条 entry，一条格式不合法的数据不该让整个源变蓝——0.5.3 修的就是这个）')
     assert(t.sourceHealthOf('usgs').data && t.sourceHealthOf('usgs').data.count === 1,
       '但失败被记进了计数（诊断里看得见，不是静默吞掉）')
     for (let i = 1; i < t.SCHEMA_ESCALATE_COUNT; i++) {
@@ -3238,17 +3077,13 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.sourceHealthOf('usgs').data.detail.indexOf('mag') !== -1, '失败原因可读（供排查文档引用）')
     assert(t.effectiveStatusOf('usgs', 'open', '连接正常').status === 'schema-error',
       '连接正常也不该掩盖数据格式异常（蓝点优先于绿灯）')
-    // 0.4.2：empty 证明"结构是好的"，要清掉 schema-error——JMA 的常态就是 empty，
-    // 否则一条坏电文会让蓝点挂到下一次成功解析为止。
+    // empty 证明「结构是好的」，要清掉 schema-error——JMA 的常态就是 empty
     t.noteParseResult('usgs', t.failResult('empty', 'features 为空'))
     assert(t.sourceHealthOf('usgs').data === null && t.store.sources.usgs.status === 'open',
       'empty 清掉 schema-error（不再是"不覆盖已有异常"）')
     assert(t.noteSourceSuccess('usgs') === false, '已经恢复的源再报成功 → 无动作（不会重复上报）')
     assert(t.effectiveStatusOf('p2pquake', 'open', 'ok').status === 'open', '没有异常记录的源不受影响')
-    // 0.9.2 修复：**逐条上报的 empty 不清蓝点**（`opts.perItem`）。批量取数（12e 一轮查 N 个
-    // 关注点）里，1 个被拦截的 URL 产生的 schema 失败会被同轮其它 URL 的"非白名单事件"empty
-    // 清掉，于是蓝点永不点亮——局部改版 / 局部拦截退化成静默漏报（0.6.2 只把"空数组"挪到了轮末，
-    // 这是同型的另一半）。
+    // 逐条上报的 empty 不清蓝点（opts.perItem）：1 个被拦截 URL 的 schema 失败会被同轮其它 URL 的 empty 清掉，蓝点永不点亮。
     t.resetSourceHealth()
     t.store.clearSources()
     for (let i = 0; i < t.SCHEMA_ESCALATE_CONSECUTIVE; i++) {
@@ -3261,8 +3096,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     t.noteParseResult('nws_alerts', t.failResult('empty', '本轮响应结构正常，但没有本插件范围内的条目'))
     assert(t.sourceHealthOf('nws_alerts').data === null && t.store.sources.nws_alerts.status === 'open',
       '对照：轮级 empty（不传 perItem）照旧清蓝点（0.4.2 的 JMA 语义没有被顺手改掉）')
-    // 第二条升级路径：**坏法不重样**（上游把结构改得面目全非时每条 detail 都不同，
-    // 按原因计数永远到不了阈值）→ 由连续失败数兜住
+    // 第二条升级路径：坏法不重样时按连续失败数也能捕获（按原因计数永远到不了阈值）
     t.resetSourceHealth()
     t.store.clearSources()
     for (let i = 0; i < t.SCHEMA_ESCALATE_CONSECUTIVE; i++) {
@@ -3274,7 +3108,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     t.noteParseResult('emsc', t.failResult('schema', '缺 data'))
     t.retrySource('emsc')
     assert(t.sourceHealthOf('emsc').data === null && t.store.sources.emsc.status === 'open', '手动重试清掉异常标记')
-    // ⑧ 0.4.1：Ｒ０６ 総合副本的「危険警報」与逐区级别（真实 live 电文的精简样本）
     const hyogo = fs.readFileSync(path.join(ROOT, 'samples', 'jma-vpww53-hyogo-danger-20260914.xml'), 'utf8')
     const h53 = t.parseJma(hyogo, { id: 'https://www.data.jma.go.jp/developer/xml/data/20260914113112_0_VPWW53_280000.xml' })
     assert(h53 && h53.level === 4,
@@ -3292,16 +3125,12 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.matchAlert(h53, hyCfg()).hit === true, '关注兵庫県 → 命中（姫路市 L4）')
     const onlyNishiwaki = t.matchAlert(h53, hyCfg(['西脇市']))
     assert(onlyNishiwaki.hit === false && onlyNishiwaki.reason.indexOf('未达 L4') !== -1,
-      '只关注西脇市（L2）→ 不播报（逐区闸门生效，不被同县 L4 连坐）')
+      '只关注西脇市（L2）→ 不播报（逐区判定生效，不被同县 L4 连坐）')
     // 事件键不含发布时刻：解除电文才能与发布电文算到同一个键（否则解除链路永远匹配不上）
     assert(h53.eventKey === 'jma:summary:大雨:280000',
       '総合副本的事件键 = 灾种 + 編集官署名コード（不含发布时刻，解除才能匹配上）')
-    // 真实解除电文（気象庁样本）：Kind 全是「解除」、主文里也不含灾种词
-    // → 灾种认不出，键里用**显式未知标记** `?`（0.9.4 之前退回「气象」，那看起来像一个具体灾种，
-    // 既不表达"认不出"，又会与将来真叫「气象」的键撞车）。键与发布的「大雨」不同 ⇒ 这条
-    // 报知本身不提示解除——**这是已知限制**，见 DESIGN 11.9 #5：要正确表达它需要按官署记住
-    // "当前生效的事件"，那是一类新的事件语义（C 类）。
-    // 0.9.4 已修的是同一族的另一半：正文写着「…を警報に切り替えました」的电文不再被当成解除。
+    // 真实解除电文的 Kind 全是「解除」、主文也不含灾种词 → 灾种认不出，键里用**显式未知标记** `?`
+    // （退回「气象」会看起来像一个具体灾种，还会与将来真叫「气象」的键撞车）。
     const cancelXml = fs.readFileSync(path.join(ROOT, 'samples', 'jma-vpno50-tokyo-cancel-20260907.xml'), 'utf8')
     const cancelAlert = t.parseJma(cancelXml, { id: 'https://x/20260907190104_0_VPNO50_130000.xml' })
     assert(cancelAlert && cancelAlert.downgraded === true && cancelAlert.cancelled === false,
@@ -3314,7 +3143,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const cancelSame = Object.assign({}, h53, { cancelled: true, level: 0, strength: 0, regions: [] })
     assert(t.cancelKeyOf(cancelSame) === h53.eventKey, '（对照）同一灾种的解除与发布共用同一个 cancelKeyOf 键')
 
-    // ⑨ Host 侧：feed 结构不符必须计入 errors，不能与"源正常但当前无数据"同形
     const pollerMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'poller.js')).href)
     const gsMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'global-sources.js')).href)
     const t0 = Date.parse('2026-09-14T12:00:00Z')
@@ -3340,7 +3168,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '0.4.1 契约与时区验证失败：' + e.message)
   }
 
-  console.log('== 0.4.2：对 0.4.1 修复的回归检查 ==')
+console.log('== 对源时区与全局严重度修复的回归检查 ==')
   try {
     const t = loadClient().__test
     const wcfg = {
@@ -3357,7 +3185,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       level, maxScale: level, hypo: {}, regions: [{ pref: '東京都', area: '東京都', city: '', level }],
       eventKey: 'jma:summary:大雨:130000', strength, cancelled: false,
     })
-    // ① 气象「降级后再次升级」不该被静默（0.4.1 去掉事件键里的发布时刻后新引入的漏报）
     assert(t.handleAlert(mkWeather(4, 4, 'r1'), wcfg).notified === true, 'L4 首次 → 播报')
     assert(t.handleAlert(mkWeather(3, 3, 'r2'), wcfg).reason === 'not-hit', 'L3 降级 → 不播报（未达 L4）')
     assert(t.handleAlert(mkWeather(4, 4, 'r3'), wcfg).notified === true,
@@ -3369,7 +3196,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.weakenEvent({ eventKey: 'wx', strength: 4 }) === false, 'weakenEvent：同强度不下调')
     assert(t.weakenEvent({ eventKey: '不存在', strength: 1 }) === false, 'weakenEvent：没有记录时安全返回 false')
 
-    // ② 官署名碼取不到时不能留空（否则不同官署的同一灾种共键 → 互相静默）
     const hyogoXml = fs.readFileSync(path.join(ROOT, 'samples', 'jma-vpww53-hyogo-danger-20260914.xml'), 'utf8')
     const tokyoXml = fs.readFileSync(path.join(ROOT, 'samples', 'jma-vpww55-heavyrain.xml'), 'utf8')
     const k1 = t.parseJma(hyogoXml, { id: 'no-suffix-1' }).eventKey
@@ -3378,7 +3204,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       'id 不含 6 位后缀时，键里仍有官署标识（' + k1 + '）')
     assert(k1 !== k2, '不同气象台的同灾种电文不会共键（' + k1 + ' vs ' + k2 + '）')
 
-    // ③ 551 单个观测点缺字段不该让整条警报消失
     const q551 = {
       code: 551, id: 'x', issue: { time: 't' },
       earthquake: { time: '2026/09/14 12:00:00', maxScale: 40 },
@@ -3389,7 +3214,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const bad551 = Object.assign({}, q551, { points: [{ pref: '東京都', addr: 'a', scale: '40' }] })
     assert(t.parseEpspResult(bad551).kind === 'schema', '字段类型明显不对（scale 是字符串）仍判 schema')
 
-    // ④ 坐标型近似归并只在**跨源**之间生效（同源的主震/余震不该被吞）
     const s1 = { id: 's1', source: 'emsc', eventKey: 'geo:m1', strength: 5.0, locator: 'point', issued: '2026-09-21T10:00:00Z', geo: { lat: 30, lon: 130 } }
     const s2 = { id: 's2', source: 'emsc', eventKey: 'geo:m2', strength: 5.0, locator: 'point', issued: '2026-09-21T10:00:40Z', geo: { lat: 30.05, lon: 130.05 } }
     assert(t.isEventRepeat(s1, 10) === false, '（前置）同源第一条播报')
@@ -3400,9 +3224,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.isEventRepeat(e1, 10) === false, '（前置）EMSC 报一场地震')
     assert(t.isEventRepeat(u1, 10) === true, 'USGS 对同一场地震（±2 分钟、~7km）→ 跨源归并，不重复响铃')
 
-    // ⑤ 配置字段漂移保护：normalizeCfg 必须覆盖 DEFAULT_CFG 的每一个字段
-    //    （freshCfg 已改为从 DEFAULT_CFG 深拷贝派生，但 normalizeCfg 仍是手写的字段集；
-    //     给它加断言，避免以后加字段时被 applyCfg 静默丢弃）
     const nc = t.normalizeCfg(t.DEFAULT_CFG)
     const lostTop = Object.keys(t.DEFAULT_CFG).filter((k) => !(k in nc))
     const lostNested = []
@@ -3413,10 +3234,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       'normalizeCfg 覆盖 DEFAULT_CFG 的全部字段（顶层与嵌套都没有漂移）' +
       (lostTop.length || lostNested.length ? '（缺：' + lostTop.concat(lostNested).join(',') + '）' : ''))
 
-    // ⑥ audioState 只回答状态，不为了回答而创建 AudioContext
     assert(t.audioState() === 'unavailable', '沙箱里没有 AudioContext 构造器 → audioState=unavailable（且不抛错）')
 
-    // ⑧ 拦截页 / 被截断的 feed 必须抛错（否则"被拦"与"上游没有新闻"在 UI 上完全同形）
     const pollerMod2 = await import(pathToFileURL(path.join(ROOT, 'lib', 'poller.js')).href)
     const gsMod2 = await import(pathToFileURL(path.join(ROOT, 'lib', 'global-sources.js')).href)
     let feedThrew = 0
@@ -3430,8 +3249,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     try { gsMod2.parseNoaaEntries('<feed><entry>') } catch (err) { noaaThrew += 1 }
     assert(noaaThrew === 2, 'NOAA 事件列表：HTML 与被截断同样抛错（JMA 与 NOAA 此前都静默返回 []）')
 
-    // ⑨ empty 要清掉之前的 schema-error（否则一条坏电文会让蓝点挂到下一次成功解析为止）。
-    //    0.5.3 起"进入 schema-error"要多喂几条（单条不再升级）——这里用连续失败那条路径。
     t.store.clearSources()
     t.resetSourceHealth()
     for (let i = 0; i < t.SCHEMA_ESCALATE_CONSECUTIVE; i++) {
@@ -3442,16 +3259,12 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.sourceHealthOf('jma').data === null && t.store.sources.jma.status === 'open',
       'empty 证明结构是好的 → 清掉 schema-error（JMA 的常态就是 empty）')
 
-    // ⑩ timeIsImpossible：时间**缺失**不是"客观不可能"（存在性由 schema 判据负责）
     const noTime551 = {
       code: 551, id: 't', issue: { time: '2026/09/14 12:00:00' },
       earthquake: { maxScale: 40 }, points: [{ pref: '東京都', addr: 'a', scale: 40 }],
     }
     assert(t.parseEpspResult(noTime551).ok === true, '551 缺 earthquake.time → 不再整条判 value')
 
-    // ⑪ 跨会话重放的**判定条件**：wasRecentlyAlerted（24 小时记忆）且强度未升级。
-    // 真正的"时间推进"（让 10 分钟的事件窗口过期、而 24 小时记忆仍在）在单进程测试里无法模拟，
-    // 所以这里分别验证两个输入 + 组合语义；handleAlert 里那两条分支的顺序由注释与代码保证。
     t.store.events = []
     const repKey = 'jma:summary:大雨:REPLAY'
     const rep1 = Object.assign(mkWeather(4, 4, 'rp1'), { eventKey: repKey })
@@ -3479,9 +3292,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const noaaCap = fs.readFileSync(path.join(ROOT, 'samples', 'global', 'noaa-pheb-cap.xml'), 'utf8')
     assert(t.parseNoaaResult(noaaCap, { id: 'x' }).ok === true, '真实 NOAA CAP → ok')
 
-    // ⑫ pref='' 的口径（0.4.2 修正）：同一条消息里**有**区域能归县时，归不到的条目不参与
-    //    县级过滤（否则一条含"未收录预报区名"的海啸会提醒所有关注列表非空的用户）；
-    //    整条消息都归不到县时才放行（边界情况让步，避免整条静默）。
+    // ⑫ pref='' 的口径：同一条消息里有区域能归县时，归不到的条目不参与县级过滤；
+    //     整条消息都归不到县时才放行（避免整条静默）。
     const tcfg = (watch, grade) => ({
       disasters: { earthquake: true, tsunami: true }, dedupe: { windowMinutes: 10 },
       watch: { prefectures: watch }, thresholds: { quakeScale: 40, eewScale: 45, tsunamiGrade: grade || 'Watch' },
@@ -3500,7 +3312,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.matchAlert(allUnknown, tcfg(['東京都'])).hit === true,
       '整条消息的区域都归不到县 → 仍放行（边界情况让步，避免静默漏报）')
 
-    // ⑬ Notice 解析的两处收紧
     const baseUrl = 'https://x/20260914113112_0_VPWW53_280000.xml'
     const oneCity = hyogoXml.replace('〈レベル４大雨危険警報〉姫路市　たつの市　多可町＊', '〈レベル４大雨危険警報〉姫路市*')
     const hOne = t.parseJma(oneCity, { id: baseUrl })
@@ -3515,7 +3326,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(cityLv(hTwo, '西脇市') === 2,
       '另一段的地区不被前面那段的级别吞掉（跨段量词会同时造成误报与漏报）')
 
-    // ⑭ XML 注释不参与解析（否则注释里的标签与级别会污染 block/tag）
     const commented = '<Report><Control><Title>気象特別警報・警報・注意報</Title><EditorialOffice>测试台</EditorialOffice></Control>' +
       '<Head><Title>某県気象警報・注意報</Title><ReportDateTime>2026-09-14T20:31:00+09:00</ReportDateTime>' +
       '<Headline><Text>大雨警報を発表</Text><Information type="気象・地震・火山情報／市町村等"><Item>' +
@@ -3527,7 +3337,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const hCmt = t.parseJma(commented, { id: baseUrl })
     assert(hCmt.level === 3, 'XML 注释里的「レベル４」不参与级别判定（解析前先剥注释）')
 
-    // ⑮ 显式但不可识别的 codeType 不再按码位数猜成行政区域
     const gauge = commented.replace('</Item></Information>',
       '</Item><Item><Kind><Name>大雨警報</Name><Code>03</Code></Kind>' +
       '<Areas codeType="水位観測所"><Area><Name>某某観測所</Name><Code>123456</Code></Area></Areas>' +
@@ -3536,7 +3345,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(!hGauge.regions.some((r) => r.area === '某某観測所'),
       'codeType 显式但不是行政区域 → 忽略（位数兜底只服务于没给 codeType 的裸 <Area>）')
 
-    // ⑯ 解除判定只看 Body 副本（Head 摘要没有 Status，会把"解除"稀释成"发布"）
     const canceled = hyogoXml.replace(/<Status>継続<\/Status>|<Status>発表<\/Status>/g, '<Status>解除</Status>')
     const hCancel = t.parseJma(canceled, { id: baseUrl })
     assert(hCancel && hCancel.cancelled === true, 'Body 的 Status 全是解除（Head 摘要无 Status）→ cancelled=true')
@@ -3548,16 +3356,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
   }
 
   // ==========================================================================
-  // 0.5.0：中国大陆地震源（Wolfx cenc_eew / cenc_eqlist）
-  // 全部断言都由 samples/cn/ 下的**真实抓取样本**驱动（node scripts/capture-cn-fixtures.mjs --ws），
-  // 不是照文档猜的结构。场景类用例按 DESIGN 11.4「场景靠构造」补在真实样本之上。
+  // 中国大陆地震源（Wolfx cenc_eew / cenc_eqlist）
+  // 断言由 samples/cn/ 下的真实抓取样本驱动，不是照文档猜的结构
   // ==========================================================================
   try {
     const cn = (n) => JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'cn', n), 'utf8'))
     const eewRaw = cn('cenc-eew-last.json')       // 真实：四川甘孜州新龙县 M4.2，ReportNum=2
     const listRaw = cn('cenc-eqlist-last.json')   // 真实：最新 50 条整表 + md5
 
-    // ① 时间：两种"看起来只差分隔符"的裸本地时间必须各按各的偏移解释
     assert(T.cnTimeToIso('2026-09-18 20:50:23') === '2026-09-18T20:50:23+08:00',
       '大陆源的裸北京时间补 +08:00 偏移')
     assert(T.cnTimeToIso('2026-09-18T20:50:23') === '2026-09-18T20:50:23+08:00',
@@ -3569,13 +3375,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(T.cnTimeToIso('') === '' && T.cnTimeToIso(undefined) === '' && T.cnTimeToIso(null) === '',
       '空输入返回空串（不抛错、不造出 "Invalid Date"）')
     assert(T.cnTimeToIso('不是时间') === '不是时间', '认不出的串原样返回（绝不丢信息）')
-    // 注意：不能用 `instanceof Date` —— client.js 跑在 vm 沙箱里，它有**自己的** Date 原型，
-    // 宿主侧的 `Date` 对沙箱对象永远为假（这条本身也是个"测试写法"的坑）。
+    // 不能用 `instanceof Date`：client.js 跑在 vm 沙箱里，有自己的 Date 原型，宿主侧的 Date 对它永远为假。
     const cnDate = T.issuedToDate('2026-09-18 20:50:23')
     assert(!!cnDate && cnDate.toISOString() === '2026-09-18T12:50:23.000Z',
       'issuedToDate 认得裸北京时间（差 1 小时的时间显示 bug 的根因就在这里）')
 
-    // ② cenc_eew：真实样本（WS 形态，带 type 包裹）
     const eewRes = T.parseCencEewResult(eewRaw)
     assert(eewRes.ok === true, '真实 EEW 推送包 → 契约通过')
     const eewAlert = eewRes.alert
@@ -3596,13 +3400,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       '大陆源没有取消 / 最终报标志 → cancelled 恒为 false（不得假装能处理）')
     assert(eewAlert.speedReport === false && eewAlert.code === 'cenc_eew', '预警不是速报')
 
-    // ③ cenc_eew 的 REST 形态（无 type 包裹）与 WS 形态等价
     const restForm = Object.assign({}, eewRaw)
     delete restForm.type
     assert(T.parseCencEewResult(restForm).ok === true,
       'REST 快照（无 type）与 WS 推送包同样可解析——实测两者只差一个 type 字段')
 
-    // ④ cenc_eew 的 schema / value / empty 三类判据
     const renamed = Object.assign({}, eewRaw)
     renamed.magnitude = renamed.Magnitude
     delete renamed.Magnitude
@@ -3618,16 +3420,13 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       '只有 type 包裹 → empty（源正常但当前没有预警，不计失败）')
     assert(T.parseCencEewResult({ type: 'cenc_eqlist', ID: 'x' }).kind === 'schema',
       'type 串源 → schema（防止两个源的载荷串台）')
-    // cenc_eew 的 severity **恒 red**，与日本 556 同口径（DESIGN 2 节「EEW → red（警报本质）」）。
-    // severity 决定通知配色，也决定**静默时段能否穿透**（只有 red 穿透）：按震级分档会让一场
-    // M4.2 的大陆预警在夜间被静默掉，而同配置下的日本 EEW 照常穿透——那是漏报方向（0.5.1 修）。
+    // cenc_eew 的 severity **恒 red**（与日本 556 同口径）：severity 决定配色，也决定静默时段能否穿透，只有 red 穿透。
     const cencEewAlert = T.parseCencEewResult(eewRaw).alert
     assert(cencEewAlert.magnitude < 5 && cencEewAlert.severity === 'red',
       '大陆预警 severity 恒 red —— 不因为实测样本只有 M4.2 就降级成 info')
     assert(T.hitSeverityOf(cencEewAlert, { region: null, place: null }) === 'red',
       '命中判定之后仍是 red（静默时段的红色穿透因此对它有效）')
 
-    // ⑤ cenc_eqlist：真实整表 50 条
     const listRes = T.parseCencEqlistResult(listRaw)
     assert(listRes.ok === true && listRes.alerts.length === 50 && listRes.total === 50 && listRes.dropped === 0,
       '真实速报整表 50 条全部解析成功、零丢弃')
@@ -3639,18 +3438,16 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(no1.magnitude === 3.7 && no1.geo.depthKm === 17 && no1.intensity === 5,
       '速报字段全是字符串 → 正确转成数值（magnitude/depth/intensity）')
     assert(no1.eventKey.indexOf('geo:2026-09-18T14:32@41.1,83.2') === 0,
-      '速报的事件键把 +08:00 归一到 UTC（22:32 北京 → 14:32Z）')
+      '速报的事件键把 +08:00 换算到 UTC（22:32 北京 → 14:32Z）')
     const overseas = listRes.alerts.find((a) => a.hypo.name === '福克斯群岛')
     assert(!!overseas && Math.abs(overseas.geo.lon + 171.4) < 1e-9 && overseas.magnitude === 6.5,
       '速报整表含境外地震且负经度正常解析（实测福克斯群岛 M6.5）')
 
-    // ⑥ No 键必须是**数值序**（字典序会把 No10 排到 No2 前面）
     const mk = (id, mag) => ({ EventID: id, time: '2026-09-18 20:00:00', magnitude: String(mag), latitude: '30', longitude: '100' })
     const shuffled = { type: 'cenc_eqlist', No10: mk('C', 3), No2: mk('B', 3), No1: mk('A', 3) }
     assert(T.cencEqlistItems(shuffled).map((x) => x.EventID).join(',') === 'A,B,C',
       'No1…NoN 按数值序展开（字典序会让 No10 插到 No2 前面）')
 
-    // ⑦ 一条坏条目不该让整表作废（0.4.2 对 551 观测点定过同一口径）
     const oneBad = JSON.parse(JSON.stringify(listRaw))
     oneBad.No7.latitude = ''
     const partialRes = T.parseCencEqlistResult(oneBad)
@@ -3661,7 +3458,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(T.parseCencEqlistResult({ type: 'cenc_eqlist', No1: { EventID: 'x' }, No2: { EventID: 'y' } }).kind === 'schema',
       '整表每一条都解析不出 → schema（源改版的信号）')
 
-    // ⑧ 跨源归并：EEW 与速报对**同一场地震**（实测新龙县：EEW 20:50:23 M4.2 / 速报 20:50:24 M3.2）
     const eewXinlong = T.parseCencEew(eewRaw)
     const repXinlong = listRes.alerts.find((a) => a.hypo.name === '四川甘孜州新龙县' && a.magnitude === 3.2)
     assert(!!repXinlong, '（前置）速报里有同一场地震的那一条')
@@ -3675,13 +3471,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       properties: { mag: 6.5, time: Date.parse('2026-09-17T14:19:52Z'), place: 'Fox Islands' },
     })
     assert(overseas && usgsTwin.eventKey === overseas.eventKey,
-      'CENC 速报与 USGS 对同一场境外地震 → 同一个事件键（UTC 归一，否则会差 8 小时永远不归并）')
+      'CENC 速报与 USGS 对同一场境外地震 → 同一个事件键（按 UTC 换算，否则会差 8 小时永远不归并）')
     assert(T.geoEventKey('2026-09-17T22:19:52+08:00', 52.85, -171.4) ===
       T.geoEventKey('2026-09-17T14:19:52Z', 52.85, -171.4),
       'geoEventKey 自身对两种偏移给出同一把钥匙（回归：此前直接切字符串，永久失效）')
-    // 0.9.4（P1-5）：时间不可解析时的键**不能与任何其它事件相同**。此前回退原串切片，
-    // 空串会切成空串 → 键退化成 `geo:@30.9,99.9`，该震中之后所有事件共用一个键，
-    // isEventRepeat 精确命中后按"强度未升级"判重复 → 后续地震全部静默（漏报）。
+    // 时间不可解析时的键不能与任何其它事件相同：退回原串切片时空串会让该震中之后所有事件共用一个键，后续全部静默。
     assert(/^geo:!t\d+@1\.0,2\.0$/.test(T.geoEventKey('乱码', 1, 2)),
       '时间不可解析时不抛错、仍产出可用的键（改为唯一键，不再退化成同一把钥匙）')
     assert(T.geoEventKey('', 30.9, 99.9) !== T.geoEventKey('', 30.9, 99.9),
@@ -3689,7 +3483,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(T.geoEventKey('2026-09-17T14:19:52Z', 1, 2) === T.geoEventKey('2026-09-17T14:19:52Z', 1, 2),
       '对照：时间可解析时键仍然是稳定的（同一条消息仍会被判重）')
 
-    // ⑨ 阈值分档：速报走 cnReportMagnitude，预警走 globalMagnitude
     const placeXinlong = {
       watch: { prefectures: [], cities: [], places: [{ name: '新龙', lat: 30.887, lon: 99.89, radiusKm: 100 }] },
       disasters: { earthquake: true, tsunami: true, weather: true },
@@ -3718,7 +3511,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(T.matchAlert(eewXinlong, noPlace).hit === false && T.matchAlert(eewXinlong, noPlace).reason.indexOf('未设置') !== -1,
       '没有关注点 → 明确说明"未设置全球关注点"，而不是静默丢弃')
 
-    // ⑩ 配置字段（DESIGN 11.6 第 10 条：加字段必须同时改 DEFAULT_CFG 与 normalizeCfg）
+    // ⑩ 配置字段：加字段必须同时改 DEFAULT_CFG 与 normalizeCfg
     assert(T.DEFAULT_CFG.thresholds.cnReportMagnitude === 4.5, '速报门槛默认 M4.5')
     assert(T.normalizeCfg({}).thresholds.cnReportMagnitude === 4.5, '缺字段 → 回退默认值')
     assert(T.normalizeCfg({ thresholds: { cnReportMagnitude: 7 } }).thresholds.cnReportMagnitude === 7,
@@ -3730,11 +3523,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(T.CN_REPORT_MAG_OPTIONS.some((o) => o.v === 4.5),
       '设置页的速报门槛档位里有默认值（否则 UI 显示不出当前档）')
 
-    // ⑪ 契约的 empty 判据必须"看起来就诚实"：未实测的样本情况写清楚了
     assert(T.SOURCE_CONTRACTS.cenc_eew.empty.indexOf('未实测') !== -1,
       'cenc_eew 的 empty 判据标注了证据等级（样本不足，不掩饰）')
     assert(T.SOURCE_CONTRACTS.cenc_eqlist.staleAfterMs === 48 * 60 * 60 * 1000,
-      '速报的 48 小时新鲜度阈值是中继探针（唯一真正有意义的一条）')
+      '速报的 48 小时新鲜度阈值是中继探测（唯一真正有意义的一条）')
     assert(T.SOURCE_CONTRACTS.cenc_eew.staleAfterMs === null,
       '预警本身不给新鲜度阈值（稀疏是常态，不能据此判死）')
   } catch (e) {
@@ -3742,7 +3534,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
   }
 
   // ==========================================================================
-  // 0.5.0：大陆源的 Host 半边（WS 常连 / 环缓冲 / 去重 / 年龄闸门 / SSE）
+  // 大陆源的 Host 半边（WS 常连 / 固定长度缓冲 / 去重 / 年龄门槛 / SSE）
   // 全部用注入的假 socket 与假定时器，不联网、不等真实心跳。
   // ==========================================================================
   try {
@@ -3776,12 +3568,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       return s
     }
     /**
-     * 建一个源 + 一批假件。
-     * @param {string} id
-     * @param {object} [options] 覆盖默认的"确定性"参数
-     * @param {number} [startT] 假时钟起点。默认取速报样本里最新那条的发布时间附近；
-     *   **预警的用例必须传更早的时刻**——真实 EEW 样本的发震时刻是 12:50Z，
-     *   而预警的年龄闸门只有 10 分钟，起点不对会被闸门（正确地）挡掉。
+     * 建一个源 + 一批假件。startT 是假时钟起点：默认取速报样本里最新那条的发布时间附近，
+     * 预警的用例必须传更早的时刻（真实 EEW 样本的发震时刻是 12:50Z，而年龄门槛只有 10 分钟）。
      */
     function harness(id, options, startT) {
       const clock = { t: startT === undefined ? Date.parse('2026-09-18T14:40:00Z') : startT } // 北京 22:40
@@ -3805,7 +3593,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     /** 真实 EEW 样本的发震时刻（= 北京 20:50:23）。 */
     const EEW_ORIGIN_MS = Date.parse('2026-09-18T12:50:23Z')
 
-    // ① 纯函数：帧 → entry（真实样本驱动）
     const eewRaw = cnSample('cenc-eew-last.json')
     const listRaw = cnSample('cenc-eqlist-last.json')
     const eewEntry = wx.cencEewEntry(eewRaw)
@@ -3813,7 +3600,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       'EEW 帧 → entry，去重键是 ID@ReportNum（修订版必须能进缓冲）')
     assert(JSON.parse(eewEntry.payload).Magnitude === 4.2, 'entry.payload 是原始 JSON（Host 不改字段）')
     assert(eewEntry.updated === '2026-09-18T12:50:23.000Z',
-      'updated 归一到 UTC（Host 侧与 Client 侧各自持有一份 +08:00 转换，见模块注释）')
+      'updated 换算到 UTC（Host 侧与 Client 侧各自持有一份 +08:00 转换，见模块注释）')
     assert(wx.cencEewEntry({ type: 'cenc_eew' }) === null, '缺 ID / 坐标的帧 → null（不造空 entry）')
     const listEntries = wx.cencEqlistEntries(listRaw)
     assert(listEntries.length === 50 && listEntries[0].id === 'cenc:CD.20260918223231.903',
@@ -3823,7 +3610,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(wx.cencEqlistEntries({ No1: { EventID: 'x' } }).length === 0, '缺坐标的速报项被跳过')
     assert(wx.cencEqlistMd5(listRaw).length === 32, '整表 md5 指纹可读（只做短路用）')
 
-    // ② 年龄闸门是"回放旧 EEW"的安全阀
     const nowMs = Date.parse('2026-09-18T14:40:00Z')
     assert(wx.isEventFreshEnough(nowMs - 60 * 1000, nowMs, 10 * 60 * 1000) === true, '1 分钟前的 EEW → 值得播报')
     assert(wx.isEventFreshEnough(nowMs - 3 * 24 * 3600 * 1000, nowMs, 10 * 60 * 1000) === false,
@@ -3831,7 +3617,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(wx.isEventFreshEnough(NaN, nowMs, 10 * 60 * 1000) === true,
       '时间不可解析时不替用户决定（不因缺时间丢掉消息）')
 
-    // ③ 端到端（假 socket）：建连 → query 指令 → 收帧 → 入缓冲
     {
       const h = harness('cenc_eew', {}, EEW_ORIGIN_MS + 2 * 60 * 1000)
       h.src.start()
@@ -3848,7 +3633,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(got.length === 1 && got[0].xml.indexOf('b4kybfnuqayyy') !== -1, '订阅者立刻收到新 entry')
       const snap = h.src.snapshot(0)
       assert(snap.entries.length === 1 && snap.cursor > 0 && snap.reset === false,
-        'entry 进了环缓冲（/feed 与 SSE 共用它）')
+        'entry 进了缓冲（/feed 与 SSE 共用它）')
       assert(h.src.snapshot(0, { tail: true }).entries.length === 0, 'tail 只对齐位置、不回放')
       // 同一条再推：不去重就会让 Client 重复处理（且历史里重复）
       s.onmessage({ data: JSON.stringify(eewRaw) })
@@ -3876,9 +3661,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       s.onmessage({ data: JSON.stringify(rev) })
       assert(got.length === 0, '取消订阅后不再回调')
       s.onclose({ code: 1006 })
-      assert(h.sockets.length === 1 && h.sched.size() >= 1, '断线后安排重连（退避）')
+      assert(h.sockets.length === 1 && h.sched.size() >= 1, '断线后安排重连（间隔递增）')
       h.sched.advance(1000)
-      assert(h.sockets.length === 2, '退避 1 秒后重新建连')
+      assert(h.sockets.length === 2, '重试间隔 1 秒到点后重新建连')
       assert(h.sockets[0].closed === true, '旧 socket 被真正关闭')
       // stop() 必须真的断开——不能像 Host 轮询器那样把在飞连接留着
       const cur = h.sockets[1]
@@ -3889,7 +3674,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(h.sockets.length === n, 'stop 之后不再重连')
     }
 
-    // ④ 年龄闸门 + 整表逐条去重（真实速报整表：50 条横跨约 20 天）
     {
       const h = harness('cenc_eqlist')
       h.src.markRead()
@@ -3901,8 +3685,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       s.onmessage({ data: JSON.stringify(listRaw) })
       const st = h.src.stats()
       assert(h.src.snapshot(0).entries.length === 3,
-        '冷启动只放行 6 小时内的事件（北京 22:32/20:50/20:09 三条），其余 47 条记已见不入缓冲')
-      assert(st.ageSkipped === 47 && st.lastAdded === 3, '被年龄闸门挡下的条数可见（不是静默丢弃）')
+        '首次启动只放行 6 小时内的事件（北京 22:32/20:50/20:09 三条），其余 47 条记已见不入缓冲')
+      assert(st.ageSkipped === 47 && st.lastAdded === 3, '被年龄门槛挡下的条数可见（不是静默丢弃）')
       assert(h.src.snapshot(0).entries[0].id === 'cenc:CD.20260918223231.903', '缓冲里第一条是最新的那条')
       // md5 短路：整表没变 → 一条都不再比对
       s.onmessage({ data: JSON.stringify(listRaw) })
@@ -3921,10 +3705,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       noMd5.No2.ReportTime = '2026-09-18 22:46:00'
       s.onmessage({ data: JSON.stringify(noMd5) })
       assert(h.src.stats().lastAdded === 1, 'md5 缺失时照常逐条去重（指纹不可用不会造成漏报）')
-      // 停更判定探的是中继：整表最新事件距今超过 48 小时 → stale。
-      // 这里的年龄闸门**保持默认（6 小时）**，因为要同时验证那个易错点：
-      // 被年龄闸门挡下的条目也必须更新 dataTime，否则冷启动时这条探针永远不会触发
-      // （独立复验真实数据时发现的：原实现只在条目入缓冲时更新 dataTime）。
+      // 停更判定探测的是中继：整表最新事件距今超过 48 小时 → stale。年龄门槛保持默认 6 小时，
+      // 被门槛挡下的条目也必须更新 dataTime，否则首次启动时这条自检永远不会触发。
       const clock2 = { t: Date.parse('2026-09-21T00:00:00Z') }
       const sched2 = makeSched(clock2)
       const sockets2 = []
@@ -3937,11 +3719,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       src2.markRead(); src2.start(); sched2.advance(0)
       sockets2[0].onopen()
       sockets2[0].onmessage({ data: JSON.stringify(listRaw) })
-      assert(src2.stats().stale === true, '整表最新事件距今超 48 小时 → 判定中继停更（只有速报能做这个探针）')
+      assert(src2.stats().stale === true, '整表最新事件距今超 48 小时 → 判定中继停更（只有速报能做这个探测）')
       assert(src2.stats().ageSkipped === 50 && src2.snapshot(0).entries.length === 0,
-        '同一批数据全部被年龄闸门挡下（2 天前的速报没有播报价值）')
+        '同一批数据全部被年龄门槛挡下（2 天前的速报没有播报价值）')
       assert(src2.stats().dataTime === Date.parse('2026-09-18T14:32:31Z'),
-        '被挡下的条目仍要更新 dataTime —— 否则冷启动时"中继停更"永远不会被发现')
+        '被挡下的条目仍要更新 dataTime —— 否则首次启动时"中继停更"永远不会被发现')
       const freshList = JSON.parse(JSON.stringify(listRaw))
       freshList.No1.time = '2026-09-20 23:30:00'
       freshList.No1.ReportTime = '2026-09-20 23:35:00'
@@ -3949,8 +3731,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       sockets2[0].onmessage({ data: JSON.stringify(freshList) })
       assert(src2.stats().stale === false && src2.stats().staleSince === 0,
         '有新鲜数据后 stale 复位（否则蓝点会永久挂着）')
-      // 真正落在 6 小时窗口内的事件必须进缓冲（闸门只挡旧的，不挡新的）。
-      // 北京 09-21 02:30 = 18:30Z，距 09-21 00:00Z 是 5.5 小时，在窗口内。
+      // 真正落在 6 小时窗口内的事件必须进缓冲（门槛只挡旧的）：北京 09-21 02:30 = 18:30Z，距起点 5.5 小时。
       const liveList = JSON.parse(JSON.stringify(listRaw))
       liveList.No1.time = '2026-09-21 02:30:00'
       liveList.No1.ReportTime = '2026-09-21 02:35:00'
@@ -3958,14 +3739,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       liveList.md5 = 'dddddddddddddddddddddddddddddddd'
       sockets2[0].onmessage({ data: JSON.stringify(liveList) })
       assert(src2.snapshot(0).entries.length === 1 && src2.stats().lastAdded === 1,
-        '窗口内的新事件照常进缓冲（闸门是"时效闸门"，不是"一律不推"）')
+        '窗口内的新事件照常进缓冲（门槛只看时效，不是"一律不推"）')
     }
 
-    // ④b 停更探针必须由**时钟**推动，不能只在"内容有变化的帧"上求值（0.5.1 修）
-    // 中继停更的两种真实形态都不产生"有变化的新帧"：① 转发同一张旧表（被 md5 短路）；
-    // ② 干脆不再推数据帧。只在收帧时算一次的话，这个探针在最需要它的时候永远停在 false。
+    // ④b 停更自检必须由**时钟**推动：中继停更的两种形态（转发同一张旧表被 md5 短路 / 不再推数据帧）都不产生「有变化的新帧」。
     {
-      // ① md5 未变（中继一直转发同一张旧表）
       const clock3 = { t: Date.parse('2026-09-18T15:32:31Z') } // 距表内最新事件 1 小时
       const sched3 = makeSched(clock3)
       const sockets3 = []
@@ -3982,9 +3760,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       clock3.t += 50 * 60 * 60 * 1000
       sockets3[0].onmessage({ data: JSON.stringify(listRaw) }) // 同一帧：md5 相同 → 走短路分支
       assert(src3.stats().stale === true && src3.stats().staleSince > 0,
-        '整表 md5 未变但时钟走过 50 小时 → 仍要判停更（md5 短路只该省掉逐条比对，不能连探针一起跳过）')
+        '整表 md5 未变但时钟走过 50 小时 → 仍要判停更（md5 短路只该省掉逐条比对，不能连自检一起跳过）')
 
-      // ② 中继不再推任何数据帧（"连得上但停更 4 个月"那种形态）：只能靠例行检查推动
       const clock4 = { t: Date.parse('2026-09-18T15:32:31Z') }
       const sched4 = makeSched(clock4)
       const sockets4 = []
@@ -4004,10 +3781,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '中继不再推任何帧时，停更由例行检查（时钟）推动 —— 心跳检查关掉也不该把它一起关掉')
     }
 
-    // ④b-2 0.9.4（P1-2）：REST 兜底必须**真的存在**
-    //      lib/index.js 与 wolfx-source.js 的注释一直宣称"WS 不可达时的 HTTP 轮询降级通道"，
-    //      但全仓没有任何 REST 取数代码：wss:// 被中间设备掐断时，两个大陆源静默停摆、状态还是绿的。
-    //      这是超承诺 + 真实缺口，两个方向都要修——这里钉住"通道现在真的在跑"。
+    // ④b-2 REST 兜底必须真的存在：wss:// 被中间设备掐断时，两个大陆源会静默停摆而状态还是绿的。
     {
       const flush = () => new Promise((r) => setImmediate(r))
       const clockR = { t: Date.parse('2026-09-18T14:40:00Z') }
@@ -4037,11 +3811,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(srcR.snapshot(0).entries.length === 3, 'REST 拿到的整表走**同一个** handleDataFrame 入缓冲（不另写一份解析）')
       assert(lastInit && lastInit.signal !== undefined, 'REST 请求带中止信号（stop() 能掐断在飞请求）')
 
-      // 节流：重连退避的每个 tick 都请求一次就太吵了，restPollMs 内不重复
+      // 节流：每次重连间隔到点都请求一次就太吵了，restPollMs 内不重复
       socketsR[0].onclose({ code: 1006 })
       schedR.advance(1000)
       await flush()
-      assert(callsR.length === 1, 'restPollMs 之内不重复请求 REST（重连退避 1s→2s→… 不该放大成 REST 频率）')
+      assert(callsR.length === 1, 'restPollMs 之内不重复请求 REST（重连间隔 1s→2s→… 不该放大成 REST 频率）')
 
       // 越过节流窗口：REST 失败要留下原因，不能静默
       restFail = true
@@ -4081,11 +3855,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(srcR2.stats().restLastError === '', '被自己中止不算故障（不写 restLastError）')
     }
 
-    // ④c 静默失效与速率约束（0.5.1 修）
+    // ④c 悄悄失灵与速率约束
     {
-      // 整表"有 NoN 项却一条都解析不出来"必须与"空表"**不同形**（DESIGN 4.5）：字段改名会让
-      // 整表 50 条全被丢弃，而它此前 errors 不涨、dataTime 停在 0，用户看到绿色"已连接"
-      // 却一条都收不到 —— 正是最不该静默的那一类失败。
+      // 整表「有 NoN 项却一条都解析不出来」必须与「空表」不同形：字段改名会让整表被丢弃，而 errors 不涨、dataTime 停在 0。
       const h = harness('cenc_eqlist')
       h.src.markRead(); h.src.start(); h.sched.advance(0)
       const s = h.sockets[0]
@@ -4103,16 +3875,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       s.onmessage({ data: JSON.stringify({ type: 'cenc_eqlist' }) })
       assert(h.src.stats().errors === err2, '空表仍不计失败（源正常但当前没有速报数据）')
 
-      // 0.9.4（P2-13）：**逐条**失败要有计数。上游把某几个字段改名时，45/50 条仍解析得出来，
-      // "整表全坏"那条判据永远不触发 —— 5 条真实地震凭空消失而界面依旧绿色"已连接"。
+      // **逐条**失败要有计数：上游改几个字段名时 45/50 条仍解析得出来，「整表全坏」那条判据永远不触发。
       {
         const h3 = harness('cenc_eqlist')
         h3.src.markRead(); h3.src.start(); h3.sched.advance(0)
         const s3 = h3.sockets[0]
         s3.onopen()
         const partial = JSON.parse(JSON.stringify(listRaw))
-        // 挑**最旧**的 3 条把坐标字段改名（只坏 3 条，整表仍有 47 条可解析）。
-        // 挑最旧的是为了与冷启动的年龄闸门解耦：否则"入缓冲条数变少"就分不清是闸门还是丢条。
+        // 挑**最旧**的 3 条把坐标字段改名（与首次启动的年龄门槛解耦，否则分不清是门槛还是丢条）。
         let renamed = 0
         const keysDesc = Object.keys(partial).filter((k) => /^No\d+$/.test(k))
           .sort((a, b) => Number(b.slice(2)) - Number(a.slice(2)))
@@ -4129,13 +3899,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         assert(h3.src.stats().errors === errBefore3, '个别条目脏不算源的故障（不把蓝点点亮）')
         assert(h3.src.stats().lastError.indexOf('有 3 条无法解析') !== -1,
           '原因写进 lastError（"少了 3 条"与"这批没有新地震"必须不同形）')
-        assert(h3.src.stats().lastAdded === 3, '窗口内的新鲜条目照常入缓冲（闸门与"丢条"互不干扰）')
+        assert(h3.src.stats().lastAdded === 3, '窗口内的新鲜条目照常入缓冲（门槛与"丢条"互不干扰）')
         h3.src.stop()
       }
 
-      // 0.9.4（P3-31）：md5 只是**观测读数**，不再是"整表没变"的闸门。
-      // md5 是上游自己给的：它改了表却忘了刷指纹时，旧实现整帧跳过、lastAdded 归零，
-      // 与"没有新地震"完全同形——真实地震就这么消失。
+      // md5 只是**观测读数**，不再是「整表没变」的判定条件：上游改了表却忘了刷指纹时旧实现整帧跳过，与「没有新地震」完全同形。
       {
         const h4 = harness('cenc_eqlist')
         h4.src.markRead(); h4.src.start(); h4.sched.advance(0)
@@ -4150,7 +3918,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
           EventID: 'CD.20260919120000.001', latitude: '30.5', longitude: '100.5', magnitude: '4.0',
           time: '2026-09-19 12:00:00', placeName: '测试地', ReportTime: '2026-09-19 12:00:10',
         }
-        // 数据时间落在窗口内（用同一批样本里最新那条的时间字段，确保过年龄闸门）
+        // 数据时间落在窗口内（用同一批样本里最新那条的时间字段，确保过年龄门槛）
         stale.No51.time = listRaw.No1.time
         stale.No51.ReportTime = '2026-09-19 12:00:10'
         s4.onmessage({ data: JSON.stringify(stale) })
@@ -4161,8 +3929,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         h4.src.stop()
       }
 
-      // 0.9.4（P3-36）：速报的去重记忆必须**长于整表覆盖窗口**（约 20 天），否则表里那些老条目
-      // 每帧都被重新当成"新候选"、再被年龄闸门挡下 → ageSkipped 在没有新事件时也持续增长
+      // 速报的去重记忆必须长于整表覆盖窗口（约 20 天），否则老条目每帧都被当成新候选、再被年龄门槛挡下。
       {
         const h5 = harness('cenc_eqlist', { seenTtlMs: undefined })
         assert(h5.src.stats().seenTtlMs === undefined || true, '（前置）不显式传 TTL 时用源自己的默认')
@@ -4183,7 +3950,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       s2.onopen()
       s2.onmessage({ data: JSON.stringify(listRaw) })
       const added1 = h2.src.stats().lastAdded
-      assert(added1 === 3, '（前置）冷启动放行窗口内的 3 条')
+      assert(added1 === 3, '（前置）首次启动放行窗口内的 3 条')
       s2.onmessage({ data: JSON.stringify(listRaw) })
       assert(h2.src.stats().lastAdded === 0, '（前置）md5 未变 → 短路，无新增')
       h2.clock.t += 100 * 1000 // 远超 1 秒的 TTL
@@ -4194,19 +3961,18 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '去重键过了 TTL 之后重新入缓冲（pruneSeen 真的被调用，seenTtlMs 不是假选项）')
       h2.src.stop()
 
-      // markRead 不能把正在等待的退避重置为 0：/feed 每 15 秒调一次它，否则"上游连不上时
-      // 不能死循环猛敲"（DESIGN 5.3）这条约束会被压平成 15 秒。
+      // markRead 不能把正在等待的重连间隔重置为 0：/feed 每 15 秒调一次它，否则间隔会被压平成 15 秒。
       const h3 = harness('cenc_eew')
       h3.src.markRead(); h3.src.start(); h3.sched.advance(0)
       h3.sockets[0].onopen()
-      h3.sockets[0].onclose({ code: 1006 }) // 断开 → 排 1 秒退避
+      h3.sockets[0].onclose({ code: 1006 }) // 断开 → 排 1 秒后重连
       const n3 = h3.sockets.length
-      h3.clock.t += 500 // 退避还没到点
+      h3.clock.t += 500 // 重连还没到点
       h3.src.markRead() // 模拟 /feed 的一次读取
       h3.sched.advance(0)
-      assert(h3.sockets.length === n3, 'markRead 不取消正在等待的退避（否则退避被压平成 /feed 周期）')
+      assert(h3.sockets.length === n3, 'markRead 不取消正在等待的重连（否则间隔被压平成 /feed 周期）')
       h3.sched.advance(600)
-      assert(h3.sockets.length === n3 + 1, '退避到点后照常重连')
+      assert(h3.sockets.length === n3 + 1, '间隔到点后照常重连')
       h3.src.stop()
 
       // 空闲断开是正常行为，不该被写成 lastError（排障脚本会把它当故障打印）
@@ -4220,7 +3986,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       h4.src.stop()
     }
 
-    // ⑤ 心跳看门狗 + 空闲断开
     {
       const h = harness('cenc_eew', { heartbeatTimeoutMs: 120 * 1000, heartbeatCheckMs: 30 * 1000 })
       h.src.markRead()
@@ -4231,9 +3996,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(h.sockets.length === 1, '每 30 秒心跳一次、有消息时不断连')
       h.sockets[0].onmessage({ data: JSON.stringify({ type: 'heartbeat' }) })
       h.sched.advance(150 * 1000)
-      assert(h.sockets[0].closed === true, '超过 120 秒没有任何消息 → 判定连接已死并主动断开（半开连接不会给事件）')
-      h.sched.advance(1000) // 退避 1 秒后才重连
-      assert(h.sockets.length === 2, '断开后按退避重连')
+      assert(h.sockets[0].closed === true, '超过 120 秒没有任何消息 → 判定连接已死并主动断开（连接假死时不会给事件）')
+      h.sched.advance(1000) // 重连间隔 1 秒到点后才重连
+      assert(h.sockets.length === 2, '断开后按递增间隔重连')
       assert(h.events.some((m) => m.indexOf('心跳超时') !== -1), '心跳超时落一条可读的错误（供诊断文档引用）')
 
       // 空闲：没人读就**不建连**，有人读时立刻补上
@@ -4245,8 +4010,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       idle.src.markRead()
       idle.sched.advance(0)
       assert(idle.sockets.length === 1, '有人读之后立刻建连（不让刚打开页面的用户白等）')
-      // 有活跃订阅者时不算空闲——否则十分钟后会把正在推流的连接掐掉。
-      // 心跳超时设成 1 小时，让这条用例只考察"空闲判定"这一件事。
+      // 有活跃订阅者时不算空闲；心跳超时设成 1 小时，让这条用例只考察「空闲判定」。
       const idle2 = harness('cenc_eew', { idleMs: 60 * 1000, heartbeatTimeoutMs: 60 * 60 * 1000, heartbeatCheckMs: 30 * 1000 })
       idle2.src.start()
       idle2.src.markRead()
@@ -4267,7 +4031,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '（对照）没有订阅者时同样时长会主动断开——不为无人看管的页面白占 Wolfx 的连接配额')
     }
 
-    // ⑥ 建连看门狗：15 秒没 open → 放弃重连（否则状态永远停在"连接中"）
     {
       const h = harness('cenc_eew', { connectTimeoutMs: 15 * 1000 })
       h.src.markRead()
@@ -4275,20 +4038,18 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       h.sched.advance(0)
       assert(h.sockets.length === 1 && h.sockets[0].closed === false, '（前置）已发起连接')
       h.sched.advance(16 * 1000)
-      assert(h.sockets[0].closed === true, '建连超时 → 关闭半开连接')
+      assert(h.sockets[0].closed === true, '建连超时 → 关闭卡住的连接')
       h.sched.advance(1000)
-      assert(h.sockets.length === 2, '建连超时后按退避重连')
+      assert(h.sockets.length === 2, '建连超时后按递增间隔重连')
       assert(h.events.some((m) => m.indexOf('建连超时') !== -1), '建连超时落一条可读的错误')
     }
 
-    // ⑦ SSE 帧格式（纯函数）
     assert(host.sseFrame('entry', { a: 1 }, 7) === 'id: 7\nevent: entry\ndata: {"a":1}\n\n',
       'SSE 帧：id + event + data + 空行结束')
     assert(host.sseFrame('', 'x').indexOf('event:') === -1, '没有事件名时不写 event 行')
     assert(host.sseFrame('x', 'a\nb') === 'event: x\ndata: "a\\nb"\n\n',
       'JSON 里的换行是转义的，不会把帧结构撑破')
 
-    // ⑧ /stream 路由：首帧 sync → 补发环缓冲 → 实况推送 → 断开清理
     {
       function fakeRes() {
         return {
@@ -4319,16 +4080,16 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         clearInterval: () => {},
       })
       const res = fakeRes()
-      // 带 since → 走"补发环缓冲"那条分支（tail 分支由后面 src4 的断言单独覆盖）
+      // 带 since → 走"补发缓冲里的历史条目"那条分支（tail 分支由后面 src4 的断言单独覆盖）
       handler({ url: '/dsh-quake-alert/stream?source=cenc_eew&since=50', headers: {} }, res)
       assert(res.status === 200 && res.headers['content-type'].indexOf('text/event-stream') === 0,
         '/stream 返回 200 + text/event-stream（该类型在 dsh-host-webserver 里被显式跳过压缩）')
       assert(res.frames[0].indexOf('event: sync') === 0 && res.frames[0].indexOf('"cursor":100') !== -1,
-        '首帧是 sync（告诉 Client 游标与缓冲状态，供诊断与判断要不要改走 /feed）')
+        '第一条数据是 sync（告诉 Client 读取位置与缓冲状态，供诊断与判断要不要改走 /feed）')
       assert(res.frames[0].indexOf('"stale":false') !== -1 && res.frames[0].indexOf('"dataTime":null') !== -1,
-        'sync 首帧带上数据健康（这个假源没有 stats()，按"不 stale"兜底——诊断字段缺失不该把整条流弄断）')
+        'sync 第一条数据带上数据健康（这个假源没有 stats()，按"不 stale"兜底——诊断字段缺失不该把整条流弄断）')
       assert(res.frames[1].indexOf('id: 99') === 0 && res.frames[1].indexOf('event: entry') !== -1,
-        '随后按 seq 补发环缓冲里的条目（断线补齐，靠 id: 让浏览器重连时带回）')
+        '随后按 seq 补发缓冲里的条目（断线补齐，靠 id: 让浏览器重连时带回）')
       assert(src.reads === 1 && src.subs.length === 1, '订阅会 markRead（保持 WS 存活）并挂上订阅者')
       src.subs[0]({ seq: 101, id: 'cenc:y', title: 't2', updated: '', xml: '{"b":2}' })
       assert(res.frames.length === 3 && res.frames[2].indexOf('id: 101') === 0, '实况 entry 立刻推给订阅者')
@@ -4339,8 +4100,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(src.subs.length === 0, '断开后订阅被清掉')
       assert(res.frames.length === n, '断开后不再写帧')
 
-      // 0.9.4（P3-34）：补发期间断开时，**不许**再装订阅与心跳（cleanup 有幂等守卫，
-      // 装完就没人能清了——那是一条永远不会被回收的订阅 + 一个永远在跑的定时器）。
+      // 补发期间断开时不许再装订阅与心跳：cleanup 有幂等守卫，装完就没人能清了。
       {
         const srcB = {
           reads: 0, subs: [], snapCount: 0,
@@ -4373,7 +4133,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         assert(srcB.reads === 0, '也不 markRead（markRead 会让 Host 的按需轮询为一个已断开的页面继续拉源）')
       }
 
-      // 0.9.4（P3-34）：背压。持续 false 到上限就断流（不丢帧、让 Client 重连补齐）
+      // 写入积压：持续 false 到上限就断流（不丢帧、让 Client 重连补齐）
       {
         const srcC = {
           subs: [],
@@ -4383,14 +4143,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         }
         const hC = host.createStreamHandler({ sources: { cenc_eew: srcC }, setInterval: () => 1, clearInterval: () => {} })
         const rC = fakeRes()
-        rC.write = () => false // 一直背压：客户端不读
+        rC.write = () => false // 一直写入积压：客户端不读
         hC({ url: '/dsh-quake-alert/stream?source=cenc_eew', headers: {} }, rC)
         assert(srcC.subs.length === 1, '（前置）订阅已装上')
         for (let i = 0; i <= host.MAX_SSE_BACKPRESSURE + 2; i += 1) {
           if (srcC.subs[0]) srcC.subs[0]({ seq: i, id: 's' + i, title: '', updated: '', xml: '{}' })
         }
         assert(srcC.subs.length === 0,
-          '连续背压超过 ' + host.MAX_SSE_BACKPRESSURE + ' 帧 → 主动断流并清掉订阅（Host 侧内存不再无上界）')
+          '连续写入积压超过 ' + host.MAX_SSE_BACKPRESSURE + ' 帧 → 主动断流并清掉订阅（Host 侧内存不再无上界）')
       }
 
       const src2 = Object.assign({}, src, { snaps: [], reads: 0, subs: [] })
@@ -4402,12 +4162,12 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const h3 = host.createStreamHandler({ sources: { cenc_eew: src3 }, setInterval: () => 1, clearInterval: () => {} })
       const r3 = fakeRes()
       h3({ url: '/dsh-quake-alert/stream?source=cenc_eew&since=42', headers: {} }, r3)
-      assert(src3.snaps[0][0] === 42, '没有 Last-Event-ID 时用页面带来的持久化游标')
+      assert(src3.snaps[0][0] === 42, '没有 Last-Event-ID 时用页面带来的持久化读取位置')
       const src4 = Object.assign({}, src, { snaps: [], reads: 0, subs: [] })
       const h4 = host.createStreamHandler({ sources: { cenc_eew: src4 }, setInterval: () => 1, clearInterval: () => {} })
       const r4 = fakeRes()
       h4({ url: '/dsh-quake-alert/stream?source=cenc_eew', headers: {} }, r4)
-      assert(src4.snaps[0][1] === true, '什么游标都没有 → tail（不把几小时前的旧警报当新闻重放）')
+      assert(src4.snaps[0][1] === true, '什么记录都没有 → tail（不把几小时前的旧警报当新闻重放）')
 
       // 参数校验与跨站防护
       const bad = fakeRes()
@@ -4421,9 +4181,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       h5({ url: '/dsh-quake-alert/stream?source=cenc_eew', headers: {} }, cs)
       assert(cs.status === 403, '跨站请求被拒绝（这条路由有保持外部连接的副作用）')
 
-      // keep-alive 帧同时承载**停更状态**（0.5.0 的 48 小时停更探针在默认路径上的可见性）。
-      // 停更的形态就是"不再有新 entry"，只看 sync / entry 的话状态会永远停在连接那一刻；
-      // 而"源可达但数据是旧的"与"这几天确实没有地震"在 Client 侧长得一模一样，只能由 Host 判。
+      // keep-alive 帧同时承载**停更状态**：停更的形态就是「不再有新 entry」，只看 sync / entry 的话状态会停在连接那一刻。
       const tickers = []
       const srcS = {
         markRead() {},
@@ -4440,7 +4198,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const rS = fakeRes()
       hS({ url: '/dsh-quake-alert/stream?source=cenc_eqlist', headers: {} }, rS)
       assert(rS.frames[0].indexOf('"stale":true') !== -1 && rS.frames[0].indexOf('"dataTime":1700000000000') !== -1,
-        'sync 首帧把 Host 判定的 stale / dataTime 带给 Client')
+        'sync 第一条数据把 Host 判定的 stale / dataTime 带给 Client')
       assert(tickers.length === 1, 'keep-alive 定时器已排上')
       tickers[0]()
       const ka = rS.frames[rS.frames.length - 1]
@@ -4448,11 +4206,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '周期 status 帧兼作 keep-alive：停更状态必须由 Host 推，否则 SSE 路径下它在界面上永远不可见')
     }
 
-    // ⑨ 两个源都进了同一张 pollers 表 → /feed?source=cenc_* 天然可用（这就是 WS→HTTP 降级通道）
     assert(wx.WOLFX_SOURCES.cenc_eew.staleAfterMs === 0 && wx.WOLFX_SOURCES.cenc_eqlist.staleAfterMs === 48 * 3600 * 1000,
-      '契约：预警不给新鲜度阈值（稀疏是常态）、速报 48 小时（探中继）')
+      '契约：预警不给新鲜度阈值（稀疏是常态）、速报 48 小时（探测中继）')
     assert(wx.MAX_EVENT_AGE_MS.cenc_eew === 10 * 60 * 1000 && wx.MAX_EVENT_AGE_MS.cenc_eqlist === 6 * 3600 * 1000,
-      '契约：事件年龄闸门 预警 10 分钟 / 速报 6 小时')
+      '契约：事件年龄门槛 预警 10 分钟 / 速报 6 小时')
     assert(wx.WOLFX_WS_BASE === 'wss://ws-api.wolfx.jp/' && wx.WOLFX_REST_BASE === 'https://api.wolfx.jp/',
       'WS 与 REST 两个端点都记在常量里（REST 是降级通道）')
   } catch (e) {
@@ -4460,8 +4217,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
   }
 
   // ==========================================================================
-  // 0.5.0：大陆源的 Client 半边（SSE 消费 / 降级 / 贯通主链 / 文案）
-  // EventSource 与定时器全部注入，不联网、不真等 8 秒探针。
+  // 大陆源的 Client 半边（SSE 消费 / 降级 / 贯通主链 / 文案）
+  // EventSource 与定时器全部注入，不联网、不真等 8 秒自检。
   // ==========================================================================
   try {
     const eewRaw = JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'cn', 'cenc-eew-last.json'), 'utf8'))
@@ -4515,8 +4272,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         createEventSource: (url) => { const es = fakeES(url); created.push(es); return es },
         setTimer: (fn, ms) => sched.set(fn, ms),
         clearTimer: (k) => sched.clear(k),
-        // 0.9.4：静默判据用注入的时钟（默认 Date.now()），所以这里必须跟着假时钟走，
-        // 否则"推进 20 秒"在 now() 眼里仍是 0 秒，那条判定在测试里永远不触发。
+        // 静默判据用注入的时钟（默认 Date.now()），否则「推进 20 秒」在 now() 眼里仍是 0 秒。
         now: () => clock.t,
         getCfg: () => cfg,
         enabled: (c) => (c.disasters || {}).earthquake !== false,
@@ -4533,7 +4289,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       return { clock, sched, created, fallbacks, statuses, saved, client, setCfg: (c) => { cfg = c }, getCfgRef: () => cfg }
     }
 
-    // ① 基本链路：建连 → 首帧 sync → entry → 游标前进并落盘
     {
       const h = cnHarness({})
       h.client.start()
@@ -4541,25 +4296,24 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(h.created[0].url.indexOf('source=cenc_eew') !== -1,
         'SSE URL 带 source 分派（与 Host 的 /stream?source= 对应）')
       assert(h.created[0].url.indexOf('since=tail') !== -1,
-        '首次没有游标 → since=tail（只对齐位置，不把 Host 缓冲里的旧警报当新闻重放）')
+        '首次没有读取位置 → since=tail（只对齐位置，不把 Host 缓冲里的旧警报当新闻重放）')
       h.created[0].emit('sync', { source: 'cenc_eew', cursor: 500, reset: false, truncated: false, frozen: false, replayed: 0 })
       assert(h.client.cursor() === 500 && h.saved.indexOf(500) !== -1,
-        '没有补发条目 → 游标对齐到 Host 当前位置并落盘')
-      assert(h.statuses.some((p) => p.status === 'open'), '首帧到达 → 上报 open（侧边栏不再是灰的）')
+        '没有补发条目 → 读取位置对齐到 Host 当前位置并写入本地存储')
+      assert(h.statuses.some((p) => p.status === 'open'), '第一条数据到达 → 上报 open（侧边栏不再是灰的）')
       h.created[0].emit('entry', { seq: 501, id: 'cenc:x', xml: '{"a":1}' })
-      assert(h.client.cursor() === 501, '游标跟着 entry 的 seq 前进')
-      assert(h.saved[h.saved.length - 1] === 501, '每条 entry 都推进落盘的游标')
+      assert(h.client.cursor() === 501, '读取位置跟着 entry 的 seq 前进')
+      assert(h.saved[h.saved.length - 1] === 501, '每条 entry 都推进读取位置并写入本地存储')
       // 回退保护：SSE 的补发与实况可能交错到达
       h.created[0].emit('entry', { seq: 400, id: 'cenc:y', xml: '{}' })
-      assert(h.client.cursor() === 501, '游标只前进（回退会让"断线补齐"重复投递）')
+      assert(h.client.cursor() === 501, '读取位置只前进（回退会让"断线补齐"重复投递）')
       // 坏帧：计入数据健康，但不影响后续条目
       h.created[0].emitRaw('entry', 'not json')
       assert(!!T.sourceHealthOf('cenc_eew'), 'SSE 帧不是合法 JSON → 计入数据健康（蓝点语义）')
       T.resetSourceHealth()
       h.created[0].emit('entry', { seq: 502, id: 'cenc:z', xml: '{}' })
-      assert(h.client.cursor() === 502, '坏帧之后照常继续处理（不让游标停住）')
-      // status 帧（Host 每 15 秒推一次，兼作 keep-alive）：停更只能由 Host 告知 ——
-      // "源可达但数据是旧的"与"这几天确实没有地震"在 Client 侧长得一模一样。
+      assert(h.client.cursor() === 502, '坏帧之后照常继续处理（不让读取位置停住）')
+      // status 帧（Host 每 15 秒推一次，兼作 keep-alive）：停更只能由 Host 告知
       const nStatus = h.statuses.length
       h.created[0].emit('status', { source: 'cenc_eew', cursor: 502, stale: true, dataTime: 1700000000000 })
       assert(h.statuses.length === nStatus + 1 && h.statuses[h.statuses.length - 1].status === 'stale',
@@ -4567,30 +4321,26 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(h.client.stats().stale === true, 'stale 进入 stats（诊断快照与源状态行要能读到）')
       h.created[0].emit('status', { source: 'cenc_eew', cursor: 503, stale: false, dataTime: 0 })
       assert(h.statuses[h.statuses.length - 1].status === 'open', '恢复新鲜 → 回到 open（中灰点不会永久挂着）')
-      // status 帧不能顶替"最近一条数据"的时刻，否则设置页会一直显示"最近数据 0 秒前"，
-      // 恰好把"其实很久没有数据了"盖掉
+      // status 帧不能顶替「最近一条数据」的时刻，否则设置页会一直显示「最近数据 0 秒前」，把停更盖掉
       const lastAtBefore = h.client.stats().lastAt
       h.created[0].emit('status', { source: 'cenc_eew', stale: false })
       assert(h.client.stats().lastAt === lastAtBefore, 'status 帧不更新 lastAt（它表示"最近一条数据"）')
       h.client.stop()
       assert(h.created[0].closed === true, 'stop() 关掉在飞的 EventSource')
 
-      // 首帧 sync 就带 stale 时也要认（连接那一刻上游已经是旧的）
+      // 第一条数据 sync 就带 stale 时也要认（连接那一刻上游已经是旧的）
       const h2 = cnHarness({})
       h2.client.start()
       h2.created[0].emit('sync', {
         source: 'cenc_eew', cursor: 9, reset: false, truncated: false, frozen: false, replayed: 0,
         stale: true, dataTime: 1700000000000,
       })
-      assert(h2.statuses.some((p) => p.status === 'stale'), 'sync 首帧带 stale → 直接上报 stale')
+      assert(h2.statuses.some((p) => p.status === 'stale'), 'sync 第一条数据带 stale → 直接上报 stale')
       h2.client.stop()
     }
 
-    // ①b 状态帧不得抹掉 sync 的告警；降级客户端必须与 SSE 共用游标键（0.5.1 修）
     {
-      // store.pushSource 是整体替换 status + detail 的，而 status 帧每 15 秒就来一次：
-      // 若它只报"已连接"，sync 那一刻报出的"增量缺口 / 游标重置 / Host 未运行"会在 15 秒后
-      // 自己消失——而它们的条件其实仍然成立。
+      // store.pushSource 整体替换 status + detail，而 status 帧每 15 秒就来一次：只报「已连接」会让 sync 报出的告警自己消失。
       const h = cnHarness({})
       h.client.start()
       h.created[0].emit('sync', {
@@ -4598,18 +4348,16 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       })
       const lastOf = (x) => x.statuses[x.statuses.length - 1]
       assert(lastOf(h).status === 'degraded' && lastOf(h).detail.indexOf('gap:') !== -1,
-        'sync 的告警先上报（增量缺口 / 游标重置 / Host 未运行）：' + lastOf(h).detail)
+        'sync 的告警先上报（增量缺口 / 读取位置重置 / Host 未运行）：' + lastOf(h).detail)
       h.created[0].emit('status', { source: 'cenc_eew', cursor: 6, stale: false, dataTime: 0 })
       assert(lastOf(h).status === 'degraded' && lastOf(h).detail.indexOf('gap:') !== -1,
         'status 帧不得把 sync 的告警抹成"已连接"（条件仍然成立）：' + lastOf(h).detail)
       h.client.stop()
 
-      // 降级客户端必须继承 SSE 的游标：否则降级瞬间从 `since=tail` 起步，
-      // SSE 挂掉到降级生效之间 Host 缓冲里的条目会被静默跳过（真实的漏报窗口）。
+      // 降级客户端必须继承 SSE 的读取位置：否则降级瞬间从 since=tail 起步，会静默跳过缓冲里的条目。
       const captured = []
       const h2 = cnHarness({ cursor: 501, over: {
-        // 覆盖掉 harness 默认的假 createFallback，逼它走 12c 的**默认降级工厂**
-        //（游标键就在那条路径上，用假工厂测不到）
+        // 覆盖掉 harness 默认的假 createFallback，逼它走 12c 的默认降级工厂（读取位置用的存储键就在那条路径上）
         createFallback: undefined,
         createFeedClient: (o) => { captured.push(o); return { start() {}, stop() {} } },
       } })
@@ -4617,38 +4365,35 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       h2.created[0].emitRaw('error', '')
       h2.created[0].emitRaw('error', '')
       h2.created[0].emitRaw('error', '')
-      assert(h2.client.modeOf() === 'poll' && captured.length === 1, '连续拿不到首帧 → 降级并建立轮询客户端')
+      assert(h2.client.modeOf() === 'poll' && captured.length === 1, '连续拿不到第一条数据 → 降级并建立轮询客户端')
       assert(captured[0].cursorKey === T.CN_CURSOR_KEY + '.cenc_eew',
-        '降级客户端与 SSE 共用同一个游标键（否则降级期间会静默跳过一段条目）')
+        '降级客户端与 SSE 共用同一个读取位置存储键（否则降级期间会静默跳过一段条目）')
       h2.client.stop()
     }
 
-    // ①c Host 说"游标重置过"时必须允许回退（0.5.1 修 D 类残留）
     {
       const h = cnHarness({ cursor: 900 })
       h.client.start()
-      assert(h.client.cursor() === 900, '（前置）从持久化游标起步')
+      assert(h.client.cursor() === 900, '（前置）从持久化的读取位置起步')
       h.created[0].emit('sync', {
         source: 'cenc_eew', cursor: 300, reset: true, truncated: false, frozen: false, replayed: 0, stale: false,
       })
       assert(h.client.cursor() === 300,
-        'Host 明确 reset → 游标回退到它的当前位置（否则本地卡在更大的值上，每次重连都全量重放）')
+        'Host 明确 reset → 读取位置回退到它的当前位置（否则本地卡在更大的值上，每次重连都全量重放）')
       // 没有 reset 时仍然只前进——防止把"回退保护"一起改坏
       h.created[0].emit('entry', { seq: 200, id: 'cenc:old', xml: '{}' })
-      assert(h.client.cursor() === 300, '没有 reset 时游标仍然只前进（回退会让"断线补齐"重复投递）')
+      assert(h.client.cursor() === 300, '没有 reset 时读取位置仍然只前进（回退会让"断线补齐"重复投递）')
       h.client.stop()
     }
 
-    // ② 页面刷新：从持久化游标续传，不重放
     {
       const h = cnHarness({ cursor: 501 })
       h.client.start()
-      assert(h.created[0].url.indexOf('since=501') !== -1, '有持久化游标 → 续传（刷新页面不会重放已消费的增量）')
-      assert(h.client.hasCursor() === true, '有游标时不再走 tail')
+      assert(h.created[0].url.indexOf('since=501') !== -1, '有持久化的读取位置 → 续传（刷新页面不会重放已消费的增量）')
+      assert(h.client.hasCursor() === true, '有读取位置时不再走 tail')
       h.client.stop()
     }
 
-    // ③ 降级：连续失败 / 环境没有 EventSource / 连上但不推流
     {
       const h = cnHarness({ over: { maxFails: 3 } })
       h.client.start()
@@ -4658,7 +4403,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '偶尔出错不降级（EventSource 自己会重连，过早降级会白白丢掉秒级延迟）')
       h.created[0].emitRaw('error', '')
       assert(h.client.modeOf() === 'poll' && h.fallbacks.indexOf('start') !== -1,
-        '连续 3 次都没收到首帧 → 降级为轮询')
+        '连续 3 次都没收到第一条数据 → 降级为轮询')
       assert(h.statuses.some((p) => p.status === 'degraded' && p.detail.indexOf('降级') !== -1),
         '降级必须**说出来**（否则用户看到"一切正常"却收不到大陆预警——本插件最不能接受的形态）')
 
@@ -4674,10 +4419,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(h3.created.length === 2 && h3.created[0].closed === true,
         '连上但 8 秒没有任何数据（代理把流缓冲住了）→ 关掉重连')
       h3.sched.advance(8000)
-      assert(h3.client.modeOf() === 'poll', '两次都拿不到首帧 → 降级（连不上与"连上但不推流"是两回事）')
+      assert(h3.client.modeOf() === 'poll', '两次都拿不到第一条数据 → 降级（连不上与"连上但不推流"是两回事）')
     }
 
-    // ④ 灾种开关：关掉主动断开、打开恢复
     {
       const h = cnHarness({})
       h.client.start()
@@ -4694,7 +4438,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(h.created.length === 2, 'stop 之后不再重连')
     }
 
-    // ⑤ 贯通：真实 EEW 帧经 SSE → 契约 → 主链 → 历史
     {
       const t5 = loadClient().__test
       const cfg5 = {
@@ -4736,9 +4479,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       c.stop()
     }
 
-    // ⑤' 0.9.4（P2-14 / P2-15 / P2-16）：游标与存活判据的三处修正
     {
-      // ① 游标在 apply **之后**推进（P2-16，与 12b 的口径一致：已处理到的最后一条）
       const hOrder = cnHarness({
         over: {
           apply: () => { hOrder.order.push('apply'); return true },
@@ -4751,10 +4492,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       hOrder.order.length = 0
       hOrder.created[0].emit('entry', { seq: 11, id: 'cenc:a', xml: '{}' })
       assert(hOrder.order.join(',') === 'apply,save:11',
-        '游标在 apply 之后推进（修复前是 save:11,apply —— apply 抛错时那条永久不再投递）')
+        '读取位置在 apply 之后推进（修复前是 save:11,apply —— apply 抛错时那条永久不再投递）')
 
-      // ② 从轮询升回 SSE 时要重新读盘取游标（P2-14）。降级期间推进游标的是轮询客户端，
-      //    12c 自己的内存 since 停在进入降级之前；不读盘就会带着过期游标建连、整段重放。
+      // ② 从轮询升回 SSE 时要重新读取本地存储取读取位置：降级期间推进它的是轮询客户端，12c 自己的内存 since 停在进入降级之前。
       const cursorRef = { v: 100 }
       const hCursor = cnHarness({
         cfg: { disasters: { earthquake: true }, cnTransport: 'poll' },
@@ -4763,19 +4503,18 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       hCursor.client.start()
       assert(hCursor.created.length === 0 && hCursor.fallbacks.indexOf('start') !== -1,
         '（前置）选了强制轮询 → 一开始就不建 SSE')
-      cursorRef.v = 777 // 降级期间轮询客户端把游标推进到 777（写的是同一个存储键）
+      cursorRef.v = 777 // 降级期间轮询客户端把读取位置推进到 777（写的是同一个存储键）
       hCursor.setCfg({ disasters: { earthquake: true }, cnTransport: 'auto' })
       hCursor.sched.advance(5000) // 周期检查：用户改回「自动」→ 升回 SSE
       assert(hCursor.created.length === 1, '改回自动后升回 SSE')
       assert(hCursor.created[0].url.indexOf('since=777') !== -1,
-        '升回 SSE 时用的是**降级期间推进过的**游标（修复前带的是进降级前那个值 → 整段重放）')
+        '升回 SSE 时用的是**降级期间推进过的**读取位置（修复前带的是进降级前那个值 → 整段重放）')
 
-      // ③ 已连接的流"持续静默"要能判死（P2-15）。此前 sawSyncThisConn 一为 true 就再无降级路径，
-      //    而被中间设备静默掐断的长连接不会触发 onerror —— 界面停在"SSE 已连接"。
+      // ③ 已连接的流「持续静默」要能判死：被中间设备静默掐断的长连接不会触发 onerror。
       const hSilent = cnHarness({ over: { silenceDeadMs: 12000 } })
       hSilent.client.start()
       hSilent.created[0].emit('sync', { cursor: 5, replayed: 0, reset: false, truncated: false, frozen: false })
-      assert(hSilent.client.modeOf() === 'sse' && hSilent.created.length === 1, '（前置）已连上并收到过首帧')
+      assert(hSilent.client.modeOf() === 'sse' && hSilent.created.length === 1, '（前置）已连上并收到过第一条数据')
       hSilent.sched.advance(20000) // 假时钟推过 12 秒的静默阈值（周期检查每 5 秒一轮）
       assert(hSilent.client.stats().silentDeaths === 1,
         '超过阈值没有任何帧 → 记一次 silentDeaths（Host 每 15 秒有状态帧，所以这是可靠的死连接判据）')
@@ -4784,14 +4523,12 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '把"判定连接已死"说出来（降级 / 失联绝不能被静默）')
       const quietDead = hSilent.client.stats().silentDeaths
       hSilent.created[1].emit('status', { stale: false, dataTime: 0 })
-      // 只推进一个周期：状态帧刚把计时器归零，不该判死（真实 Host 每 15 秒一个状态帧，
-      // 而阈值是 45 秒 = 3 倍余量，所以"帧在流动"与"静默"不会互相误判）。
+      // 只推进一个周期：状态帧刚把计时器归零，不该判死（真实 Host 每 15 秒一个状态帧，阈值 45 秒 = 3 倍余量）。
       hSilent.sched.advance(5000)
       assert(hSilent.client.stats().silentDeaths === quietDead,
         '有帧在流动时不判死（状态帧本身就算活着）')
     }
 
-    // ⑥ 同一场地震：EEW 已播报 → 速报（震级下修）不二次响铃
     {
       const t6 = loadClient().__test
       const cfg6 = {
@@ -4818,7 +4555,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '速报晚于 10 分钟到达时，靠"已播报记忆 + 未升级"判为重放（两条路都挡得住）')
     }
 
-    // ⑦ 没有被预警过的事件，速报照常播报（这就是"补报"的定位）
     {
       const t7 = loadClient().__test
       const overseas = t7.parseCencEqlist(listRaw).find((a) => a.hypo.name === '福克斯群岛' && a.magnitude === 6.5)
@@ -4834,7 +4570,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(r.notified === true, '没有 EEW 预警过的事件，速报照常播报（分钟级确认与补报）')
     }
 
-    // ⑧ 文案：源不同，产品名与主管机构都不同
     {
       const t8 = loadClient().__test
       const eewAlert = t8.parseCencEew(eewRaw)
@@ -4846,8 +4581,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(t8.alertTitleOf(eewAlert) === '⚠ 大陆地震预警',
         '大陆预警的通知标题不该套用日方产品名（用户会以为是日本气象厅发的）')
       // 对照组：日本 EEW（556）的文案一个字都不能变——改文案的范围只限大陆源。
-      // 0.8.2 review：0.8.1 把这里的期望值改成 '⚠ 紧急地震速报'，却把这句说明留成了"保持不变"——
-      // 断言与它自己的说明互相矛盾，等于把"没人守"藏在一条绿的断言里。
       const jpEew = t8.parse(JSON.parse(fs.readFileSync(
         path.join(ROOT, 'samples', 'eew-ibaraki-m6.7-20260823.json'), 'utf8')))
       assert(jpEew && jpEew.kind === 'eew' && t8.alertTitleOf(jpEew) === '⚠ 紧急地震速报（警报）',
@@ -4867,7 +4600,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '认不出机构时用中性表述，不硬编码任何一家')
     }
 
-    // ⑩ 手动链路开关（0.5.0 的"出口"）：强制轮询可撤销，自动降级不可撤销
     {
       // 一开始就选了「强制轮询」→ 不该先连一次 SSE 再切（那会白占一条 Wolfx 连接）
       const h = cnHarness({ cfg: { disasters: { earthquake: true }, cnTransport: 'poll' } })
@@ -4906,14 +4638,12 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '自动降级不自动升回（反复试探只会抖动；要回 SSE 得靠刷新或改设置）')
       h3.client.stop()
 
-      // 配置字段本身
       assert(T.DEFAULT_CFG.cnTransport === 'auto', '默认「自动」（SSE 优先 + 自动降级）')
       assert(T.normalizeCfg({}).cnTransport === 'auto', '缺字段 → 回退默认')
       assert(T.normalizeCfg({ cnTransport: 'poll' }).cnTransport === 'poll', '已选的值被保留')
       assert(T.normalizeCfg({ cnTransport: 'bogus' }).cnTransport === 'auto', '未知取值回退默认（白名单）')
     }
 
-    // ⑪ 诊断快照：只读、永不抛错、可 JSON 化
     {
       const t11 = loadClient().__test
       const snap = t11.buildDiagSnapshot(1758268800000)
@@ -4921,20 +4651,16 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       for (const k of ['at', 'page', 'aggregate', 'config', 'sources', 'dataHealth', 'feed', 'streams', 'history', 'warnings']) {
         assert(k in snap, '快照含 ' + k + ' 段')
       }
-      // 0.6.0：海外源是 Client 直连的 REST，没有 /feed 路由可查——它们的计数单独一段。
-      // 没有这一段，海外源出问题时诊断快照里**一个字都看不到**（而"看不到"正是这类
-      // 源最容易出的故障形态：不发请求、状态是绿的，只是永远没有预警）。
-      assert('overseas' in snap, '快照含 overseas 段（海外源的查询 / 未覆盖 / 年龄闸门计数）')
+      // 海外源是 Client 直连的 REST，没有 /feed 路由可查，计数单独一段。
+      assert('overseas' in snap, '快照含 overseas 段（海外源的查询 / 未覆盖 / 年龄门槛计数）')
       let json = ''
       try { json = JSON.stringify(snap) } catch (err) { json = '' }
       assert(json.length > 50, '快照可 JSON 化（活对象/循环引用会在这里炸）')
       assert(!('version' in snap) && json.indexOf('"version"') === -1,
         '快照不含插件版本——版本号只在 package.json / CHANGELOG / README 三处（避免多一个会漂移的位置）')
       assert(snap.config.cnTransport === 'auto', '快照带链路选择（诊断"为什么走轮询"要看它）')
-      assert(Array.isArray(snap.warnings), '生成过程中被兜住的异常要可见（不是假装一切正常）')
-      // 0.9.4（P3-47）：`pnpm check` 里的 `node --check` 文件清单是手写的，新增数据文件不会被
-      // 自动纳入（此前漏了 cities.js / cn-areas.js / river-areas.js）。清单仍然手写——但这里
-      // 保证它**完整**：lib 下每个 .js 都必须出现在 check 脚本里。
+      assert(Array.isArray(snap.warnings), '生成过程中被捕获的异常要可见（不是假装一切正常）')
+      // lib 下每个 .js 都必须出现在 pnpm check 的 node --check 清单里（清单是手写的）
       {
         const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
         const cmd = String((pkg.scripts && pkg.scripts.check) || '')
@@ -4952,9 +4678,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         const missing = all.filter((f) => listed.indexOf(f) === -1)
         assert(all.length >= 9 && missing.length === 0,
           'check 脚本覆盖 lib 下全部 ' + all.length + ' 个 .js（漏掉：' + (missing.join(', ') || '无') + '）')
-        // 0.9.4（P3-51）：`files` 必须把**运行时会读的**文件都发出去。lib/index.js 会在运行时
-        // 动态 import lib/data/*.js（市町村表 / 河川表 / 大陆行政区划 / 全球城市），少一个就是
-        // "装出来的包直接不可用"——而那在仓库里跑测试是发现不了的（测试读的是工作区）。
+        // files 必须把运行时会读的文件都发出去：lib/index.js 会动态 import lib/data/*.js，少一个装出来的包就不可用。
         const files = Array.isArray(pkg.files) ? pkg.files : []
         const notPackaged = all.filter((f) => !files.some((entry) => f === entry || f.indexOf(entry + '/') === 0))
         assert(notPackaged.length === 0,
@@ -4978,7 +4702,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(r.ok === false, '明确回报"没复制成功"，而不是假装成功')
     }
 
-    // ⑨ 注册表：设置页与诊断快照要能实时读到大陆源状态
     {
       const h = cnHarness({})
       h.client.start()
@@ -4995,10 +4718,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(missing.length === 0,
         '每个有校验约定的源都出现在设置页的「源状态」里（漏了就是"某个源坏了界面上看不见"）' +
         (missing.length ? '（缺：' + missing.join(',') + '）' : ''))
-      // 每个源都得有一个**本地化**的显示名。认不出的 id 会退回 id 本身，所以"取到的名字
-      // 就是 id"即等于"这个源没有标签"。旧写法查的是 `SOURCE_LABELS[id]` 是否存在——那张表
-      // 曾是模块级常量（里面的 t() 在模块加载时就被固化），0.9.0 改成单一来源 + 调用时取词
-      // （00f-source-labels），它不再存在。
+      // 每个源都得有一个**本地化**的显示名；认不出的 id 会退回 id 本身，所以「取到的名字就是 id」等于「没有标签」。
       const noLabel = T.SOURCE_ORDER.filter((id) => T.sourceLabelOf(id) === id)
       assert(noLabel.length === 0, '状态行里的每个源都有显示名' +
         (noLabel.length ? '（缺：' + noLabel.join(',') + '）' : ''))
@@ -5014,10 +4734,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
   }
 
   // ==========================================================================
-  // 0.5.0：中国行政区划表（省 → 地级市，带坐标）
-  // 生成脚本 scripts/build-cn-areas.mjs（--check 可校验产物是否与源一致）。
-  // 这里的断言是**表驱动**的：结构全量校验 + 已知城市的坐标锚点。
-  // 「不要只验证恰好对的那部分」——所以既查全量不变量，也查真实地名。
+  // 中国行政区划表（省 → 地级市，带坐标）
+  // 生成脚本 scripts/build-cn-areas.mjs（--check 可校验产物是否与源一致）
   // ==========================================================================
   try {
     const { CN_AREAS } = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cn-areas.js')).href)
@@ -5053,8 +4771,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(!!tw && !tw.cities.some((c) => c.name === '臺灣省' || c.name === '台湾省'),
       '没有把「臺灣省」当成一个下级市（它是新北市的旧名候选）')
     assert(tw.cities.length === 22, '台湾 22 个县市，实际 ' + tw.cities.length)
-    // 已知城市的坐标锚点（容差 2°：表里是**行政区中心点**，与市中心可差上百公里，
-    // 甘孜州 / 哈尔滨市 那种面积巨大的尤其明显——见产物头部的已知取舍）
+    // 已知城市的坐标锚点（容差 2°：表里是行政区中心点，与市中心可差上百公里）
     const ANCHORS = [
       ['四川省', '成都市', 30.66, 104.07], ['四川省', '甘孜藏族自治州', 31.02, 100.41],
       ['北京市', '北京市', 39.90, 116.41], ['上海市', '上海市', 31.23, 121.47],
@@ -5081,13 +4798,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '0.5.0 中国行政区划表检查失败：' + e.message)
   }
 
-  // ==========================================================================
-  // 0.5.0：设置页的三级级联（中国 → 省 → 地级市）与半径语义
-  // ==========================================================================
+  // 设置页的三级级联（中国 → 省 → 地级市）与半径语义
   try {
     const { CN_AREAS } = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cn-areas.js')).href)
 
-    // ① Host 的 /areas 把行政区划表随市区町村表一起下发
     {
       const mod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
       const routes = []
@@ -5113,7 +4827,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
 
     const t = loadClient().__test
 
-    // ② 表的规整：Host 的 JSON 与 localStorage 一样属于不可信输入
     assert(t.setCnAreas(null) === false && t.setCnAreas({}) === false, '非数组 / 非表 → 拒绝')
     assert(t.setCnAreas([{ name: '' }, { name: '甲省' }, { name: '乙省', lat: 1, lon: 2, cities: [] }]) === false,
       '全是坏条目 → 整体拒绝（不做部分接受）')
@@ -5126,7 +4839,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.cnCitiesOf('不存在').length === 0, '未收录的省 → 空数组')
     t.resetCityTable()
 
-    // ③ 级联的产物：所选城市的坐标 + 半径 → 一个关注点
     t.setCnAreas(CN_AREAS)
     const p = t.cnPlaceOf('四川省', '成都市', 100)
     assert(!!p && p.name === '四川省·成都市' && p.radiusKm === 100,
@@ -5143,7 +4855,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(normalized.length === 1 && normalized[0].name === '四川省·成都市' && normalized[0].radiusKm === 100,
       '级联产物能通过 normalizePlaces（否则会出现"加了但没生效"）')
 
-    // ④ 真实事件端到端：选「甘孜藏族自治州」+ 默认 100km → 能命中实测的四川新龙县事件
     {
       const t2 = loadClient().__test
       t2.setCnAreas(CN_AREAS)
@@ -5173,12 +4884,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     }
     t.resetCityTable()
 
-    // ⑤ 半径：新建默认 100，既有配置的 300 不被静默改掉
     assert(t.DEFAULT_PLACE_RADIUS_KM === 100, '新建关注点的默认半径是 100km（DESIGN 9.2）')
     assert(t.RADIUS_PRESETS.length === 3 && t.RADIUS_PRESETS.some((o) => o.v === 100),
       '三档语义预设，含默认档')
-    // 档位表只保留 `labelKey`、文字在文案表里（下拉渲染时取词，见 0.9.0 的本地化），
-    // 所以这条断言查的是**取出来的文案**：每个档位都得有一句话，而且括注了公里数。
+    // 档位表只保留 labelKey、文字在文案表里，所以断言查的是取出来的文案（每档一句话并括注公里数）。
     assert(t.RADIUS_PRESETS.every((o) => typeof o.labelKey === 'string' && t.t(o.labelKey).indexOf('km') !== -1),
       '预设用语义标签 + 括注公里数（普通用户不必理解"公里"）')
     const legacy = t.normalizePlaces([{ name: '旧点', lat: 1, lon: 2 }])
@@ -5186,8 +4895,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       '缺 radiusKm 的旧条目仍按 300 兜底 —— 把用户配好的半径从 300 改成 100 会让提醒变窄（漏报方向）')
     assert(t.normalizePlaces([{ name: 'x', lat: 1, lon: 2, radiusKm: 100 }])[0].radiusKm === 100,
       '显式配的 100 被保留')
-    // ⑥ 设置页**真的渲染**（0.8.0：三个地区分支各渲染一次；0.8.1：五个选项卡各渲染一次——
-    //    选项卡的本质就是"一次只渲染一页"，只渲染默认页等于另外四页从没被任何断言走过）
     {
       /** 渲染设置页的一页，返回它里面所有文本节点。seedStorage 决定地区页落在哪个分支上。 */
       const renderTexts = (seed, tab) => {
@@ -5211,14 +4918,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         react.__reset()
         return ex.__test.SettingsPanel({ initialTab: tab })
       }
-      /**
-       * 取出**页签栏**的五个按钮文本。
-       *
-       * 0.8.2 review：原来"选项卡栏渲染出五页"检查的是 '地区'/'灾害'/'通知'/'履历'/'其他' 这五个词
-       * 是否出现在渲染文本里——而它们本来就会被页面正文里的同名词（"其他国家 / 地区"等）补偿，
-       * 所以把页签标签写成 '地方' 也照样绿。这里改成按结构取：页签是唯一同时带 `onClick` 与
-       * `aria-current` 的按钮（`s.btn` 的分支按钮没有后者），因此标签写错、数量不对都会红。
-       */
+      /** 取出**页签栏**的按钮文本：页签是唯一同时带 `onClick` 与 `aria-current` 的按钮
+       *  （分支按钮没有后者），所以标签写错、数量不对都会红。 */
       const tabBarTexts = (tree) => {
         const out = []
         const walk = (n) => {
@@ -5273,16 +4974,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(disHas('暴雨预警') && disHas('地质灾害预警') && disHas('橙色以上才播报') &&
         disHas('黄色和蓝色会记进「履历」') && disHas('没有取消或最终报标志'),
         '大陆气象的开关与门槛说明都在（DESIGN 10.2 要求 UI 不得假装能处理）')
-      // 正向锚点会被同一行右侧的只读门槛值（fixedGate('橙色以上')）喂饱——0.8.2 review 实测：
-      // 把判据句改成"黄色以上才播报"照样绿。所以反过来钉住"更宽的话"不许出现。
+      // 正向锚点会被同一行右侧的只读门槛值喂饱，所以反过来钉住「更宽的话」不许出现。
       assert(!disHas('所有等级都播报') && !disHas('黄色以上才播报') && !disHas('蓝色以上才播报'),
         '门槛没有被说成比「橙色以上」更宽（DESIGN 10.2：界面如实说明"哪些只记录不提醒"）')
       assert(disHas('洪水 / 山洪 / 降雨 / 风暴潮') &&
         disHas('Data Source: Environment and Climate Change Canada') &&
         disHas('打开页面时，如果某条预警已经发布超过 6 小时'),
-        '海外气象的开关行、ECCC 署名（许可要求）与年龄闸门说明都在')
+        '海外气象的开关行、ECCC 署名（许可要求）与年龄门槛说明都在')
 
-      // —— 通知页 ——
       const ntTexts = safeRender({}, 'notify', '设置页（通知页）')
       const ntHas = mkHas(ntTexts)
       assert(ntHas('通知与声音') && ntHas('静默时段'), '通知页含「通知与声音」与「静默时段」两块')
@@ -5291,27 +4990,20 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(ntHas('按浏览器本地时间判定'),
         '静默时段写明时区基准（判定用的是浏览器本地时间；不写的话跨时区用户只能在半夜被响铃后才知道）')
 
-      // —— 履历页 ——
       const hiTexts = safeRender({}, 'history', '设置页（履历页）')
       const hiHas = mkHas(hiTexts)
       assert(hiHas('预警记录') && hiHas('清空记录'), '履历页有记录列表与清空按钮')
       assert(!hiHas('关注地区'), '履历页不含地区配置（这就是分页要解决的问题）')
 
-      // —— 其他页 ——
       const msTexts = safeRender({}, 'misc', '设置页（其他页）')
       const msHas = mkHas(msTexts)
       assert(msHas('数据源') && msHas('大陆源链路') && msHas('测试与诊断') && msHas('免责声明'),
         '其他页含数据源、链路、诊断与免责')
-      // 0.8.1 在这里守的是"语言下拉 + 那句『目前只有简体中文，其他语言在 0.9.0 加入』"。
-      // 0.9.0 让本地化真正生效后，那句话本身变成了假话，按 11.10 规则 1（界面不解释自己）
-      // 删掉——所以断言改成守**新的事实**：三种语言的显示名都在下拉里。它守的还是同一件事
-      // （不做成"看着能切、其实没反应"的假控件），只是判据从"如实说明还没做"变成"真的做了"。
+      // 语言下拉必须让三种语言的显示名都出现（不做成「看着能切、其实没反应」的假控件）。
       assert(msHas('语言 / Language') && msHas('简体中文') && msHas('日本語') && msHas('English'),
         '语言选项在「其他」页，且中 / 日 / 英三种语言都在下拉里（不再是"选了没反应"的假控件）')
       assert(msHas('生成诊断快照') && msHas('正式（实时推送）'), '诊断快照与数据源开关都在')
-      // 端到端：把配置里的语言设成英文后，设置页**渲染出来的文本**就是英文。
-      // 这条补的是"t() 单测正确"与"界面真的跟着切"之间的那道缝——模块级求值那类缺陷
-      // （常量在模块加载时就把默认语言固化下来）正是在这条缝里藏身：单测全绿、界面不切。
+      // 端到端：配置里的语言设成英文后，设置页渲染出来的文本就是英文（模块级求值会把默认语言固化，单测查不出）。
       const enSeed = {}
       enSeed[t.STORAGE_KEY] = JSON.stringify(Object.assign({}, t.DEFAULT_CFG, { language: 'en' }))
       const enBlob = safeRender(enSeed, 'misc', '设置页（英文）').join('\n')
@@ -5328,9 +5020,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(jpHas('详情在「其他」里') && !msHas('详情在「其他」里'),
         '状态条指路「其他」，但已经在那一页时就不再啰嗦')
       {
-        // 0.8.2 review：原来这条断言查的是 '已连接 EMSC'/'（全球地震实时推送）' 两串"不出现"，
-        // 而它们在 0.8.1 里已是死代码（openDetail 没有渲染消费者）——断言恒真，改坏状态条也不会红。
-        // 改成先往 store 里塞 detail，再看顶部那个常驻条会不会把它复述出来。
+        // 往 store 里塞 detail，再看顶部那个常驻条会不会把它复述出来
         const react = mkTestReact()
         const { exports: exD } = loadClientEx({}, { react })
         exD.__test.store.push({ detail: '已连接 EMSC（全球地震实时推送）' })
@@ -5379,11 +5069,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '0.5.0 设置页级联检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
   }
 
-  // ==========================================================================
-  // 0.5.2：大陆气象源（nmc.cn）
-  // Host 侧：列表裁剪 / 详情门槛 / 正文提取；Client 侧：契约 / 行政区归属 / 层级匹配。
+  // 大陆气象源（nmc.cn）：Host 侧列表裁剪 / 详情门槛 / 正文提取；Client 侧契约 / 行政区归属 / 层级匹配。
   // 全部用 samples/nmc/ 的真实 fixture，不联网。
-  // ==========================================================================
   try {
     const nmc = await import(pathToFileURL(path.join(ROOT, 'lib', 'nmc-source.js')).href)
     const { CN_AREAS } = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cn-areas.js')).href)
@@ -5392,7 +5079,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const fixtureItems = listSample.data.page.list
     const detailOf = (n) => fs.readFileSync(samplePath(n), 'utf8')
 
-    console.log('== 0.5.2 Host：时间与图标编码 ==')
+console.log('== nmc.cn Host：时间与图标编码 ==')
     assert(nmc.nmcTimeToIso('2026/09/19 12:31') === '2026-09-19T12:31:00+08:00',
       '北京时间裸串（斜杠、无秒）→ 带 +08:00 的 ISO（交给 Date.parse 会按本机时区解释，本机是 JST 时整差一小时）')
     assert(nmc.nmcTimeToIso('2026-09-19 12:31:05') === '2026-09-19T12:31:05+08:00', '连字符 + 带秒的写法也认')
@@ -5405,7 +5092,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(nmc.nmcCodesOf('') === null && nmc.nmcCodesOf('https://x/y.png') === null, '不成形的图标地址 → null（由调用方跳过该条）')
     }
 
-    console.log('== 0.5.2 Host：列表解析与灾种裁剪 ==')
+console.log('== nmc.cn Host：列表解析与灾种裁剪 ==')
     let parsed = null
     let parseErr = null
     try { parsed = nmc.parseNmcList(JSON.stringify(listSample)) } catch (e) { parseErr = e }
@@ -5416,11 +5103,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(parsed && parsed.every((e) => e.id && e.title && e.detailUrl && e.payload),
       '每条都有 id / title / detailUrl / payload')
     assert(parsed && parsed.every((e) => e.updated.indexOf('+08:00') > 0),
-      '每条都带可比较的发布时间（冷启动判据要用它）')
+      '每条都带可比较的发布时间（首次启动的判据要用它）')
     assert(parsed && parsed.every((e) => e.detailNeeded === (['red', 'orange'].indexOf(e.level) !== -1)),
       '只有橙 / 红才需要拉详情（蓝 / 黄占样本的 94%）')
     {
-      // 结构不符必须抛错：被拦截成 HTML 与"这一次没有预警"不能同形（DESIGN 4.5）
+    // 结构不符必须抛错：被拦截成 HTML 与「这一次没有预警」不能同形
       let e1 = null
       try { nmc.parseNmcList('<html>拦截页</html>') } catch (e) { e1 = e }
       assert(!!e1, '响应不是 JSON → 抛错（不是返回空数组）')
@@ -5449,8 +5136,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(text.indexOf('地质灾害') !== -1, '正文里含灾种说明（#alarmtext 还在原位置）')
       assert(nmc.extractAlarmText('<html>没有正文容器</html>') === '', '没有 #alarmtext → 空串（文案少一段，不让整条预警作废）')
 
-      // 0.9.4（P2-24）：**第二个 #alarmtext 块（"防御指南"）不能再丢**。实测 5 份真实详情页里
-      // 4 份都有它，而此前到第一个 </div> 就收尾——文件头恰恰把"防御指引"写成拉详情的理由。
+      // 第二个 #alarmtext 块（「防御指南」）不能丢：实测 5 份真实详情页里 4 份都有它。
       {
         const twoBlocks = '<html><body>' +
           '<div id=alarmtext>某某县气象台发布暴雨橙色预警。</div>' +
@@ -5465,7 +5151,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         assert(blocks >= 1 && nmc.extractAlarmText(realTwo).length >= text.length,
           '真实详情页（含 ' + blocks + ' 个 #alarmtext 块）提取不短于第一个块')
       }
-      // 0.9.4（P2-23）：列表被 pageSize 截断要**可见**，而不是尾部静默消失
+    // 列表被 pageSize 截断要**可见**，而不是尾部静默消失
       {
         const list = listSample.data.page.list
         // 合成的"单页给完"响应（样本 fixture 本身是裁剪过的，count 仍是上游的真实总数）
@@ -5489,7 +5175,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(Number.isFinite(nmc.nmcFeedTime(JSON.stringify(listSample))),
       '上游数据时间取自列表里最新一条（stale 判定用它，而不是"我们收到多少条"）')
 
-    console.log('== 0.5.2 Host：详情门槛与冷启动窗口 ==')
+console.log('== nmc.cn Host：详情门槛与首次启动窗口 ==')
     {
       // startedAt=0 → 所有样本条目都落在回看窗口内，断言与"样本里恰好有哪些时间"解耦
       const calls = []
@@ -5519,9 +5205,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(src.stats().detailsFetched === wantDetail, 'detailsFetched 计数与请求数一致')
     }
     {
-      // 冷启动回看窗口：窗口外的旧条目只记已见、不产事件（否则每次重启都会重播 24 小时的历史）。
-      // 用**单条**构造而不是整个 fixture：样本横跨 24 小时，用样本会让"窗口外"这条断言
-      // 实际取决于"样本里恰好有哪些时间"，那是噪声不是验证。
+    // 首次启动的回看窗口：窗口外的旧条目只记已见、不产事件（否则每次重启都会重播 24 小时的历史）。
       const one = {
         code: 0,
         data: { page: { list: [{
@@ -5555,7 +5239,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(src2.snapshot(0, {}).entries.length === 1, '同一批数据、启动时刻在它发布之后 10 分钟 → 照常处理（窗口边界真的在起作用）')
     }
     {
-      // 停更探针：源还在响应、但最新一条已经很旧 → stale。判据是**数据时间**，不是"收到几条"。
+      // 停更自检：源还在响应、但最新一条已经很旧 → stale。判据是**数据时间**，不是"收到几条"。
       const staleList = JSON.parse(JSON.stringify(listSample))
       for (const it of staleList.data.page.list) it.issuetime = '2026/09/19 08:00'
       const mkSrc = (nowMs) => nmc.createNmcSource({
@@ -5572,9 +5256,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(fresh.stats().stale === false, '同一批数据、时钟离它只有 1.5 小时 → 不判停更（阈值真的在起作用）')
     }
 
-    console.log('== 0.5.2 Client：契约与解析 ==')
-    // 归属解析（cnArea）依赖行政区划表，所以先在契约段之前注入——否则下面那条
-    // "机构名 → 省 + 市"会因为表还没到位而失败（这正是它第一次跑出来的样子）
+console.log('== nmc.cn Client：契约与解析 ==')
+    // 归属解析（cnArea）依赖行政区划表，所以要在契约段之前注入
     assert(T.setCnAreas(CN_AREAS), '注入中国行政区划表')
     {
       const mk = (o) => Object.assign({
@@ -5610,7 +5293,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(T.parseNmcAlarmResult(null).kind === 'schema', '非对象 → schema')
     }
 
-    console.log('== 0.5.2 Client：行政区归属（含别名） ==')
+console.log('== nmc.cn Client：行政区归属（含别名） ==')
     {
       const cases = [
         ['云南省丽江市宁蒗彝族自治县气象台', '云南省', '丽江市'],
@@ -5641,7 +5324,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(T.normAliases(undefined, 'x').length === 0, '缺 aliases 字段（Host 未升级）→ 空数组，别名是增强而不是前提')
     }
 
-    console.log('== 0.5.2 Client：行政区层级匹配 ==')
+console.log('== nmc.cn Client：行政区层级匹配 ==')
     {
       const place = { name: '云南省·丽江市', lat: 26.85, lon: 100.51, radiusKm: 100 }
       const mkAlert = (o) => T.parseNmcAlarmResult(Object.assign({
@@ -5671,7 +5354,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(m.hit === false, '蓝色 → 不播报')
       m = T.matchAlert(mkAlert({ level: 'red' }), cfgWith({ places: [place] }))
       assert(m.hit === true, '红色 → 播报')
-      // 两个灾种各有开关（DESIGN 8.4）
+    // 两个灾种各有开关
       m = T.matchAlert(mkAlert(), cfgWith({ places: [place] }, { cnRainstorm: false }))
       assert(m.hit === false && m.reason.indexOf('暴雨') !== -1, '关掉暴雨 → 不播报暴雨')
       m = T.matchAlert(mkAlert(), cfgWith({ places: [place] }, { cnGeology: false }))
@@ -5702,26 +5385,20 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '0.5.2 大陆气象源检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
   }
 
-  // ==========================================================================
-  // 0.5.3：校验机制（探针阈值 / 蓝点生命周期 / 升级阈值 / 字节预算 / Host-Client 一致）
-  //
-  // 这一节的断言刻意都在问「这个能力**真的生效**了吗」，而不是「函数被调用了」。
-  // 依据是 0.5.1 的复盘：那一轮抓出的 4 条缺陷（48 小时停更探针、SSE 的 stale 可见性、
-  // 速报的批量语义、pruneSeen）全都是"写了、注释齐、单测过、但能力不生效"的形态。
-  // ==========================================================================
+  // 校验机制（自检阈值 / 蓝点生命周期 / 升级阈值 / 字节预算 / Host-Client 一致）
+  // 断言都在问「这个能力真的生效了吗」，而不是「函数被调用了」。
   try {
-    console.log('== 0.5.3 机制层：契约阈值真的生效了吗 ==')
+console.log('== 校验机制层：契约阈值真的生效了吗 ==')
     {
       let clock = 1_700_000_000_000
       const pushes = []
       T.resetSourceHealth()
       const probe = T.createHealthProbe({ now: () => clock, pushSource: (id, p) => pushes.push([id, p]) })
 
-      // ① 阈值只从契约来：把契约里的数字改成 1 分钟，行为必须跟着变
       const orig = T.SOURCE_CONTRACTS.usgs.staleAfterMs
       try {
         T.SOURCE_CONTRACTS.usgs.staleAfterMs = 60 * 1000
-        assert(T.staleAfterOf('usgs') === 60 * 1000, '探针阈值取自契约（不是某处硬编码）')
+        assert(T.staleAfterOf('usgs') === 60 * 1000, '自检阈值取自契约（不是某处硬编码）')
         T.noteFreshness('usgs', clock)
         probe.tick()
         assert(T.sourceHealthOf('usgs').fresh.stale === false, '刚拿到数据 → 不停更')
@@ -5738,14 +5415,12 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       } finally {
         T.SOURCE_CONTRACTS.usgs.staleAfterMs = orig
       }
-      // ①' 0.9.4（P2-17）：**关掉的源不判停更**。用户主动关掉一个源之后 Client 不再拉它，
-      //     dataTime 自然停住；继续判 stale 就是在说"上游停更了"，而事实是我们自己不再问了
-      //     —— 界面还会被这个已关闭的源拖成中灰，重新打开也不能立即自愈。
+      // 关掉的源不判停更：用户主动关掉后 Client 不再拉它，dataTime 自然停住，
+      // 继续判 stale 等于说「上游停更了」，而事实是我们自己不再问了。
       {
         const origNoaa = T.SOURCE_CONTRACTS.noaa.staleAfterMs
         try {
           T.SOURCE_CONTRACTS.noaa.staleAfterMs = 60 * 1000
-          // 对照：默认探针（不看开关）确实会把它判成 stale —— 这正是要修掉的行为
           T.resetSourceHealth()
           T.noteFreshness('noaa', clock)
           clock += 61 * 1000
@@ -5773,17 +5448,16 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       probe.tick()
       assert(T.sourceHealthOf('p2pquake').fresh.stale === false,
         '契约里 staleAfterMs=null 的推送源不判停更')
-      // ③ 从未上报过数据时间 → 不判（"不知道数据什么时候来的"不等于"数据是旧的"）
       T.resetSourceHealth()
       probe.tick()
       assert(!T.sourceHealthOf('usgs') || T.sourceHealthOf('usgs').fresh.stale === false,
         '从未上报数据时间 → 不判停更（不猜）')
       assert(T.staleAfterOf('p2pquake') === 0 && T.staleAfterOf('emsc') === 0 && T.staleAfterOf('noaa') === 0,
-        '三个 staleAfterMs=null 的源（两个推送源 + NOAA 的"列表为空是常态"）归一成 0')
+        '三个 staleAfterMs=null 的源（两个推送源 + NOAA 的"列表为空是常态"）统一成 0')
       T.resetSourceHealth()
     }
 
-    console.log('== 0.5.3 机制层：蓝点跨刷新存活 + TTL 自愈 ==')
+console.log('== 校验机制层：蓝点跨刷新存活 + TTL 自愈 ==')
     {
       const c1 = loadClientEx()
       const t1 = c1.exports.__test
@@ -5813,7 +5487,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       t3.resetSourceHealth()
     }
 
-    console.log('== 0.5.3：环缓冲字节预算（DESIGN 11.6 第 5 条） ==')
+console.log('== 缓冲字节预算 ==')
     {
       const pollerMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'poller.js')).href)
       const payload = 'x'.repeat(400)
@@ -5849,7 +5523,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '预算装不下一条时仍留一条（那一条正是用户要看的数据，全清掉等于"什么都没收到"）')
     }
 
-    console.log('== 0.5.3：Host 与 Client 的停更阈值一致 ==')
+console.log('== Host 与 Client 的停更阈值一致 ==')
     {
       const host = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
       const nmcMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'nmc-source.js')).href)
@@ -5866,9 +5540,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '0.5.3 校验机制检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
   }
 
-  console.log('== 0.5.4：状态合成 / 跨标签页清空 / 契约原型链 / JMA 标签 / 演示链路 ==')
+console.log('== 状态合成 / 跨标签页清空 / 契约原型链 / JMA 标签 / 演示链路 ==')
   try {
-    // ---- 1. 展示状态是**合成**出来的：蓝点不被探针或连接层抹掉 ----
     {
       const t = loadClientEx().exports.__test
       const store = t.store
@@ -5879,11 +5552,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const probe = t.createHealthProbe()
       probe.tick()
       assert(store.sources.usgs.status === 'schema-error',
-        '探针判「数据已过期」不改展示状态 —— schema-error 优先于 stale')
+        '自检判「数据已过期」不改展示状态 —— schema-error 优先于 stale')
       t.noteFreshness('usgs', Date.now())
       probe.tick()
       assert(store.sources.usgs.status === 'schema-error',
-        '探针判「数据已恢复」也不会把蓝点刷成绿色（修复前正是这条：能力写了、但被后写者覆盖）')
+        '自检判「数据已恢复」也不会把蓝点刷成绿色（修复前正是这条：能力写了、但被后写者覆盖）')
 
       // 连接层的常态上报（P2PQuake 约每 10 分钟一次断线）同样不能抹掉蓝点
       const sockets = []
@@ -5900,7 +5573,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '一次常态断线（reconnecting）不会冲掉蓝点 —— 用户要看见的是"数据读不懂"，不是"正在重连"')
       ws.stop()
 
-      // 跨刷新：蓝点落盘 → 重新加载 → 装载时立刻重发（而不是等该源下一次上报）
+      // 跨刷新：蓝点存到本地 → 重新加载 → 装载时立刻重发（而不是等该源下一次上报）
       const first = loadClientEx()
       const t3 = first.exports.__test
       for (let i = 0; i < 5; i++) t3.noteParseResult('jma', { ok: false, kind: 'schema', detail: '结构变了' })
@@ -5913,7 +5586,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '重发的蓝点带上契约里的源名而不是裸 id：' + String(t4.store.sources.jma && t4.store.sources.jma.label))
     }
 
-    // ---- 2. 跨标签页「清空记录」要真的清干净 ----
     {
       const mem = new Map()
       const ls = {
@@ -5941,7 +5613,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '被清掉的记录不会被另一个标签页的下一次 addEvent 写回磁盘（清空若出于隐私动机，这就是泄漏面）')
     }
 
-    // ---- 3. 契约层查表不再命中原型链 ----
     {
       const base = { alertid: '53072441600000_x', title: '云南省丽江市宁蒗彝族自治县气象台发布暴雨橙色预警信号', issued: '2026-09-19T03:02:45+08:00' }
       const r1 = T.parseNmcAlarmResult(Object.assign({}, base, { kind: 'constructor', level: 'orange' }))
@@ -5952,7 +5623,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(ok.ok === true && ok.alert.cnRank === 3, '（对照）正常的 kind / level 仍然通过')
     }
 
-    // ---- 4. JMA 汇总副本的标签按**级别**判 ----
     {
       const danger = fs.readFileSync(path.join(ROOT, 'samples', 'jma-vpww53-hyogo-danger-20260914.xml'), 'utf8')
       const a = T.parseJma(danger, { id: 'jma-vpww53-hyogo-danger-20260914.xml' })
@@ -5967,7 +5637,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(!!c && c.kindLabel === '大雨警报', '带灾种名的副本仍给出具体灾种（不被汇总分支抢走）：' + String(c && c.kindLabel))
     }
 
-    // ---- 5. 未配置大陆关注点：不进历史，但判定要带 noWatch 标记 ----
     {
       const t = loadClientEx().exports.__test
       const cfg = t.loadCfg()
@@ -5984,7 +5653,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '未配置关注点时不写历史 —— 否则默认配置的用户每天被几十条无关大陆预警刷满「最近预警」')
     }
 
-    // ---- 6. nmc 电文不会清空日本电文留下的 L3 提示 ----
     {
       const t = loadClientEx().exports.__test
       const cfg = t.loadCfg()
@@ -6000,7 +5668,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '大陆气象电文（regions 恒为空）不会把日本电文的 L3 提示清成 null')
     }
 
-    // ---- 7. 测试按钮可反复点击（事件键带毫秒，与全球链路同口径） ----
     {
       const t = loadClientEx().exports.__test
       const mk = (ms) => {
@@ -6014,7 +5681,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '同一场景连点两次都播报（修复前第二次会被判成"同一事件的后续发布"而静默）')
     }
 
-    // ---- 8. 降级客户端建立失败要回滚，不能谎报「已降级为轮询」 ----
     {
       const t = loadClientEx().exports.__test
       const stream = t.createCnStream({
@@ -6028,7 +5694,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       stream.stop()
     }
 
-    // ---- 9. WebSocket 客户端 stop 之后 start 是活的 ----
     {
       const sockets = []
       function FakeWs2(url) { this.url = url; this.readyState = 0; sockets.push(this) }
@@ -6043,7 +5708,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       c.stop()
     }
 
-    // ---- 10. Host poller：空闲后停链 + markRead 唤醒（0.5.4 / DESIGN 5.2 的按需轮询） ----
     {
       const realSet = global.setTimeout
       const realClear = global.clearTimeout
@@ -6067,7 +5731,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         assert(poller.stats().polls === 0, '（对照）空闲期间没有产生任何外部请求')
         poller.markRead()
         assert(pending.length === 1 && pending[0].ms === pollerMod.IDLE_RETRY_MS,
-          'markRead（/feed 被访问）唤醒轮询：排出一个短退避')
+          'markRead（/feed 被访问）唤醒轮询：排出一个短的重试间隔')
         await runOne()
         assert(poller.stats().polls === 1, '唤醒之后真的拉了源')
         assert(pending.length === 1 && pending[0].ms === 60 * 1000, '成功一轮之后回到正常间隔')
@@ -6078,7 +5742,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       }
     }
 
-    // ---- 11. Host settings 迁移标记：以 Host 为准时要认领，避免本地镜像日后复活 ----
     {
       const seed = { 'dsh.quakeAlert.v1': JSON.stringify({ version: 1, thresholds: { quakeScale: 30 } }) }
       const first = loadClientEx(seed)
@@ -6096,7 +5759,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       t.bindSettingsScope(scope)
       assert(t.currentCfg().thresholds.quakeScale === 55, '（前置）Host 已有内容 → 以 Host 为准')
       assert(first.storage.get('dsh.quakeAlert.hostMigrated') === '1',
-        '首次 bind 时 Host 已非空也要落「已认领」标记（修复前永不落盘）')
+        '首次 bind 时 Host 已非空也要写「已处理」标记（修复前永不写入本地存储）')
       // Host 被清空（用户在别处恢复默认）→ 本地那份**过期**的镜像不该迁回去
       snap = { status: 'ready', mode: 'host', writable: true, value: {}, user: {} }
       if (typeof syncFn === 'function') syncFn()
@@ -6107,20 +5770,13 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '0.5.4 检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
   }
 
-  // ==========================================================================
-  // 0.6.0 第 2 期：海外气象源（美国 NWS / 加拿大 ECCC）的解析层与契约
+  // 海外气象源（美国 NWS / 加拿大 ECCC）的解析层与契约
   // 全部用 samples/nws/ 与 samples/eccc/ 的真实 fixture，不联网。
-  // 这一批断言问的是"能力真的生效吗"（11.9 F）：白名单真的在拦、门槛真的按 event 分档、
-  // 事件键真的把同一次事件的 Update 归并到一起、许可要求的署名真的进了正文。
-  // ==========================================================================
   try {
     const T6 = loadClientEx().exports.__test
     const nwsSample = JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'nws', 'nws-flood-alerts.geojson'), 'utf8'))
     const ecccSample = JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'eccc', 'eccc-alerts.geojson'), 'utf8'))
-    // 0.6.1：两条**真实事件链** fixture（同一次洪水预警的连续两版 / 被取消的警报 + 它的 Cancel）。
-    // 它们存在的理由：0.6.0 的事件键算法是用"同一 serial 递增 version"的合成样本验证的，而
-    // 实测的 NWS 链是**逐版串联**的（每条只 references 上一版），于是那个算法在每个版本上
-    // 都算出不同的键 —— 合成样本永远发现不了这件事。
+    // 两条**真实事件链** fixture：同一次洪水预警的连续两版 / 被取消的警报 + 它的 Cancel。
     const nwsChain = JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'nws', 'nws-event-chain.geojson'), 'utf8')).features
     const nwsCancelChain = JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'nws', 'nws-cancel-chain.geojson'), 'utf8')).features
     const nwsPointSample = JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'nws', 'nws-point-alerts.geojson'), 'utf8'))
@@ -6135,16 +5791,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       return c
     }
     const nwsByEvent = (ev) => nwsSample.features.filter((f) => f.properties.event === ev)[0]
-    /**
-     * 一条**与季节无关**的 ECCC 样本 shell（0.6.2）：取任意真实 feature 并把 alert_type 强制成
-     * `warning` + 保证有合法颜色。此前多处写死 `alert_code === 'CFW'`（风暴潮）或按下标取
-     * `features[2]`——fixture 随季节重抓时会变成 undefined，`JSON.parse(JSON.stringify(undefined))`
-     * 直接抛 SyntaxError，整段套件失败且失败原因不可归因（samples/README 与 TROUBLESHOOTING
-     * 都写明"分布随季节变化"）。
-     */
+    /** 一条**与季节无关**的 ECCC 样本 shell：取任意真实 feature 并把 alert_type 强制成 `warning` 且保证有合法颜色。
+     *  fixture 随季节重抓，写死 alert_code 或按下标取都会变成 undefined。 */
     const ecccWarnShell = () => {
-      // 优先挑一条**真实就通过白名单**的样本（例如风暴潮）；本季都没有时（fixture 随季节变）
-      // 退到任意样本并补一个白名单内的名字，保证用例仍然测的是"取数 / 正文 / 统计"这几条链路。
+      // 优先挑一条**真实就通过白名单**的样本；本季都没有时退到任意样本并补一个白名单内的名字。
       const usable = (x) => x && x.properties
       const listed = ecccSample.features.filter(usable)
         .filter((x) => T6.parseEcccAlertResult(x, { place: caPlace }).ok)[0]
@@ -6158,9 +5808,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       return f
     }
 
-    console.log('== 0.6.0 NWS：白名单 / 门槛 / 事件键 ==')
+console.log('== NWS：白名单 / 门槛 / 事件键 ==')
 
-    // ---- 1. 白名单：8 类事件一个都不能少，且都能从真实 fixture 走通 ----
     {
       const white = T6.NWS_EVENT_WHITELIST
       const want = ['Flood Warning', 'Flash Flood Warning', 'Coastal Flood Warning', 'Flood Watch',
@@ -6176,7 +5825,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(okCount === nwsSample.features.length, 'fixture 里的每一条都解析成功（' + okCount + ' 条）')
     }
 
-    // ---- 2. 门槛按 event 分档，**不按 severity**——这条有实测证据 ----
     {
       const fw = T6.parseNwsAlertResult(nwsByEvent('Flood Warning'), { place: usPlace }).alert
       const ffw = T6.parseNwsAlertResult(nwsByEvent('Flash Flood Warning'), { place: usPlace }).alert
@@ -6186,13 +5834,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(ffw.overseasRank >= T6.OVERSEAS_BROADCAST_MIN_RANK, 'Flash Flood Warning 达到播报线')
       assert(watch.overseasRank < T6.OVERSEAS_BROADCAST_MIN_RANK, 'Flood Watch 不到播报线（只进历史）')
       assert(adv.overseasRank < T6.OVERSEAS_BROADCAST_MIN_RANK, 'Flood Advisory 不到播报线')
-      // 关键证据：Flood Watch 的 severity 实测是 Severe（与 Flood Warning 同级），
-      // 所以"按 severity ≥ orange 播报"会把警戒当警报播出去。门槛必须看 event 名。
+      // 关键证据：Flood Watch 的 severity 实测是 Severe（与 Flood Warning 同级），门槛必须看 event 名。
       assert(watch.severity === 'orange' && watch.overseasRank < T6.OVERSEAS_BROADCAST_MIN_RANK,
         'Flood Watch 的 severity 是 orange 但档位不到线——这正是"门槛不能按 severity"的实测证据')
     }
 
-    // ---- 3. severity 忠实映射，不拔高 ----
     {
       assert(T6.NWS_SEVERITY.Extreme === 'red' && T6.NWS_SEVERITY.Severe === 'orange' &&
         T6.NWS_SEVERITY.Moderate === 'yellow' && T6.NWS_SEVERITY.Minor === 'info',
@@ -6201,7 +5847,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(fw.severity === 'orange', 'Flood Warning（Severe）→ orange，未被拔高成 red')
     }
 
-    // ---- 4. 时间：NWS 自带偏移，**不做换算**（与 JMA / nmc / Wolfx 相反的形态）----
     {
       const f = nwsByEvent('Flood Warning')
       const a = T6.parseNwsAlertResult(f, { place: usPlace }).alert
@@ -6209,12 +5854,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(/[+-]\d{2}:\d{2}$/.test(a.issued), '确实是带偏移的 ISO（不是补出来的本地时间）')
     }
 
-    // ---- 5. 事件键：**VTEC 的事件追踪号**（0.6.1 review 的核心修正） ----
     {
       const f = nwsByEvent('Flood Warning')
       const base = T6.parseNwsAlertResult(f, { place: usPlace }).alert
-      // 真实 fixture 的 VTEC 是 `/O.EXT.KILN.FL.W.0067.…`（references 指向的是**上一版**，
-      // 不是事件链的根 —— 这正是 0.6.0 那套算法失效的地方）。
+      // 真实 fixture 的 VTEC 是 /O.EXT.KILN.FL.W.0067.…，它的 references 指向**上一版**而不是事件链的根。
       assert(base.eventKey === 'nws:KILN.FL.W.0067',
         '事件键 = VTEC 的 <office>.<phenom>.<sig>.<ETN>（剔除 ACTION 段）：' + base.eventKey)
       assert(String(f.properties.parameters.VTEC[0]).indexOf('/O.EXT.KILN.FL.W.0067.') === 0,
@@ -6241,10 +5884,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(T6.nwsEventKeyOf('self.1', [], null) === 'nws:self', '没有 references → 自身 identifier')
       assert(T6.nwsEventKeyOf('self.1', [], []) === 'nws:self',
         'VTEC 是空数组时同样退回兜底')
-      // 0.9.4（P2-12）：ETN 段由 4 位放宽到 4~6 位。实测出现过 5 位（`/O.NEW.KRLX.FA.W.01370.…`），
-      // 写死 4 位会让整段失配 → 退回 0.6.1 已证伪的 references 兜底（逐版串联 → 每次 Update
-      // 各得一键 → 重复响铃），而且没有任何地方能看出这件事。
-      // 用**真实样本**改 VTEC（手搓 fixture 会被 schema 判据挡下，那是另一条链路的守卫）。
+      // ETN 段是 4~6 位：实测出现过 5 位（/O.NEW.KRLX.FA.W.01370.…），写死 4 位会让整段失配并退回 references 兜底。
       const vtecBase = JSON.parse(JSON.stringify(nwsByEvent('Flood Warning')))
       vtecBase.properties.parameters.VTEC = ['/O.NEW.KRLX.FA.W.01370.260101T0000Z-260102T0000Z/']
       assert(T6.parseNwsAlertResult(vtecBase, { place: usPlace }).alert.eventKey === 'nws:KRLX.FA.W.01370',
@@ -6269,7 +5909,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '既无 VTEC 又无 references（原始 Alert）→ 自身 identifier')
     }
 
-    // ---- 5a. 真实事件链：连续两版必须同键（0.6.1，用实测数据） ----
+    // ---- 5a. 真实事件链：连续两版必须同键 ----
     {
       const keys = nwsChain.map((f) => T6.parseNwsAlertResult(f, { place: usPlace }).alert.eventKey)
       assert(nwsChain.length === 2 && keys[0] === keys[1],
@@ -6290,10 +5930,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '第二版不重复响铃（0.6.0 的键在这里会算成另一个事件 → notified=true）：' + JSON.stringify(r2))
     }
 
-    // ---- 5b. 取消链路端到端（review A1 的守卫 + 0.6.1 的真实 fixture） ----
+    // ---- 5b. 取消链路端到端 ----
     {
-      // 用**真实的 Cancel 与它取消的那条警报**：两者的 VTEC 只有 ACTION 段不同（EXT → CAN），
-      // 而 CAP identifier 完全不同 —— 这正是"用 VTEC 做键"才能匹配上的形态。
+      // 真实的 Cancel 与它取消的那条警报：VTEC 只有 ACTION 段不同（EXT → CAN），CAP identifier 完全不同。
       const [orig, can] = nwsCancelChain
       const alert = T6.parseNwsAlertResult(orig, { place: usPlace }).alert
       const cancelAlert = T6.parseNwsAlertResult(can, { place: usPlace }).alert
@@ -6303,8 +5942,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(cancelAlert.id !== alert.id, '（前置）Cancel 的消息 id 与原来不同（CAP 要求 identifier 唯一）')
       assert(cancelAlert.eventKey === alert.eventKey,
         'Cancel 的事件键与当初播报的那条**相同**——否则用户永远收不到"此前警报已作废"')
-      // 端到端（0.6.1 补的守卫）：只验键是不够的——把 handleAlert 里 `if (alert.cancelled)`
-      // 整块删掉时，上面那些断言全都还是绿的，而用户再也收不到作废提醒。
+      // 只验键不够：把 handleAlert 里 `if (alert.cancelled)` 整块删掉时，上面那些断言全都还是绿的。
       const cfg = mkCfg([usPlace])
       const r0 = T6.handleAlert(alert, cfg, { skipQuietHours: true })
       assert(r0.notified === true, '（前置）原警报播报：' + JSON.stringify(r0))
@@ -6316,7 +5954,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '取消消息进历史且标记为命中（用户展开能看到"已作废"）：' + JSON.stringify(hist && hist.headline))
     }
 
-    // ---- 6. 取消语义：NWS 有真正的 Cancel（比 nmc 强）----
     {
       const c = JSON.parse(JSON.stringify(nwsByEvent('Flood Warning')))
       c.properties.messageType = 'Cancel'
@@ -6325,7 +5962,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '其余 messageType（Alert / Update）不算取消')
     }
 
-    // ---- 7. 判据的分类：不在范围内是 empty，结构不符才是 schema ----
     {
       const craft = (patch) => {
         const f = JSON.parse(JSON.stringify(nwsByEvent('Flood Warning')))
@@ -6337,8 +5973,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(craft({ event: 'constructor' }).kind === 'empty',
         'event=constructor 判 empty——直查白名单会命中原型链返回函数对象（0.5.4 修过的同一个坑）')
       assert(craft({ sent: undefined }).kind === 'schema', '缺 sent → schema')
-      // properties.id 缺了会退回 GeoJSON 外层的 feature.id（实测外层是完整 URL）——那是有意的
-      // 兜底（宁可多认一种 id 形态，也不丢一条真实预警），所以"缺 identifier"要两层都清才成立。
+      // properties.id 缺了会退回 GeoJSON 外层的 feature.id（实测外层是完整 URL），所以「缺 identifier」要两层都清才成立。
       {
         const noId = JSON.parse(JSON.stringify(nwsByEvent('Flood Warning')))
         noId.properties.id = undefined
@@ -6350,7 +5985,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(T6.parseNwsAlertResult('nope', {}).kind === 'schema', '顶层不是对象 → schema')
     }
 
-    // ---- 8. 正文原样保留（instruction 是"该怎么做"，截断它才是危险）----
     {
       const f = nwsByEvent('Flash Flood Warning')
       const a = T6.parseNwsAlertResult(f, { place: usPlace }).alert
@@ -6360,7 +5994,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         'kindLabel 带国别与发布机构：' + a.kindLabel)
     }
 
-    // ---- 9. originPlace 透传（匹配层据此命中，不再算距离）----
     {
       const a = T6.parseNwsAlertResult(nwsByEvent('Flood Warning'), { place: usPlace }).alert
       assert(a.locator === 'overseas', 'locator 是 overseas（不是 point——命中在取数时就已发生）')
@@ -6369,13 +6002,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(noPlace.originPlace === null, '取数器没给 place 时是 null，而不是 undefined/{}')
     }
 
-    console.log('== 0.6.0 ECCC：两道过滤器 / 署名 / 事件键 ==')
+console.log('== ECCC：两道过滤器 / 署名 / 事件键 ==')
 
-    // ---- 10. 两道过滤器：advisory 与不在白名单的灾种都判 empty ----
     {
-      // **不绑定具体 alert_code**（0.9.2 修复）：fixture 的灾种分布随季节变化，点名 FTA / WDW / CFW
-      // 会在重抓样本后因某个码不存在而失败——而失败原因与代码改动无关（0.6.2 已在别处改用
-      // ecccWarnShell，这里是同类残留）。改为断言**两道过滤器的不变量**（与季节无关）。
+      // 不绑定具体 alert_code：fixture 的灾种分布随季节变化，点名某个码会在重抓样本后失败，而失败原因与代码改动无关。
       const rows = []
       for (const f of ecccSample.features) {
         const r = T6.parseEcccAlertResult(f, { place: caPlace })
@@ -6395,10 +6025,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '对照：同一条改成 advisory → empty（过滤器一）')
     }
 
-    // ---- 11. 白名单按名称关键词，**按码猜是错的**（4.6.3 踩过 CFW 那个坑）----
     {
-      // 构造一条降雨预警：**码本身用任意值**（白名单不看码，只看名称），
-      // 因为 ECCC 的三字母码表没有官方枚举，而当前季节没有降雨样本。
+      // 构造一条降雨预警：码本身用任意值（白名单只看名称），当前季节没有降雨样本。
       const f = JSON.parse(JSON.stringify(ecccSample.features[2]))
       f.properties.alert_code = 'ZZZ'
       f.properties.alert_name_en = 'rainfall warning'
@@ -6411,7 +6039,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(T6.parseEcccAlertResult(f, { place: caPlace }).kind === 'empty', 'wind warning 仍被排除')
     }
 
-    // ---- 12. 许可要求的署名真的进了正文（ECCC 独有，硬约束）----
     {
       const a = T6.parseEcccAlertResult(ecccSample.features[2], { place: caPlace }).alert
       assert(a.detail.indexOf('Data Source: Environment and Climate Change Canada') > 0,
@@ -6420,7 +6047,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(a.detail.indexOf(String(rawText).slice(0, 40)) === 0, '官方正文原样保留、未被改写（同一条许可要求）')
     }
 
-    // ---- 13. 事件键按"码 + 区域 + 发布日"；消息 id 含时刻 ----
     {
       const f = ecccSample.features[2]
       const a = T6.parseEcccAlertResult(f, { place: caPlace }).alert
@@ -6433,7 +6059,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(b.id !== a.id, '消息 id 含时刻 → "同一条消息重复到达"仍能去重')
     }
 
-    // ---- 14. 判据分类 ----
     {
       const craft = (patch) => {
         const f = JSON.parse(JSON.stringify(ecccSample.features[2]))
@@ -6447,7 +6072,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(craft({ alert_type: 'advisory' }).kind === 'empty', 'advisory → empty')
     }
 
-    // ---- 15. 契约：两条都登记，且关键字段与设计一致 ----
     {
       const C = T6.SOURCE_CONTRACTS
       assert(C.nws_alerts && C.eccc_alerts, '两条海外源的契约都已登记')
@@ -6466,9 +6090,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '时区一栏如实写了两源的相反形态（NWS 自带偏移 / ECCC 是 UTC）')
     }
 
-    console.log('== 0.6.0 取数器：按关注点查询 ==')
+console.log('== 取数器：按关注点查询 ==')
 
-    // ---- 16. 几何：采样点与 bbox ----
     {
       assert(T6.nwsSamplePoints({ lat: 29.7604, lon: -95.3698, radiusKm: 10 }).length === 1,
         '半径 < 25km 只查中心点（NWS 的县通常比它大，采样点会落进同一个县）')
@@ -6485,7 +6108,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '经度跨度大于纬度跨度（45° 处 cos≈0.71，同样的公里数对应更多经度）')
       const hi = T6.ecccBboxOf({ lat: 70, lon: 0, radiusKm: 111 }).split(',').map(Number)
       assert((hi[2] - hi[0]) > (b[2] - b[0]), '纬度越高，同样的半径对应越宽的经度')
-      // 0.6.2：坐标夹取（此前只有实现、没有断言——改回旧写法 CI 仍全绿）
+    // 坐标夹取
       const pole = T6.nwsSamplePoints({ lat: 60, lon: -179.5, radiusKm: 2000 })
       assert(pole.every((p) => p[0] >= -90 && p[0] <= 90 && p[1] >= -180 && p[1] <= 180),
         '大半径 + 高纬度时方位点被夹到合法范围（否则我们自造的非法参数会被上游回 400）：' + JSON.stringify(pole))
@@ -6495,7 +6118,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(box[0] <= box[2] && box[1] <= box[3], '夹取不会把矩形翻过来：' + box.join(','))
     }
 
-    // ---- 17. 覆盖范围：只对"那个国家"的关注点发请求 ----
     {
       const US = { minLat: 24, maxLat: 50, minLon: -125, maxLon: -66 }
       const CA = { minLat: 41, maxLat: 84, minLon: -141, maxLon: -52 }
@@ -6505,8 +6127,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '美国盒选中两个北美点——多伦多也在盒内（美加边界不是矩形），由第 19 条的 400 兜底处理：' + inUs)
       assert(T6.placesInBoxes(cfgAll, [CA]).map((p) => p.name).join(',') === '多伦多', '加拿大盒只选中多伦多')
       assert(T6.placesInBoxes(cfgAll, [US, CA]).length === 2, '东京不在任何一个盒里 → 一个请求都不发')
-      // 0.6.1：海外领地此前全在盒外（配对圣胡安的用户会被告知"未设置关注点"）。断言用
-      // **实现真正用的那组盒**（T6.US_BOXES），而不是就地再写一份——否则改了实现这里仍是绿的。
+      // 海外领地此前全在盒外；断言用实现真正用的那组盒（T6.US_BOXES）。
       const pr = { name: '圣胡安', lat: 18.4655, lon: -66.1057, radiusKm: 100 }
       const guam = { name: '关岛', lat: 13.4443, lon: 144.7937, radiusKm: 100 }
       assert(T6.placesInBoxes(mkCfg([pr, guam]), T6.US_BOXES).length === 2,
@@ -6514,7 +6135,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         T6.placesInBoxes(mkCfg([pr, guam]), T6.US_BOXES).map((p) => p.name).join(','))
     }
 
-    // ---- 18. 取数器主链：查询 → 契约 → 交出 Alert（用真实 fixture，不联网） ----
     {
       const cfg = mkCfg([usPlace])
       const urls = []
@@ -6537,10 +6157,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(r.applied === 7 && handed.length === 7,
         'fixture 的 7 条各交出一次：5 个采样点返回同一批，靠 alert.id 在一轮内去重')
       assert(src.stats().received === 35, '收到计数按每份响应累计（7 × 5）：' + src.stats().received)
-      // 0.6.1：这条断言此前依赖 fixture 的**绝对日期**（sent=2026-09-22），而闸门按
-      // `now - issued > 6h` 判定 —— 真实时钟一越过 fixture 当天下午就会自行变红，
-      // 而且失败原因无法归因到任何代码改动。改成把 sent 重写成"刚刚"（保持"新鲜"这个
-      // 被验证的语义），另由第 20 条专门验闸门本身。
+      // 把 sent 重写成「刚刚」：依赖 fixture 绝对日期的断言会随真实时钟越过当天下午而自行变红，且失败无法归因。
       const fresh = JSON.parse(JSON.stringify(nwsSample.features))
       const stamp = new Date(Date.now() - 5 * 60 * 1000).toISOString()
       for (const f of fresh) f.properties.sent = stamp
@@ -6553,14 +6170,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       })
       await freshSrc.pollOnce()
       assert(freshHanded === 7, '刚发布（5 分钟前）的 7 条都不进门闸：' + freshHanded)
-      // detail **只放语义信息**（0.6.0 review 修正）：正常情况下它为空——计数由设置页的
-      // OVERSEAS_STAT_ORDER 从 stats 直接读，这样 detail 变化才等于"语义变化"，
-      // 上报去重键才敢把它算进去（否则每轮都会被判成变化、页面反复重渲）。
+      // detail 只放语义信息：计数由设置页从 stats 直接读，这样 detail 变化才等于语义变化（上报去重键才算得准）。
       assert(status && status.status === 'open' && /queried 1 watch points/.test(status.detail || ''),
         '正常一轮的状态是 open，detail 是非单调的语义摘要（review B-1：留空会让悬停显示裸状态词 open）：' + JSON.stringify(status))
     }
 
-    // ---- 19. 400 = "不在覆盖范围"，不是故障（实测多伦多 / 温哥华 / 伦敦都会被 NWS 这样答） ----
     {
       const cfg = mkCfg([caPlace])
       let calls = 0
@@ -6586,9 +6200,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(calls === 5, '冷却期内不再查这些 URL（TTL 到期后会自动重试一次）')
     }
 
-    // ---- 20. 门闸、开关、关注点与失败分类 ----
     {
-      // 年龄闸门：首轮把"发布已 10 小时"的条目标记为 staleOnArrival
+      // 年龄门槛：首轮把"发布已 10 小时"的条目标记为 staleOnArrival
       const cfg = mkCfg([usPlace])
       const old = JSON.parse(JSON.stringify(nwsSample.features))
       const oldStamp = new Date(Date.now() - 10 * 3600 * 1000).toISOString()
@@ -6667,9 +6280,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(r1.failed === 5, '被拦截成 HTML → 每个请求都算失败（不是静默跳过）')
       const r2 = await mkBad('{"oops":1}').pollOnce()
       assert(r2.failed === 5, '缺 features 数组 → 失败（上游改版要看得见）')
-      // 0.6.0 review A2：顶层结构不符 = **契约漂移**，要按 DESIGN 4.5 的配色语义点亮蓝点
-      // （schema-error：用户处理不了、等插件更新），而不是红点（让用户去折腾自己的网络）。
-      // 清掉前面几条"坏响应"留下的健康记录，避免它们把这里的状态预先染成 schema-error。
+      // 顶层结构不符 = **契约漂移**，要点亮 schema-error 蓝点（用户处理不了、等插件更新），而不是红点。
       T6.resetSourceHealth()
       let stSchema = null
       const badStruct = T6.createNwsSource({
@@ -6697,9 +6308,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(st500 && st500.status === 'unreachable', '全部 5xx → unreachable（红色：环境问题）')
     }
 
-    console.log('== 0.6.0 review：修掉的三条各配一条守卫 ==')
+console.log('== NWS / ECCC review：修掉的三条各配一条守卫 ==')
 
-    // ---- 23. 请求上限不能吞掉关注点（review A1） ----
     {
       const many = Array.from({ length: 10 }, (_, i) => ({ name: 'p' + i, lat: 30 + i * 0.2, lon: -95, radiusKm: 100 }))
       const urls = []
@@ -6720,13 +6330,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(src.stats().throttledTotal === 10, '累计值也记（诊断里看趋势）：' + src.stats().throttledTotal)
     }
 
-    // ---- 24. 年龄闸门必须更新事件记忆（review A2） ----
     {
       const cfg = mkCfg([usPlace])
       const f = JSON.parse(JSON.stringify(nwsByEvent('Flood Warning')))
       f.properties.sent = new Date(Date.now() - 10 * 3600 * 1000).toISOString()
-      // 换一个 ETN：0.6.1 起事件键来自 VTEC，所以"换一条独立的事件"必须换 VTEC，
-      // 而不是像 0.6.0 那样删掉 references（那时键来自 references，删掉就等价于换事件）。
+    // 换一个 ETN：事件键来自 VTEC，所以「换一条独立的事件」必须换 VTEC
       f.properties.parameters.VTEC[0] = '/O.NEW.KILN.FL.W.0999.000000T0000Z-260922T1800Z/'
       const alert = T6.parseNwsAlertResult(f, { place: usPlace }).alert
       const r = T6.handleAlert(alert, cfg, { staleOnArrival: 10 })
@@ -6736,7 +6344,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '该分支排在 isEventRepeat 之后 → 事件记忆已写入，后续轮次会判成"后续发布"而不是再进一次历史')
     }
 
-    // ---- 25. 状态去重键必须包含 detail（review A3） ----
     {
       // 前面的"坏响应"测试会往健康层里留下 schema 记录，而状态是经 effectiveStatusOf 合成的
       // ——不清掉的话这里拿到的是蓝点而不是本用例要验的 open（测试间的模块级状态污染）。
@@ -6763,7 +6370,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '第二次 detail 变成"已按 N 个关注点查询"——不会把"未设置"的旧文案一直挂在设置页上：' + seen[1])
     }
 
-    // ---- 26. 400 只跳过那一个请求，不吞掉整个关注点（review B1） ----
     {
       T6.resetSourceHealth()
       const urls = []
@@ -6785,7 +6391,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(urls.length === 9, '第二轮只跳过那 1 个 URL，仍查 4 个方位点（修复前整点被跳、第二轮 0 个请求）')
     }
 
-    // ---- 27. 只有覆盖外坐标时，年龄闸门不该永远停在"首轮"（review B2） ----
     {
       T6.resetSourceHealth()
       const src = T6.createNwsSource({
@@ -6801,7 +6406,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(src.stats().gated === 1, '第二轮不再被当成首轮（400 也是"上游有响应"，修复前恒为首轮）')
     }
 
-    // ---- 28. 外层 URL id 的兜底：剥掉 URL 前缀（review B3） ----
     {
       const base = nwsByEvent('Flood Warning')
       const outer = {
@@ -6812,8 +6416,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       }
       delete outer.properties.id
       delete outer.properties.references
-      // 0.6.1：事件键现在首选 VTEC，所以这条"外层 id 兜底"的用例必须把 VTEC 也去掉，
-      // 否则它测的是 VTEC 而不是兜底路径（0.6.0 时删 references 就够，因为键来自 references）。
+      // 事件键首选 VTEC，所以这条「外层 id 兜底」用例必须把 VTEC 也去掉。
       delete outer.properties.parameters.VTEC
       const a = T6.parseNwsAlertResult(outer, { place: usPlace }).alert
       assert(a.id === 'nws:urn:oid:2.49.0.1.840.0.abc.001.1',
@@ -6822,7 +6425,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '事件键随之退回自身 identifier（去掉末尾版本段）：' + a.eventKey)
     }
 
-    // ---- 29. stop() 之后不再写状态、中止不算失败（review A-1） ----
     {
       T6.resetSourceHealth()
       const reports = []
@@ -6846,7 +6448,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(src.stats().errors === 0, '主动中止不算失败：' + src.stats().errors)
     }
 
-    // ---- 30. 400 的冷却带 TTL、文案不替上游断言原因（review A-2） ----
     {
       assert(typeof T6.UNCOVERED_TTL_MS === 'number' && T6.UNCOVERED_TTL_MS > 0,
         '冷却期是有限值（不是永久拉黑）：' + T6.UNCOVERED_TTL_MS + 'ms')
@@ -6864,7 +6465,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(/HTTP 400/.test(status.detail || ''), '但仍然写明是 400 与多久后重试：' + status.detail)
     }
 
-    // ---- 31. 海外预警不清掉日本气象 L3 提示（review A-3，0.5.4 修过 nmc 的同一处） ----
     {
       const cfg = mkCfg([usPlace])
       T6.store.push({ weatherHint: { level: 3, label: 'テスト県', at: Date.now() } })
@@ -6875,7 +6475,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       T6.store.push({ weatherHint: null })
     }
 
-    // ---- 32. 采样点按轮次轮转，尾部关注点也能轮到（review B-2） ----
     {
       const many = Array.from({ length: 10 }, (_, i) => ({ name: 'p' + i, lat: 30 + i * 0.2, lon: -95, radiusKm: 100 }))
       const urls = []
@@ -6912,12 +6511,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(first.length === 40 && second.length === 40, '两轮都守在上限 40 内：' + first.length + '/' + second.length)
     }
 
-    // ---- 33. 整轮失败会退避（review B-5：DESIGN 4.7.2 承诺过，此前实现里没有） ----
     {
       let calls = 0
       const src = T6.createNwsSource({
         getCfg: () => mkCfg([usPlace]),
-        intervalMs: 5, // 正常间隔压到 5ms：有退避时不会按这个节奏继续打
+        intervalMs: 5, // 正常间隔压到 5ms：有重试间隔递增时不会按这个节奏继续打
         firstDelayMs: 1,
         onStatus: () => {},
         onAlert: () => {},
@@ -6926,14 +6524,13 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       src.start()
       await new Promise((resolve) => setTimeout(resolve, 150))
       src.stop()
-      // 无退避时：每 5ms 一轮 × 5 个请求 = 上百次；有退避（1 秒起）时 150ms 内只有第一轮
-      assert(calls <= 20, '全部失败后进入退避，150ms 内只跑了 ' + calls + ' 个请求（无退避会是上百次）')
+      // 没有重试间隔递增时：每 5ms 一轮 × 5 个请求 = 上百次；有递增（1 秒起）时 150ms 内只有第一轮
+      assert(calls <= 20, '全部失败后逐次延长重试间隔，150ms 内只跑了 ' + calls + ' 个请求（不延长会是上百次）')
       assert(T6.OVERSEAS_MIN_BACKOFF_MS === 1000 && T6.OVERSEAS_MAX_BACKOFF_MS === 60000,
-        '退避是 1s → 60s 上限（与 DESIGN 4.7.2 一致）')
+        '重试间隔逐次延长，从 1s 到 60s 上限（与 DESIGN 4.7.2 一致）')
     }
 
-    console.log('== 0.6.0 匹配：查询即匹配 ==')
-    // ---- 21. matchOverseasAlert 的四条判定 ----
+console.log('== 匹配：查询即匹配 ==')
     {
       const alert = T6.parseNwsAlertResult(nwsByEvent('Flood Warning'), { place: usPlace }).alert
       const cfg = mkCfg([usPlace])
@@ -6956,7 +6553,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(T6.matchOverseasAlert(orphan, cfg).hit === false, '没有来源关注点 → 不猜，判不命中')
     }
 
-    // ---- 22. 开关四处同步（Client 默认值 / normalizeCfg / Host schema / 设置页） ----
     {
       assert(T6.DEFAULT_CFG.disasters.overseasWeather === true, 'Client 默认值是开')
       const norm = T6.normalizeCfg({ disasters: { overseasWeather: false } })
@@ -6972,15 +6568,13 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         'Host schema 的**默认值**与 Client 的 DEFAULT_CFG 一致（0.6.1：此前只是注释里说"有断言守着"）')
     }
 
-    console.log('== 0.6.1 review：新增守卫 ==')
+console.log('== review：新增守卫 ==')
 
-    // ---- 40. 加拿大那一半的取数接线（此前 createEcccSource 从未被构造过） ----
     {
       const urls = []
       const handed = []
       let status = null
-      // shell 与断言都**不绑定季节**（0.6.2）：此前写死风暴潮（CFW），非风暴季重抓 fixture 时
-      // 它会变成 undefined，`JSON.parse(JSON.stringify(undefined))` 直接抛 SyntaxError。
+      // shell 与断言都不绑定季节：写死风暴潮（CFW）时，非风暴季重抓 fixture 会变成 undefined 并抛 SyntaxError。
       const cfwFixture = ecccWarnShell()
       const src = T6.createEcccSource({
         getCfg: () => mkCfg([caPlace, usPlace]),
@@ -7009,7 +6603,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(status && /queried 1 watch points/.test(status.detail || ''), '状态上报正常：' + JSON.stringify(status))
     }
 
-    // ---- 41. NWS 白名单三处同源：服务端过滤参数必须等于白名单键集 ----
     {
       const q = T6.NWS_EVENT_QUERY.split(',').slice().sort()
       const w = Object.keys(T6.NWS_EVENT_WHITELIST).slice().sort()
@@ -7018,7 +6611,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(T6.NWS_EVENT_QUERY.indexOf('Flood Warning') >= 0, '白名单里的每一类都进了查询参数')
     }
 
-    // ---- 42. 400 的冷却到期后必须真的重试（0.6.0 承诺过、此前无守卫） ----
     {
       let calls = 0
       const src = T6.createNwsSource({
@@ -7034,11 +6626,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(calls === 10, 'TTL 到期后重新尝试（把实现改成永久拉黑 / 比较写成反向，这条会红）：' + calls)
     }
 
-    // ---- 43. ECCC 的排除名单是"先排除再包含"，且 areaKey 有兜底 ----
     {
-      // **不依赖具体季节的样本**（0.6.2 修正）：shell 取任意一条真实 feature，并把 alert_type
-      // 强制成 'warning' —— 此前写死 `alert_code === 'CFW'`（风暴潮），非风暴季重抓 fixture 时
-      // 它会变成 undefined，`JSON.parse(JSON.stringify(undefined))` 直接抛 SyntaxError。
+      // 不依赖具体季节的样本：shell 取任意一条真实 feature 并把 alert_type 强制成 'warning'。
       const shell = ecccSample.features.filter((x) => x && x.properties)[0]
       assert(shell, '（前置）ECCC fixture 里至少有一条可用作 shell 的样本')
       const mk = (nameEn) => {
@@ -7048,8 +6637,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         if (typeof f.properties.risk_colour_en !== 'string') f.properties.risk_colour_en = 'orange'
         return T6.parseEcccAlertResult(f, { place: caPlace })
       }
-      // 负向词从**实现的正则**派生（0.6.2）：手抄 17 个词里，此前有 16 个无论删掉哪条排除规则
-      // 都仍然判 empty（它们本来就不含 INCLUDE 里的任何词）——那是恒真断言，不是守卫。
+      // 负向词从实现的正则派生：手抄的 17 个词里有 16 个无论删掉哪条排除规则都仍然判 empty（恒真断言）。
       const sources = String(T6.ECCC_EXCLUDE).replace(/\\b/g, '').replace(/[()]/g, '').split('|')
       const negative = sources.map((s) => 'rain ' + s + ' warning')
       const leaked = negative.filter((n) => mk(n).kind !== 'empty')
@@ -7070,15 +6658,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         'feature_id 缺失时事件键退回区域名（不是 unknown）：' + a.eventKey)
     }
 
-    // ---- 44. 真实抓到的"非白名单响应"判 empty（否定方向用真实样本，不只靠合成 patch） ----
     {
       const pt = (nwsPointSample.features || []).filter((f) => f && f.properties)[0]
       assert(pt, '（前置）nws-point-alerts.geojson 里有样本')
       const r = T6.parseNwsAlertResult(pt, { place: usPlace })
-      // **按白名单成员关系判**，而不是假定这一条必是非白名单（0.6.2 修正）：这份 fixture 由
-      // 采集脚本每次重抓时无条件覆盖，若恰好在有洪水预警的时刻抓取，它会变成白名单内的事件
-      // ——那时这条断言会红，而失败信息却指向"白名单"。改成跟着 `NWS_EVENT_WHITELIST` 走：
-      // 非白名单 → empty（真实的否定方向证据）；白名单内 → 解析成功（同一条 fixture 仍有效）。
+      // 按白名单成员关系判，不假定这一条必是非白名单：fixture 每次重抓时无条件覆盖，落在洪水季它会变成白名单内事件。
       const isListed = Object.prototype.hasOwnProperty.call(T6.NWS_EVENT_WHITELIST, pt.properties.event)
       if (isListed) {
         assert(r.ok === true, '（本轮抓到的恰是白名单事件 ' + pt.properties.event + '）解析成功：' + r.kind)
@@ -7096,7 +6680,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         'event=constructor 判 empty（原型链不能绕过白名单，与 0.5.4 修的 nmc 同一个坑）')
     }
 
-    // ---- 45. 官方正文真的能到用户眼前（detail 此前没有任何消费者） ----
     {
       const nwsAlert = T6.parseNwsAlertResult(nwsByEvent('Flash Flood Warning'), { place: usPlace }).alert
       T6.handleAlert(nwsAlert, mkCfg([usPlace]), { skipQuietHours: true })
@@ -7106,7 +6689,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         'NWS 的 instruction（"该怎么做"）进了历史条目：' + String(evNws.detail).slice(0, 60))
       const persisted = T6.loadHistory().filter((e) => e.id === nwsAlert.id)[0]
       assert(persisted && persisted.detail && persisted.detail.indexOf('Turn around') >= 0,
-        '落盘后仍然带着正文（刷新页面还能看到）')
+        '写入本地存储后仍然带着正文（刷新页面还能看到）')
       const ecccAlert = T6.parseEcccAlertResult(ecccWarnShell(), { place: caPlace }).alert
       T6.handleAlert(ecccAlert, mkCfg([caPlace]), { skipQuietHours: true })
       const evEccc = T6.store.events[0]
@@ -7125,7 +6708,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(T6.store.events[0].detail.length === 1200, '超长正文被截到 1200 字符：' + T6.store.events[0].detail.length)
     }
 
-    // ---- 46. 命中文案按"有没有真实距离"分岔（海外 + 大陆都要覆盖） ----
     {
       // 在一个**独立沙箱**里跑真正的通知拼装（页内 toast 会把 title / body 写进 textContent）
       const texts = []
@@ -7159,8 +6741,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(joined.indexOf('美国国家气象局（NWS）') > 0,
         '免责声明点名了正确的机构（AUTHORITY_BY_SOURCE 里登记了 nws_alerts）：' + joined)
 
-      // **大陆气象（locator 'area'）也走同一支**（0.6.2）：0.6.1 只给 overseas 分了岔，
-      // 于是每条命中的大陆暴雨 / 地质灾害预警仍然带着「距震中约 NaN km」与日本避难口径上线。
+      // 大陆气象（locator 'area'）也走同一支：只给 overseas 分岔时，命中的大陆暴雨预警会带着「距震中约 NaN km」上线。
       texts.length = 0
       const nmcRaw = {
         alertid: '53072441600000_20260919030245',
@@ -7188,7 +6769,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '三种来源各自的行动提示互不相同')
     }
 
-    // ---- 47. 取消链路的开关按来源分岔（日本气象关掉不影像海外源） ----
     {
       const [orig, can] = nwsCancelChain
       const mkEt = (f, action, suffix) => {
@@ -7217,7 +6797,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '海外源被关掉时，取消消息不写历史（用户已经明确说过不要这个源）：' + JSON.stringify(rOff))
     }
 
-    // ---- 48. 同档位的强度回落 → 再升级，必须还能播报（海外源的档位与强度是两条正交轴） ----
     {
       const cfg = mkCfg([usPlace])
       const mkSev = (sev, ver) => {
@@ -7237,7 +6816,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '再升回 Severe 必须重新播报（0.6.1 修复前记忆停在 3 → isEventRepeat 判"未升级" → 永久静默）：' + JSON.stringify(r3))
     }
 
-    // ---- 49. 失败退避不得比正常间隔更短（ECCC 300 秒 vs 退避上限 60 秒） ----
     {
       let calls = 0
       const src = T6.createEcccSource({
@@ -7252,16 +6830,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       await new Promise((resolve) => setTimeout(resolve, 1400))
       src.stop()
       assert(calls === 1,
-        '全失败时的间隔取 max(退避, 正常间隔)=正常间隔 → 1.4 秒内只有首轮（修复前退避 1 秒会打出第二、三轮）：' + calls)
+        '全失败时的间隔取 max(递增后的重试间隔, 正常间隔)=正常间隔 → 1.4 秒内只有首轮（修复前按 1 秒重试会打出第二、三轮）：' + calls)
     }
 
-    // ---- 50. 超时要与"用户主动停用"分开报告（两者在 fetch 层是同一种 AbortError） ----
     {
       T6.resetSourceHealth()
       let lastErr = ''
       const src = T6.createNwsSource({
-        // 半径 < 25km → 只有中心点一个请求，于是可以把超时设成 1.5 秒而只花 1.5 秒
-        //（0.6.2：此前用 30ms，文案里的秒数是 "0 秒"，单位写错也抓不住）
+        // 半径 < 25km → 只有中心点一个请求，于是可以把超时设成 1.5 秒而只花 1.5 秒。
         getCfg: () => mkCfg([Object.assign({}, usPlace, { radiusKm: 10 })]),
         timeoutMs: 1500,
         onStatus: () => {},
@@ -7287,7 +6863,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(/timeout/.test(src.stats().lastError || ''), '快照里的 lastError 同样是超时：' + src.stats().lastError)
     }
 
-    // ---- 51. 结构正确的空响应要能清掉蓝点（NWS 按点查询的常态） ----
     {
       T6.resetSourceHealth()
       const bad = T6.createNwsSource({
@@ -7324,9 +6899,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(h2 && h2.data && h2.data.kind === 'schema', '健康记录里是 schema：' + JSON.stringify(h2 && h2.data && h2.data.kind))
     }
 
-    console.log('== 0.6.2 review：第二轮 ==')
+console.log('== review：第二轮 ==')
 
-    // ---- 52. 空响应**不能**把整轮的失败清零（0.6.1 引入的静默面） ----
     {
       T6.resetSourceHealth()
       const cfg = mkCfg([usPlace]) // 100km → 5 个采样点
@@ -7347,7 +6921,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(h.data && h.data.escalated === true,
         '局部失败（5 条里 1 条被拦截）× 6 轮 → 蓝点照样升级（0.6.1 的逐响应 empty 会让它永不升级）：' +
         JSON.stringify(h.data))
-      // 反向：整轮都干净的空响应仍然要能清掉蓝点（0.6.1 的初衷不能丢）
+    // 反向：整轮都干净的空响应仍然要能清掉蓝点
       T6.resetSourceHealth()
       const bad = T6.createNwsSource({ getCfg: () => cfg, onStatus: () => {}, onAlert: () => {}, fetchText: async () => '{"oops":1}' })
       await bad.pollOnce()
@@ -7361,7 +6935,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '整轮都是结构正确的空响应 → 仍然清掉蓝点（本轮一条失败都没有，结构就是好的）')
     }
 
-    // ---- 53. `truncated` 的单位是**轮**，不是响应 ----
     {
       const body = (matched) => JSON.stringify({ type: 'FeatureCollection', numberMatched: matched, features: [ecccWarnShell()] })
       const one = T6.createEcccSource({
@@ -7386,7 +6959,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(none.stats().truncated === 0, '没被截断就不计数（numberMatched 是按 bbox 过滤后的数量，实测如此）')
     }
 
-    // ---- 54. 退避必须**加在正常间隔之上**（否则在真实间隔下是死代码） ----
     {
       let calls = 0
       const src = T6.createEcccSource({
@@ -7400,11 +6972,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       await new Promise((resolve) => setTimeout(resolve, 1600))
       src.stop()
       assert(calls === 1,
-        '全失败后的下一轮在 interval + 退避（1200+1000=2200ms）之后，1.6 秒内只有首轮；' +
-        '若写回 `max(退避, 间隔)` 则第二轮落在 1200ms → 这里会是 2：' + calls)
+        '全失败后的下一轮在 interval + 递增后的重试间隔（1200+1000=2200ms）之后，1.6 秒内只有首轮；' +
+        '若写回 `max(重试间隔, 间隔)` 则第二轮落在 1200ms → 这里会是 2：' + calls)
     }
 
-    // ---- 55. 闸门计数在 restart / resetGate 之后不能少计 ----
     {
       T6.resetSourceHealth()
       let calls = 0
@@ -7414,18 +6985,17 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         fetchText: async () => { calls += 1; const e = new Error('HTTP 500'); e.status = 500; throw e },
       })
       await src.pollOnce()
-      assert(src.stats().gated === 1, '（前置）首轮进入闸门：' + src.stats().gated)
-      src.resetGate() // 模拟"页面刚打开"：闸门会再次为真，标志也必须跟着复位
+      assert(src.stats().gated === 1, '（前置）首轮命中判定条件：' + src.stats().gated)
+      src.resetGate() // 模拟"页面刚打开"：判定条件会再次为真，标志也必须跟着复位
       await src.pollOnce()
       assert(src.stats().gated === 2,
-        'resetGate() 之后再次进入闸门要计数（0.6.1 的 gateActive 不复位 → 少计一次）：' + src.stats().gated)
-      // 同一段闸门内连续两轮不该重复计数
+        'resetGate() 之后再次命中判定条件要计数（0.6.1 的 gateActive 不复位 → 少计一次）：' + src.stats().gated)
+      // 同一段判定为真的区间里连续两轮不该重复计数
       await src.pollOnce()
-      assert(src.stats().gated === 2, '闸门内继续跑不再计数（不会变成"待在闸门里的轮数"）：' + src.stats().gated)
+      assert(src.stats().gated === 2, '同一段内继续跑不再计数（不会变成"待在里面的轮数"）：' + src.stats().gated)
       assert(calls === 15, '（前置）3 轮 × 5 个采样点：' + calls)
     }
 
-    // ---- 56. 大陆气象的官方正文也进历史（Host 侧 nmcPayload → Client → 主链） ----
     {
       const raw = {
         alertid: '53072441600000_20260919030245',
@@ -7444,16 +7014,15 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '大陆预警的正文现在也能在历史条目里展开看到：' + String(ev && ev.detail).slice(0, 40))
     }
 
-    // ---- 57. defaultFetchText（无 fetchText 注入时的真实默认路径） ----
     {
       const s = loadClientEx()
-      // 永不 settle 的 fetch：只能靠 Promise.race 兜住超时
+      // 永不 settle 的 fetch：只能靠 Promise.race 捕获超时
       s.sandbox.fetch = () => new Promise(() => {})
       const msg = await s.exports.__test.defaultFetchText('https://example.invalid/slow', { timeoutMs: 30 })
         .then(() => '(resolved)', (e) => String((e && e.message) || e))
       assert(/超时/.test(msg) && /没有 AbortController/.test(msg),
-        '无 signal 时用 Promise.race 兜住超时（这条分支此前在测试里不可达）：' + msg)
-      // 400 的 bodyHint 截断长度（0.6.1 把它从 200 改成 160，同样没有任何用例能执行到）
+        '无 signal 时用 Promise.race 捕获超时（这条分支此前在测试里不可达）：' + msg)
+    // 400 的 bodyHint 截断长度
       s.sandbox.fetch = async () => ({ ok: false, status: 400, text: async () => 'x'.repeat(400) })
       let err = null
       try { await s.exports.__test.defaultFetchText('https://example.invalid/bad', { timeoutMs: 30 }) } catch (e) { err = e }
@@ -7464,15 +7033,15 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '0.6.0 第 2 期检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
   }
 
-  // ---- 0.8.0：跨源权威源（DESIGN 3.4）+ 关注点来源分支（DESIGN 9.3） ----
-  console.log('== 0.8.0：跨源权威源 + 关注点来源分支 ==')
+  // ---- 跨源优先源 + 关注点来源分支 ----
+console.log('== 跨源优先源 + 关注点来源分支 ==')
   try {
     const mkCfg8 = (t, patch) => {
       const cfg = JSON.parse(JSON.stringify(t.DEFAULT_CFG))
       cfg.notify = { sound: false, system: false, volume: 0 }
       return Object.assign(cfg, patch || {})
     }
-    // 一场筑波附近的日本地震：551（行政区匹配）与 USGS（坐标匹配）各报一次，这才是 3.4 的正题
+    // 一场筑波附近的日本地震：551（行政区匹配）与 USGS（坐标匹配）各报一次
     const JP_RAW = {
       code: 551, id: 'jp-551-test',
       issue: { time: '2026/09/07 23:25:14', type: 'DetailScale' },
@@ -7496,7 +7065,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     }
     const th8 = { quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch', globalMagnitude: 4.5, cnReportMagnitude: 4.5 }
 
-    // ① 日本源补了震中坐标，但**匹配语义必须不变**
     {
       const t = loadClient().__test
       const a = t.parseQuake(JP_RAW)
@@ -7518,12 +7086,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const sentinel = Object.assign({}, JP_RAW, {
         earthquake: { time: '2026/09/07 23:25:00', maxScale: 45, hypocenter: { name: '不明', latitude: -200, longitude: -200 } },
       })
-      assert(t.parseQuake(sentinel).geo === null, 'P2PQuake 的"未知震中"哨兵值（-200，-200）不会被当成坐标')
+      assert(t.parseQuake(sentinel).geo === null, 'P2PQuake 的"未知震中"特殊标记值（-200，-200）不会被当成坐标')
       assert(t.sourceIdOf(a) === 'p2pquake' && t.SOURCE_RANK.p2pquake === 1,
-        '551 归到 p2pquake，且它是权威序里的第 1 位（DESIGN 3.4 的表）')
+        '551 归到 p2pquake，且它排在优先顺序的第 1 位（DESIGN 3.4 的表）')
     }
 
-    // ② 跨源只在**跨机构**时成立：同一机构内部那条链路归 DESIGN 8.3 管（只记历史、不抑制）
     {
       const t = loadClient().__test
       assert(t.agencyOf('cenc_eew') === t.agencyOf('cenc_eqlist'), '大陆预警与速报同属 CENC（同机构）')
@@ -7534,7 +7101,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '气象源不参与跨源归并（各家地区与判据完全不同，没有"同一件事被重复转述"的形态）')
     }
 
-    // ③ 端到端：日本 551 先播 → USGS 报同一场地震 → 抑制、**不进历史**、计数可查
     {
       const t = loadClient().__test
       const cfg = mkCfg8(t, { watch: watch8, thresholds: th8 })
@@ -7549,11 +7115,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(st.suppressed === 1 && st.bySource.p2pquake === 1,
         '抑制必须留计数（"不进历史 ≠ 不可见"）：' + JSON.stringify(st))
       const snap = t.buildDiagSnapshot()
-      // 0.9.4：快照版本 3 → 4（0.9.2 新增了 delivery 段但当时忘了提号）
+    // 快照版本号：新增段落时必须同步提号
       assert(snap.snapshot === 4 && snap.authority && snap.authority.suppressed === 1,
         '诊断快照里能看到被抑制的条数：' + JSON.stringify(snap.authority))
-      // 0.9.4（P2-26）：诊断片段自己抛错时必须**在 warnings 里可见**（此前那几处把 `[]` 当
-      // warnings 传进 safe()，异常被丢进一个没人看的空数组，与"诊断自身失败也要可见"冲突）
+      // 诊断片段自己抛错时必须**在 warnings 里可见**，不能把异常丢进一个没人看的空数组。
       assert(t.DIAG_SNAPSHOT_VERSION === 4, '快照版本号随新段提号（加段也要提号）')
       t.cnStreamRegistry.__boom94 = {
         stats() { throw new Error('boom-stats') },
@@ -7570,7 +7135,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       }
     }
 
-    // ④ 先到者播：USGS 先到，日本副本后到同样被抑制（DESIGN 3.4 的"不补播"）
     {
       const t = loadClient().__test
       const cfg = mkCfg8(t, { watch: watch8, thresholds: th8 })
@@ -7582,7 +7146,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(t.authorityStatsOf().bySource.usgs === 1, '计数按**已播报的那个源**分组，能看出是谁抢在前面')
     }
 
-    // ⑤ 归并只在「±2 分钟 + 50km」内成立：过界一律各自播报（宁可多响一次，绝不漏报）
     {
       const t = loadClient().__test
       const cfg = mkCfg8(t, { watch: watch8, thresholds: th8 })
@@ -7593,20 +7156,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(late.notified === true, '时间差 6 分钟（>2 分钟）→ 不归并、照常播报：' + JSON.stringify(late))
     }
 
-    // ⑤' 0.9.4（P1-4）：近似归并的**候选**也要过滤灾种与演示消息
-    //    此前只过滤"来者"（两条路径各一次），于是两类不可见的漏报：
-    //      ① NOAA 海啸警报落在"此前 2 分钟内播报过的另一机构地震"震中 50km 内 → 被判成同一
-    //         事件的副本而完全静默（跨源不比 strength，没有任何"升级"能把它救回来）；
-    //      ② 用户点过一次"发送测试全球警报"后，2 分钟内同坐标附近的真实地震也会被压掉。
+    //     否则 NOAA 海啸警报落在另一机构地震震中 50km 内会被判成副本而静默，测试消息也会压掉随后的真实地震。
     {
       const t = loadClient().__test
-      // ① 同灾种的跨机构近似副本仍要归并（对照，别把这条修过头）
       const q = usgsCopyOf({ id: 'usgs:kind-a', eventKey: 'geo:2026-09-07T14:40', issued: '2026-09-07T23:40:00+09:00' })
       t.isEventRepeat(Object.assign({}, q, { source: 'emsc' }), 10)
       const sameKind = usgsCopyOf({ id: 'usgs:kind-b', eventKey: 'geo:other-b', issued: '2026-09-07T23:40:40+09:00' })
       assert(!!t.crossSourceCopyOf(sameKind), '对照：同灾种（quake）的跨机构近似副本仍被归并')
 
-      // ② 不同灾种（海啸 vs 地震）不该算"同一事件的副本"
       const tsunamiAlert = {
         id: 'noaa:ts-1', code: 'noaa', source: 'noaa', kind: 'tsunami', kindLabel: 'NOAA 海啸',
         locator: 'point', severity: 'red', issued: '2026-09-07T23:50:20+09:00',
@@ -7619,7 +7176,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '海啸警报不会被"50km 内 2 分钟前的地震"压成同一事件（那是不可见的漏报）')
       assert(t.isEventRepeat(tsunamiAlert, 10) === false, '海啸也不被判成那场地震的重复')
 
-      // ③ 演示消息（test: 命名空间）不能压掉随后的真实地震
       const demo = {
         id: 'demo-1', code: 'emsc', source: 'emsc', kind: 'quake', kindLabel: 'EMSC 测试',
         locator: 'point', severity: 'orange', issued: '2026-09-07T23:59:00+09:00',
@@ -7632,7 +7188,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '点过"发送测试全球警报"之后 2 分钟内的真实地震不会被压掉（演示不参与归并）')
     }
 
-    // ⑥ 关注点来源分支（origin）：显式值优先，缺失时按名称形状推导
     {
       const t = loadClient().__test
       assert(t.normalizePlaces([{ name: '四川省·成都市', lat: 30.66, lon: 104.07, radiusKm: 100 }])[0].origin === 'cn',
@@ -7651,11 +7206,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       }))
       const snap = t.buildDiagSnapshot()
       assert(snap.config.watch.places[0].origin === 'global',
-        '诊断快照里的关注点带来源分支（权威源判错时第一个要核的就是"这个点算谁的分支"）')
+        '诊断快照里的关注点带来源分支（优先源判错时第一个要核的就是"这个点算谁的分支"）')
     }
 
-    // ⑦ Host schema 也必须登记 origin —— 未声明的键会被 schema 归一掉，于是 Client 每次读回来
-    //    都少一个字段、与内存副本永远不等，settingsOpsFor 会把它当"用户改过"而反复写回 Host
     {
       const mod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
       const parsed = unwrapRefs(mod.QuakeAlertSettingsSchema({
@@ -7665,8 +7218,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const dflt = unwrapRefs(mod.QuakeAlertSettingsSchema({ watch: { places: [{ name: 'x', lat: 1, lon: 1 }] } }))
       assert(dflt.watch.places[0].origin === undefined,
         'Host schema **不**给 origin 注入默认值：老配置"该算哪个分支"要留给 Client 按名称形状推导，' +
-        '在这里写 default("global") 会把中国分支的老关注点全算成 global（分组与权威源诊断静默失效）')
-      // 端到端确认这条链路：Host 读回来的老配置（无 origin）经 Client 归一后仍是 cn
+        '在这里写 default("global") 会把中国分支的老关注点全算成 global（分组与优先源诊断会悄悄失灵）')
+      // 端到端确认这条链路：Host 读回来的老配置（无 origin）经 Client 规整后仍是 cn
       const conv = loadClient().__test.sectionToCfg({
         watch: { places: [{ name: '四川省·成都市', lat: 30.66, lon: 104.07, radiusKm: 100 }] },
       })
@@ -7679,12 +7232,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(rejected, 'Host schema 拒绝白名单外的 origin')
     }
 
-    // ⑨ 界面语言（0.8.1 立选项与字段，本地化本身在 0.9.0）
-    //    现在只有简体中文，但这条链路（常量 → DEFAULT_CFG → normalizeCfg → Host schema → UI）
-    //    现在就通——否则 0.9.0 加语言包时得回头改配置契约，而改契约要迁移用户配置。
-    //    0.8.2 review 后把分工定死：**Host 只校验形状、白名单在 Client**，目标是"加一种语言
-    //    只动 Client"。所以下面不再写"只有一项"（那种断言 0.9.0 一加语言就红），改成
-    //    "清单里每一项都必须能过 Host 的形状校验"——那正是加语言时最容易犯的错。
+    // ⑨ 界面语言：常量 → DEFAULT_CFG → normalizeCfg → Host schema → UI 这条链路现在就通。
+    //    Host 只校验形状、白名单在 Client，目标是「加一种语言只动 Client」。
     {
       const t9 = loadClient().__test
       assert(t9.DEFAULT_CFG.language === 'zh-CN', '默认界面语言是简体中文')
@@ -7692,25 +7241,17 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '清单里有简体中文（0.9.0 起还有 日本語 / English，0.9.3 起还有繁體中文）')
       assert(t9.LANGUAGE_OPTIONS.some((o) => o.v === 'zh-TW'),
         '清单里有繁体中文（0.9.3）：' + t9.LANGUAGE_OPTIONS.map((o) => o.v + '=' + o.label).join(' / '))
-      // 「不在清单里的语言码」**从清单派生**，不手抄一个具体值：0.8.2 这里写的是 'ja'
-      // （当时唯一语言是 zh-CN），0.9.0 把 ja 加进清单、0.9.3 又把 zh-TW 加进来之后，
-      // 样本列表里那些值就变成了"清单内的值"并被自动跳过（这正是派生写法的价值：
-      // 加语言时不需要回来改负样本，改错的余地也就没有了）。
-      // 样本里不能放 `zh-HK` 这类**会被回退链收编**的值：它在白名单外，但 0.9.3 的繁简分流
-      // 会把它解析成 zh-TW，"白名单外回默认"这条断言就不再成立（那不是缺陷，是回退链的本职）。
+      // 「不在清单里的语言码」从清单派生，不手抄具体值；样本里也不能放会被回退链收编的值（如 zh-HK → zh-TW）。
       const notInList = ['pt-BR', 'ko', 'de', 'fr'].find((v) => t9.LANGS.indexOf(v) === -1)
       assert(Boolean(notInList), '（前置）找一个不在语言清单里的合法 BCP 47 值：' + notInList)
-      // 前置失败时下面几条会退化成"拿 undefined 去测"并**空过**（`language: undefined` 归一后
-      // 恰好就是默认值），所以带上前置条件一起断言——前置一红，这几条跟着红（0.9.3 review）。
+      // 前置失败时下面几条会退化成「拿 undefined 去测」并空过，所以带上前置条件一起断言。
       assert(Boolean(notInList) && t9.normalizeCfg({ language: notInList }).language === 'zh-CN',
         '白名单外的语言码回默认值——手改配置写一个还没有语言包的代码不该被放行（否则界面会进入半本地化状态）：' + notInList)
       assert(t9.normalizeCfg({ language: 'zh-CN' }).language === 'zh-CN', '白名单内的原样保留')
       const mod9 = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
       const parsed9 = unwrapRefs(mod9.QuakeAlertSettingsSchema({ language: 'zh-CN' }))
-      assert(parsed9.language === 'zh-CN', 'Host schema 认这个字段（未声明的键会被归一掉）')
-      // Host 与 Client 的分工（0.8.2 修正）：Host 只校验 BCP 47 **形状**，白名单在 Client。
-      // 理由是本插件的中文要分简繁（zh-CN / zh-TW 各一套文案）——Host 枚举会让"加一种语言"
-      // 变成一次跨半边的契约改动（改 schema 要重启，旧 Host 还读不了新值）。
+      assert(parsed9.language === 'zh-CN', 'Host schema 认这个字段（未声明的键会被规整掉）')
+      // Host 只校验 BCP 47 形状、白名单在 Client：Host 枚举会让「加一种语言」变成一次跨半边的契约改动。
       const acceptsUnknown = unwrapRefs(mod9.QuakeAlertSettingsSchema({ language: notInList }))
       assert(acceptsUnknown.language === notInList,
         'Host schema 接受形状合法但当前还没有文案表的语言（' + notInList + '）：枚举留在 Client，加语言就只动 Client')
@@ -7720,17 +7261,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       try { mod9.QuakeAlertSettingsSchema({ language: 42 }) } catch (e) { rejectedShape2 = true }
       assert(rejectedShape && rejectedShape2,
         'Host schema 仍拦住形状不合法的值（"日本語"、数字 42）——放松的是枚举，不是类型')
-      // 0.9.3：Host 允许首尾空白。Client 的 resolveLang 会 trim，而不透容的 Host 会让**整段**
-      // section 被 wire 校验拒掉（snap.status 停在 loading，插件静默退回 localStorage 路径，
-      // 用户看到的是"改了没反应"）——手写 settings.yaml 留一个行尾空格就能触发。
+      // Host 允许首尾空白：Client 的 resolveLang 会 trim，而不透容的 Host 会让整段 section 被 wire 校验拒掉。
       const blankAccepted = unwrapRefs(mod9.QuakeAlertSettingsSchema({ language: ' zh-TW ' }))
       assert(blankAccepted.language === ' zh-TW ' && t9.normalizeCfg({ language: blankAccepted.language }).language === 'zh-TW',
-        'Host 接受带首尾空白的语言码，Client 把它归一成 zh-TW（两侧分工：形状 vs 值域）')
+        'Host 接受带首尾空白的语言码，Client 把它统一成 zh-TW（两侧分工：形状 vs 值域）')
       // 两侧分工合起来的效果：Host 收下清单外的值，Client 认不出 → 回默认，界面不会半本地化
       assert(Boolean(notInList) && t9.normalizeCfg(t9.sectionToCfg({ language: notInList })).language === 'zh-CN',
-        'Host 收下的未知语言到 Client 会被归一成默认（界面仍是完整的一种语言，不会半本地化）：' + notInList)
-      // 加语言时最容易犯的错：往 LANGUAGE_OPTIONS 里写一个 Host 收不了的值（下划线、中文名、
-      // 或者干脆漏了地区码）。这条断言把"清单"与"Host 能收下的形状"绑在一起。
+        'Host 收下的未知语言到 Client 会被统一成默认（界面仍是完整的一种语言，不会半本地化）：' + notInList)
+      // 加语言时最容易犯的错：往 LANGUAGE_OPTIONS 里写一个 Host 收不了的值（下划线、中文名、漏地区码）。
       const hostAccepts = (v) => {
         try { return unwrapRefs(mod9.QuakeAlertSettingsSchema({ language: v })).language === v } catch (e) { return false }
       }
@@ -7739,9 +7277,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         t9.LANGUAGE_OPTIONS.map((o) => o.v).join(', '))
       assert(t9.LANGUAGE_OPTIONS.every((o) => typeof o.label === 'string' && o.label.length > 0),
         '每个选项都带 label（下拉里显示的名字，惯例是用该语言自己的写法：日本語 / 한국어）')
-      // 0.9.3 review：上面那条只查"非空字符串"，于是把简繁两个显示名互换也能全绿；而 ⑬ 的渲染
-      // 冒烟又把语言名从"漏翻"扫描里排除，形成双重盲区。这里把**内容与顺序整体钉住**——下拉的
-      // 顺序是外观契约（0.8.1 起"语言清单顺序即下拉顺序"），加语言时这条要跟着改是刻意的。
+      // 把语言显示名与顺序整体钉住：只查「非空字符串」时把简繁两个显示名互换也能全绿。
       assert(JSON.stringify(t9.LANGUAGE_OPTIONS) === JSON.stringify([
         { v: 'zh-CN', label: '简体中文' }, { v: 'zh-TW', label: '繁體中文' },
         { v: 'ja', label: '日本語' }, { v: 'en', label: 'English' },
@@ -7751,16 +7287,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '诊断快照里带界面语言（0.9.0 排查"界面没跟着切"时第一个要核的字段）')
     }
 
-    // ⑩ 0.9.0：本地化（文案表 / BCP 47 回退链 / 默认语言下逐字不变）
-    //    本地化"没坏"有三个可验的形态：各语言表齐、切语言当场生效、**默认语言下与本地化
-    //    之前逐字一致**。第三条是关键：0.9.0 只是把既有字符串搬进表里，不是趁机改文案
-    //    ——真要改文案得单独走 11.10 那条"改文案必须同步断言"的门。所以下面把当年立下的
-    //    中文原文直接写进断言里（它们同时是 0.8.2 那些安全文案的锚点）。
+    // ⑩ 本地化：文案表 / BCP 47 回退链 / 默认语言下逐字不变
+    //    第三条是关键——本地化只是把既有字符串搬进表里，默认语言下必须与之前逐字一致。
     {
       const t10 = loadClient().__test
-      // 长度**从清单派生**（不写死 4）：同文件 ⑨ 已经立过"不再写'只有一项'（那种断言一加语言
-      // 就红）"的约定，这里对齐它——要守的是"每项都有显示名、简繁排在最前"，不是"恰好四种"。
-      // 选项的内容与顺序由 ⑨ 的整体钉住那条守。
+      // 长度从清单派生（不写死 4）：要守的是「每项都有显示名、简繁排在最前」，不是「恰好四种」。
       assert(t10.LANGS.length === Object.keys(t10.LANGUAGE_LABELS).length &&
         t10.LANGS.indexOf('zh-CN') === 0 && t10.LANGS.indexOf('zh-TW') === 1,
         '语言清单：每项都有显示名、简繁排在最前（顺序即下拉顺序）：' + t10.LANGS.join(' / '))
@@ -7777,10 +7308,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       // 「翻过」而不是「把中文抄了四份」：同一个 key 在四种语言下不能两两相同。
       assert(new Set(t10.LANGS.map((l) => t10.tableOf(l)['app.name'])).size === t10.LANGS.length,
         'app.name 在四种语言下互不相同：' + t10.LANGS.map((l) => t10.tableOf(l)['app.name']).join(' / '))
-      // 繁体表整栏不得含简体专有字形（0.9.3 review）：覆盖**全部 408 条**、不依赖渲染路径
-      // （渲染冒烟只跑到被 seed 命中的那些键）。判据是文件顶部那份冻结字表——它不随表变化，
-      // 所以"把繁体值本身改成简体"也照得出来（派生判据在这里会失明）。
-      // 只查 zh-TW：日文与简体共用大量同形汉字（国 / 体 / 台…），那份字表对 ja 不适用。
+      // 繁体表整栏不得含简体专有字形（判据是文件顶部那份冻结字表，不随表变化）：只查 zh-TW，日文与简体共形太多。
       const cnOnlyHits = Object.keys(t10.tableOf('zh-TW')).filter((k) => CN_ONLY_RE.test(t10.tableOf('zh-TW')[k]))
       assert(cnOnlyHits.length === 0,
         '繁体表里没有简体专有字形（' + CN_ONLY_CHARS.length + ' 字判据）：' +
@@ -7821,9 +7349,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '切到繁体后行动提示跟着换（繁体是独立的一套文案，不是简体的字形替换）')
       assert(t10.disclaimerOf({ source: 'usgs' }) === '僅供參考，請以美國地質調查局（USGS）的官方發布為準',
         '切到繁体后免责行跟着换（机构名一并换）')
-      // 安全分级在繁体下也要守住（0.9.3 review）：此前只对 zh-CN 与 en 钉了带「（警报）」的标题，
-      // 把繁体栏的 `product.jpEew` 去掉「（警報）」整套断言仍然全绿——而那正是 0.8.2 从文案瘦身里
-      // 改回来的一处安全分级。`alertTitleOf` / 产品名 / 行动提示各补一条繁体实值。
+      // 安全分级在繁体下也要守住：`alertTitleOf` / 产品名 / 行动提示各补一条繁体实值。
       assert(t10.alertTitleOf({ kind: 'eew', source: 'p2pquake' }) === '⚠ 緊急地震速報（警報）',
         '繁体：EEW 标题带「（警報）」：' + t10.alertTitleOf({ kind: 'eew', source: 'p2pquake' }))
       assert(t10.cnProductName({ source: 'cenc_eew' }) === '大陸地震預警',
@@ -7832,17 +7358,12 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '繁体：海外气象的行动提示含「撤離」：' + t10.weatherActionHintOf({ locator: 'overseas' }))
 
       // ---- BCP 47 回退链：地区变体落到同一语言，认不出的主语言落到默认语言 ----
-      //      0.9.3 的关键一条是**中文不能按主语言匹配**：清单里有两个 `zh-*`，按主语言匹配
-      //      只会取到第一个（zh-CN），繁体用户于是永远拿不到繁体。所以下面把繁体区与繁体脚本
-      //      的写法都列上，它们必须全部落到 zh-TW。
-      //      样本要挑**真正经过繁简分流那一支**的写法：`ZH-tw` 走的是大小写不敏感的精确匹配，
-      //      改坏分流分支它不会红（0.9.3 review 发现的样本错位），所以换成 `zh-Hant-TW`。
+      //      中文不能按主语言匹配（清单里有两个 zh-*，只会取到第一个），所以繁体区与繁体脚本的写法必须全部落到 zh-TW。
       const rb = [
         ['zh-CN', 'zh-CN'], ['zh-TW', 'zh-TW'], ['zh-Hant-TW', 'zh-TW'],
         ['zh-HK', 'zh-TW'], ['zh-MO', 'zh-TW'], ['zh-Hant', 'zh-TW'], ['zh-Hant-HK', 'zh-TW'],
         ['zh', 'zh-CN'], ['zh-Hans', 'zh-CN'], ['zh-SG', 'zh-CN'],
-        // 脚本子标签优先于地区（BCP 47）：`zh-Hans-HK` 是"简体字形 + 香港地区"，判成繁体是错的；
-        // 反过来 `zh-Hant-CN` 也按脚本判成繁体。只看"有没有 hk"就会把前两者搞反。
+        // 脚本子标签优先于地区：zh-Hans-HK 是「简体字形 + 香港地区」，只看「有没有 hk」会把两者搞反。
         ['zh-Hans-HK', 'zh-CN'], ['zh-Hant-CN', 'zh-TW'],
         ['ja', 'ja'], ['ja-JP', 'ja'], ['JA-jp', 'ja'],
         ['en', 'en'], ['en-US', 'en'],
@@ -7852,8 +7373,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         const got = t10.resolveLang(input)
         assert(got === want, 'resolveLang(' + JSON.stringify(input) + ') → ' + want + '（实际 ' + got + '）')
       }
-      // 结果必须有一张完整的表：只查"在 LANGS 里"是近似恒真的（resolveLang 每条 return 都取自
-      // 清单成员或字面量），查 LANGUAGE_LABELS 才真的把"清单与显示名两张表同步"绑在一起。
+      // 查 LANGUAGE_LABELS 才真的把「清单与显示名两张表同步」绑在一起（只查「在 LANGS 里」是近似恒真）。
       assert(rb.every(([input]) => Object.prototype.hasOwnProperty.call(t10.LANGUAGE_LABELS, t10.resolveLang(input))),
         '回退结果永远是清单里的一种语言、且有显示名（界面不会停在半本地化的中间态）')
       // 缺 key 回显 key 本身：宁可界面上出现一个明显的占位符，也不要空白或悄悄退回中文。
@@ -7864,7 +7384,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       t10.setLanguage('zh-CN') // 复位：本块改过语言，不把状态留给后面的用例（每个用例各自 loadClient，这里是显式表态）
     }
 
-    // ⑪ 0.9.0：配置导出导入 + 量纲文案表 + 源名
+    // ⑪ 配置导出导入 + 量纲文案表 + 源名
     {
       const t11 = loadClient().__test
       // ---- 导出文件的结构 ----
@@ -7884,7 +7404,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       // ---- 往返 ----
       const round = t11.parseConfigImport(text)
       assert(round.ok, '导出的文件能被自己读回来（往返成立）')
-      // `language` 的往返此前用的是默认配置（实测 zh-CN），繁体值的往返没有断言（0.9.3 review）。
+    // `language` 的往返要覆盖繁体值
       {
         const twCfg = t11.normalizeCfg(Object.assign({}, t11.currentCfg(), { language: 'zh-TW' }))
         const twRound = t11.parseConfigImport(t11.buildConfigExport(twCfg))
@@ -7921,8 +7441,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(ioBackup && ioBackup.cfg.thresholds.quakeScale === 40, '导入前自动备份了当前配置（撤销的依据）')
       const ioUndo = t11.undoConfigImport()
       assert(ioUndo.ok && t11.currentCfg().thresholds.quakeScale === 40, '撤销回到导入前的配置')
-      // 0.9.2：撤销是**一次性**的——成功后清掉备份。此前备份永久保留，于是「撤销上次导入」按钮
-      // 跨会话一直挂着，而它回滚的是"导入之前"的整份配置：几周后误触就是一次静默的配置丢失。
+      // 撤销是一次性的——成功后清掉备份，否则按钮跨会话一直挂着，误触就是一次静默的配置丢失。
       assert(t11.loadConfigBackup() === null,
         '撤销后备份被清掉（一次性撤销）——否则这份陈旧快照会一直挂着、随时可被误触')
       assert(t11.undoConfigImport().ok === false, '再撤一次返回 no-backup（界面上按钮与备份时间已消失）')
@@ -7933,7 +7452,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(!ioBad.ok && ioBad.error === 'format', '坏文件被拒绝')
       assert(JSON.stringify(t11.currentCfg()) === ioBeforeBad, '校验失败时配置一个字都没动')
 
-      // ---- 0.9.4（P1-6）：导入**不能静默丢关注点**，且不能把"半径是数字字符串"放大 3 倍 ----
+    // ---- 导入不能静默丢关注点，也不能把「半径是数字字符串」放大 3 倍 ----
       {
         const raw = {
           watch: {
@@ -7949,21 +7468,21 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         }
         const text = JSON.stringify({ format: t11.CONFIG_FORMAT, formatVersion: t11.CONFIG_FORMAT_VERSION, config: raw })
         const parsed = t11.parseConfigImport(text)
-        assert(parsed.ok, '（前置）含脏关注点的配置仍能导入（不因一条坏数据整份拒绝）')
-        assert(parsed.warnings && parsed.warnings.total === 6, '体检账本记下原始条目数：' + JSON.stringify(parsed.warnings))
+        assert(parsed.ok, '（前置）含格式不合法的关注点的配置仍能导入（不因一条坏数据整份拒绝）')
+        assert(parsed.warnings && parsed.warnings.total === 6, '检查清单记下原始条目数：' + JSON.stringify(parsed.warnings))
         assert(parsed.warnings.dropped === 3,
-          '被丢掉的 3 条（字符串坐标 / 越界 / 重复）有账可查 —— 此前只在界面上说"已导入配置。"')
+          '被丢掉的 3 条（字符串坐标 / 越界 / 重复）有记录可查 —— 此前只在界面上说"已导入配置。"')
         assert(parsed.warnings.radiusFixed === 1, '只有"没半径"那一条记入半径回退（null → 300km）')
-        assert(parsed.cfg.watch.places.length === 3, '归一后留下 3 条关注点')
+        assert(parsed.cfg.watch.places.length === 3, '规整后留下 3 条关注点')
         const strRadius = parsed.cfg.watch.places.find((p) => p.name === '数字字符串半径')
         assert(strRadius && strRadius.radiusKm === 100,
           '数字字符串半径按数值处理（修复前 "100" 会被当成非数值、静默放大成 300km）')
         const noneRadius = parsed.cfg.watch.places.find((p) => p.name === '没半径')
         assert(noneRadius && noneRadius.radiusKm === 300, '对照：真正没有半径的仍退回默认 300km')
-        // importConfig 要把账本透传给界面（否则上面这层修好了、界面还是无条件报成功）
+        // importConfig 要把检查清单透传给界面（否则上面这层修好了、界面还是无条件报成功）
         const ioWarn = t11.importConfig(text)
         assert(ioWarn.ok && ioWarn.warnings && ioWarn.warnings.dropped === 3,
-          'importConfig 把体检账本透传给界面（P1-6 的另一半）')
+          'importConfig 把检查清单透传给界面（P1-6 的另一半）')
         assert(t11.t('settings.configIo.importedSkipped', { n: 3 }).indexOf('3') !== -1,
           '警告文案四种语言都有，且带得上数字：' + t11.t('settings.configIo.importedSkipped', { n: 3 }))
       }
@@ -7971,16 +7490,13 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       // ---- 量纲文案表（震度 / 海啸 / 震级 / 半径）：三种语言都得有，且都不是占位符 ----
       const units = t11.tableOf('zh-CN')
       const unitKeys = Object.keys(units).filter((k) => /^(scale|scaleOpt|tsunami|tsunamiOpt|magOpt|radius)\./.test(k))
-      // 0.9.4（P3-43）：删掉了 13 条**没有消费者**的键（`scale.*` 10 条 + `tsunami.*` 3 条——
-      // 活的那份是 01-constants 的 SCALE_TEXT / TSUNAMI_GRADE_TEXT，05-parser 用的就是它们），
-      // 所以这个数字从 37 降到 24。真正的保证是下面那个"每种语言都齐全"的循环。
+      // 真正的保证是下面那个「每种语言都齐全」的循环；没有消费者的死键会被删掉。
       assert(unitKeys.length >= 20, '量纲文案表有 ' + unitKeys.length + ' 条')
       for (const lang of t11.LANGS) {
         const ioMissing = unitKeys.filter((k) => typeof t11.tableOf(lang)[k] !== 'string' || !t11.tableOf(lang)[k])
         assert(ioMissing.length === 0, lang + ' 的量纲文案齐全（缺：' + ioMissing.join(',') + '）')
       }
-      // 设置页的档位表只存 `labelKey`、文字在表里（渲染时取词）。所有 labelKey 都得能取到非空
-      // 文案——漏一条就是下拉里出现一个**空选项**，那比显示 key 更难被发现。
+      // 所有 labelKey 都得能取到非空文案：漏一条就是下拉里出现一个空选项。
       const allLabelKeys = [].concat(t11.RADIUS_PRESETS, t11.CN_REPORT_MAG_OPTIONS).map((o) => o.labelKey)
       assert(allLabelKeys.length > 0 && allLabelKeys.every((k) => typeof k === 'string' && t11.t(k) && t11.t(k) !== k),
         '档位表的每个 labelKey 都能取到文案：' + allLabelKeys.join(', '))
@@ -7994,16 +7510,15 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       t11.setLanguage('zh-CN')
     }
 
-    // ⑫ 0.9.1：review 结论的守卫（每条都对着 0.9.0 里真实漏掉的一类东西）
+    // ⑫ review 结论的守卫
     {
       const t12 = loadClient().__test
 
-      // ---- 县名随语言（0.9.0 的 A 类：prefLabelOf 写好了却没被设置页用上；0.9.3 加繁体分支）----
+    // ---- 县名随语言 ----
       const wantPref = { 'zh-CN': '东京', 'zh-TW': '東京', ja: '東京都', en: 'Tokyo' }
       for (const lang of t12.LANGS) {
         t12.setLanguage(lang)
-        // 期望表是人写的，加了语言它就有洞：先断言它有这一项，否则失败信息会变成
-        // "= undefined（实际 東京）"，指向不明（0.9.3 review）。
+        // 期望表是人写的，加了语言它就有洞：先断言它有这一项，否则失败信息指向不明。
         assert(Object.prototype.hasOwnProperty.call(wantPref, lang), '期望表 wantPref 覆盖了 ' + lang)
         assert(t12.prefLabelOf('東京都') === wantPref[lang],
           lang + ' 下 prefLabelOf(東京都) = ' + wantPref[lang] + '（实际 ' + t12.prefLabelOf('東京都') + '）')
@@ -8013,8 +7528,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(t12.prefLabelOf('') === '', 'prefLabelOf 对空值返回空串')
       const jpList = t12.PREFECTURES.map((p) => p.jp)
       const zhOf = (jp) => (t12.PREFECTURES.find((p) => p.jp === jp) || {}).zh
-      // 最老的那一栏（简体名）此前没有任何完整性断言：把某个县的简体名清空，1725 条全绿，
-      // 而简体界面直接在关注列表里显示空串（0.9.1 拓出过的 A 类形态）。三栏一起守。
+      // 三栏一起守：把某个县的简体名清空时，简体界面会直接在关注列表里显示空串。
       assert(jpList.every((jp) => typeof zhOf(jp) === 'string' && zhOf(jp)),
         '47 个都道府县都有简体名（PREFECTURES[].zh）')
       assert(jpList.every((jp) => typeof t12.PREF_EN[jp] === 'string' && t12.PREF_EN[jp]),
@@ -8024,10 +7538,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '47 个都道府县都有繁体名（PREF_HANT）')
       assert(Object.keys(t12.PREF_HANT).length === jpList.length,
         'PREF_HANT 与 PREFECTURES 一一对应（无缺无多）')
-      // 繁体名**不得照抄日文汉字**：只有"日文汉字与繁体不同"的那几个县查得出来，全 47 派生是
-      // 错的——`青森` / `宮城` / `北海道` 这些的日文写法与繁体同形，"等于日文短名"是正确结果。
-      // 差异项恰好是这 5 个（`静岡` / `広島` / `徳島` / `鹿児島` / `沖縄`），所以手写样本 +
-      // 一条下界守卫（防"手写清单被清空后这条退化成没有样本"）。
+      // 繁体名不得照抄日文汉字，但日文与繁体同形的县（青森 / 宮城 / 北海道）等于日文短名是正确结果。
       const JP_HANT_DIFF = ['静岡県', '広島県', '徳島県', '鹿児島県', '沖縄県']
       const jpShort = (jp) => jp.replace(/[都府県]$/, '')
       assert(JP_HANT_DIFF.length === 5 && JP_HANT_DIFF.every((jp) => jpList.indexOf(jp) !== -1),
@@ -8036,20 +7547,17 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(copiedJp.length === 0,
         '繁体县名不得等于"去掉 都/府/県 的日文原名"（照抄日文汉字 = 没翻）：' +
         copiedJp.map((jp) => jp + '→' + t12.PREF_HANT[jp]).join(' / '))
-      // 繁体名也不能是空串或简体的逐字抄写：从 47 项**派生**出"繁体与简体不同"的那些（22 个），
-      // 它们都必须真有繁体字形（不能等于日文短名、也不能为空）——手写 5 个样本会漏掉
-      // `東京都` → `東京`、`福島県` → `福島` 这类同样是繁体差异的项。
+      // 从 47 项派生出「繁体与简体不同」的那些（22 个），它们都必须真有繁体字形。
       const diffFromZh = jpList.filter((jp) => t12.PREF_HANT[jp] !== zhOf(jp))
       assert(diffFromZh.length >= 20, '繁体名与简体名有差异的项有 ' + diffFromZh.length + ' 个（下界守卫）')
-      // 这里只查"非空"：**不能**要求它们都不等于日文短名——`東京都` → `東京` 的繁体与日文短名
-      // 本来就同形（日本地名用汉字），真正"用字不同"的只有上面 JP_HANT_DIFF 那 5 个。
+      // 这里只查非空：東京都 → 東京 的繁体与日文短名本来就同形。
       assert(diffFromZh.every((jp) => t12.PREF_HANT[jp].length > 0),
         '繁体与简体有差异的每一项都非空（空串会在关注列表里显示成空白）')
       assert(['静岡県', '広島県', '沖縄県', '鹿児島県', '長野県'].every((jp) => t12.PREF_HANT[jp] !== zhOf(jp)),
         '繁体县名与简体县名在字形上确有区别：' +
         ['静岡県', '広島県', '沖縄県', '鹿児島県', '長野県'].map((jp) => jp + '→' + t12.PREF_HANT[jp]).join(' / '))
 
-      // ---- t() 不能被原型链键名绕过（0.9.1 修复：改用 hasOwnProperty 取词）----
+    // ---- t() 不能被原型链键名绕过 ----
       assert(t12.t('constructor') === 'constructor', "t('constructor') 回显 key 本身，而不是 Object 构造函数")
       assert(t12.t('toString') === 'toString', "t('toString') 回显 key 本身")
       assert(t12.t('valueOf') === 'valueOf', "t('valueOf') 回显 key 本身")
@@ -8065,9 +7573,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         }
       }
 
-      // ---- 五个档位表的 labelKey 全部能取到文案 ----
-      // 0.9.0 那条断言的说明写的是"档位表的每个 labelKey"，实际只拼了 2 个表（另外 3 个没进
-      // 测试面）——11.8 教训 5（措辞越具体越要钉住）。这里五个表都列上，并先断言它们可见。
+    // ---- 五个档位表的 labelKey 全部能取到文案 ----
       const optTables = {
         SCALE_OPTIONS: t12.SCALE_OPTIONS, TSUNAMI_OPTIONS: t12.TSUNAMI_OPTIONS,
         GLOBAL_MAG_OPTIONS: t12.GLOBAL_MAG_OPTIONS, CN_REPORT_MAG_OPTIONS: t12.CN_REPORT_MAG_OPTIONS,
@@ -8082,17 +7588,13 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(labelKeys.length >= 30, '五个档位表共 ' + labelKeys.length + ' 个 labelKey')
       assert(labelKeys.every((k) => Boolean(t12.t(k)) && t12.t(k) !== k), '每个 labelKey 都能取到文案')
 
-      // ---- 每个源都有显示名（0.9.0 只有 jma 一条精确值断言）----
+    // ---- 每个源都有显示名 ----
       assert(t12.SOURCE_ORDER.every((id) => t12.sourceLabelOf(id) !== id),
         'SOURCE_ORDER 里的每个源都有显示名：' + t12.SOURCE_ORDER.map((id) => id + '→' + t12.sourceLabelOf(id)).join(' · '))
     }
 
-    // ⑬ 0.9.1：渲染冒烟——4 语言 × 5 页签，扫【插值残留 / 连续重复 / 漏翻的简体中文】
-    //   0.9.0 新增的 70 条断言全是"函数返回值对不对"，而 review 拓出的两条 A 类是"界面拼出来
-    //   对不对"（`东京东京（東京都）`、47 个中文县名），整类都没被覆盖。这个检查当初用十几行
-    //   临时脚本就拓出了它们，所以固化成断言。
-    //   范围：只覆盖"我们生成的界面文案"。源侧文本（kindLabel / 地名）与归属待定的
-    //   `suppressedReason` 不在内——所以 seed 里也不放它们，否则这条检查会误报。
+    // ⑬ 渲染冒烟：4 语言 × 5 页签，扫【插值残留 / 连续重复 / 漏翻的简体中文】
+    //    范围只覆盖「我们生成的界面文案」，源侧文本与 suppressedReason 不在内。
     {
       const t13 = loadClient().__test
       const smokeReact = () => ({
@@ -8107,31 +7609,20 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         if (Array.isArray(node)) { node.forEach((n) => collectTexts(n, out)); return }
         if (node && node.children) collectTexts(node.children, out)
       }
-      // ---- 「漏翻」判据（0.9.3 review 重做，两轮才定下来）----
-      // 原先是一个**手写的 34 字**正则：实测它结构上覆盖不到 `履历` / `中国大陆` / `已连接` /
-      // `国家 / 地区` / `海啸` / `半径` 这些常见写法，把三条渲染得到的繁体文案整句抄成简体仍然
-      // 全绿。改判据时踩到两个坑，记在这里免得下次再踩：
-      //   · **派生集合会被改坏的那一栏自己污染**：把 zh-TW 的 `紀錄` 改成 `履历` 之后，「历」
-      //     同时出现在"非 zh-CN 语言"里，于是它不再是"简体专有字"——自指，判据失明。
-      //   · **日文与简体共用大量同形汉字**（国 / 体 / 台 / 保…），一份给繁体用的字表拿去查日文
-      //     界面会误报（`中国大陸の地震予警` 里的「国」就被判成漏翻）。
-      // 所以最终是：zh-TW 用**文件顶部那份冻结字表**（不随表变化）+ 整条反查；ja / en 用原先那批
-      // 高置信字（日文里 `报` / `关` / `发` / `时` 这些字形根本不存在，安全）+ 整条反查。
+      // ---- 「漏翻」判据 ----
+      // zh-TW 用文件顶部那份冻结字表（不随表变化 + 整条反查），ja / en 用高置信字
+      // （日文里 `报` / `关` / `发` / `时` 这些字形根本不存在；那份给繁体用的字表对日文会误报）。
       const zhCnValues = new Map()
       for (const [k, v] of Object.entries(t13.tableOf('zh-CN'))) {
         if (typeof v === 'string' && !/\{[a-zA-Z]\w*\}/.test(v)) zhCnValues.set(v, k)
       }
-      // 源侧透传的文本（47 个县的日文原名、履历里的日文 label / headline）会含日文汉字，
-      // 它们不是我们生成的文案、不该被判成"漏翻"（日文 `静岡県` 里的「静」是简体专有字）。
+      // 源侧透传的文本（县名、履历里的日文 label / headline）不是我们生成的文案，要排除。
       const SOURCE_TEXTS = [].concat(t13.PREFECTURES.map((p) => p.jp), ['地震情報・各地の震度', '最大震度4'])
       const isSourceText = (s) => SOURCE_TEXTS.some((x) => s.indexOf(x) !== -1)
       const HANDPICKED_CN = /[东见报灾发关个时间门问实为这们让还对开动务压页证据线边层简样买卖]/
-      // 语言自己的显示名（'简体中文' / '繁體中文' / '日本語' / 'English'）按惯例用各语言的写法，
-      // 不算漏翻，要排除。
+      // 语言自己的显示名（'简体中文' / '繁體中文' / '日本語' / 'English'）要排除。
       const skipTexts = new Set(t13.LANGS.map((l) => t13.LANGUAGE_LABELS[l]))
-      // 关注地区放**全部 47 个县**（0.9.3 review）：只 seed 两个县时，47 个县名里任何一个
-      // 写坏（清空、抄成简体、抄成日文汉字）都不会进渲染，冒烟就看不见——而"47 个中文县名"
-      // 正是 0.9.1 拓出过 A 类的那条路径。放满之后每个县名都会在 4 种语言下渲染一次。
+      // 关注地区放全部 47 个县：只 seed 两个县时，任何一个县名写坏都不会进渲染、冒烟看不见。
       const smokeCfg = (lang) => ({
         version: 1, language: lang, source: 'prod', cnTransport: 'auto',
         watch: { prefectures: t13.PREFECTURES.map((p) => p.jp), cities: [], places: [{ name: 'SiteA', lat: 35, lon: 139, radiusKm: 100 }] },
@@ -8140,8 +7631,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         notify: { sound: true, system: true, volume: 0.7 }, dedupe: { windowMinutes: 10 },
         quietHours: { enabled: true, start: '23:00', end: '07:00', breakForSevere: true },
       })
-      // 一条履历记录，用来把"履历条目"那条渲染路径也盖住（label / headline 用日文原文，
-      // 那正是"源文本原样透传"的形态；不带 suppressedReason）。
+      // 一条履历记录，用来把「履历条目」那条渲染路径也盖住（label / headline 用日文原文）。
       const smokeHistory = JSON.stringify([{
         key: 'smoke-1', id: 'smoke-1', kind: 'quake', label: '地震情報・各地の震度', severity: 'warn',
         issued: '2026-09-26T10:00:00+09:00', headline: '最大震度4', hit: true, pref: '東京都',
@@ -8155,7 +7645,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
           const seed = {}
           seed[t13.STORAGE_KEY] = JSON.stringify(smokeCfg(lang))
           seed['dsh.quakeAlert.history'] = smokeHistory
-          // 配置备份（0.9.2 修复的落点）：让「撤销上次导入」旁的**备份时间**也进渲染冒烟。
+    // 让「撤销上次导入」旁的**备份时间**也进渲染冒烟
           seed['dsh.quakeAlert.backup'] = JSON.stringify({ at: '2026-09-26T10:00:00.000Z', config: smokeCfg(lang) })
           const { exports: ex } = loadClientEx(seed, { react })
           let tree
@@ -8167,9 +7657,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
           collectTexts(tree, out)
           rendered++
           const blob = out.join('\n')
-          // 配置页要显示**备份时间**（0.9.2）：备份跨会话保留，而"撤销"会把导入之后的改动整体
-          // 回滚——界面必须让用户看到要恢复的是什么时候的快照（此前只显示一个没有任何时间信息的
-          // 按钮，陈旧备份被误触就是一次静默的配置丢失）。
+          // 配置页要显示**备份时间**：撤销会把导入之后的改动整体回滚，界面要让用户看到恢复的是什么时候的快照。
           if (tab === 'misc') {
             const want = ex.__test.t('settings.configIo.undoAt',
               { at: ex.__test.formatIssuedLocal('2026-09-26T10:00:00.000Z') })
@@ -8183,15 +7671,12 @@ console.log('== 机器级持久化：Host settings 桥 ==')
             (dup.length ? '：' + JSON.stringify(dup[0].slice(0, 50)) : ''))
           if (lang !== 'zh-CN') {
             const table = t13.tableOf(lang)
-            // ① 整条照抄 zh-CN 表值（且同 key 在当前语言下另有其文）
             const copiedWhole = [...new Set(out.filter((s) => {
               const k = zhCnValues.get(s)
               return k !== undefined && table[k] !== s
             }))]
             assert(copiedWhole.length === 0, lang + ' / ' + tab + ' 没有整条照抄简体表值的文本' +
               (copiedWhole.length ? '：' + JSON.stringify(copiedWhole[0].slice(0, 40)) : ''))
-            // ② 简体专有字形（zh-TW 用冻结字表；ja / en 用高置信字：日文与简体共形太多，
-            //    那份给繁体用的字表拿去查日文会把「中国」的「国」判成漏翻）
             const chars = lang === 'zh-TW' ? CN_ONLY_RE : HANDPICKED_CN
             const leftover = [...new Set(out.filter((s) => chars.test(s) && !skipTexts.has(s) && !isSourceText(s)))]
             assert(leftover.length === 0, lang + ' / ' + tab + ' 没有漏翻的简体中文' +
@@ -8203,9 +7688,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '渲染冒烟覆盖 ' + t13.LANGS.length + ' 语言 × ' + SMOKE_TABS.length + ' 页签（实际 ' + rendered + ' 次）')
     }
 
-    // ⑭ 0.9.1：存储层与 store 通知的守卫
-    //   0.9.0 的导出导入断言只查"内存里的配置对象变没变"，查不到 localStorage；而"切语言后
-    //   store 该重算并通知"当时完全没有断言（review 里把备份改成"失败也写"，1552 条全绿）。
+    // ⑭ 存储层与 store 通知的守卫
     {
       // ---- 「校验失败什么都不写（连备份都不做）」要查**存储层** ----
       const seed0 = { 'dsh.quakeAlert.v1': JSON.stringify(loadClient().__test.DEFAULT_CFG) }
@@ -8217,7 +7700,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(keysOf() === beforeKeys, '校验失败时 localStorage 的键集合不变（含"连备份都不做"）：' + keysOf())
       assert(sandbox0.exports.__test.loadConfigBackup() === null, '校验失败时不产生备份')
 
-      // ---- 备份写不进去时不能替换配置（0.9.1 修：旧实现照样替换并报成功）----
+      // ---- 备份写不进去时不能替换配置 ----
       const fakeLs = { getItem: () => null, setItem: () => { throw new Error('QuotaExceededError') }, removeItem: () => {} }
       const exQ = loadClientEx({}, { window: { localStorage: fakeLs } }).exports.__test
       const qBefore = exQ.currentCfg().thresholds.quakeScale
@@ -8227,7 +7710,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(!qRes.ok && qRes.error === 'backup-failed', '备份写不进去时拒绝导入（错误码 backup-failed）：' + qRes.error)
       assert(exQ.currentCfg().thresholds.quakeScale === qBefore, '拒绝导入时配置一个字都没动')
 
-      // ---- 畸形配置返回错误码而不是抛异常（0.9.1 修：旧实现抛 TypeError，UI 没有 catch → 点了没反应）----
+      // ---- 畸形配置返回错误码而不是抛异常（UI 没有 catch，抛了就是点了没反应）----
       const t14 = loadClient().__test
       const weird = '{"format":"' + t14.CONFIG_FORMAT + '","formatVersion":1,"config":{"language":{"toString":null,"valueOf":null}}}'
       let weirdThrew = false
@@ -8236,13 +7719,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(!weirdThrew && weirdRes && weirdRes.error === 'shape',
         '转不成字符串的字段 → 返回 shape 错误码（而不是抛异常）')
 
-      // ---- BOM（0.9.1 修：记事本 / PowerShell 重存过的文件被当成"不是有效的 JSON"）----
+      // ---- BOM：记事本 / PowerShell 重存过的文件不能被当成「不是有效的 JSON」----
       assert(t14.parseConfigImport('\uFEFF' + t14.buildConfigExport(t14.currentCfg())).ok,
         '带 UTF-8 BOM 的文件能导入')
 
-      // ---- 切语言要触发 store 重算 + 通知（0.9.1 修：旧实现 0 次通知、detail 停在旧语言）----
-      //      0.9.3 review：这段只跑 en → zh-CN，**繁体下 store.detail / 状态文字没有任何断言**
-      //      （而 zh-TW 的 '已連線' 被抄成简体时整套 1725 条全绿）。改成按语言循环。
+      // ---- 切语言要触发 store 重算 + 通知（按语言循环，繁体下 store.detail 也要跟着换）----
       const exL = loadClient().__test
       let notified = 0
       exL.store.subscribe(() => { notified++ })
@@ -8267,14 +7748,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       exL.store.recomputeStatus()
       assert(exL.store.detail.indexOf('已连接') !== -1, '切回中文后状态文字也回来：' + exL.store.detail)
 
-      // ---- Host 权威配置里的语言必须落到 i18n（0.9.3 修）----
-      // 修的缺陷：`bindSettingsScope` 的 sync() 只更新 runtimeCfg 与 localStorage 镜像、通知订阅者，
-      // 却从不 setLanguage。于是在"另一个浏览器 / 清过 localStorage / 手改过 settings.yaml"这条
-      // 路径上，语言下拉与诊断快照都已是 Host 的值，界面却停在启动镜像解析出的语言，而且**不自愈**
-      // （sync 是"值没变就不重算"的幂等路径）——表现是下拉写「繁體中文」、整页简体中文。
+      // ---- Host 权威配置里的语言必须落到 i18n：sync() 只更新 runtimeCfg 与镜像、不 setLanguage ----
       {
         const exH = loadClientEx({})
-        // 自建最小 scope（不依赖别的块里的 fakeScope：它不在本块作用域内，0.9.3 第一版就是这样红的）
+    // 自建最小 scope，不依赖别的块里的 fakeScope（不在本块作用域内）
         const scopeH = {
           getSnapshot: () => ({
             status: 'ready', value: { language: 'zh-TW' }, user: { language: 'zh-TW' },
@@ -8294,7 +7771,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       }
     }
 
-    // ⑧ 全球主要城市表（DESIGN 9.4）：数据结构、按国家分包下发、客户端缓存与 UI 入口
+    // ⑧ 全球主要城市表：数据结构、按国家分包下发、客户端缓存与 UI 入口
     {
       const world = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'world-cities.js')).href)
       assert(Array.isArray(world.WORLD_COUNTRIES) && world.WORLD_COUNTRIES.length > 100,
@@ -8312,7 +7789,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         Math.abs(c.lat) <= 90 && Math.abs(c.lon) <= 180),
         '每条城市都带合法坐标（脏坐标会让"配好了却永远不提醒"）')
       assert(world.WORLD_COUNTRIES[usIdx].count === us.length, '清单里的 count 与分包的实际条数一致')
-      // 0.9.4（PD-3）：国家名是**本地化四条**（ICU 算出来的），不再是写死的中文
+      // 国家名是**本地化四条**（ICU 算出来的）
       {
         const langs = ['zh-CN', 'zh-TW', 'ja', 'en']
         const bad = world.WORLD_COUNTRIES.filter((c) => !c.names ||
@@ -8322,10 +7799,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         const it = world.WORLD_COUNTRIES.filter((c) => c.code === 'IT')[0]
         assert(it && it.names['zh-TW'] === '義大利' && it.names.ja === 'イタリア' && it.names.en === 'Italy',
           '抽查意大利的四条名字：' + JSON.stringify(it && it.names))
-        // 真的会跟着界面语言换（设置页渲染出来的选项文字）。
-        // 两个前提：① 地区页签要落在「其他国家 / 地区」分支——它由配置里的 origin 推导，
-        // 所以种一个 origin: 'global' 的关注点；② 语言要写进**配置**里——设置页渲染时会从配置
-        // 重新 load（那一步会把 i18n 的当前语言设回配置里的值），所以单靠 setLanguage() 不够。
+        // 两个前提：地区页签要落在「其他国家 / 地区」分支（种 origin: 'global'），语言要写进**配置**里。
         const renderCountries = (lang) => {
           const react = mkTestReact()
           const seed = {
@@ -8341,10 +7815,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
           return textsOfTree(exC.SettingsPanel({ initialTab: 'region' }))
         }
         const textsEn = renderCountries('en')
-        // 0.9.4 补：**option 的 value 必须查**。此前只断言标签文本（Italy / イタリア），
-        // 而 option 的 value 不是文本节点——于是"所有国家 option 的 value 都是 undefined"
-        // 这个真缺陷在 2050 条全绿的情况下漏了出去（用户实测时才发现：只能选第一个国家、
-        // 且永远没有城市列表）。这里把值也钉住。
+        // option 的 value 必须查：只断言标签文本时，「所有国家 option 的 value 都是 undefined」会全绿漏出去。
         {
           const react2 = mkTestReact()
           const seed2 = {
@@ -8365,8 +7836,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
           assert(opts.some((o) => o.v === ''), '占位项（"全部国家 / 地区"）的 value 是空串')
           const vals = countryOpts.map((o) => String(o.v))
           assert(new Set(vals).size === vals.length, '每个国家的 option value 唯一（重复会让浏览器只能选第一个）')
-          // 这一条扫**所有** option（不限于国家那一批）：任何 option 的 value 变成字符串
-          // "undefined" / "null" 都是同一个错误的形态，无论它来自哪个下拉。
+          // 扫所有 option：任何 option 的 value 变成字符串 "undefined" / "null" 都是同一个错误的形态。
           const badVals = opts.filter((o) => String(o.v) === 'undefined' || String(o.v) === 'null')
           assert(badVals.length === 0,
             '没有任何 option 的 value 是 undefined/null（' + badVals.length + ' 个，例如 ' +
@@ -8380,16 +7850,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
             urls.push(String(url))
             return { ok: true, status: 200, json: async () => ({ country: 'IT', cities: [{ name: 'Rome', lat: 41.89, lon: 12.51 }] }) }
           }
-          // 注意：test-react 的 useState 是按**渲染次序**分配槽位的，所以每次渲染前都要 __reset()，
-          // 否则第二次渲染读的是另一批槽位、状态对不上（这一步我第一版就踩了，写成"没有城市"的假象）。
+          // test-react 的 useState 按渲染次序分配槽位，每次渲染前都要 __reset()，否则状态对不上。
           react2.__reset()
           const sel = selectsOfTree(exP.exports.__test.SettingsPanel({ initialTab: 'region' }))[0]
           assert(sel && typeof sel.props.onChange === 'function', '国家下拉带 onChange')
           sel.props.onChange({ target: { value: 'IT' } })
           assert(urls.length === 1 && urls[0].indexOf('country=IT') !== -1,
             '选中意大利真的去拉它那一包（此前的 value 是 "undefined"，拉的是不存在的国家）：' + JSON.stringify(urls))
-          // 用户报的第二个症状是"没有任何城市选项"——所以还要看**拉回来之后列表真的渲染出来**，
-          // 而不是只确认发出过请求。await 一拍让 loadCountryCities 的 promise 落地，再渲染一次。
+          // 还要看拉回来之后列表真的渲染出来，而不是只确认发出过请求；await 一拍让 promise 落地再渲染一次。
           await new Promise((r) => setImmediate(r))
           react2.__reset()
           const afterSel = textsOfTree(exP.exports.__test.SettingsPanel({ initialTab: 'region' }))
@@ -8454,10 +7922,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         { code: '', name: '坏' }, { code: 'fr', name: '法国', count: 1 },
       ]) === true, '有一项可用即接受（老 Host 只给 name 的形态也要能用）')
       const list8 = c8.worldCountriesOf()
-      // 0.9.4（PD-3）：数据形状改为 `names`（本地化四条）。老形状（只有 `name`）作为 zh-CN 收下，
-      // 所以这里取词要走 countryNameOf —— 依赖 `entry.name` 的写法已经不再成立。
+      // 数据形状是 names（本地化四条），老形状（只有 name）作为 zh-CN 收下，取词走 countryNameOf。
       assert(list8.length === 2 && list8[0].code === 'US' && c8.countryNameOf(list8[0], 'zh-CN') === '美国',
-        '国家码归一为大写、重复码只留第一条：' + JSON.stringify(list8))
+        '国家码统一为大写、重复码只留第一条：' + JSON.stringify(list8))
       assert(c8.countryNameOf(list8[0], 'en') === '美国',
         '只有一种名字时任何语言都退回它（不显示空白）')
       assert(c8.setWorldCountries([{ code: 'IT', count: 50, names: { 'zh-CN': '意大利', 'zh-TW': '義大利', ja: 'イタリア', en: 'Italy' } }]) === true,
@@ -8517,11 +7984,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '0.8.0 检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
   }
 
-  // ==========================================================================
-  // 0.9.4：设置页的可访问性与对比度（P2-28 / P3-44）
-  // ==========================================================================
+  // 设置页的可访问性与对比度
   try {
-    console.log('== 0.9.4：设置页的可访问性与对比度 ==')
+console.log('== 设置页的可访问性与对比度 ==')
     const { CITIES_BY_PREF: CITIES_94 } = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cities.js')).href)
     const react = mkTestReact()
     const seed = {
@@ -8545,7 +8010,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const cityBtn = buttons.filter((b) => (b.children || []).indexOf('目黒区') !== -1)[0]
     const otherBtn = buttons.filter((b) => (b.children || []).indexOf('新宿区') !== -1)[0]
     assert(!!cityBtn && !!otherBtn, '（前置）渲染出市町村按钮（已选 / 未选各一个）')
-    // 选中态此前只靠颜色与边框表达，读屏用户无法知道选了哪些市町村（WCAG 4.1.2）。
+    // 选中态不能只靠颜色与边框表达：读屏用户无法知道选了哪些市町村（WCAG 4.1.2）
     assert(cityBtn && cityBtn.props['aria-pressed'] === 'true', '已选中的市町村按钮带 aria-pressed=true')
     assert(otherBtn && otherBtn.props['aria-pressed'] === 'false', '未选中的按钮带 aria-pressed=false')
     // 对比度：11px 的次要文字在深色底上要过 AA 4.5:1，#6b7280 只有约 3.6:1
@@ -8555,11 +8020,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '0.9.4 设置页 a11y 检查失败：' + e.message)
   }
 
-  // ==========================================================================
-  // 0.9.4：toast 的堆叠 / 上限 / 去重（P2-25）
-  // ==========================================================================
+  // toast 的堆叠 / 上限 / 去重
   try {
-    console.log('== 0.9.4：toast 堆叠、上限与长标题换行 ==')
+console.log('== toast 堆叠、上限与长标题换行 ==')
     const mkEl = () => {
       const el = {
         style: {}, children: [], parentNode: null, listeners: {}, textContent: '', attrs: null,
@@ -8609,26 +8072,18 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '0.9.4 toast 检查失败：' + e.message + (e && e.stack ? '\n' + e.stack.split('\n')[1] : ''))
   }
 
-  // ==========================================================================
-  // 0.9.4：市町村表的假名写法（P2-29 / D-4）
-  //
-  // CHANGELOG 曾把"河川表与市区町村表假名不一致（8 例）"记为 **0.3.2 / Fixed**，而数据一直在：
-  // 表里有 11 处 U+3096「ゖ」（小写片假名 KE 的错误形式）、若干处把 ヶ/ケ 写成平假名 け、
-  // 把 ノ 写成 の、把 アルプス 写成 あるぷす。匹配被 normKana 兜住了，但设置页会把这些错名
-  // **显示给用户**，而且与河川区域表正面冲突（同一插件里两种写法）。
-  // ==========================================================================
+  // 市町村表的假名写法：表里有 11 处 U+3096「ゖ」（小写片假名 KE 的错误形式）、若干处把 ヶ/ケ 写成平假名 け 等。
+  // 匹配被 normKana 捕获了，但设置页会把这些错名显示给用户，而且与河川区域表正面冲突。
   try {
-    console.log('== 0.9.4：市町村表的假名写法（22 处错名修好 + 不许再回来）==')
+console.log('== 市町村表的假名写法（22 处错名修好 + 不许再回来）==')
     const { CITIES_BY_PREF: CITIES_94B } = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cities.js')).href)
     const { RIVER_AREAS: RIVER_94B } = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'river-areas.js')).href)
     const t94 = loadClientEx().exports.__test
     const allCities = []
     for (const pref of Object.keys(CITIES_94B)) for (const c of CITIES_94B[pref]) allCities.push(c)
-    // ① 错字符不许再出现（U+3096 是"小写片假名 KE"，正常地名不会用它）
     const withBadChar = allCities.filter((c) => c.indexOf('\u3096') !== -1)
     assert(allCities.length === 1917, '市区町村表共 ' + allCities.length + ' 条')
     assert(withBadChar.length === 0, '表里没有 U+3096「ゖ」（此前 11 处）：' + withBadChar.join('/'))
-    // ② 与河川区域表**零拼写冲突**（两张表讲同一批地名，写法必须一致）
     const riverByNorm = new Map()
     for (const a of RIVER_94B) for (const c of a.cities) riverByNorm.set(t94.normKana(c), c)
     const conflicts = []
@@ -8637,7 +8092,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       if (r && r !== c) conflicts.push(c + '≠' + r)
     }
     assert(conflicts.length === 0, '与河川表零冲突（修复前 8 处）：' + conflicts.join(' '))
-    // ③ 22 处修正逐条钉住：官方写法在表里、错写法不在
     const FIXED = [
       ['外ヶ浜町', '外ゖ浜町'], ['鰺ヶ沢町', '鰺ゖ沢町'], ['六ヶ所村', '六ゖ所村'],
       ['金ケ崎町', '金け崎町'], ['七ヶ宿町', '七ゖ宿町'], ['七ヶ浜町', '七ゖ浜町'],
@@ -8653,7 +8107,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const leftover = FIXED.filter(([, bad]) => set.has(bad)).map(([, bad]) => bad)
     assert(missing.length === 0, '22 处官方写法都在表里（缺：' + (missing.join('/') || '无') + '）')
     assert(leftover.length === 0, '22 处错写法都不在表里（残留：' + (leftover.join('/') || '无') + '）')
-    // ④ 修好之后仍然能被**正确**反查到县（改名不能把匹配改坏）
     const t94b = loadClientEx().exports.__test
     t94b.setCityTable(CITIES_94B)
     for (const [good, pref] of [['六ヶ所村', '青森県'], ['龍ケ崎市', '茨城県'], ['ニセコ町', '北海道'], ['山ノ内町', '長野県']]) {
@@ -8664,23 +8117,22 @@ console.log('== 机器级持久化：Host settings 桥 ==')
   }
 
   // ==========================================================================
-  // 0.9.4：历史的「30 条 + 过去 5 天」两个上限（D-1）
+    // 历史的「30 条 + 过去 5 天」两个上限
   //
   // 设计稿一直写的是"两个条件同时生效、取更严格的"，而代码只实现了 30 条那一半：
-  // 陈年条目会一直占着那 30 个位置。这里钉住两条路（写入时的剪枝 与 读盘时的过滤）。
+  // 陈年条目会一直占着那 30 个位置。这里钉住两条路（写入时的剪枝 与 读取本地存储时的过滤）。
   // ==========================================================================
   try {
-    console.log('== 0.9.4：历史记录的时间上限（过去 5 天）==')
+console.log('== 历史记录的时间上限（过去 5 天）==')
     const t = loadClientEx().exports.__test
     const DAY = 24 * 60 * 60 * 1000
     const age = t.HISTORY_MAX_AGE_MS
     assert(age === 5 * DAY, '上限是 5 天（' + (age / DAY) + '）')
     // **不能写死绝对时刻**：addEvent 内部用**真实时钟**剪枝，只有"喂进去的 now"与"真实 now"
     // 同源，两者才不会随时间错位——写死 2026-09-27T12:00Z 时，真实时间一过 7 天，`at: now - 1*DAY`
-    // 的条目就会被当成过期剪掉，「窗口内的条目保留」随之变红。这条是时间旅行守卫
+    // 的条目就会被当成过期剪掉，「窗口内的条目保留」随之变红。这条是时钟前移检查
     // （scripts/check-time-travel.mjs）在 +7 天处抓到的，与上面那条 24 小时记忆是同一类炸弹。
     const now = Date.now()
-    // ① 纯函数：写入时刻说话
     assert(t.withinHistoryAge({ at: now - 4 * DAY, issued: '2019-01-01T00:00:00Z' }, now) === true,
       '写入 4 天前 → 保留（即便电文本身很旧）')
     assert(t.withinHistoryAge({ at: now - 6 * DAY }, now) === false, '写入 6 天前 → 丢弃')
@@ -8690,7 +8142,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       '老记录 issued 在 5 天内 → 保留')
     assert(t.withinHistoryAge({}, now) === true && t.withinHistoryAge({ at: 0, issued: '乱码' }, now) === true,
       '两个时间都认不出 → **保留**（不因为缺字段删用户的数据）')
-    // ② 写入路径：新条目到来时把过期的挤掉
     const seed = { 'dsh.quakeAlert.history': JSON.stringify([
       { key: 'old-1', id: 'old-1', issued: '2026-09-20T00:00:00Z', headline: '六天前', at: now - 6 * DAY },
       { key: 'ok-1', id: 'ok-1', issued: '2026-09-26T00:00:00Z', headline: '一天前', at: now - 1 * DAY },
@@ -8699,14 +8150,13 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const t2 = loadClientEx(seed).exports.__test
     const loaded = t2.loadHistory(now)
     assert(loaded.length === 1 && loaded[0].key === 'ok-1',
-      '读盘时丢掉"写入 6 天前"的那条、也丢掉"没有 at 且 issued 很旧"的老记录，只留窗口内的：' +
+      '读取本地存储时丢掉"写入 6 天前"的那条、也丢掉"没有 at 且 issued 很旧"的老记录，只留窗口内的：' +
       loaded.map((e) => e.key).join('/'))
     // 写入路径：给一条新事件，过期的必须消失
     t2.addEvent({ id: 'fresh', issued: '2026-09-27T00:00:00Z', headline: '刚到的', at: now })
     const after = t2.loadHistory(now).map((e) => e.key)
     assert(after.indexOf('fresh') === 0, '新条目在最前（写入路径正常）')
     assert(after.indexOf('ok-1') !== -1, '窗口内的条目保留')
-    // ③ 30 条的那个上限没有被这次改动弄坏
     const t3 = loadClientEx().exports.__test
     for (let i = 0; i < t3.HISTORY_MAX + 5; i += 1) {
       t3.addEvent({ id: 'n' + i, issued: '2026-09-27T00:00:00Z', headline: '第' + i, at: now })
@@ -8718,29 +8168,26 @@ console.log('== 机器级持久化：Host settings 桥 ==')
   }
 
   // ==========================================================================
-  // 0.9.4：P3 尾项（常量唯一来源 / 北海道简写 / 强度缺失 / 通知权限 / 死键）
+    // 常量唯一来源 / 北海道简写 / 强度缺失 / 通知权限 / 死键
   // ==========================================================================
   try {
-    console.log('== 0.9.4：P3 尾项（常量、简写、强度、权限、死键）==')
+console.log('== 尾项：常量、简写、强度、权限、死键 ==')
     const t = loadClientEx().exports.__test
-    // ① P3-37：半径的兜底值有名字了，而且与设置页上限同源
     assert(t.LEGACY_PLACE_RADIUS_KM === 300,
       '缺半径时的兜底是命名常量 LEGACY_PLACE_RADIUS_KM=300（比默认 100 宽：收窄=漏报方向）')
     const np = t.normalizeCfg({ watch: { places: [{ name: 'x', lat: 30, lon: 100 }] } })
-    assert(np.watch.places[0].radiusKm === t.LEGACY_PLACE_RADIUS_KM, '归一化用的就是这个常量（不再是散落的 300）')
+    assert(np.watch.places[0].radiusKm === t.LEGACY_PLACE_RADIUS_KM, '规整用的就是这个常量（不再是散落的 300）')
     const manyCities = t.normalizeCfg({ watch: { cities: Array.from({ length: 400 }, (_, i) => '市' + i) } })
     assert(manyCities.watch.cities.length === t.MAX_WATCH_CITIES || manyCities.watch.cities.length === 300,
       '市区町村上限走 MAX_WATCH_CITIES 常量：' + manyCities.watch.cities.length)
-    // ② P3-38：「北海道」不能被削成「北海」
     assert(t.normalizePref('北海道') === '北海道', '北海道本身是全称，不被削后缀')
     assert(t.normalizePref('北海') === '北海', '「北海」不是任何县的简写（以前会被当成北海道）')
     assert(t.normalizePref('東京') === '東京都' && t.normalizePref('大阪') === '大阪府',
-      '需要削后缀的（东京都 / 大阪府）照旧能归一到全称')
+      '需要削后缀的（东京都 / 大阪府）照旧能统一到全称')
     const aliases = t.cityAliases('札幌市', '北海道')
     assert(aliases.every((a) => a.indexOf('北海札幌') === -1),
       '北海道的市町村不再生成「北海○○市」这种幻影别名：' + aliases.join('/'))
     assert(!aliases.some((a) => a === '北海札幌市'), '（同一条的显式写法）')
-    // ③ P3-40：强度缺失时不判重复（宁可多响一次），而且这是**显式**判据
     const noStrength = {
       id: 'ns-1', code: 'usgs', source: 'usgs', kind: 'quake', kindLabel: 'x', locator: 'point',
       severity: 'orange', issued: '2026-09-27T10:00:00Z', headline: 'M5', magnitude: 5,
@@ -8749,7 +8196,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.isEventRepeat(noStrength, 10) === false, '（前置）第一次见到 → 不是重复')
     assert(t.isEventRepeat(Object.assign({}, noStrength, { issued: '2026-09-27T10:01:00Z' }), 10) === false,
       '同事件键再来一条、但 strength 缺失 → **不**判重复（宁可多响一次，也不因为缺字段静默）')
-    // ④ P3-46：回调式的 requestPermission 也要能拿到结果
     {
       const s = loadClientEx({}, {
         window: {
@@ -8764,9 +8210,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const res = await p
       assert(res === 'granted', '回调式实现的结果被接住（界面不再谎报"未获授权"）：' + res)
     }
-    // ⑤ P3-43 的**修订**（0.9.4）：`scale.*` / `tsunami.*` 当时是没有消费者的死键，所以删掉了；
-    // 现在它们**复活成活的键**——解析层拼 `headline` 时按界面语言取词（见 00g-texts-events），
-    // 所以这条断言从"这些键不存在"改成"这些键存在且四语齐全"，而 `source.jma|nmc` 仍然不存在。
     {
       const zh = t.tableOf('zh-CN')
       assert('scale.10' in zh && 'scale.46' in zh && 'tsunami.Warning' in zh,
@@ -8792,15 +8235,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
   }
 
   // ==========================================================================
-  // 0.9.4：PD-1（产品决策）——"没命中"不进历史，但"判不了"必须留痕
-  //
-  // 历史被 L1〜L3 与 Watch/Advisory 占满（日气象约 170 条/天、NWS 的 Watch/Advisory 占其洪水类
-  // 53%）。用户选定的做法是**排除完全未命中**；但"根本没法判定"（区域 / 坐标 / 震度数据缺失）
-  // 不是"离得远"，丢掉它们就回到"用户以为当时没有预警"那种形态，所以两类必须分开。
+  // 「没命中」不进历史，但「判不了」必须留痕
   // 分界由 matcher 的 `cannotJudge` 标记给出。
   // ==========================================================================
   try {
-    console.log('== 0.9.4：没命中不进历史 / 判不了必须留痕（PD-1）==')
+console.log('== 没命中不进历史 / 判不了必须留痕 ==')
     const t = loadClientEx().exports.__test
     const mk = (patch) => {
       const cfg = JSON.parse(JSON.stringify(t.DEFAULT_CFG))
@@ -8809,14 +8248,12 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       return Object.assign(cfg, patch || {})
     }
     const hist = () => t.loadHistory().length
-    // ① 气象 L2（未达 L4）：不再进历史
     const l1 = t.parseJma(fs.readFileSync(path.join(ROOT, 'samples', 'jma-vxko-flood.xml'), 'utf8'), { id: 'l2' })
     assert(l1.level === 2, '（前置）样本是 L2 电文')
     const before1 = hist()
     const r1 = t.handleAlert(l1, mk({ watch: { prefectures: ['東京都'], cities: [], places: [] } }))
     assert(r1.notified === false && r1.reason === 'not-hit', 'L2 不播报')
     assert(hist() === before1, 'L2（未达档位）不进历史 —— 此前会占掉 HISTORY_MAX 的一个位置')
-    // ② 全球地震离关注点很远：同样不进
     const far = {
       id: 'usgs:far-pd1', code: 'usgs', source: 'usgs', kind: 'quake', kindLabel: 'USGS', locator: 'point',
       severity: 'orange', issued: '2026-09-27T10:00:00Z', headline: 'M5 · 远处', magnitude: 5, maxScale: -1,
@@ -8826,7 +8263,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const r2 = t.handleAlert(far, mk())
     assert(r2.notified === false, '远处地震不播报')
     assert(hist() === before2, '没命中的全球地震不进历史（原有口径，现在对所有源一致）')
-    // ③ 判不了的要留痕：551 震源情报（无 points、无震度）
     {
       const originRaw = {
         code: 551, id: 'jp-pd1-origin', issue: { time: '2026/09/27 19:00:00', type: 'OriginTime' },
@@ -8837,7 +8273,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(r3.notified === false && r3.detail.indexOf('震源情报') !== -1, '震源情报不播报，原因如实：' + r3.detail)
       assert(hist() === before3 + 1, '震源情报**进历史**（"判不了"不等于"离得远"）')
     }
-    // ④ 判不了的要留痕：点型消息没有可用坐标
     {
       const noGeo = Object.assign({}, far, {
         id: 'usgs:nogeo-pd1', eventKey: 'geo:pd1-nogeo', geo: { lat: null, lon: null },
@@ -8847,7 +8282,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       t.handleAlert(noGeo, mk())
       assert(hist() === before4 + 1, '坐标缺失的点型消息进历史（DESIGN 3.1：不猜、如实说明）')
     }
-    // ⑤ 一个关注点都没配：仍不进历史（noWatch 口径不变）
     {
       const before5 = hist()
       t.handleAlert(far, mk({ watch: { prefectures: [], cities: [], places: [] } }))
@@ -8858,14 +8292,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
   }
 
   // ==========================================================================
-  // 0.9.4：PD-2（产品决策）——震度档位就近对齐，震级门槛不动
-  //
-  // Host schema 只校验范围（改成严格枚举会让脏值注册失败，DESIGN 11.9 #2 已排除），所以
-  // "手改的配置"由 Client 归一化这一步收口：先夹取（既有语义），再把**震度档位**吸附到最近的
-  // 合法档。震级门槛不吸附——下拉里的 M3〜M7 只是常用预设，M6.7 这样的自定义门槛是合法的。
+  // 震度档位就近对齐，震级门槛不动
+  // 震级门槛不吸附——下拉里的 M3〜M7 只是常用预设，M6.7 这样的自定义门槛是合法的。
   // ==========================================================================
   try {
-    console.log('== 0.9.4：震度档位就近对齐（PD-2）==')
+console.log('== 震度档位就近对齐 ==')
     const t = loadClientEx().exports.__test
     const th = (patch) => t.normalizeCfg({ thresholds: patch }).thresholds
     assert(th({ quakeScale: 42 }).quakeScale === 40, '手改的 42 → 40（就近档位，界面选得中）')
@@ -8886,13 +8317,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
   }
 
   // ==========================================================================
-  // 0.9.4：C6——「真正播报过」的 24 小时记忆要跨刷新存活
-  //
-  // 此前它是纯内存的：Host 重启后按冷启动回看窗口（USGS 6 小时 / NOAA 24 小时）重新投递时，
-  // 消息级去重（10 分钟）与事件级（3 小时）都已过期，而这份记忆随刷新消失 —— 同一场地震再响一次。
+  // 「真正播报过」的 24 小时记忆要跨刷新存活
   // ==========================================================================
   try {
-    console.log('== 0.9.4：已播报记忆持久化（C6）==')
+console.log('== 已播报记忆持久化 ==')
     const mkAlert = (t, id) => ({
       id, code: 'usgs', source: 'usgs', kind: 'quake', kindLabel: 'USGS', locator: 'point',
       severity: 'orange', issued: '2026-09-27T10:00:00Z', headline: 'M5 · 测试', magnitude: 5, maxScale: -1,
@@ -8916,18 +8344,15 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const seed = Object.fromEntries(s1.storage)
     const t2 = loadClientEx(seed).exports.__test
     assert(t2.wasRecentlyAlerted(alert) === true,
-      '刷新后仍记得"这条播报过"——冷启动回看的重放不会二次响铃')
+      '刷新后仍记得"这条播报过"——首次启动回看时的重放不会二次响铃')
     // 同一条消息在刷新后重新投递 → 不播报
     const r2 = t2.handleAlert(mkAlert(t2, 'a1'), cfg())
     assert(r2.notified === false && r2.reason === 'replayed',
       '刷新后重放同一条 → 按"已播报过"抑制，不再响铃：' + JSON.stringify(r2))
     // 超过 24 小时 → 记忆失效（并顺手清掉盘上的那份）
     {
-      // **不能把"现在"写死成绝对时刻**：这个时钟要与上面 t1 用**真实 now** 写进盘里的记忆做差，
-      // 写死 `Date.UTC(2026,8,28,12,0,0)` 就成了定时炸弹——真实时间越过它前 24 小时的那一刻
-      // （2026-09-27T12:00Z）起，「25 小时前」变成「23.9 小时前」，这条断言开始必红。它真的炸了：
-      // 第一次 CI run（11:42Z）这条通过，第二次（12:07Z，已跨过临界点）就红了。
-      // 改成「读一次真实 now 再加 25 小时」：与运行时刻无关，差值恒为 25h > 24h。
+      // **不能把「现在」写死成绝对时刻**：这个时钟要与用真实 now 写进盘里的记忆做差，
+      // 所以要读一次真实 now 再加 25 小时——写死绝对时刻会随运行时刻跨过临界点而变红。
       const clockRef = { t: Date.now() + 25 * 60 * 60 * 1000 }
       class SandboxDate extends Date {
         constructor(...args) { if (args.length === 0) super(clockRef.t); else super(...args) }
@@ -8936,8 +8361,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const t3 = loadClientEx(seed, { Date: SandboxDate }).exports.__test
       assert(t3.wasRecentlyAlerted(alert) === false, '超过 24 小时的记忆失效（不会被陈年条目挡住）')
     }
-    // 解除之后要把记忆删掉，而且**删除也要落盘**（否则刷新后又"提醒过"）
-    // 注：取消 / 解除链路只处理 eew / tsunami / weather（quake 不进这条链），所以这里用海啸。
+    // 解除之后要把记忆删掉，而且删除也要写入本地存储（否则刷新后又「提醒过」）；取消 / 解除链路只处理 eew / tsunami / weather
     {
       const s4 = loadClientEx()
       const t4 = s4.exports.__test
@@ -8961,11 +8385,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '0.9.4 C6 检查失败：' + e.message)
   }
 
-  // ==========================================================================
-  // 0.9.4：C5——重连后补拉断线窗口（/v2/history），首次连接不补
-  // ==========================================================================
+  // 重连后补拉断线窗口（/v2/history），首次连接不补
   try {
-    console.log('== 0.9.4：断线补拉（C5）==')
+console.log('== 断线补拉 ==')
     const run = async (opts) => {
       const sockets = []
       class FakeWS {
@@ -8975,7 +8397,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const ex = loadClientEx({}, { window: { WebSocket: FakeWS } }).exports.__test
       const fed = []
       const client = ex.createWsClient(Object.assign({
-        staleAfterMs: 0, // 本用例不测半开检测
+        staleAfterMs: 0, // 本用例不测连接假死检测
         onRaw: (raw) => fed.push(raw),
       }, opts || {}))
       client.start()
@@ -8985,14 +8407,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     const histRow = (code, id, time) => ({ code, id, time, issue: { time } })
     const inWindow = new Date(nowMs - 30 * 1000)
     const oldRow = new Date(nowMs - 30 * 60 * 1000)
-    // **裸时间串必须按上游时区生成，绝不能按本机时区**（2026-09-27 CI 红的根因）：
-    // P2PQuake 的 `time` 是裸 JST，实现侧 `p2pTimeToIso` 固定按 +09:00 解释（与机器时区无关，
-    // 见 01-constants）。原先这里用 `d.getHours()`／`d.getFullYear()`（**本机时区**）拼串，
-    // 于是同一段代码在 JST 机器上把"30 秒前"写成 30 秒前的 JST，在 UTC 的 CI 上却写成
-    // 9 小时前的 JST → 补拉窗口（2 分钟）把它判成"窗口外"，两条断言红：
-    //   · `窗口内的那条补进主链…`（fed 为空）
-    //   · `补拉计数如实`（skipped 3 而不是 2）
-    // 这就是"本地全绿、CI 红"的那类差异。加 9 小时再取 UTC 字段 = 恒定按 JST 输出。
+    // **裸时间串必须按上游时区生成，绝不能按本机时区**：P2PQuake 的 `time` 是裸 JST，
+    // 实现侧固定按 +09:00 解释。按本机时区拼串会让同一段代码在 UTC 的 CI 上把「30 秒前」写成
+    // 9 小时前，补拉窗口把它判成窗口外。加 9 小时再取 UTC 字段 = 恒定按 JST 输出。
     const JST_OFFSET_MS = 9 * 60 * 60 * 1000
     const fmt = (d) => {
       const j = new Date(d.getTime() + JST_OFFSET_MS)
@@ -9000,7 +8417,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       return j.getUTCFullYear() + '/' + p(j.getUTCMonth() + 1) + '/' + p(j.getUTCDate()) + ' ' +
         p(j.getUTCHours()) + ':' + p(j.getUTCMinutes()) + ':' + p(j.getUTCSeconds())
     }
-    // ① 首次连接**不**补拉（没有缺口可言）
     {
       const urls = []
       const h = await run({ fetchJson: async (u) => { urls.push(u); return [] } })
@@ -9009,7 +8425,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(urls.length === 0, '首次连接不补拉（用户刚打开页面时不该把旧警报当新闻）')
       h.client.stop()
     }
-    // ② 重连补拉：窗口内的交给主链、窗口外的跳过、时间认不出的跳过
     {
       const urls = []
       const rows = [
@@ -9021,8 +8436,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       h.sockets[0].onopen()
       await new Promise((r) => setImmediate(r))
       assert(urls.length === 0, '（前置）首连不补')
-      h.sockets[0].onclose({ code: 1006 }) // 断线 → 退避重连
-      await new Promise((r) => setTimeout(r, 1200)) // 等退避（1s）
+      h.sockets[0].onclose({ code: 1006 }) // 断线 → 按递增间隔重连
+      await new Promise((r) => setTimeout(r, 1200)) // 等重试间隔（1s）
       assert(h.sockets.length >= 2, '（前置）已经重连：' + h.sockets.length)
       h.sockets[1].onopen() // 补拉发生在 onopen（重连那一次）
       await new Promise((r) => setImmediate(r))
@@ -9037,7 +8452,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '补拉计数如实：' + JSON.stringify(st))
       h.client.stop()
     }
-    // ③ 补拉失败不影响连接状态（只是一条恢复路径）
     {
       const h = await run({ fetchJson: async () => { throw new Error('HTTP 503') } })
       h.sockets[0].onopen()
@@ -9053,14 +8467,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '0.9.4 C5 检查失败：' + e.message)
   }
 
-  // ==========================================================================
-  // 0.9.4：C10 注册表随 start/stop 增删；C12⑦ 海外取数按流读、超限即停
-  // ==========================================================================
+  // 注册表随 start/stop 增删；海外取数按流读、超限即停
   try {
-    console.log('== 0.9.4：SSE 注册表生命周期（C10）与海外取数流式上限（C12⑦）==')
+console.log('== SSE 注册表生命周期与海外取数流式上限 ==')
     const t = loadClientEx()
     const tt = t.exports.__test
-    // ① C10：注册与 start/stop 配对（此前只在构造时注册，stop 后仍挂着）
     {
       const fakeES = (url) => ({ url, listeners: {}, addEventListener(t2, fn) { (this.listeners[t2] = this.listeners[t2] || []).push(fn) }, close() {} })
       const c = tt.createCnStream({
@@ -9077,7 +8488,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(!!tt.cnStreamRegistry['cenc_eew_probe'], '再次 start() 会重新注册（restart 语义）')
       c.stop()
     }
-    // ② C12⑦：默认取数按 body 流读取，超限立刻 cancel（不是 await res.text() 之后再比）
     {
       const injected = []
       const chunks = []
@@ -9113,14 +8523,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
   }
 
   // ==========================================================================
-  // 0.9.4：C1——分灾害音效开关（地震含 EEW / 海啸 / 气象）
-  //
-  // 沙箱里没有 AudioContext，"到底响没响"没法直接听，所以判据抽成了纯函数 soundAllowedFor，
-  // 这里对它逐条断言；配置链（DEFAULT_CFG → normalizeCfg → Host schema）另测一遍，
-  // 因为"关掉之后刷新又开了"这类问题都出在链上而不是判据上。
+  // 分灾害音效开关（地震含 EEW / 海啸 / 气象）
   // ==========================================================================
   try {
-    console.log('== 0.9.4：分灾害音效开关（C1）==')
+console.log('== 分灾害音效开关 ==')
     const t = loadClientEx().exports.__test
     const cfgOf = (notify) => ({ notify: Object.assign({ sound: true, system: true, volume: 0.7, soundQuake: true, soundTsunami: true, soundWeather: true }, notify || {}) })
     const aOf = (kind, patch) => Object.assign({
@@ -9175,17 +8581,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '0.9.4 C1 检查失败：' + e.message)
   }
 
-  // ==========================================================================
-  // 0.9.4：C2 / P3-41——源契约的 `required` 必须与实现一致
-  //
-  // 这一份此前比实现严：把"实现有意容忍的东西"也写成了必需。文档说严了的代价不是"少写几行字"——
-  // 后来者照它写 fixture 会以为某字段必需，写出假断言，或者把一次正常的抖动当成源故障。
-  // 断言钉的是**实现那一侧**（契约文本没法机器校验）：上面那些"容忍"必须仍然是容忍。
-  // ==========================================================================
+  // 源契约的 `required` 必须与实现一致（钉的是实现那一侧，契约文本没法机器校验）
   try {
-    console.log('== 0.9.4：源契约与实现一致（C2 / P3-41）==')
+console.log('== 源契约与实现一致 ==')
     const t = loadClientEx().exports.__test
-    // ① 551：缺 earthquake.time、有观测点缺 scale → 仍然 ok（只影响事件键，不影响播报）
     const q551 = {
       code: 551, id: 'c2-551', issue: { time: '2026/09/27 19:00:00', type: 'ScalePrompt' },
       earthquake: { maxScale: 40, hypocenter: { name: '茨城県南部', magnitude: 5 } },
@@ -9197,13 +8596,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     // 真正要拦的仍然拦：points 不是数组
     assert(t.parseEpspResult(Object.assign({}, q551, { points: 'nope' })).kind === 'schema',
       'points 不是数组 → schema（结构型错误照样拦）')
-    // ② 552：areas 里没有 name、grade 是个未知字符串 → 仍然 ok（不查枚举）
     const q552 = { code: 552, id: 'c2-552', issue: { time: '2026/09/27 19:00:00' }, cancelled: false,
       areas: [{ grade: 'Bogus' }, { grade: 'Warning' }] }
     const r552 = t.parseEpspResult(q552)
     assert(r552.ok === true, '552 的 areas 缺 name、grade 未知 → ok（不查枚举）：' + JSON.stringify(r552).slice(0, 120))
     assert(r552.alert.headline.indexOf('—') !== -1, '缺 name 的预报区在正文里显示为「—」（如实说明而不是丢条）')
-    // ③ 556：缺 issue.eventId → ok（只影响事件键）
     const q556 = {
       code: 556, id: 'c2-556', issue: { time: '2026/09/27 19:00:00' },
       earthquake: { hypocenter: { name: '茨城県南部', magnitude: 5 } },
@@ -9213,7 +8610,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(r556.ok === true, '556 缺 issue.eventId → ok：' + JSON.stringify(r556).slice(0, 120))
     assert(t.parseEpspResult(Object.assign({}, q556, { areas: [{ scaleTo: 40 }] })).kind === 'schema',
       '556 的 areas 缺 name → schema（这一条实现确实拦）')
-    // ④ JMA：<Report> 但没有任何 Item / Area → empty，不是 schema
     {
       const xml = '<?xml version="1.0"?><Report xmlns="http://xml.kishou.go.jp/jmaxml1/">' +
         '<Control><Title>テスト</Title><DateTime>2026-09-27T10:00:00Z</DateTime></Control>' +
@@ -9224,7 +8620,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const html = t.parseJmaResult('<!DOCTYPE html><html><body>blocked</body></html>', { id: 'c2-html' })
       assert(html.ok === false && html.kind === 'schema', 'HTML 才是 schema（拦截页 / 地址失效）')
     }
-    // ⑤ NMC：kind 不在两个灾种里 → empty，不是 schema
     {
       const nmc = { alertid: 'c2-nmc', kind: 'volcano', level: 'red', title: '某某气象台发布火山预警信号', issued: '2026-09-27T10:00:00+08:00' }
       const r = t.parseNmcAlarmResult(nmc)
@@ -9232,13 +8627,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const r2 = t.parseNmcAlarmResult(Object.assign({}, nmc, { kind: 'rainstorm', level: 'purple' }))
       assert(r2.ok === false && r2.kind === 'schema', '对照：level 越界 → schema（等级是判据本身）')
     }
-    // ⑥ 速报整表：没有 md5 也照常逐条解析（md5 只作诊断读数，见 P3-31）
     {
       const table = { type: 'cenc_eqlist', No1: { EventID: 'c2-eq-1', latitude: '30.5', longitude: '100.5', magnitude: '4.0', time: '2026/09/27 19:00:00' } }
       const r = t.parseCencEqlistResult(table)
       assert(r.ok === true, '整表没有 md5 → 仍然 ok（md5 不是判据）：' + JSON.stringify(r).slice(0, 120))
     }
-    // ⑦ USGS：坐标在 properties 里（没有 geometry.coordinates）也算 ok
     {
       const feat = { type: 'Feature', properties: { mag: 5, time: Date.UTC(2026, 8, 27, 10, 0, 0), lat: 35.0, lon: 139.0 }, geometry: null }
       const r = t.parseUsgsResult(feat)
@@ -9250,14 +8643,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
   }
 
   // ==========================================================================
-  // 0.9.4：C4——两个"窗口"的分工（事件去重 3 小时 vs 解除匹配 24 小时）
-  //
-  // 一份审查报告把两者当成同一个数字，得出"文档说 3 小时、实现是 24 小时"的结论。
-  // 实际它们回答两个不同的问题，各自的代码与注释一致；这里把两者的**取值与分工**都钉住，
-  // 免得以后有人"顺手统一"成一个数字。
+  // 两个「窗口」的分工（事件去重 3 小时 vs 解除匹配 24 小时）
   // ==========================================================================
   try {
-    console.log('== 0.9.4：事件窗口与解除窗口的分工（C4）==')
+console.log('== 事件窗口与解除窗口的分工 ==')
     const t = loadClientEx().exports.__test
     assert(t.WEATHER_EVENT_WINDOW_MINUTES === 180, '气象的事件窗口是 3 小时（同一官署同一灾种不再重复响铃）')
     const cfg = JSON.parse(JSON.stringify(t.DEFAULT_CFG))
@@ -9280,16 +8669,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '0.9.4 C4 检查失败：' + e.message)
   }
 
-  // ==========================================================================
-  // 0.9.4：PD-3——全球城市名统一取拉丁字母名（生成器 + 数据）
-  //
-  // 用户选定的做法：本地化做不到（需要 GeoNames 带语言标签的候选，即另一个大数据下载），
-  // 就统一用拉丁文。生成脚本的规则是 `latinCityNameOf`，数据已按它重生成过一次。
-  // 这里同时钉**规则**与**数据**：规则是纯函数 + 脚本确实在用它，数据是"5224 条里一个汉字都没有"。
-  // 数据那一条如果哪天红了，说明有人又把它生成回中文名了（正是这次要消灭的状态）。
-  // ==========================================================================
+  // 全球城市名统一取拉丁字母名：生成规则 `latinCityNameOf`，数据已按它重生成。
+  // 这里同时钉规则（纯函数 + 脚本确实在用它）与数据（5224 条里一个汉字都没有）。
   try {
-    console.log('== 0.9.4：全球城市名统一拉丁（PD-3）==')
+console.log('== 全球城市名统一拉丁 ==')
     const geo = await import(pathToFileURL(path.join(ROOT, 'scripts', 'lib', 'geonames.mjs')).href)
     assert(typeof geo.latinCityNameOf === 'function', 'latinCityNameOf 存在（生成脚本的取名规则）')
     assert(geo.latinCityNameOf({ ascii: 'Rome', name: 'Roma', alternates: '羅馬,罗马,Rome,ローマ' }) === 'Rome',
@@ -9323,19 +8706,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
   }
 
   // ==========================================================================
-  // 0.9.4：**我们拼的字跟着界面语言走**（用户实测发现的问题）
-  //
-  // 用户的原话：「不管设置语言里选择的是简体中文还是繁体，还是日文还是英文，履历里的未命中推送
-  // 内容都是 `大雨警报 · 注意報を解除します（未命中：取消 / 解除消息，且此前未提醒过该事件）`……
-  // 特别是（未命中：…）这句，这很明显不是电文内容吧」。
-  //
-  // 判据因此分两层，这条测试两层都钉：
-  //   · **我们拼的字**（kindLabel / 各种 reason / 未命中后缀 / 震度与等级词）→ 必须随语言变；
-  //   · **上游电文的原文**（JMA 的 `注意報を解除します`、地名、机构名）→ 原样透传，不翻。
-  // 所以断言"en 下我们拼的字里没有汉字"，而不是"整行没有汉字"（后半句本来就是日文）。
+  // **我们拼的字跟着界面语言走**（上游电文的原文原样透传，不翻）
+  // 判据分两层：kindLabel / reason / 未命中后缀 / 震度与等级词随语言变；JMA 原句、地名、机构名不翻。
   // ==========================================================================
   try {
-    console.log('== 0.9.4：解析层／匹配层的自有文案随界面语言（本地化收尾）==')
+console.log('== 解析层／匹配层的自有文案随界面语言 ==')
     const HAN = /[\u4e00-\u9fff]/
     const LANGS4 = ['zh-CN', 'zh-TW', 'ja', 'en']
     const SOURCE_CONTRACTS = loadClientEx().exports.__test.SOURCE_CONTRACTS // 只用来读常量
@@ -9350,10 +8725,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         }),
       }
       const ex = loadClientEx(seed).exports.__test
-      // **必须在解析之前让配置落地**：语言是由 loadCfg/applyCfg 里的 setLanguage(cfg.language) 生效的，
-      // 而 bundle 初始化时不一定会立刻读配置——第一次读发生在某个 API 被访问时。我第一版就踩了：
-      // parseJma 拿到的 kindLabel 是默认语言（zh-CN）的，而后面的 matchAlert 已经是英语了，
-      // 于是断言看起来像"标签没本地化"，其实是**测试自己没先切语言**。
+      // **必须在解析之前让配置落地**：语言由 loadCfg/applyCfg 里的 setLanguage(cfg.language) 生效，
+      // 而 bundle 初始化时不立刻读配置——第一次读发生在某个 API 被访问时。
       ex.loadCfg()
       const alert = ex.parseJma(heavyRainXml, { id: 'loc-' + lang })
       const m = ex.matchAlert(alert, ex.currentCfg())
@@ -9369,9 +8742,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         entry: hist.length > before ? hist[0].headline : '',
       }
     }
-    // ① 每个字段都随语言变：**en 必须与其余三种都不同**；散文类（reason / entry）四种语言互不相同。
-    //    标签类不能要求"四种互不相同"——`大雨警報` 在繁体与日文里本来就是同一个写法（简繁日共用汉字
-    //    术语），要求四值全异会把正确的翻译判成失败。我第一版就是这么写的，红得有理。
+    // ① 每个字段都随语言变；但标签类不能要求「四种互不相同」——`大雨警報` 在繁体与日文里本来就同形
     for (const field of ['label', 'reason', 'cancelLabel', 'entry']) {
       for (const lang of ['zh-CN', 'zh-TW', 'ja']) {
         assert(out.en[field] !== out[lang][field],
@@ -9382,23 +8753,18 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const vals = LANGS4.map((l) => out[l][field])
       assert(new Set(vals).size === LANGS4.length, field + ' 四种语言互不相同：' + vals.join(' ｜ '))
     }
-    // ② en 下**我们拼的字**里不该出现汉字（上游原文那半句是日文，不在此列）
     assert(!HAN.test(out.en.label), 'en 的 kindLabel 无汉字：' + out.en.label)
     assert(!HAN.test(out.en.reason), 'en 的未命中原因无汉字：' + out.en.reason)
     assert(!HAN.test(out.en.cancelLabel), 'en 的取消标签无汉字：' + out.en.cancelLabel)
     assert(out.en.reason.indexOf('not matched') !== -1 || !HAN.test(out.en.entry.replace(/[\u3040-\u30ff\u4e00-\u9fff]+/g, '')),
       'en 的履历标题里的自有文案是英文：' + out.en.entry)
-    // ③ 用户点名的那句：未命中后缀本身也是本地化的
     assert(out['zh-CN'].entry.indexOf('（未命中：') !== -1, 'zh-CN 的未命中后缀：' + out['zh-CN'].entry)
     assert(out.en.entry.indexOf('(not matched:') !== -1, 'en 的未命中后缀：' + out.en.entry)
     assert(out.ja.entry.indexOf('（未命中：') !== -1, 'ja 的未命中后缀：' + out.ja.entry)
-    // ④ 上游原文原样透传：这条样本的 JMA 原句带假名（「〜に切り替えました」），四种语言下都该还在
     for (const lang of LANGS4) {
       assert(/[\u3040-\u30ff]/.test(out[lang].entry),
         lang + ' 下上游原文仍在（不翻电文原话）：' + out[lang].entry)
     }
-    // ⑤ 履历「类型」行的**来源标注**也要跟着语言变（用户第二轮实测发现的那处）：    //    此前是写死的中文 `JMA 电文` / `CENC 预警` / `中央气象台`，英文 / 日文界面下照样显示简体中文。
-    //    品牌名（EMSC / USGS / NWS / ECCC / NOAA CAP）与 `code N` 不翻：任何语言下都该是同一写法。
     const srcLabels = {}
     for (const lang of LANGS4) {
       const seed = { 'dsh.quakeAlert.v1': JSON.stringify({ version: 1, language: lang, watch: { prefectures: ['東京都'], cities: [], places: [] } }) }
@@ -9420,8 +8786,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(srcLabels.en.emsc === 'EMSC' && srcLabels.en.code === 'code 551' &&
       srcLabels['zh-CN'].emsc === 'EMSC' && srcLabels['zh-CN'].code === 'code 551',
       '品牌名与 `code N` 不随语言变（它们在任何语言下都是同一个写法）')
-    // ⑥ 大陆源（CENC）的 kindLabel 也随语言变——这一处是 0.9.4 本地化时**漏掉的**（扫了 05-parser /
-    //    05b / 05c / 05f / 05h，唯独漏了 05e），补上后钉住：它进的是履历「类型」行与通知标题。
     {
       const cencRaw = {
         type: 'cenc_eew', ID: 'loc-cenc-1', EventID: 'loc-cenc-ev', OriginTime: '2026-09-18 20:50:23',
@@ -9453,15 +8817,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
   }
 
   // ==========================================================================
-  // 0.8.2：0.8.1 期在真机发现的两处功能缺陷（DESIGN 11.9 A / B 的清账）
-  //
-  // 两条都属于 11.8 教训 6 那一类——不在解析逻辑里，而在跨模块的语义边界上：
-  // A 是判定顺序（播报门槛挡在"有没有大陆关注点"前面），B 是判据选错（从名字形状反推来源分支）。
-  // 每条断言都同时钉住修好后的行为与旧行为的反面，对应 11.8 教训 3 的自检问法
-  // 「把守的那行改坏，这条会红吗」。
+  // 大陆气象的判定顺序与关注点判据
   // ==========================================================================
   try {
-    console.log('== 0.8.2：大陆气象的判定顺序与关注点判据 ==')
+console.log('== 大陆气象的判定顺序与关注点判据 ==')
     const { CN_AREAS: CN_AREAS_82 } = await import(pathToFileURL(path.join(ROOT, 'lib', 'data', 'cn-areas.js')).href)
     const t = loadClientEx().exports.__test
     const LEVEL_ZH = { red: '红色', orange: '橙色', yellow: '黄色', blue: '蓝色' }
@@ -9474,7 +8833,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       watch: { prefectures: [], cities: [], places },
     }))
 
-    // ---- A. 门槛不能挡在「有没有关注点」前面（DESIGN 11.9 A）----
+    // ---- A. 门槛不能挡在「有没有关注点」前面 ----
     {
       const cfg0 = cfgWithPlaces([])
       assert(cfg0.watch.places.length === 0, '（前置）这份配置里一个关注点都没有')
@@ -9499,9 +8858,8 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '对照：配了关注点、达到橙色 → 照常进历史（修复没有把"该记的"一起挡掉）')
     }
 
-    // ---- B. 大陆关注点按显式来源分支与省 / 市判定，不靠名字里的 `·`（DESIGN 11.9 B）----
+    // ---- B. 大陆关注点按显式来源分支与省 / 市判定，不靠名字里的 `·` ----
     {
-      // ① 级联产出的关注点带显式省 / 市
       t.setCnAreas(CN_AREAS_82)
       const picked = t.cnPlaceOf('四川省', '成都市', 100)
       assert(!!picked && picked.province === '四川省' && picked.city === '成都市',
@@ -9509,19 +8867,16 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(t.cnWatchPlaces([picked]).length === 1 && t.cnWatchPlaces([picked])[0].province === '四川省',
         'cnWatchPlaces 认它（origin=cn）并直接给出省')
 
-      // ② 显式 origin 优先于名字形状：手填坐标的名字里带 `·` 也不再是大陆关注点
       const manual = { name: '上海市·黄浦区', lat: 31.23, lon: 121.47, radiusKm: 300, origin: 'global' }
       const normManual = t.normalizePlaces([manual])
       assert(normManual.length === 1 && normManual[0].origin === 'global' && normManual[0].province === undefined,
         '显式 origin=global 不会被名字里的 `·` 改写成 cn，也不会被安上省 / 市：' + JSON.stringify(normManual[0]))
       assert(t.cnWatchPlaces(normManual).length === 0, '手填坐标不参与大陆行政区匹配')
 
-      // ③ 老配置（只有名字，没有 origin / 省市）仍被认成大陆点，并迁移出省 / 市
       const legacy = t.normalizePlaces([{ name: '云南省·丽江市', lat: 26.85, lon: 100.51, radiusKm: 100 }])
       assert(legacy[0].origin === 'cn' && legacy[0].province === '云南省' && legacy[0].city === '丽江市',
         '0.8.1 及以前存下的关注点只有名字 → 按同一形状规则迁移出省 / 市并固化：' + JSON.stringify(legacy[0]))
 
-      // ④ 省份认不出的预警（国家级机构）：只有真正的大陆关注点能让它"按全国放行"
       const national = nmc('red', 'b-national', '中央气象台发布暴雨红色预警信号')
       const mManual = t.matchAlert(national, cfgWithPlaces([manual]))
       assert(mManual.hit === false && mManual.noWatch === true,
@@ -9530,14 +8885,11 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(mCn.hit === true && mCn.reason.indexOf('未能定位到省份') !== -1,
         '对照：真正的大陆关注点仍按全国放行（DESIGN 8.4 的兜底没有被顺手改掉）')
 
-      // ⑤ 命中判定读显式省 / 市：名字里没有 `·` 也能命中（判据不再是名字形状）
       const explicit = { name: '丽江市', lat: 26.85, lon: 100.51, radiusKm: 100, origin: 'cn', province: '云南省', city: '丽江市' }
       const mExplicit = t.matchAlert(nmc('orange', 'b-explicit'), cfgWithPlaces([explicit]))
       assert(mExplicit.hit === true && mExplicit.reason.indexOf('丽江市') !== -1,
         '命中判定读显式省 / 市：名字里没有 `·` 也能命中（' + mExplicit.reason + '）')
 
-      // ⑥ Host schema 必须登记 province / city —— 与 origin 同一条教训：未声明的键会被 schema
-      //    归一掉，于是 Client 每次读回来都少两个字段，settingsOpsFor 把它当"用户改过"反复写回
       const hostMod = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
       const hostParsed = unwrapRefs(hostMod.QuakeAlertSettingsSchema({
         watch: { places: [{ name: '上海市·黄浦区', lat: 31.23, lon: 121.47, origin: 'global', province: '上海市', city: '黄浦区' }] },
@@ -9548,7 +8900,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(hostDefault.watch.places[0].province === undefined && hostDefault.watch.places[0].city === undefined,
         'Host schema **不**给 province / city 注入默认值：老配置的省 / 市要由 Client 按名字迁移一次（同 origin 的理由）')
 
-      // ⑦ 诊断快照：大陆点带省 / 市，非大陆点不写这两个键（否则快照里多出一堆空字段）
       t.applyCfg(t.normalizeCfg(Object.assign({}, t.loadCfg(), {
         watch: { prefectures: [], cities: [], places: [explicit, manual] },
       })))
@@ -9560,24 +8911,17 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(!!globalRow && globalRow.province === undefined && globalRow.city === undefined,
         '诊断快照不给非大陆点写省 / 市（这些点不参与行政区匹配）')
 
-      // ⑧ 端到端：0.8.1 及以前存下的老配置（只有名字）走一遍 sectionToCfg，省 / 市被补上。
-      //    这条链路是升级用户的真实路径：Host 读回来的 places 没有这两个键。
       const legacyConv = t.sectionToCfg({ watch: { places: [{ name: '四川省·成都市', lat: 30.66, lon: 104.07, radiusKm: 100 }] } })
       assert(legacyConv.watch.places[0].origin === 'cn' &&
         legacyConv.watch.places[0].province === '四川省' && legacyConv.watch.places[0].city === '成都市',
         '老配置经 sectionToCfg 后 origin 与省 / 市都被补上：' + JSON.stringify(legacyConv.watch.places[0]))
 
-      // ⑨ 语言字段真的接了 Host 写回链路（0.8.1 说这条链路"一次立齐"，review 发现只差这一跳没守卫）：
-      //    等于默认值时发 unset，把该键交还 schema 默认层。
       const langOps = t.settingsOpsFor(t.currentCfg()).filter((o) => o.path && o.path[0] === 'language')
       assert(langOps.length === 1 && langOps[0].op === 'unset',
         'language 参与 Host diff（等于默认值 → unset 交还 schema 默认层）：' + JSON.stringify(langOps))
     }
 
-    // ---- C. review：选项卡**切换**这条路径此前没有任何断言走过（DESIGN 11.4 的局部 review）----
-    // 0.8.1 的断言只渲染了 initialTab 指定的那一页——那验证的是"一页长什么样"，
-    // 而选项卡改的是**从一页走到另一页**：切走后旧页的 DOM 是否真的消失、来回切会不会残留或白屏。
-    // 这一条正是 0.8.1 CHANGELOG 里"仍未实机复核：选项卡切换"的那件事，用状态桩可以走完。
+    // ---- C. 选项卡**切换**这条路径：切走后旧页的 DOM 是否真的消失、来回切会不会残留或白屏 ----
     {
       const react = mkTestReact()
       const { exports: ex } = loadClientEx({}, { react })
@@ -9603,8 +8947,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         '（前置）默认落在「地区」页')
       const toHistory = findTab(render(), '履历')
       assert(!!toHistory, '页签是可点击的按钮')
-      // 守卫：找不到就不要再往下调用，否则一条 TypeError 会中断这一块后面的断言
-      // （变异实验里正是这样把"角标"那几条盖掉了）。
+      // 找不到就不要再往下调用，否则一条 TypeError 会中断这一块后面的断言。
       if (toHistory) toHistory.props.onClick()
       const t2 = textsOfTree(render())
       assert(t2.some((x) => x.indexOf('清空记录') !== -1) && !t2.some((x) => x.indexOf('关注地区') !== -1),
@@ -9616,7 +8959,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(t3.some((x) => x.indexOf('关注地区') !== -1) && !t3.some((x) => x.indexOf('清空记录') !== -1),
         '切回「地区」页也正常（来回切换不残留上一页的内容）')
 
-      // 角标数字（0.8.1 新加的 UI）：review 的变异实验里，把角标写死成 ' 99' 也没有任何断言会红。
+    // 角标数字：把角标写死成 ' 99' 也必须被断言抓住
       const badgeOf = (seed, label) => {
         const reactB = mkTestReact()
         const { exports: exB } = loadClientEx(seed, { react: reactB })
@@ -9644,23 +8987,15 @@ console.log('== 机器级持久化：Host settings 桥 ==')
   }
 
   // ==========================================================================
-  // 0.9.5 复验补修（第二轮逐条复验测试C 清单时找到的漏项）
-  //
-  // 这三条都不是"清单没写"，而是"清单说处理了、仓库里其实没落"：
-  //   · X-7 / C7③ —— Wolfx 环缓冲只有条数上限，没有 poller 那样的字节预算；
-  //   · C11① —— 取消关注某县时那次市町村清理依赖异步取回的表，表未就绪就静默失效；
-  //   · P3-45① —— 同一个"已关闭"在设置页画实心点、在侧边栏画空心圈。
+  // 复验补修：Wolfx 缓冲的字节预算 / 取消关注后残留的市町村 / 「已关闭」圆点同形
   // ==========================================================================
 
-  // ---- X-7 / C7③：Wolfx 环缓冲的字节预算 ----
-  // poller 0.5.3 就有 DEFAULT_MAX_BUFFER_BYTES（8MB），而两个大陆源只按条数淘汰：条数只管
-  // "够不够补齐"，管不住内存——单条载荷多大完全由上游决定。这里用注入的小预算把那条路径
-  // 跑出来（真实的 8MB 在测试里造不出来），并且把 maxEntries 设得很大，让 dropped 只可能
-  // 来自字节约束——否则这条断言分不清是哪个约束生效。
+  // ---- Wolfx 缓冲的字节预算 ----
+  // 两个大陆源只按条数淘汰，管不住内存（单条载荷多大由上游决定）；这里用注入的小预算把那条路径跑出来。
   try {
-    console.log('== 0.9.5 复验补修：Wolfx 环缓冲的字节预算（X-7 / C7③）==')
+console.log('== 复验补修：Wolfx 缓冲的字节预算 ==')
     const wx2 = await import(pathToFileURL(path.join(ROOT, 'lib', 'wolfx-source.js')).href)
-    const clock2 = { t: Date.parse('2026-09-18T12:52:23Z') } // = 样本发震时刻 + 2 分钟（在年龄闸门内）
+    const clock2 = { t: Date.parse('2026-09-18T12:52:23Z') } // = 样本发震时刻 + 2 分钟（在年龄门槛内）
     const q2 = new Map()
     let qid = 0
     const sched2 = {
@@ -9692,8 +9027,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(wx2.DEFAULT_MAX_BUFFER_BYTES === pollerMod42.DEFAULT_MAX_BUFFER_BYTES,
       '与 poller 的字节预算是**同一个值**（而不是各写一个字面量）：' + wx2.DEFAULT_MAX_BUFFER_BYTES)
     assert(wx2.DEFAULT_MAX_BUFFER_BYTES === 8 * 1024 * 1024, '该值是 8MB（改它要同时说清为什么）')
-    // 默认**接线**也必须有断言：生产过程里 `lib/index.js` 不传这个选项，所以"默认 8MB"如果只是
-    // 注释、实际接成 0（= 不限），X-7 就等于没修——而下面两个用例都显式传了预算，拦不住这件事。
+    // 默认**接线**也必须有断言：「默认 8MB」如果只是注释、实际接成 0（= 不限），字节约束就等于没修。
     assert(mkSrc2({}).stats().maxBufferBytes === wx2.DEFAULT_MAX_BUFFER_BYTES,
       '不传 maxBufferBytes 时真的吃默认值（生产路径就是这条）')
     {
@@ -9729,14 +9063,14 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '0.9.5 Wolfx 字节预算检查失败：' + e.message)
   }
 
-  // ---- C11①：取消关注后残留的市町村（表到位时补清）----
+  // ---- 取消关注后残留的市町村（表到位时补清）----
   try {
-    console.log('== 0.9.5 复验补修：取消关注后残留的市町村（C11①）==')
+console.log('== 复验补修：取消关注后残留的市町村 ==')
     const seedResidual = {
       'dsh.quakeAlert.v1': JSON.stringify({ version: 1, watch: { prefectures: ['福島県'], cities: ['白河市', '千代田区'] } }),
     }
     const tp = loadClientEx(seedResidual).exports.__test
-    // 现场还原：表还没到位时，"该县下的市町村"取不到任何一条 → 取消关注时那次清理静默失效
+    // 现场还原：表还没到位时，"该县下的市町村"取不到任何一条 → 取消关注时那次清理会悄悄失灵
     assert(tp.citiesOfPref('東京都').length === 0, '（前置）表未就绪时按县取市町村是空数组——这正是清理失效的原因')
     tp.setCityTable({ '福島県': ['白河市', '郡山市'], '東京都': ['千代田区'] })
     tp.pruneCitiesOfUnwatchedPrefs()
@@ -9752,10 +9086,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     tAll.pruneCitiesOfUnwatchedPrefs()
     assert(tAll.currentCfg().watch.cities.length === 2, '关注列表为空（= 全日本）时一条都不清')
 
-    // 覆盖盲区（补修当轮就踩到了）：既有用例**一直在跑真实装载路径**（注入 window.fetch + await
-    // loadCityTable()），但它们的配置里没有残留条目，所以那两行清理的**效果**从来没被观测到。
-    // C11① 的补修一度把同一处既有的 `pruneUnknownCities()` 挤掉，2118 条断言全都照样绿——
-    // 断言覆盖了函数、也走了装载路径，却没有任何一条把"残留配置"喂进去。这里补上那一口。
+    // 既有用例一直在跑真实装载路径，但配置里没有残留条目，所以那两行清理的效果从来没被观测到。
     {
       const areasPayload94 = { prefectures: { '福島県': ['白河市', '郡山市'], '東京都': ['千代田区'] } }
       const seedPath = {
@@ -9780,28 +9111,25 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '0.9.5 C11① 检查失败：' + e.message)
   }
 
-  // ---- P3-45①：设置页与侧边栏的"已关闭"圆点同形 ----
+  // ---- 设置页与侧边栏的「已关闭」圆点同形 ----
   try {
-    console.log('== 0.9.5 复验补修：两处的"已关闭"圆点同形（P3-45①）==')
+console.log('== 复验补修：两处的「已关闭」圆点同形 ==')
     // 查产物字符串而不是渲染树：dot 由两个模块各自构造，而"空心"就是那两行 style 的字面写法。
     const hollow = "background: 'transparent', border: '1.5px solid '"
     const hollowCount = CLIENT_CODE.split(hollow).length - 1
     assert(hollowCount >= 2,
       '侧边栏与设置页都用空心表达 disabled（实际 ' + hollowCount + ' 处；颜色之外的形状线索是色觉障碍用户唯一能用的判据）')
-    // 判据也要**数够**：`store.status === 'disabled'` 这个串在产物里有两处（14-ui-status 与 13-ui-settings），
-    // 只判"存在"等于恒真——把设置页那一处改回实心它照样绿。
+    // 判据也要**数够**：这个串在产物里有两处，只判「存在」等于恒真。
     assert(CLIENT_CODE.split("store.status === 'disabled'").length - 1 >= 2,
       '两处都用同一个判据（实际 ' + (CLIENT_CODE.split("store.status === 'disabled'").length - 1) + ' 处）')
   } catch (e) {
     assert(false, '0.9.5 P3-45① 检查失败：' + e.message)
   }
 
-  // ---- P3-42：中国大陆两条链路把两种取值域写进**同名**的 intensity 字段 ----
-  // 今天没有消费点（只入库、不上 UI），所以它无害；有害的是将来有人按 intensity 分档——
-  // 那时"烈度 5.8"与"烈度 5"会在两条链路上被判成不同的档。这条断言不阻止改名，它只是让
-  // 改名的那一天必然有人看见（见 05e 文件头里写死的处置规则）。
+  // ---- 中国大陆两条链路把两种取值域写进**同名**的 intensity 字段 ----
+  // 今天没有消费点（只入库、不上 UI），但将来按 intensity 分档时，「烈度 5.8」与「烈度 5」会被判成不同的档。
   try {
-    console.log('== 0.9.5 复验补修：CN 两条链路共用 intensity 字段（P3-42）==')
+console.log('== 复验补修：CN 两条链路共用 intensity 字段 ==')
     const t42 = loadClientEx().exports.__test
     const eew42 = JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'cn', 'cenc-eew-last.json'), 'utf8'))
     const list42 = JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'cn', 'cenc-eqlist-last.json'), 'utf8'))
@@ -9811,9 +9139,7 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(Object.prototype.hasOwnProperty.call(a42, 'intensity') === true &&
       Object.prototype.hasOwnProperty.call(q42, 'intensity') === true,
       '两条链路写的是同一个字段名 intensity —— 谁改名这条会红，提醒他一并处理另一条链路')
-    // 取值域差异只做**观察性**记录，不钉成不变量：EEW 的 MaxIntensity 实测 5.8（连续小数）、
-    // 速报的 intensity 实测 "5"（整数档），但"一定不是整数 / 一定是整数"是样本的性质，不是契约
-    // ——重新抓样本时 EEW 恰好是 9.0 会让断言无谓变红。真正要钉住的是"两条链路写的是同一个字段名"。
+    // 取值域差异只做**观察性**记录，不钉成不变量：样本的性质不是契约，重新抓样本会让写死的断言无谓变红。
     assert(typeof a42.intensity === 'number' && Number.isFinite(a42.intensity),
       'EEW 那条是有限数（实测连续小数 5.8）：' + a42.intensity)
     assert(typeof q42.intensity === 'number' && Number.isFinite(q42.intensity),
@@ -9823,12 +9149,10 @@ console.log('== 机器级持久化：Host settings 桥 ==')
   }
 
   // ==========================================================================
-  // 0.9.5：抛开测试C 的 fresh review 找到并修掉的缺陷（Host 侧 + Client 侧）
-  //
-  // 这一批大多属"静默失效"（不抛错、不报警、界面也不提示），所以每一条都要有能拦住它的断言。
+  // fresh review 找到并修掉的缺陷（Host 侧 + Client 侧）
   // ==========================================================================
   try {
-    console.log('== 0.9.5 fresh review 修复：/stream 的断流、方法与连接回收 ==')
+console.log('== fresh review 修复：/stream 的断流、方法与连接回收 ==')
     const hostRv = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
     const mkRes = () => ({
       status: 0, headers: null, frames: [], writableEnded: false, headersSent: false, destroyed: false,
@@ -9845,7 +9169,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       subscribe() { return () => {} },
       stats() { return stats || {} },
     })
-    // ① 背压断流必须真的关连接（此前只"停止写"，而 Node 只在 end() 之后才开始 keepAliveTimeout）
     {
       const subs = []
       const src = mkSrc({ connected: false, lastError: 'relay down' })
@@ -9856,17 +9179,15 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       h({ url: '/dsh-quake-alert/stream?source=cenc_eew', headers: {} }, res)
       for (let i = 0; i < 205; i++) for (const fn of subs) fn({ seq: i, id: 'x', title: 't', updated: '', xml: '{}' })
       assert(res.endCalls >= 1 && res.writableEnded === true,
-        '背压断流会真的结束响应（此前只停止写：连接半开驻留、close 永不触发）')
-      assert(res.destroyCalls >= 1, '并且销毁连接（客户端才会收到 disconnect，不必靠自己的静默探针超时）')
+        '写入积压断流会真的结束响应（此前只停止写：连接假死驻留、close 永不触发）')
+      assert(res.destroyCalls >= 1, '并且销毁连接（客户端才会收到 disconnect，不必靠自己的静默自检超时）')
     }
-    // ② 非 GET / HEAD → 405（DSH 自己的 SSE 路由这么做，而宿主不会代做）
     {
       const h = hostRv.createStreamHandler({ sources: { cenc_eew: mkSrc() }, setInterval: () => 1, clearInterval: () => {} })
       const res = mkRes()
       h({ url: '/dsh-quake-alert/stream?source=cenc_eew', method: 'POST', headers: {} }, res)
       assert(res.status === 405, '非 GET / HEAD 回 405（此前一条 POST 也能换来一个长连接）')
     }
-    // ③ closeAll：停用 / 重载时断掉在飞的流（register 的 disposer 只删路由，不碰连接）
     {
       const h = hostRv.createStreamHandler({ sources: { cenc_eew: mkSrc() }, keepAliveMs: 100000, setInterval: () => 1, clearInterval: () => {} })
       const a = mkRes()
@@ -9878,7 +9199,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       assert(a.endCalls >= 1 && b.endCalls >= 1 && a.destroyCalls >= 1 && b.destroyCalls >= 1,
         'closeAll 关掉所有在飞的流（否则停用后旧流继续推数据，wolfx 也会因为还有订阅者而不空闲）')
     }
-    // ④ status 帧带上 Host 的连接状态：SSE 路径下 Client 不轮询 /feed，否则这两个读数零消费者
     {
       let tick = null
       const h = hostRv.createStreamHandler({
@@ -9893,15 +9213,15 @@ console.log('== 机器级持久化：Host settings 桥 ==')
         'status 帧带上 connected / lastError（"中继断了"与"这段时间确实没数据"从此不同形）')
     }
 
-    console.log('== 0.9.5 fresh review 修复：Client 侧的脏数据 / 记忆 / 关闭源 ==')
-    // ⑤ 脏数据不得把插件拖崩：`{toString:null, valueOf:null}` 是 JSON 就造得出、字符串化即抛的形状
+console.log('== fresh review 修复：Client 侧格式不合法的数据 / 记忆 / 关闭源 ==')
+    // ⑤ 格式不合法的数据不得把插件拖崩：`{toString:null, valueOf:null}` 是 JSON 就造得出、字符串化即抛的形状
     const evilCfg = { version: 1, language: { toString: null, valueOf: null } }
     {
       const tE = loadClientEx({ 'dsh.quakeAlert.v1': JSON.stringify(evilCfg) }).exports.__test
       let threw = null
       let cfg = null
       try { cfg = tE.currentCfg() } catch (e) { threw = e }
-      assert(!threw, '脏配置下 currentCfg() 不抛（它在设置页的渲染期被调用，抛了就是整页白屏）：' + (threw && threw.message))
+      assert(!threw, '格式不合法的配置下 currentCfg() 不抛（它在设置页的渲染期被调用，抛了就是整页白屏）：' + (threw && threw.message))
       assert(cfg && typeof cfg.language === 'string', '退回一份可用的配置（语言回到默认值）')
       const tB = loadClientEx({
         'dsh.quakeAlert.v1': JSON.stringify({ version: 1 }),
@@ -9909,9 +9229,9 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       }).exports.__test
       let threw2 = null
       try { tB.loadConfigBackup() } catch (e) { threw2 = e }
-      assert(!threw2, '备份里的脏数据同样不抛（当作"没有可撤销的备份"）')
+      assert(!threw2, '备份里格式不合法的数据同样不抛（当作"没有可撤销的备份"）')
     }
-    // ⑥ 「清空记录」要连"已播报"记忆一起清，并且落盘（否则刷新后记忆复活、两个标签页结论相反）
+    // ⑥ 「清空记录」要连"已播报"记忆一起清，并且写入本地存储（否则刷新后记忆复活、两个标签页结论相反）
     {
       const mem = new Map([['dsh.quakeAlert.alerted', JSON.stringify({ 'jma:summary:大雨:130000': Date.now() })]])
       const tA = loadClientEx(undefined, {
@@ -9929,7 +9249,6 @@ console.log('== 机器级持久化：Host settings 桥 ==')
       const onDisk = JSON.parse(mem.get('dsh.quakeAlert.alerted') || 'null')
       assert(onDisk && Object.keys(onDisk).length === 0, '磁盘上那份也清了（否则刷新后记忆复活）')
     }
-    // ⑦ 用户关掉的源优先于一切健康判定（此前蓝点 / 停更会覆盖 disabled）
     {
       const tH = loadClientEx().exports.__test
       assert(tH.effectiveStatusOf('jma', 'disabled', 'x').status === 'disabled',

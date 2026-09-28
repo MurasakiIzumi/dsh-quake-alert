@@ -1,11 +1,7 @@
 // ============================================================================
 // dsh-quake-alert · client/src/07-store.js
-//
-// 作用：全局 store——连接状态 + 最近预警，供设置页与状态指示订阅。
-// 内容：store 对象（status/retries/detail/received/events + 订阅）、
-//       addEvent（写入历史并落盘，key 唯一化）。
-// 依赖：01-constants、02-storage、00-i18n、00f-source-labels（源名与状态文字的取词）。
-// 注意：store.push({}) 是各 UI 的重渲染信号，改变它会影响所有订阅方。
+// 全局 store：连接状态 + 最近预警，供设置页与状态指示订阅。含 store 对象与 addEvent。
+// store.push({}) 是各 UI 的重渲染信号，改变它会影响所有订阅方。
 // ============================================================================
 
 import { HISTORY_MAX, HISTORY_MAX_AGE_MS, HISTORY_KEY } from './01-constants.js'
@@ -13,10 +9,6 @@ import { loadHistory, saveJSON, isPlainObject, normalizeHistoryEntry, withinHist
 import { t } from './00-i18n.js'
 import { sourceLabelOf, statusTextOf } from './00f-source-labels.js'
 
-// ---------- 全局 store：连接状态 + 最近预警（设置页订阅） ----------
-// 0.4.0 起「连接状态」是**多源聚合**的：日本链路是 P2PQuake WebSocket，全球链路是 EMSC
-// WebSocket，将来还会有 Host 侧轮询的源。每个源各自汇报，主状态按
-// 「任一源红 → 红；否则任一源黄 → 黄；否则绿」聚合——只要有一条链路断了就不该显示成一切正常。
 const store = {
   status: 'idle', // idle | connecting | open | reconnecting | closed（多源聚合结果）
   retries: 0,
@@ -24,9 +16,7 @@ const store = {
   sources: {}, // { [id]: { label, status, retries, detail } }
   received: 0, // 收到并成功解析的推送条数（诊断用）
   events: loadHistory(), // 最近预警 [{kind,label,severity,issued,headline,pref}]
-  // 气象警报的「静默提示」（0.3.0）：L3 命中关注地区时只记一笔，由侧边栏状态点的悬停提示
-  // 显示出来，不弹窗、不响铃——弥补 L4 起播报带来的提前量损失（DESIGN 10.3）
-  weatherHint: null, // { level, area, pref, at } | null
+  weatherHint: null, // 气象警报的「静默提示」（L3 命中关注地区时只记一笔）：{ level, area, pref, at } | null
   listeners: new Set(),
   push(patch) {
     Object.assign(this, patch)
@@ -47,15 +37,12 @@ const store = {
     this.push({})
   },
   recomputeStatus() {
-    // 遍历 **id** 而不是值：源名要按语言现取（`sourceLabelOf(id)`），而 `sources[id].label`
-    // 是 15-entry 建连时塞进来的字符串——那份是"建连那一刻的语言"，切语言后不会变。
+    // 源名要按语言现取（`sourceLabelOf(id)`），不能沿用 `sources[id].label`——那是建连那一刻的语言
     const ids = Object.keys(this.sources)
     if (ids.length === 0) {
       this.status = 'idle'; this.retries = 0; this.detail = ''
       return
     }
-    // disabled（用户关掉了某个灾种）不参与聚合：它不该把整体拉成"异常"，
-    // 但全部源都关掉时要如实显示成"已关闭"而不是"未启动"。
     const activeIds = ids.filter((id) => this.sources[id].status !== 'disabled')
     if (activeIds.length === 0) {
       this.status = 'disabled'; this.retries = 0
@@ -63,19 +50,14 @@ const store = {
       return
     }
     const pick = (s) => activeIds.filter((id) => this.sources[id].status === s)[0]
-    // 红优先：任一链路停了 / 不可达，整体就不是"正常"；其次蓝（数据格式异常，用户处理不了）、
-    // 黄（连接中 / 重连 / 降级）、中灰（数据过期），最后才是绿。
-    // 0.4.1 起 feed 源（JMA / USGS / NOAA）也上报状态——此前只有 WebSocket 源参与聚合，
-    // 于是气象 / 全球轮询链路整体死掉时侧边栏仍然是绿的（用户以为在被保护）。
+    // 主状态优先级：红（停了 / 不可达）→ 蓝（数据格式异常）→ 黄（连接中 / 重连 / 降级）→ 灰（过期）→ 绿
     const chosenId = pick('closed') || pick('unreachable') || pick('schema-error') ||
       pick('reconnecting') || pick('connecting') || pick('degraded') || pick('stale') ||
       pick('open') || activeIds[0]
     const chosen = this.sources[chosenId]
     this.status = chosen.status
     this.retries = typeof chosen.retries === 'number' ? chosen.retries : 0
-    // 详情优先列异常源（全部正常时才列全部）：源多了以后逐条列会挤爆悬停提示。
-    // `detail` 是取数层给的具体原因（原样透传）；没有原因时退回**状态文字**，而不是裸状态码
-    // （旧写法直接把 `open` / `closed` 这种码拼进提示里，那是给开发看的，不是给用户看的）。
+    // 没有具体原因时退回**状态文字**，裸状态码是给开发看的
     const badIds = activeIds.filter((id) => this.sources[id].status !== 'open')
     this.detail = (badIds.length ? badIds : activeIds)
       .map((id) => {
@@ -88,16 +70,14 @@ const store = {
   },
   subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn) },
 }
-let anonSeq = 0 // 兜底：无 id 消息用递增匿名 key，避免空 id 互相覆盖
+let anonSeq = 0 // 无 id 消息用递增匿名 key，避免空 id 互相覆盖
 function addEvent(ev) {
   const hasId = ev && ev.id && ev.id !== ''
   const key = hasId ? ev.id : ('anon-' + (++anonSeq))
-  // 写入时刻（0.9.4 / D-1）：历史保留的"过去 5 天"以它为准（见 withinHistoryAge）。
-  // 显式传入有限值时尊重它（测试要能注入）；否则取当前时刻。
+  // 写入时刻：历史保留的「过去 5 天」以它为准（见 withinHistoryAge）；有限值可注入以便测试
   const now = (ev && typeof ev.at === 'number' && Number.isFinite(ev.at) && ev.at > 0) ? ev.at : Date.now()
-  // 统一过一遍字段规整：写入侧也保证历史里不会出现对象/数组字段
   const item = normalizeHistoryEntry(Object.assign({}, ev, { key, at: now }), 0)
-  // 0.9.4（D-1）：条数与**时间**两个上限同时生效（设计稿一直是这么写的，此前只实现了条数）
+  // 条数与**时间**两个上限同时生效
   const fresh = store.events.filter((e) => withinHistoryAge(e, now))
   store.events = [item].concat(fresh.filter((e) => e.key !== key)).slice(0, HISTORY_MAX)
   saveJSON(HISTORY_KEY, store.events.slice(0, HISTORY_MAX))

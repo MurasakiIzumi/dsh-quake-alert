@@ -1,11 +1,7 @@
 // ============================================================================
 // dsh-quake-alert · client/src/01-constants.js
-//
-// 作用：唯一的常量与默认配置来源（React 依赖也在这里引入）。
-// 内容：震度文案与档位、海啸等级与排序、47 都道府县表、简写→全称映射、
-//       默认配置 DEFAULT_CFG、存储 key、重连参数、历史上限等全部共享常量。
-// 依赖：00-i18n（语言清单与显示名）。
-// 新增常量请优先放这里，避免散落到各功能文件里。
+// 全仓库唯一的常量与默认配置来源：震度档位、海啸等级、47 都道府县表、DEFAULT_CFG、存储 key、
+// 重连参数、历史上限等。依赖 00-i18n、00d-texts-regions。新的共享常量放这里。
 // ============================================================================
 
 // ---------- 依赖 ----------
@@ -18,40 +14,18 @@ const { useState, useEffect, useRef } = React
 // ---------- 常量 ----------
 const WS_URL = 'wss://api.p2pquake.net/v2/ws'
 const SANDBOX_URL = 'wss://api-realtime-sandbox.p2pquake.net/v2/ws'
-// 全球地震（0.4.0）：EMSC 的实时推送通道。它是少数提供 WebSocket 的全球地震源
-// （USGS / GDACS 都只有轮询），因此在全球链路上复用与 P2PQuake 相同的连接管理。
 const EMSC_WS_URL = 'wss://www.seismicportal.eu/standing_order/websocket'
 const STORAGE_KEY = 'dsh.quakeAlert.v1'
 const HISTORY_KEY = 'dsh.quakeAlert.history'
-// 源健康记录（0.5.3）：**唯一**一处跨刷新保留的运行时状态。它存的是"某个源的解析在什么时候
-// 因为什么失败了"——蓝点是"用户处理不了、等插件更新"的信号，刷新页面就消失会让它没人看见
-// （DESIGN 11.9 A）。连接状态不在这里：重启即重新建连，旧值没有意义。
+// 源健康记录：**唯一**一处跨刷新保留的运行时状态，存「某个源的解析在什么时候因为什么失败了」。 连接状态不在这里：重启即重新建连，旧值没有意义。
 const HEALTH_KEY = 'dsh.quakeAlert.health'
-/**
- * 「真正播报过的事件」记忆的落盘位置（0.9.4 / C6）。
- *
- * 这份记忆（eventKey → 时间戳，保留 24 小时）此前只在内存里，于是**刷新页面 / 重开标签页**就被
- * 清空：Host 重启后的冷启动回看（USGS 6 小时 / NOAA 24 小时）会把同一场地震重新投递一遍，而
- * 消息级去重（10 分钟）与事件级去重（3 小时）早已过期——同一场地震因此再响一次。同一份记忆
- * 也是"解除能找到此前提醒过的事件"的依据，清空还会让解除退化成无上下文的"某处已解除"。
- */
 const ALERTED_KEY = 'dsh.quakeAlert.alerted'
 const HISTORY_MAX = 30 // 「最近预警」保留条数（内存与设置页展示）
-/**
- * 「最近预警」的时间上限（0.9.4 / D-1）。
- *
- * 设计稿一直写的是「**上限：30 条 + 过去 5 天**，两个条件同时生效、取更严格的」，而代码只实现了
- * 30 条这一半：陈年条目会一直占着那 30 个位置，把它们挤掉的是"更久以前的事"而不是"更新的事"。
- * 5 天的取法：一场灾害的完整过程（预警 → 升级 → 解除）通常在一两天内结束，5 天足够回看；
- * 再久之前的记录对"我现在要不要担心"没有参考价值。时间认不出的条目**不据此丢弃**
- * （宁可留着，也不因为缺字段把用户的数据删掉）。
- */
+// 「最近预警」的时间上限，与 HISTORY_MAX 条数上限同时生效、取更严格的
 const HISTORY_MAX_AGE_MS = 5 * 24 * 60 * 60 * 1000
 const MAX_WATCH_CITIES = 300 // 关注市区町村上限（防止配置与 UI 被撑爆）
-// 全球关注点上限：每个点带名字、经纬度与半径，几十个点就足够覆盖"我住哪、家人在哪"，
-// 再多说明用法不对（那是一张地图，不是一份关注列表）。
 const MAX_WATCH_PLACES = 20
-const RECONNECT_BASE = 1000 // 指数退避起点 1s
+const RECONNECT_BASE = 1000 // 重连间隔递增的起点 1s
 const RECONNECT_MAX = 60000 // 封顶 60s
 
 const SCALE_TEXT = {
@@ -59,9 +33,7 @@ const SCALE_TEXT = {
   45: '震度5弱', 46: '震度5弱以上', 50: '震度5强', 55: '震度6弱',
   60: '震度6强', 70: '震度7',
 }
-// 用户可选的最低震度档位（值 = P2PQuake scale 数值）。
-// 选项的**文字**搬去了 `00e-texts-units.js`（各语言一套），这里只留「值 → 文案 key」：下拉在渲染时
-// 取词，而模块级常量里的文字会在加载那一刻被固化（切语言就不跟着变）。
+// 用户可选的最低震度档位（值 = P2PQuake scale）。labelKey 由渲染时的取词函数解析成各语言文案。
 const SCALE_OPTIONS = [
   { v: 10, labelKey: 'scaleOpt.10' }, { v: 20, labelKey: 'scaleOpt.20' }, { v: 30, labelKey: 'scaleOpt.30' },
   { v: 40, labelKey: 'scaleOpt.40' }, { v: 45, labelKey: 'scaleOpt.45' }, { v: 50, labelKey: 'scaleOpt.50' },
@@ -74,44 +46,29 @@ const TSUNAMI_OPTIONS = [
   { g: 'Warning', labelKey: 'tsunamiOpt.Warning' },
   { g: 'MajorWarning', labelKey: 'tsunamiOpt.MajorWarning' },
 ]
-// 全球源（EMSC / USGS）的最低震级。全球目录里 M2.5+ 每天近百条，而用户真正关心的是
-// "我这附近有没有明显晃动"——M4.5 是全球速报的常用门槛，默认取它。
+// 全球源（EMSC / USGS）的最低震级档位，默认取 M4.5
 const GLOBAL_MAG_OPTIONS = [
   { v: 3, labelKey: 'magOpt.3' }, { v: 3.5, labelKey: 'magOpt.3.5' }, { v: 4, labelKey: 'magOpt.4' },
   { v: 4.5, labelKey: 'magOpt.4.5' }, { v: 5, labelKey: 'magOpt.5' }, { v: 5.5, labelKey: 'magOpt.5.5' },
   { v: 6, labelKey: 'magOpt.6' }, { v: 6.5, labelKey: 'magOpt.6.5' }, { v: 7, labelKey: 'magOpt.7' },
 ]
-// 大陆**地震速报**（cenc_eqlist）的最低震级。与预警分开的原因见 DESIGN 8.4：速报覆盖低到 M2.5，
-// 用预警阈值播报会被小震频繁打扰；而它又是 EEW 稀少时的唯一补报通道，所以两把旋钮而不是一把。
-// 档位比 GLOBAL_MAG_OPTIONS 少一档低值（M3.0）——大陆速报的取舍区间在 3.5–6.0。
+// 大陆速报（cenc_eqlist）的独立门槛：速报覆盖低到 M2.5，不与预警共用
 const CN_REPORT_MAG_OPTIONS = [
   { v: 3.5, labelKey: 'magOpt.3.5' }, { v: 4, labelKey: 'magOpt.4' },
   { v: 4.5, labelKey: 'magOpt.4.5' }, { v: 5, labelKey: 'magOpt.5' },
   { v: 5.5, labelKey: 'magOpt.5.5' }, { v: 6, labelKey: 'magOpt.6' },
 ]
 
-// ---------- 关注点半径（0.5.0 / DESIGN 9.2） ----------
-// 用语义标签而不是裸数字：普通用户不必理解"公里"，想精确控制的人有「自定义」这个出口。
-// 「本市及周边 100km」是**新建关注点**的默认值（旧值 300km 是为震中距设计的，
-// 套在城市上会把邻省地震也算进来）。既有配置里的 radiusKm 一律不动——
-// 静默把用户配好的半径从 300 改成 100 会让提醒变窄，那是漏报方向的变化。
+// ---------- 关注点半径 ----------
 const RADIUS_PRESETS = [
   { v: 30, labelKey: 'radius.30' },
   { v: 100, labelKey: 'radius.100' },
   { v: 300, labelKey: 'radius.300' },
 ]
-/** 新建关注点的默认半径（既有配置不动，见上）。 */
+// 新建关注点的默认半径；既有配置里的 radiusKm 一律不动
 const DEFAULT_PLACE_RADIUS_KM = 100
-/**
- * 缺半径时的兜底半径（0.9.4 / P3-37）：**比默认值宽**，而且是刻意的。
- *
- * 关注点来自旧配置 / 手工改过的 JSON 时可能没有 `radiusKm`。兜底取 100（界面上的默认值）看着
- * 更整齐，但那会把用户已经配好的监控范围**收窄**——收窄的直接后果是漏报，而本项目的取向一贯是
- * "宁可多响一次也不漏报"。所以这个值单独命名（`numOr` 的兜底不再是魔法数字 300），
- * 语义上它是"旧条目的兜底"，不是"新条目的默认"。
- */
+// 关注点缺 radiusKm 或值非法时的兜底：取比默认值宽的 300，避免收窄用户已配好的监控范围
 const LEGACY_PLACE_RADIUS_KM = 300
-/** 半径上下限，与 Host schema / normalizeCfg 的 1–2000 保持一致。 */
 const MIN_PLACE_RADIUS_KM = 1
 const MAX_PLACE_RADIUS_KM = 2000
 
@@ -131,10 +88,7 @@ const PREFECTURES = [
   ['宮崎県', '宫崎'], ['鹿児島県', '鹿儿岛'], ['沖縄県', '冲绳'],
 ].map(([jp, zh]) => ({ jp, zh }))
 const PREF_SET = new Set(PREFECTURES.map((p) => p.jp))
-// 都道府県コード → 都道府県名。PREFECTURES 的顺序就是 JIS 码 01..47（01 北海道 … 47 沖縄県），
-// 気象庁电文里的区域码前两位正是都道府県码：细分区 宗谷北部=011011、市町村 北九州市=4010000。
-// 判县因此优先用 code 而不是名称——名称有 25 例同名跨县（伊達市 北海道/福島県、川崎町 宮城県/福岡県…），
-// 且已改制的旧名会把历史电文里的区域认到别的县（福岡県「那珂川町」曾落到栃木県那珂川町）。
+// PREFECTURES 的顺序就是 JIS 码 01..47，而気象庁电文的区域码前两位正是都道府県码。 判县优先用 code 而不是名称：名称有 25 例同名跨县（伊達市 北海道/福島県），已改制的旧名也会认错。
 const PREF_BY_CODE = {}
 PREFECTURES.forEach((p, i) => { PREF_BY_CODE[String(i + 1).padStart(2, '0')] = p.jp })
 /** 区域码 → 都道府県名（取前两位；认不出返回空字符串）。 */
@@ -144,18 +98,12 @@ function prefOfCode(code) {
   const hit = PREF_BY_CODE[s.slice(0, 2)]
   return hit || ''
 }
-/** 都道府県名 → 2 位都道府県码（认不出返回空字符串）。测试电文按关注地区构造时用。 */
+/** 都道府県名 → 2 位都道府県码（认不出返回空字符串）。 */
 function prefCodeOf(pref) {
   const i = PREFECTURES.findIndex((p) => p.jp === pref)
   return i === -1 ? '' : String(i + 1).padStart(2, '0')
 }
-// 都道府県简写 → 全称：551 的 points[].pref 通常是全称，但实测直播数据里出现过「京都」
-// 这类简写，不归一就会与用户勾选的「京都府」永不相等（静默漏报）。
-//
-// 0.9.4（P3-38）：**北海道不能这样削后缀**。`/[都道府県]$/` 会把「北海道」削成「北海」——
-// 那不是一个地名，却成了一条简写映射；更糟的是 04-city-table 会用它给北海道的**每个**市町村
-// 造一个「北海○○市」的别名（"北海札幌市"这种根本不存在的写法），alias 索引里塞进上百条
-// 幻影条目。真正需要削后缀的只有 県 / 都 / 府（「北海道」是唯一的 道，本身就是全称）。
+// 都道府県简写 → 全称：源里的 pref 多半是全称，但出现过「京都」这类简写，不统一成全称就会与用户 勾选的「京都府」永不相等（静默漏报）。只削 県 / 都 / 府——「北海道」本身就是全称。
 const PREF_SHORT = {}
 for (const p of PREFECTURES) {
   const short = p.jp.replace(/[都府県]$/, '')
@@ -167,17 +115,7 @@ function normalizePref(raw) {
   return Object.prototype.hasOwnProperty.call(PREF_SHORT, s) ? PREF_SHORT[s] : s
 }
 
-/**
- * 都道府县的**显示名**（随界面语言变）。
- *
- * `PREFECTURES` 里的 `jp` 是**匹配用的**（P2PQuake 的 `pref` 就是这个形状，`PREF_SET` /
- * `PREF_SHORT` 都从它派生），所以显示不能复用它——`zh` 那一栏只是"简体界面用哪几个字"。
- * 这个函数负责挑出"给人看的那一份"：日文界面用原名，简体界面用 `zh`，繁体界面用 `PREF_HANT`，
- * 英文界面用罗马字（`PREF_EN`）。四种语言都不缺项时，同一条数据在四种语言下各有写法。
- *
- * 认不出的**原样返回**：调用方也会把源里的 `pref` 直接传进来，那里可能是简写或空值，
- * 不该被这里改写（简写归一由 normalizePref 负责，两件事分开）。
- */
+/** 都道府県的**显示名**（随界面语言变）：日文用原名，简体用 PREFECTURES[].zh，繁体用 PREF_HANT， 英文用 PREF_EN；`jp` 那一栏是匹配用的形状，显示不能复用它。认不出的原样返回。 */
 function prefLabelOf(pref) {
   const s = String(pref === undefined || pref === null ? '' : pref).trim()
   if (!s) return ''
@@ -186,22 +124,15 @@ function prefLabelOf(pref) {
   const lang = getLanguage()
   if (lang === 'ja') return hit.jp
   if (lang === 'en') return PREF_EN[hit.jp] || hit.jp
-  // 繁体缺项时回退到**日文原名**，与 en 分支同一形态：回退到 `hit.zh` 会在繁体界面里
-  // 静默显示简体县名（同一条列表里两种字形混杂），而原名是"我们没翻译"的显式形态，
-  // 一眼能看出并被抓进断言（0.9.3；当前 47 项齐全，这条只是防"加了县忘补表"）。
+  // 繁体缺项时回退到**日文原名**，与 en 分支同形：回退到 `hit.zh` 会在繁体界面里混进简体字形
   if (lang === 'zh-TW') return PREF_HANT[hit.jp] || hit.jp
   return hit.zh
 }
 
-// ---------- 时间：源时区 → 带偏移的 ISO 8601（DESIGN 第 4 节） ----------
-// 各源给的时间字符串**自己不带时区信息**——P2PQuake 是 JST（"2023/09/05 06:16:32"），
-// 单看字符串完全看不出这是哪里的本地时间。所以解析器负责把它转成带偏移的 ISO 8601
-// （"2023-09-05T06:16:32+09:00"），UI 只按**本地时区**渲染（Intl.DateTimeFormat）。
-// 不做这一步，大陆浏览器上会显示一个比本地时间早 1 小时、且没有任何标注的时间戳。
-// 其余源本身就是绝对时间，无需转换：JMA 的 ReportDateTime 带 +09:00、USGS 是 epoch 毫秒、
-// EMSC 的时间带 Z、NOAA CAP 的 <sent> 带偏移。
-// 历史记录里的**旧数据**没有偏移（0.4.1 之前写入的），一律按 JST 解释——旧数据只可能来自
-// P2PQuake 这一条链路（见 issuedToDate）。
+// ---------- 时间：源时区 → 带偏移的 ISO 8601 ----------
+// P2PQuake 与 Wolfx 给的时间串**自己不带时区**，解析器负责补成带偏移的 ISO 8601，UI 只按本地
+// 时区渲染；其余源本身是绝对时间（JMA 带 +09:00、USGS 是 epoch 毫秒、EMSC 带 Z、NOAA 的 <sent>
+// 带偏移）。历史里带不了偏移的旧数据一律按 JST 解释。
 const P2P_TZ_OFFSET = '+09:00'
 const P2P_TIME_RE = /^(\d{4})\/(\d{2})\/(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?$/
 /** P2PQuake 的裸 JST 时间串 → 带 +09:00 偏移的 ISO 8601；认不出时**原样返回**（绝不丢信息）。 */
@@ -214,10 +145,7 @@ function p2pTimeToIso(raw) {
   return m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] +
     (ms ? '.' + ms : '') + P2P_TZ_OFFSET
 }
-// ---------- 大陆源：中国标准时间（CST，UTC+8，无夏令时） ----------
-// Wolfx 的 `cenc_eew` / `cenc_eqlist` 给的是裸北京时间，形如 `2026-09-18 20:50:23`——与 P2PQuake
-// 的 `2023/09/05 06:16:32` **只有分隔符不同**，光看字符串完全无法区分是 JST 还是 CST（DESIGN 4.5）。
-// 所以同样由解析器补偏移，UI 只按本地时区渲染。中国全境单一时区、无夏令时，偏移恒为 +08:00。
+// Wolfx 的 cenc_eew / cenc_eqlist 给的是裸北京时间，与中国全境单一时区、无夏令时，偏移恒为 +08:00
 const CN_TZ_OFFSET = '+08:00'
 const CN_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?$/
 /** 大陆源的裸北京时间串 → 带 +08:00 偏移的 ISO 8601；认不出时**原样返回**（绝不丢信息）。 */
@@ -230,9 +158,7 @@ function cnTimeToIso(raw) {
   return m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6] +
     (ms ? '.' + ms : '') + CN_TZ_OFFSET
 }
-/** 时间串 → Date：裸 JST（P2PQuake）/ 裸北京时间（Wolfx）分别按各自偏移解释，其余交给 Date。
- *  两个源的时间串**看起来只差分隔符**，所以这里是按各自的正则分别补偏移，不能只判一种。
- *  漏掉大陆源那一支会让历史详情里的时间差 1 小时（且没有任何标注）。 */
+/** 时间串 → Date。JST 串与北京串看起来只差分隔符，所以按各自的正则分别补偏移，不能只判一种。 */
 function issuedToDate(raw) {
   const s = String(raw === undefined || raw === null ? '' : raw).trim()
   if (!s) return null
@@ -251,40 +177,28 @@ function formatIssuedLocal(raw) {
   } catch (err) { return d.toISOString() }
 }
 
-// ---------- 界面语言（0.8.1 立契约，0.9.0 由 00-i18n 提供） ----------
-// 选项**从 00-i18n 的语言清单派生**，不在这里另写一份：加一种语言只改 00-i18n 的 LANGS
-// 与 LANGUAGE_LABELS、再补一份文案表，配置契约（DEFAULT_CFG → normalizeCfg → Host schema）
-// 一行都不用动。值用 BCP 47 的完整标识（zh-CN / zh-TW / ja / en）。
+// ---------- 界面语言 ----------
+// 选项从 00-i18n 的语言清单派生：加一种语言只改 00-i18n 与文案表，配置契约一行都不用动
 const LANGUAGE_OPTIONS = LANGS.map((v) => ({ v, label: LANGUAGE_LABELS[v] }))
 
 const DEFAULT_CFG = {
   version: 1,
   source: 'prod', // prod | sandbox（沙箱回放 2023 年历史，约30秒/条，测试用）
-  // 大陆源的**链路选择**（0.5.0）：auto = SSE 优先、走不通自动降级为轮询；
-  // poll = 用户强制轮询。给出口的理由见 DESIGN 11.5——某些网络下长连接会被中间设备掐掉，
-  // 而"自动降级"判不出的那几种（能连上、偶尔漏、但整体像坏的）需要一个手动出口。
+  // auto = SSE 优先、走不通自动降级为轮询；poll = 用户强制轮询
   cnTransport: 'auto',
-  // 两种关注模式并存：
-  //   · 行政区（prefectures / cities）——日本源（P2PQuake、気象庁）用，粒度到市区町村
-  //   · 坐标点（places）——全球源（EMSC / USGS / NOAA）用，判定方式是「震中距 ≤ radiusKm」
-  // 两者互不影响：日本用户不用配 places，全球用户不用配 prefectures。
+  // 两种关注模式并存，互不影响（日本用户不用配 places，全球用户不用配 prefectures）： · 行政区（prefectures / cities）——日本源用，粒度到市区町村 · 坐标点（places）——全球源用，判定「震中距 ≤ radiusKm」
   watch: { prefectures: [], cities: [], places: [] },
   disasters: { earthquake: true, tsunami: true, weather: true, cnRainstorm: true, cnGeology: true, overseasWeather: true }, // weather = 日本气象灾害（泥石流 / 洪水 / 大雨 / 高潮…），固定 L4 以上播报；cnRainstorm / cnGeology = 中国大陆气象灾害（0.5.2），固定橙色以上播报；overseasWeather = 海外气象灾害（0.6.0，美国 NWS + 加拿大 ECCC），一个开关覆盖两个"按关注点生效"的源
-  // globalMagnitude：全球源（EMSC / USGS）的最低震级。日本源用的是震度（quakeScale），
-  // 全球源只有震级——实测 EMSC 会推 M3.8 级别的事件，若沿用"来什么报什么"会明显吵闹。
-  // cnReportMagnitude：大陆**速报**（cenc_eqlist）的独立震级门槛。大陆地震预警（cenc_eew）与
-  // 全球源共用 globalMagnitude（DESIGN 8.4）——它同样是"只有震级、没有分区烈度"的坐标型源。
+  // globalMagnitude：全球源（EMSC / USGS）的最低震级；cnReportMagnitude：大陆速报的独立门槛 （大陆地震预警与全球源共用 globalMagnitude——同样是"只有震级、没有分区烈度"的坐标型源）
   thresholds: {
     quakeScale: 40, eewScale: 45, tsunamiGrade: 'Watch',
     globalMagnitude: 4.5, cnReportMagnitude: 4.5,
   },
   notify: { sound: true, system: true, volume: 0.7, soundQuake: true, soundTsunami: true, soundWeather: true },
   dedupe: { windowMinutes: 10 },
-  // 静默时段（0.2.0）：按浏览器本地时间判定；跨午夜用 start > end 表示（如 23:00–07:00）
+  // 静默时段：按浏览器本地时间判定；跨午夜用 start > end 表示（如 23:00–07:00）
   quietHours: { enabled: false, start: '23:00', end: '07:00', breakForSevere: true },
-  // 界面语言（0.8.1 先立字段，本地化在 0.9.0）。**放在末尾是有意的**：Host schema 的字段顺序
-  // 也要跟着一致——那条"Host 默认值与 Client DEFAULT_CFG 完全一致"的断言是 JSON.stringify
-  // 全量比较，顺序不同就会红。
+  // 界面语言。**必须留在末尾**：Host schema 的字段顺序要与此一致——"Host 默认值与 Client DEFAULT_CFG 完全一致"的断言是 JSON.stringify 全量比较，顺序不同就会红。
   language: 'zh-CN',
 }
 

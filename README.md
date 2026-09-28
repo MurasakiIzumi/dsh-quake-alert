@@ -2,66 +2,41 @@
 
 **English** · [中文](./README.zh.md) · [日本語](./README.ja.md)
 
-> A DeepSeek Harness (DSH) plugin that delivers real-time disaster alerts while you are using DSH: **Japanese** earthquakes, tsunamis and weather warnings, plus **global** earthquakes (EMSC / USGS) and tsunamis (NOAA). When an alert matches the watch regions and thresholds you configured, it notifies you with an alert tone, an in-page toast, and a system notification.
+A DeepSeek Harness (DSH) plugin that alerts you in real time to **Japanese** and **global** earthquakes,
+tsunamis and weather hazards, matched against the regions and thresholds you configured. A matching
+alert gives you an alert tone, an in-page toast and a system notification.
 
-⚠️ **Disclaimer — please read first**: Alert data is provided or relayed by [P2PQuake](https://www.p2pquake.net/), the Japan Meteorological Agency's public XML feed, [EMSC](https://www.seismicportal.eu/), [USGS](https://earthquake.usgs.gov/) and [NOAA](https://www.tsunami.gov/) — none of them a direct official push channel. The content and delivery quality of Earthquake Early Warnings (EEW) are not guaranteed. Alerts from this plugin are **for reference only**; for evacuation decisions always follow the official announcements of your local authority (the JMA (気象庁) in Japan, NOAA in the United States, and so on). The plugin works only while a DSH page is open.
+⚠️ **Disclaimer — please read first**: alert data is provided or relayed by
+[P2PQuake](https://www.p2pquake.net/), the Japan Meteorological Agency's public XML feed,
+[EMSC](https://www.seismicportal.eu/), [USGS](https://earthquake.usgs.gov/) and
+[NOAA](https://www.tsunami.gov/) — none of them a direct official push channel, and the content and
+delivery quality of Earthquake Early Warnings (EEW) are not guaranteed. Alerts from this plugin are
+**for reference only**; for evacuation decisions always follow the official announcements of your local
+authority. The plugin works only while a DSH page is open.
 
 ## Features
 
-- **Real-time push**: a persistent WebSocket connection to P2PQuake; alerts are parsed as soon as they arrive (EEW typically reaches P2PQuake a few hundred milliseconds after the JMA issues it).
-- **Automatic reconnection**: exponential backoff (1s → capped at 60s). P2PQuake force-closes connections about every 10 minutes, so reconnecting is normal and needs no intervention. Two silent failure modes are detected and recovered from: a connection that never finishes connecting (no `onopen` within 15 s), and a connection that goes silent after it was established (half-open — no `onclose`, no data for 20 minutes).
-- **Disaster types**: earthquake reports (code 551), Earthquake Early Warnings (code 556), and tsunami forecasts (code 552) from P2PQuake, plus **weather alerts from the Japan Meteorological Agency** — landslides (土砂災害警戒情報, 大雨警報（土砂災害）), floods (指定河川洪水予報), heavy rain and storm surges.
-- **Watch regions (unified in 0.8.0)**: a **single** entry point — pick a country / region first, then that country's own controls unfold: Japan → prefectures (optionally narrowed to municipalities); Mainland China → province → prefecture-level city + radius; other countries / regions → a **city list** (towns of 100,000+ inhabitants, fetched per country) or coordinates + radius. Watched places are listed together in the same block and can be removed at any time. Leaving the Japanese prefecture list empty means all of Japan.
-- **Mainland China earthquakes (0.5.0)**: CENC's **earthquake early warning** (seconds, relayed by Wolfx) and **earthquake reports** (minute-level confirmation and backfill). The Chinese sources carry no regional intensity, so matching is by epicenter plus radius: just pick your city in the settings — no coordinates needed. The report threshold is a separate knob (M4.5 by default) so M2.5 tremors do not flood you.
-- **Mainland China weather hazards (0.5.2)**: **heavy-rain** and **geological-disaster** warning signals aggregated by the China Meteorological Administration's National Meteorological Center (issued by weather offices at every level, down to the county). Only **orange and above** is announced; yellow and blue are neither announced nor recorded — since 0.9.4 the history keeps only alerts that actually rang, plus the ones the plugin genuinely could not judge. Matching is by administrative area — the province / prefecture-level city you picked — so no radius is involved. An expired warning simply disappears from the list: **the source carries no "cleared" flag**, so "no cancellation received" does not mean "the alert is still in force".
+- **Realtime push, Japan**: a persistent WebSocket to P2PQuake for earthquake reports (551), Earthquake Early Warnings (556) and tsunami forecasts (552). EEW reaches P2PQuake a few hundred milliseconds after the JMA issues it.
+- **Realtime push, global**: an EMSC WebSocket for worldwide earthquakes.
+- **Japanese weather alerts**: landslides, floods, heavy rain and storm surges from the JMA's public XML telegrams, announced at warning level 4 and above.
+- **Mainland China**: CENC earthquake early warnings and reports relayed by Wolfx, plus heavy-rain and geological-disaster warning signals from nmc.cn (orange and above).
+- **United States and Canada**: NWS flood warnings and ECCC rainfall / flood / storm-surge warnings, fetched directly by the browser from the official APIs.
+- **Global earthquakes and tsunamis**: the USGS catalog and NOAA tsunami CAP messages, both polled by the Host half.
+- **Watch regions**: one entry point — pick a country / region, then that country's own controls. Japan → prefectures, optionally narrowed to municipalities; mainland China → province → city + radius; other countries / regions → a city list or coordinates + radius.
 - **Radius in semantic steps**: local only (~30 km) / city and surroundings (~100 km, the default for new watch points) / wider area (~300 km), or type an exact number of kilometres.
-- **Overseas weather alerts (0.6.0)**: flood / flash-flood / coastal-flood warnings from the US **NWS**, and rainfall / flood / storm-surge warnings from Canada's **ECCC**. Both are fetched **directly by the browser** from the official APIs (no Host relay) using the coordinates you set under "Other countries / regions": the NWS source judges by the county / zone the point falls in (with a radius ≥ 25 km it also samples four compass points, so the radius is an **approximation**), while the ECCC source converts your radius into a bounding box and asks ECCC for every warning overlapping it. Only **Warning**-class NWS events are announced (Flood / Flash Flood / Coastal Flood Warning); Watch, Advisory and Statement are below the threshold, so they are neither announced nor recorded in the history. ECCC contributes **warning**-class rainfall / flood / storm-surge alerts only — frost and fog are advisories (ECCC's own definition of "generally not considered hazardous"), while wind, heat and thunderstorms *are* warnings but fall outside this plugin's hazard scope. A warning published more than 6 hours before you open the page is recorded in history without ringing.
-- **Global earthquakes and tsunamis (0.4.0)**: EMSC's live WebSocket push plus USGS's global earthquake catalog (polled by the Host half) cover earthquakes worldwide; NOAA's tsunami CAP messages cover the Pacific and other basins.
-- **Only once per earthquake (0.8.0)**: the Japanese network, China's network, EMSC and USGS can each report the same earthquake on their own. Now **only the first source to arrive announces it**, and the remaining copies do not even enter the history (the test is ±2 minutes + 50 km + **across agencies**); the number of suppressed copies is counted in the diagnostic snapshot rather than vanishing silently. Two product lines inside the same agency (mainland China's warning → report) still follow the existing history-only path — "the network's final determination was M3.2" is useful information in its own right.
-- **Global watch points**: under the "other countries / regions" branch, pick cities by country (**towns of 100,000+ inhabitants**), or enter coordinates yourself / use browser geolocation; each point carries a radius (up to 20). An alert fires when the epicenter falls inside the radius and the magnitude reaches the global threshold (M4.5 by default, adjustable). Japanese earthquakes and tsunamis are unaffected by this and are still judged by prefecture; with no watch point configured, global and Chinese messages neither alert you nor enter the history.
-- **Disaster types and thresholds in one table (0.8.0)**: one hazard per row, with the switch on the left deciding whether to alert and the threshold on the right deciding how strong it has to be — earthquakes by observed intensity, EEW by predicted intensity, tsunamis by grade (advisory / warning / major warning), global and mainland-China earthquakes by magnitude, mainland reports on a threshold of their own. Weather hazards have fixed boundaries (L4 in Japan, orange in mainland China, warning overseas), so they get a switch and nothing else.
-- **Notifications**: synthesized alert tones (Web Audio; earthquake / EEW / tsunami / weather / cancellation each have their own tone) with adjustable volume; in-page toast when the page is visible, system notification when it is in the background. Earthquake and EEW headlines carry the intensity (observed or predicted), so the alert itself tells you how strong it is.
-- **Cancellation notices**: if an EEW you were alerted about is cancelled, or a tsunami forecast you were alerted about is cleared, a short follow-up (descending tone) tells you the earlier alert is void. A cancellation for an event you were never alerted about stays silent (history only). US NWS flood alerts carry a real `Cancel` semantic too — the event key is NWS's own VTEC tracking number `<office>.<phenom>.<sig>.<ETN>`, and a cancellation only changes its ACTION segment to `CAN`, so it is matched to the warning it withdraws and gets the same "no longer valid" reminder. ECCC's `status_en` has no verified meaning (a freshly issued frost advisory is also `ended`), so it is never treated as a cancellation; the two mainland-China feeds have no such field either (see the known limitations below).
-- **Quiet hours**: silence non-critical alerts during a daily window (local browser time; a start later than the end crosses midnight). Red-level alerts — EEW, tsunami warnings (Warning and above), intensity 6-lower-or-above earthquakes, and level-4+ weather alerts — still break through unless you turn that off. Suppressed alerts stay in the history.
-- **Weather alerts, level 4 and above**: the JMA states an explicit warning level on every weather telegram. Only level 4+ — the "evacuation instruction" grade — is announced; levels 1–3 are still fetched and parsed, and a level-3 hit adds one line to the sidebar tooltip, but below-threshold telegrams no longer enter the history (see the note under the table). See [Warning levels](#warning-levels-japan).
-- **Connection indicator**: a status dot at the sidebar foot — green connected, amber connecting/reconnecting/degraded, mid-grey data stale, blue data-format error (wait for a plugin update), red stopped or unreachable, hollow grey disabled by you — with per-source details on hover. Settings → **Test & diagnostics** → Source status additionally lists increments, failures, gaps, last poll and upstream staleness (0.4.1).
-- **Machine-level persistence**: configuration goes to DSH's machine-level storage (the Host settings `settings.yaml` up to DSH 0.1.6; the plugin entry's profile configuration from 0.1.7 on), so it survives across browsers and machines. A browser `localStorage` copy stays as a mirror, and as the fallback when that storage is unavailable; existing local settings migrate once, on first run.
-- **Municipality-level watch**: narrow earthquake reports down to individual cities / wards / towns / villages, chosen from a searchable per-prefecture list (1,917 entries). Observed-intensity point names are resolved to their municipality first, so the many official spellings all match (大阪北区茶屋町 → 大阪市北区, 福島伊達市 → 伊達市, 渡島北斗市 → 北斗市). Only observed-intensity points carry that granularity; EEW and tsunami stay prefecture-level, and a point that cannot be resolved is treated as a match rather than dropped.
-- **Data source switch**: production (live) or sandbox (replays 2023 history, roughly one message every 30 seconds, for testing).
-- **Smart de-duplication**: multiple releases for the same earthquake (intensity prompt → detailed intensity report, or successive EEW updates) notify you only once, and again only when the intensity is upgraded; when **several sources report the same earthquake** only the one that arrives first announces it (0.8.0). With several DSH pages open, only one tab plays the alert.
-- **History**: the most recent 30 processed messages **from the past 5 days** (both limits apply). Since 0.9.4 it keeps only entries that actually rang, plus the ones the plugin genuinely could not judge (missing region data, missing coordinates, a hypocenter-only report with no intensity) — alerts below your threshold, or from regions you do not watch, are neither announced nor recorded; click an entry to expand its details.
-- **Interface language (0.9.0; Traditional Chinese added in 0.9.3)**: 简体中文 / 繁體中文 / 日本語 / English, switched in Settings → More → Language, and it takes effect **immediately** (no restart). Simplified and Traditional Chinese are **two separate text sets** — the Traditional one is written in Taiwan wording (設定 / 匯入 / 紀錄 / 載入 …), not converted character by character. Only the text **this plugin writes itself** is translated — setting labels, notification titles, action prompts, disclaimers, hit lines and history badges. Everything that comes from a source stays verbatim: headlines, descriptions, place names, the weather agency's own category names. An alert about a Japanese earthquake therefore reads as an English (or Chinese) template wrapped around Japanese place names — that is by design, not a gap.
-- **Settings export and import (0.9.0)**: write your configuration (watch regions, thresholds, language, data source, quiet hours, notification switches) to a JSON file and load it on another machine or browser. The file carries a **format version and no plugin version**; a file whose format is newer than this build can read is **refused outright** rather than half-parsed. Importing **replaces** the whole configuration, and the previous one is backed up automatically first, so "Undo last import" is always available. Alert history and source health are **not** part of the file.
-
-## How it works
-
-```
-P2PQuake WebSocket ──┐   (Japan: earthquake / EEW / tsunami — Client connects directly)
-EMSC WebSocket ──────┤   (Global: earthquakes — Client connects directly)
-                     ├──▶ parser (→ unified alert object)
-JMA Atom feed ───────┤   (Japan: landslides / floods / heavy rain / storm surges)
-USGS GeoJSON ────────┤   (Global: earthquake catalog)   Host polls these three,
-NOAA CAP ────────────┘   (Global: tsunamis)             Client reads the local route
-                                     │
-                                     ▼
-                 matcher (administrative areas × thresholds / coordinate + radius)
-                                     │ hit
-                                     ▼
-                  notify: tone + toast (foreground) / system notification (background)
-                                     │
-                                     ▼
-                      recent alert history (persisted in localStorage)
-```
-
-- All realtime logic runs in the browser (the Client half): the WebSocket connections, parsing, matching, notifications and the history list. The Host half wires the `quake-alert` configuration into the host's settings service (from 0.1.7 the form is derived from the exported `Config` schema; up to 0.1.6 the plugin registered the namespace itself), serves the read-only municipality table, river-forecast-area table, Chinese administrative-division table and country / region list at `/dsh-quake-alert/areas` (**the cities themselves are fetched separately, in per-country chunks, with `?country=XX`** — see 0.8.0), and polls the feed for each of the three polled sources.
-- **Two realtime links, both Client-direct**: P2PQuake (Japan, sub-second) and EMSC (global). Global earthquake traffic is far sparser than Japan's — an M4+ event arrives roughly every 30 minutes on average — so the EMSC connection **deliberately uses a long three-hour "no data" threshold** instead of a tight one: M4+ events are sparse enough that a short window would keep tearing down a perfectly healthy connection. Real disconnects are still caught by `onclose` and the connect watchdog.
-- **Three polled sources, one external requester (the Host half)**: the JMA Atom feed (landslides / floods / heavy rain / storm surges, about once a minute), the USGS GeoJSON catalog (global earthquakes, every 2 minutes) and the NOAA event list plus CAP messages (tsunamis, every 5 minutes). The Host remembers which entries it has already fetched and exposes the increment on a local read-only route, `/dsh-quake-alert/feed?source=jma|usgs|noaa&since=N`; the Client polls that route every 15 s and hands each message to the very same `handleAlert` used by P2PQuake messages. Keeping the only external requester on the Host means several DSH tabs or windows never multiply the requests — the JMA explicitly asks consumers not to re-download a file it has already served, and blocks IPs that do. The Client persists a cursor per source, so a refresh resumes where it left off instead of replaying the buffer; a first run (no cursor yet) uses `?since=tail` to align to the current position without replaying anything.
-- **Two overseas sources, fetched directly by the Client (0.6.0)**: the US NWS and Canada's ECCC are queried straight from the browser rather than through the Host half. The reason is that they are **only usable as per-watch-point queries** (NWS `?point=lat,lon`, ECCC `bbox=`), while pulling everything would mean 1.2 GB/day and 144 MB/day respectively; the Host's standing rule is that it does not know the Client's configuration, so it has no watch points — going through the Host would force full pulls and effectively mean dropping both sources. Both APIs return `Access-Control-Allow-Origin: *` (measured), so the browser can call them directly. The two are deliberately not unified: NWS `?point=` returns the warnings for the county / zone containing the point and does not expand to a radius, so radii ≥ 25 km add four compass samples (an approximation); ECCC's `bbox` takes the radius directly. Requests are serial, with a 10 s timeout and a 512 KB body cap; **no watch point in that country means no request at all**.
-- **Two watch modes coexist**: Japanese sources are judged by prefecture (optionally narrowed to municipalities); global sources carry only an epicenter, so they are judged by spherical distance (Haversine) against your watch points and their radius. Magnitude and JMA intensity are not convertible into one another, which is why global sources get a threshold knob of their own (M4.5 by default). The settings page unifies them into **one user path** (pick a country / region first), but there are still two data models underneath — forcing Japan onto coordinate matching would miss earthquakes whose epicenter is somewhere else while your own area still reaches intensity 5-lower.
-- WebSocket messages carry the same payload as the HTTP `/history` endpoint, but the id field name differs (WS uses `_id`); the parser accepts both.
-- Region normalization: area names in EEW / tsunami messages (such as `上川地方北部` or `東京湾内湾`) are resolved through an explicit area table, then by prefix-matching the 47 prefecture names, and finally by the EEW prefecture forecast name. For JMA telegrams the prefecture is taken from the first two digits of the area code (which _is_ the prefecture code) — more reliable than names, which collide across prefectures. River forecast areas are mapped to their municipalities through a generated table. Areas spanning several prefectures (such as `有明・八代海`) are expanded and evaluated per prefecture.
-- Three-layer de-duplication: ① message id (guards against replay after a reconnect) ② event key (multiple releases of the same earthquake; an intensity upgrade still breaks through and alerts again) ③ cross-tab (`BroadcastChannel`, so only one page plays the alert).
-- Quiet hours are evaluated after a match: a suppressed alert is still recorded in the history with the reason, and red-level alerts break through by default.
+- **Thresholds in one table**: one hazard per row, with the switch on the left deciding whether to alert and the threshold on the right deciding how strong it has to be. Weather hazards have fixed boundaries, so they get a switch and nothing else.
+- **Notifications**: synthesized alert tones with adjustable volume, an in-page toast while the page is visible and a system notification while it is in the background. Earthquake and EEW headlines carry the intensity.
+- **Cancellation notices**: a short follow-up tone when an EEW you were alerted about is cancelled or a tsunami forecast is cleared. NWS cancellations are matched through the warning's VTEC tracking number.
+- **Quiet hours**: silence non-critical alerts during a daily window. Red-level alerts break through unless you turn that off.
+- **Reconnection**: exponential backoff (1s → 60s). P2PQuake force-closes connections about every 10 minutes, so reconnecting is normal; a connection that never opens and a connection that goes silent afterwards are both detected and recovered from.
+- **Only once per earthquake**: multiple releases of the same earthquake notify once, and again only when the intensity is upgraded. When several agencies report the same earthquake, only the first source to arrive announces it.
+- **History**: the most recent 30 processed messages from the past 5 days, keeping only the alerts that actually rang and the ones the plugin genuinely could not judge.
+- **Interface language**: 简体中文 / 繁體中文 / 日本語 / English, switched in the settings and applied immediately. Text that comes from a source stays verbatim.
+- **Settings export and import**: write your configuration to a JSON file and load it on another machine or browser. Import replaces the whole configuration and backs up the previous one first.
+- **Saved on this machine**: configuration is stored through DSH, so it survives across browsers and machines, with a browser copy as a mirror and fallback.
+- **Source status**: a status dot at the sidebar foot with per-source details on hover, plus increments, failures, gaps, last poll and upstream staleness under Settings → Test & diagnostics.
+- **Data source switch**: production (live) or sandbox (replays 2023 history, roughly one message every 30 seconds).
+- **Local diagnostics**: two test buttons build telegrams in the source format and run them through the real parsers and matcher, making no network request at all.
 
 ## Installation
 
@@ -72,250 +47,40 @@ dsh plugin --profile web add github:MurasakiIzumi/dsh-quake-alert
 # Restart dsh web to activate the plugin
 ```
 
-**Updating**: replace the package contents, then restart `dsh web`. Changes confined to the Client half (`client/`) take effect after a page refresh; anything under `lib/` (the Host half) needs the restart.
+**Updating**: replace the package contents, then restart `dsh web`. Changes confined to the Client half
+(`client/`) take effect after a page refresh; anything under `lib/` needs the restart.
 
 ## Usage
 
 1. Open **Settings → Disaster Alerts** (灾害预警).
-2. **Watch regions**: pick a **country / region** first (Japan / Mainland China / other countries / regions), then work through that country's own controls:
-   - **Japan**: select the prefectures you live in or care about (leave empty for all of Japan). Once a prefecture is selected you can narrow it further to municipalities (searchable, multi-select).
-   - **Mainland China**: pick a province → a city → a radius → "Add this city". Alternatively click "Use my location" to add a watch point straight from browser geolocation (it warns you that the fix may be imprecise). Coordinates in the table are **administrative centres** — for very large prefectures (Garzê, Harbin) the point can be over 100 km from the urban centre, so widen the radius if you live on the edge.
-   - **Other countries / regions**: pick a country → find a city in the search box → **one click adds it** (it uses the shared radius steps). The city table only contains **towns of 100,000+ inhabitants**; for a country / region missing from the table, or for an exact point, fill in the coordinate form below by hand (or use "Use current location").
-   - Watched places are **listed together** below this block (grouped by origin: Japan / Mainland China / other countries) and can be removed at any time.
-3. **Disaster types and thresholds**: one hazard per row — the switch decides whether to alert, the threshold decides how strong it has to be. Weather hazards have fixed boundaries, so they get a switch and no steps.
-4. **Notifications and sound**: enable the alert tone and/or system notifications and adjust the volume. Use the preview buttons to check the tones, and "Test system notification" to grant permission and verify delivery.
-5. **Data source**: keep "Production" for daily use; switch to "Sandbox" to verify the pipeline or see it in action (about one 2023 replay every 30 seconds).
-6. **Test & diagnostics**: two test buttons (weather / global) build **telegrams in the source format** locally and run them through the real parsers and matcher, making **no network request at all**, so you can click them as often as you like — the way to confirm the pipeline works on a day with no real disaster (the result line reports honestly whether anything was announced, and why not when it was not). Below them are the per-source status and the diagnostic snapshot (ready to paste into an AI assistant for troubleshooting).
-   - **"Send test global alert (rotating scenarios)"** builds EMSC / USGS / NOAA telegrams. Four scenarios rotate; the "distant earthquake" one is ~550 km away (it misses when your radius is smaller than that and hits when it is larger), to show what the radius does.
-   - **"Send test weather alert (rotating scenarios)"** rotates through landslide / flood / heavy rain / storm surge, plus an L3 case that deliberately stays silent.
-   - **"Global source status"** shows the EMSC connection plus how many increments each polled source (JMA / USGS / NOAA) has received and how long ago it last polled — so you can confirm the pipeline is alive. Worldwide earthquakes are infrequent by nature; hearing nothing is the normal state.
+2. **Watch regions** — pick a **country / region** first, then work through that country's own controls:
+   - **Japan**: select the prefectures you care about (leave empty for all of Japan); a selected prefecture can be narrowed to municipalities.
+   - **Mainland China**: pick a province → a city → a radius → "Add this city", or use "Use my location". The coordinates in the table are administrative centres, so widen the radius for very large prefectures.
+   - **Other countries / regions**: pick a country, find a city and add it in one click, or fill in the coordinate form by hand. The city list holds towns of 100,000+ inhabitants.
 
-When an alert matches, you get a tone plus a foreground toast or a background system notification, and the event is recorded in "Recent alerts".
+   Watched places are listed together below this block and can be removed at any time.
+3. **Disaster types and thresholds** — one hazard per row: the switch decides whether to alert, the threshold decides how strong it has to be.
+4. **Notifications and sound** — enable the alert tone and/or system notifications, adjust the volume, and use the preview buttons to check them.
+5. **Data source** — keep "Production" for daily use, or switch to "Sandbox" to verify the pipeline.
+6. **Test & diagnostics** — the two test buttons build telegrams in the source format locally and run them through the real parsers and matcher, making no network request, so you can click them as often as you like. Below them are the per-source status and a diagnostic snapshot you can paste into an AI assistant.
+
+When an alert matches, you get a tone plus a foreground toast or a background system notification, and
+the event is recorded in "Recent alerts".
 
 ## A source is unreachable? (mainland-China networks)
 
 Under mainland-China networks a data source may become unreachable, stop updating, or alerts may stay
-silent. Those failures only reproduce there — this project's dev machine exits from Japan — so the
-approach is to make every failure **visible** and ship a troubleshooting document written **for an AI
-assistant** (Chinese only, since mainland users are its only audience):
+silent. Those failures only reproduce there, so the plugin makes every failure **visible** under
+**Settings → Disaster alerts → Test & diagnostics → Source status**, and ships a troubleshooting
+document written **for an AI assistant** (Chinese only, since mainland users are its only audience):
 
 > **Hand [`TROUBLESHOOTING.zh.md`](./TROUBLESHOOTING.zh.md) to your AI assistant and let it work
 > through it step by step.**
 
-That document explains no theory and asks nobody to "open a menu and look": every section is
-"trigger → command you can actually run / state you can actually read → what the result means".
-The AI cannot fix the network; its job is to **classify** the failure, **state the blast radius**
-(which links still work), and pick a downgrade path where one exists — and to say plainly when the
-conclusion is "not something you can fix".
+## More documentation
 
-For day-to-day self-checks you do not need the document: **Settings → Disaster alerts → Test & diagnostics → Source status**
-lists each source's state, how many increments arrived, failure counts, gap counts and the time of the
-last poll; hovering the sidebar status dot shows the same (abnormal sources first).
-
-## Behaviour changes in 0.4.1
-
-- **Region filtering is stricter about unresolvable areas (adjusted in 0.4.2).** When a message
-  contains at least one area that resolves to a prefecture, areas that cannot be resolved no longer
-  take part in prefecture filtering (one unknown forecast-area name no longer alerts every user);
-  only when *every* area is unresolvable does it pass (prefer over-alerting over going silent).
-
-- **Weather events are merged per (forecast office, hazard) with a 3-hour event window.** Updates,
-  area extensions and continuations of the same hazard from the same office alert once; an intensity
-  escalation (L3→L4) still alerts again. Crossing an hour boundary, or the same event issued by two
-  offices, may still alert twice — we prefer one extra chime over a missed alert.
-- **The L4 gate now looks at the level of the region that matched**, not the telegram maximum. In one
-  real telegram (Hyogo, 2026-09-14) Himeji is L4 while Aioi is L3 and Nishiwaki is L2; watching only
-  Nishiwaki no longer produces an overstated "evacuation-level" alert.
-- **A tsunami cancellation only matches when the telegram lists the forecast areas.** A cancellation
-  without a list is recorded in history but does not notify — that avoids "some other sea area's
-  cancellation is presented as your event" (a false all-clear is the worst kind of wrong for tsunamis).
-- **Global earthquakes are graded by magnitude** (EMSC/USGS have no intensity scale), so the red-level
-  quiet-hours bypass applies to M7+ global quakes too.
-- **"Source is responding but data is old" is a separate state** (mid-grey): JMA's feed update time or
-  USGS's feed generation time beyond the threshold shows as upstream staleness, distinct from
-  "no news". A data-format problem is shown in blue — that is not the user's network to fix.
-- **P2PQuake timestamps are converted from JST to your local time zone** in history details (previously
-  the raw JST string was shown, an hour off with no label for mainland-China users).
-
-## Known limitations
-
-- The plugin runs with the DSH page: closing the page stops it, and browsers may throttle background tabs, delaying notifications.
-- Cancellation / clearance notices only fire for events that were previously alerted; a cancellation for an event you never saw stays in the history and does not interrupt you.
-- Tsunami forecasts (552) carry no mergeable event id, so successive releases of the same tsunami (added areas, upgraded grade) each notify.
-- With several DSH pages open, each page keeps **two** WebSocket connections of its own (P2PQuake and EMSC). Alerts are de-duplicated via BroadcastChannel, but the number of connections grows with the number of tabs — and P2PQuake enforces a concurrency limit, so opening a great many tabs deserves a thought.
-- Several DSH pages **share the same per-source cursors**: a telegram or earthquake already handled by one page is not replayed in another (cross-tab de-duplication only ever lets one page announce it). The trade-off is that a page opened or reloaded later does not add those already-consumed entries to its own "Recent alerts" list.
-- Hypocenter-only reports (551 "hypocenter information" / "distant earthquake") carry no intensity data and cannot be evaluated against thresholds; they are recorded in "Recent alerts" with an explanatory note.
-- System notification permission must be granted once via "Test system notification"; the alert tone requires one user interaction before the browser allows it (autoplay policy).
-- **Coverage**: Japanese earthquakes / EEW / tsunamis come from P2PQuake over a WebSocket, and weather alerts from the JMA's Atom feed (polled by the Host half about once a minute). Outside Japan, coverage comes from EMSC (live push), USGS (global catalog, polled by the Host every 2 minutes) and NOAA (tsunami CAP, polled every 5 minutes). Earthquakes in **mainland China** come from Wolfx relaying CENC (the China Earthquake Networks Center): the Host half holds one persistent connection per source and streams it to the page over SSE. Weather warnings for mainland China come separately from nmc.cn's warning-signal list (polled by the Host half every 120 seconds) and cover the heavy-rain and geological-disaster categories only. US and Canadian weather alerts (0.6.0) are fetched **directly by the browser** from the NWS and ECCC APIs, using the watch points configured under "Other countries / regions". Other regional weather sources (Europe's MeteoAlarm, GDACS) were evaluated and left out — their granularity, hazard set or coordinate support did not qualify.
-- **Five boundaries of the overseas weather sources (0.6.0; ④⑤ added in 0.6.1)**: ① the US radius is an **approximation** — NWS judges by county / zone and the radius only adds four samples, so coverage of every county inside the radius is not guaranteed; ② **ECCC does not cover river floods** — river-flood warnings in Canada are issued by provincial agencies (such as the BC River Forecast Centre) with no national API, while ECCC issues weather warnings and coastal storm-surge warnings; "the plugin is installed" must not be read as "somebody is watching Canada's floods"; ③ **neither source can detect an upstream stall** — a per-point / per-box query is legitimately empty, so "no data this round" and "the upstream stopped" look identical; only request failures and schema drift are observable. Note also that the NWS is key-free today but has said its User-Agent string will become an API key — at that point direct browser calls stop working and the Host half would have to be brought back in.
-  (added in 0.6.1) ④ **ECCC has no reliable "ended" signal** — its `status_en` does contain `ended` / `continued`, but a freshly issued frost advisory is also `ended`, so the meaning is unverified and ECCC's `cancelled` is **always false**: an expired ECCC warning never produces a follow-up saying it is void (better to say one word too many than to pretend we can handle it). NWS does have a real CAP `Cancel`, and that cancellation path works. ⑤ **ECCC's hazard whitelist is the only part of this design not backed by measurements** — its code table has no official enumeration and there are no rainfall samples in the current season, so the whitelist is built from English-name keywords and needs calibration once real rainfall warnings arrive. Mind the age rule too: alerts already issued more than 6 hours ago when you **open the page** are recorded without ringing, and a page that has been **asleep for over 30 minutes** is treated the same way on wake.
-- **Global sources are coarser than Japanese ones**: they carry only an epicenter and a magnitude, with nothing down to the municipality; tsunamis are expressed as NOAA sea areas (such as `SCOTIA SEA`) rather than Japan's 津波予報区; and landslides / floods outside Japan have no ingestion channel yet.
-- **The same earthquake may still be reported once by each source (narrowed in 0.8.0, but not eliminated)**: the cross-source merge window is ±2 minutes + 50 km + across agencies, so when two determinations fall outside it in time or epicenter (EMSC's and USGS's origin times cross a minute boundary, or their epicenters differ by more than 50 km) each still reports once. Suppressed copies **do not enter the history**, but they are counted in the `authority` section of the diagnostic snapshot. The trade-off matches the rest of the project: better one chime too many than a missed alert.
-- **The global city table only contains towns of 100,000+ inhabitants (0.8.0)**: small towns and villages are not in it, so use the coordinate form or "Use current location" when you need one. Cities with the same name inside one country get their first-level administrative area appended to the name ("Springfield (Illinois)"), and that area name is **in English** (GeoNames only provides Latin-script names) — it only affects how readable the list is and takes no part in matching.
-- **City names in the global table are plain Latin, and country names are localized (0.9.4)**: city names used to come from GeoNames' `alternatenames` **preferring a CJK candidate**, so one table mixed Simplified, Traditional and Japanese forms (Rome read 羅馬 while its administrative area was the Latin "Lazio"). Localizing them would need GeoNames' **language-tagged** candidates (`alternateNamesV2` — a much larger download), so they are now **uniformly Latin** instead (Rome / Milan / New York City; none of the 5224 entries contains a Han character). Country / region names are resolved per interface language — Simplified, Traditional, Japanese and English, computed from ICU rather than copied from a table. Regenerating the city table needs the GeoNames dump: `node scripts/build-world-cities.mjs` (it downloads the dump, or reads a local copy with `--from <directory>`).
-- **Machine-level configuration with a wrong type falls back to the browser's storage (0.1.7 path)**: if a value in the Host's settings file fails schema validation, the plugin uses the configuration kept in the page's localStorage instead. On the older (0.1.6) path a warning was visible; on the current one the rejection happens on the Host side and this plugin never sees it, so the only symptom is "the value I edited did not take effect". Values that fail validation are the ones outside the declared ranges or of the wrong type — the plugin does not merge partially valid objects.
-- **A reconnect can replay up to a full ring buffer (120 entries) over SSE (registered, measured, accepted)**: `/feed` caps a batch at 50 entries, but the SSE replay path does not. Each replayed entry costs one write to localStorage; measured, 120 of them (a 6.7 KB history plus a 1.2 KB "already announced" map) come to about **1.8 ms** of CPU, and it only happens on reconnect. A cap would not save any data (entries past the ring buffer's age are gone either way) while creating the impression of a complete catch-up, so the behaviour is left as it is.
-- **Weather events are de-duplicated by a 3-hour window, not merged into one item**: successive telegrams from the same issuing office for the same hazard (updates, area extensions, "continues") do not ring again unless the level rises, and a clearance clears the memory so a re-issue rings again. There is deliberately no aggregator that folds them into a single evolving entry — that would make it harder to tell which issue you are looking at, and the project's standing trade-off is one chime too many rather than a missed alert.
-- **Some text still does not follow the interface language (0.9.4 narrowed this a lot)**: our own event text — type labels, intensity / tsunami grade words, match reasons, the `（未命中：…）` suffix in history — is now localized into all four languages, and wording that comes from the source (JMA's own Japanese sentences, place names, agency names, NWS / ECCC official event names) is passed through verbatim by design. The **status / diagnostic layer** (connection, backoff, stalled feeds, parse failures) is deliberately **English-only and kept short** — about 70 strings that only a person reading the sidebar or pasting a diagnostic snapshot looks at, and the reader's own language buys little there; the test-telegram dropdown in the settings page *is* localized into all four languages (its scenario names and notes), and the simulated telegrams are Japanese for the Japanese source, English for the global sources, like the real ones.
-- **The Wolfx relay's REST fallback is unverified against the live endpoint (measured only through injected fetchers)**: when the WebSocket to the Wolfx relay is not connected, the Host half polls `https://api.wolfx.jp/<source-id>.json` (for example `cenc_eqlist.json`) as a fallback. `api.wolfx.jp` was unreachable from the author's network (the TLS handshake is cut, the same way `download.geonames.org` is), so the endpoint's real shape is covered by unit tests with injected fetchers only. Run `node scripts/check-wolfx-live.mjs` on a network that can reach it to confirm.
-- **The Chinese sources carry no cancellation or final-report flag (safety-relevant)**: neither CENC stream has a "cancelled" or "final" field, so **if an alert already announced to you is later withdrawn or revised upstream, the plugin cannot send a follow-up saying it is void** — the cancellation path that exists for Japanese EEW / tsunamis does not apply here. That is a gap in the source itself, not something an implementation can paper over. For anything you receive, defer to CENC's own official release.
-- **The mainland weather source has no "cleared" flag either, and orange alerts do not pierce quiet hours**: nmc.cn's warnings are a "currently in force" set — an expired warning simply vanishes from the list, so the plugin never sees a "cleared" action and will not post a follow-up saying a heavy-rain / geological-disaster alert it announced is void. Orange is also mapped faithfully to the official level (orange ≠ red) while quiet hours release red only by default, so an orange warning issued at night leaves a trace in "Recent alerts" and nothing more.
-- **Mainland China's EEW threshold sits around M4.0**: the warnings themselves are sparse (a few days apart in practice), so you will receive noticeably fewer alerts than for Japan. The reports stream (which does have data daily) has its own magnitude threshold, M4.5 by default and adjustable in the settings.
-- **The Chinese push channel can be downgraded**: the page uses an SSE long connection (seconds of latency); if a network middlebox cuts it (EventSource unavailable, no first frame after repeated attempts, or connected but not streaming), the plugin automatically falls back to 15-second polling and says so under "Source status" in the settings. You can also force polling there.
-- **CENC's warning and report streams are independent**: if both cover the same earthquake they are merged by origin time (minute) plus epicentre (0.1°) so you are alerted once — that is **inside one agency**, and it runs down the "no intensity upgrade → history only" path, so 0.8.0's cross-source suppression does not apply to it; if they fall on opposite sides of a minute boundary, or the epicentres differ by more than 0.1°, the merge fails and the same earthquake may alert twice. Same trade-off as the global sources: better twice than never.
-- **The EMSC connection uses a long three-hour "no data" threshold**: an M4+ event arrives roughly every 30 minutes worldwide, so a tight window would keep tearing down a healthy connection. Real disconnects are still detected and reconnected.
-- Weather alerts are deliberately threshold-free: the cut-off is fixed at level 4, so there is no slider to tune — the switch is simply on or off.
-- The sandbox replays mostly small, low-intensity earthquakes, so long periods without a match under the default "intensity 4 or higher" threshold are expected.
-
-## Warning levels (Japan)
-
-The JMA states an explicit warning level (警戒レベル) on every weather telegram. This plugin announces **level 4 and above only**:
-
-| Level | What it means in Japan                    | Typical products                                           | What this plugin does                              |
-| ----- | ----------------------------------------- | ---------------------------------------------------------- | -------------------------------------------------- |
-| 1     | Be aware                                  | 早期注意情報                                               | not announced, not in history                      |
-| 2     | Check your hazard map                     | 大雨注意報、洪水注意報（レベル２…）                        | not announced, not in history                      |
-| 3     | Elderly and vulnerable residents evacuate | 大雨警報（土砂災害）、洪水警報（レベル３…）                | **sidebar tooltip only** — no sound, no popup      |
-| **4** | **Evacuation instruction**                | 土砂災害警戒情報、氾濫危険情報、大雨危険警報、高潮危険警報 | **announced** — tone + toast / system notification |
-| **5** | Emergency safety measures                 | 大雨特別警報、氾濫発生情報                                 | **announced**                                      |
-
-Why the cut-off sits at 4: levels 1–2 call for "check the hazard map", which a desktop popup cannot act on, and level 3 is aimed at elderly and vulnerable residents — neither matches how DSH is used. Level 4 is the grade that actually threatens life and property, and it is the grade the JMA labels 「避難指示」. Levels 1–3 are still fetched and parsed, and a level-3 hit shows up in the sidebar tooltip — but since 0.9.4 they no longer fill "Recent alerts": that list keeps only alerts which actually rang, plus the ones the plugin genuinely could not judge (missing region data, missing coordinates, a hypocenter-only report with no intensity), so you can still verify what the plugin saw without the L1–L3 traffic crowding it out.
-
-## Development
-
-```
-client/src/*.js       # client sources: 35 standard ESM modules (explicit import/export; each header states job + deps)
-client/client.js      # DSH single-file bundle — GENERATED by rollup, do not edit
-lib/index.js          # Host half: settings namespace (schemastery) + the /areas and /feed read-only routes
-lib/poller.js         # Host half: generic feed poller (entry de-duplication, ring buffer, cursor; single-stage and two-stage sources)
-lib/global-sources.js # Host half: USGS / NOAA feed parsers and endpoints (the JMA parser is still the poller default)
-lib/data/cities.js    # municipality table (generated from public data; served to the browser half)
-lib/data/cn-areas.js  # Chinese administrative divisions (provinces → prefecture-level cities + coordinates, GENERATED by build-cn-areas.mjs)
-lib/data/world-cities.js  # global city table (166 countries / 5224 cities, served per country, GENERATED by build-world-cities.mjs)
-lib/data/river-areas.js   # river forecast areas → municipalities (GENERATED by build-areas.mjs)
-scripts/build-client.mjs  # bundles client/src into client/client.js with rollup
-scripts/build-areas.mjs   # regenerates lib/data/river-areas.js from the JMA public zip
-scripts/build-cn-areas.mjs # regenerates lib/data/cn-areas.js from the official administrative-division data (needs network)
-scripts/build-world-cities.mjs # regenerates the global city table from the GeoNames dump (needs network)
-scripts/lib/zip.mjs   # zero-dependency zip reader shared by the build scripts
-scripts/lib/geonames.mjs  # reads and parses the GeoNames dumps by column (shared by the two table scripts)
-scripts/check-imports.mjs # fails on a missing import, or an assignment to an undeclared name
-cordis.patch.yml      # plugin row insert declaration
-tests/sync-test.cjs   # regression tests: parser / matcher / region normalization / Host poller / feed client / WebSocket state machine (plain node, no browser)
-tests/area-tables.cjs # JMA area names and tsunami forecast areas → expected prefectures (test data)
-```
-
-```sh
-node scripts/build-client.mjs          # rebuild client/client.js after editing client/src
-node scripts/build-areas.mjs           # regenerate the river-area table from the JMA public zip (needs network)
-node scripts/build-cn-areas.mjs        # regenerate the Chinese administrative-division table (needs network)
-node scripts/build-world-cities.mjs    # regenerate the global city table from the GeoNames dump (needs network)
-node scripts/check-imports.mjs         # cross-module reference check (missing import / undeclared assignment)
-node scripts/build-client.mjs --check  # fail when the committed bundle is stale
-node tests/sync-test.cjs               # regression tests (2133 assertions)
-node scripts/check-time-travel.cjs 180 # time-travel guard: shift the clock +180 days and rerun the suite (catches date-dependent assertions)
-node scripts/check-contracts.mjs       # contract check: pull the live sources through the parsers to catch upstream changes (--offline uses samples/, no network)
-```
-
-> **Note**: `tests/sync-test.cjs` loads the **built** `client/client.js`. After editing `client/src/`
-> always run `node scripts/build-client.mjs` first, otherwise you are looking at the previous build.
-> One-liner: `node scripts/build-client.mjs && node tests/sync-test.cjs`.
->
-> On Windows, if `pnpm` fails with "cannot be loaded because running scripts is disabled", use
-> `pnpm.cmd check` / `pnpm.cmd test` (or `npx pnpm check`). `pnpm check` only verifies the bundle is
-> current; `pnpm test` rebuilds and then runs the regression suite.
-
-> Edit `client/src/*.js`, never `client/client.js` — DSH requires a single-file client bundle (flat module
-> graph: one bundle is one module node, no in-package multi-file imports), so the ESM modules are bundled by
-> rollup at build time. This is also how DSH's own plugins ship: **the build output is what gets loaded**,
-> while the sources are multi-file. This repository's npm package ships both (`package.json` `files` includes
-> the whole `client/` directory, so `client/src/` is in the package too — handy when debugging against the
-> source); `samples/`, `tests/` and `scripts/` are not.
-
-> `samples/` and `tests/` ship with the repository (plain-text test assets with no external dependencies and no network access), so the regression tests above run right after cloning. They are not part of the npm package (not listed in `package.json` `files`). `DESIGN.md` is git-ignored internal design notes.
-
-## Changelog
-
-Current version **0.9.5** (**a second, independent pass over that list — and the six items it had marked done without doing**). Every entry was re-checked against the code, the regression assertions and the public docs, ignoring the list's own "handled" summary. Six items had never landed: the Wolfx ring buffer still had no byte budget (the poller has had one since 0.5.3); cancelling a watched prefecture could leave that prefecture's municipalities behind (the cleanup depends on the city table, which loads asynchronously); the settings page drew "disabled" as a filled dot while the sidebar drew it hollow; the two mainland-China feeds write two different intensity ranges into the same `intensity` field; one "correction" in the list rested on a false premise (`parseEpspResult` does sit in the runtime path — its failures light the blue dot); and the list's own verdict that a special warning gets swallowed by L4 (P2-9) — overturned by the re-check — had never been recorded anywhere in the repo. Separately, six "deliberately not done" decisions had been documented only in the private design notes; those now live in this changelog. The pass also caught one **regression introduced by the fixes themselves**: the new cleanup had displaced the pre-existing `pruneUnknownCities()` call inside `loadCityTable()`, and no assertion covered that *wiring* (they all called the functions directly). Both calls are back, and the real load path is now asserted. Regression 2097 → **2133**.
-
-**0.9.4** was **the consolidated findings list, worked through in full**. The workspace's
-review notes (two independent passes, A and B) were merged into one list of 8 silent-miss findings,
-20 general defects, 22 minor / engineering items, 4 documentation gaps, a registered backlog (C) and
-3 product decisions — and this release fixes or resolves every one of them, each with regression
-assertions. The user-visible side: the "Recent alerts" list now honours **both** limits the design
-asked for (30 entries **and** the past 5 days) and only keeps entries that either rang or that the
-plugin genuinely could not judge (no region / no coordinates / hypocenter-only reports) — the
-L1–L3 weather and Watch/Advisory traffic that used to fill it is gone; the alert tone has
-**per-hazard switches** (earthquakes incl. EEW / tsunami / weather, all on by default); a P2PQuake
-reconnect now backfills the gap through the official `/v2/history` (the WebSocket has no replay, and
-an EEW is only useful for tens of seconds); the 24-hour "already announced" memory is persisted, so
-Host-style cold-start replays no longer ring twice after a refresh; the CENC rapid-report table is no
-longer gated on the upstream md5 (an upstream that changed the table without refreshing its
-fingerprint used to make the whole frame disappear); country names in the global city picker are now
-**localized into all four interface languages** (computed from ICU, not hand-copied); and the
-configuration page's export fallback has the copy button its own text had been promising. Under the
-hood: `/stream` now handles backpressure and stops installing subscriptions it can no longer clean up,
-the Host poller backs off and aborts in flight, byte caps are enforced while reading rather than after,
-the SSE cursor survives a silent connection, and the dead i18n keys are gone. Our own event text — type labels, intensity and tsunami grades, match reasons, the `（未命中：…）` suffix in the history — now follows the interface language in all four languages, while wording taken from the source (JMA sentences, place names, agency names) is passed through verbatim; that reverses the "the parse layer stays Simplified Chinese" decision registered since 0.9.0. Regression 1767 → 2097 — the history's source label (`JMA 电文` and friends) is localized too, while brand names (`EMSC` / `USGS` / `NWS` / `ECCC` / `code 551`) stay identical in every language.
-**0.9.3** was **Traditional Chinese added**. The language list now has four entries —
-简体中文 / **繁體中文** / 日本語 / English — and Traditional Chinese is a **complete text set of its own**
-(Taiwan wording: 設定 / 匯入 / 紀錄 / 載入 …), not a character conversion of the Simplified set.
-Simplified and Traditional are now two `zh` entries in the same BCP 47 list, so the fallback chain can no
-longer match Chinese by primary language: `zh-Hant` / `zh-HK` / `zh-MO` / `zh-TW` resolve to `zh-TW`,
-while `zh` / `zh-Hans` / `zh-CN` / `zh-SG` resolve to `zh-CN` (matching by primary language would always
-pick the first `zh-*` and silently hand Simplified to a Traditional reader; among subtags the **script wins
-over the region**, so `zh-Hans-HK` is Simplified). Prefecture names got a Traditional column of
-their own (`PREF_HANT`), the rendering smoke test now covers 4 languages × 5 tabs (and the
-untranslated-text check runs over the **whole** Traditional table, not just the keys that smoke test
-renders), and the interface language selector picks the new entry up with no configuration-contract change.
-A four-way review of this release then fixed a real defect — the interface language stored in Host settings
-never reached the UI (the selector said 繁體中文 while the page stayed Simplified) — plus two hard-coded
-P2PQuake connection strings, an untranslated-text detector that structurally missed more than half of the
-translated entries, and several consistency issues. Regression 1693 → 1767.
-**0.9.2** was **the first full-project review pass**. Six independent reviews across
-the whole project (docs consistency / Host / parsing & matching / pipeline & connections / UI & config /
-tests & scripts) turned up 18 findings (4 real defects + 14 smaller issues), and this release fixes
-them all (plus one documentation discrepancy it verified along the way).
-The four defects were a blue "data format error" badge that could never light up when one upstream URL
-was blocked while the others returned out-of-scope events, a magnitude revision (M5.2 → M6.4) on the
-same message id being silently suppressed by the cross-tab claim, an import backup that never expired
-(so "Undo last import" stayed clickable across sessions, rolling back the whole configuration) with no
-timestamp shown anywhere, and the assertion count in the three READMEs contradicting itself.
-**0.9.1** was **a review-and-fix pass over 0.9.0**. Five independent reviews of 0.9.0's
-localization and settings-import work turned up six user-visible defects — prefecture names that stayed
-Chinese in the English / Japanese interface, a duplicated name in the watched-prefecture line, a
-malformed settings file that made the import silently do nothing, a failed backup still reported as an
-undoable import, the sidebar status text not following a language switch, and Chinese test-scenario
-names — plus a dozen smaller issues. All are fixed, and the checks the review used became regression
-assertions (1552 → 1671).
-The interface ships four complete text sets (three at 0.9.0; Traditional Chinese joined in 0.9.3),
-switched in Settings → More → Language and applied
-immediately (no restart), while everything that comes from a data source stays verbatim. Settings can be
-exported to a JSON file and loaded on another machine: importing replaces the whole configuration after
-backing up the previous one, so it can always be undone.
-**0.8.0** turned the settings page's region picker from three flat blocks (① Japan / ② Mainland China / ③ Other
-regions) into a **single "country / region" entry point** that unfolds only that country's own
-controls, with every watched place listed together in the same block. "Disaster types" and "Alert
-thresholds" likewise became one per-hazard table (one hazard per row, switch and threshold side by side).
-Functionally, **the same earthquake is no longer announced once by every source** — only the source that
-arrives first announces it, and the rest do not even enter the history, though they are counted in the
-diagnostic snapshot (the only trace if that call was wrong). "Other countries / regions" finally has a
-city list too (towns of 100,000+ inhabitants, 166 countries / 5224 entries, delivered per country), so
-there is no need to type latitude and longitude by hand.
-The suite is now at **1767** assertions (1363 before 0.8.0).
-See [CHANGELOG.md](./CHANGELOG.md) for the details of each release.
-
-## Data sources
-
-- Earthquake / tsunami messages: [P2PQuake](https://www.p2pquake.net/) (relaying JMA data), over WebSocket.
-- Weather alerts (landslides / floods / heavy rain / storm surges): the JMA's [防災情報XML](https://xml.kishou.go.jp/) Atom feed (`extra.xml`, updated every minute), fetched by the Host half. The river forecast area → municipality table (`lib/data/river-areas.js`) is generated from the JMA's 「指定河川洪水予報区域と市区町村に関するCSVファイル」.
-- Mainland China weather warnings (heavy rain / geological disasters): the [National Meteorological Center](https://www.nmc.cn/) warning-signal list (`rest/findAlarm`, polled by the Host half every 120 seconds). The issuing body is a weather office at some level, and the detail page body is fetched separately.
-- US weather alerts (flood / flash flood / coastal flood): the [National Weather Service](https://api.weather.gov/) `alerts/active` API (key-free, declared open data free to use for any purpose, application identification requested; **called directly by the browser**, queried per watch point with `?point=`).
-- Canadian weather alerts (rainfall / flood / storm surge): the [Environment and Climate Change Canada](https://api.weather.gc.ca/) `weather-alerts` collection (key-free; **called directly by the browser**, queried with `bbox`). Used under the ECCC Data Services End-use Licence v2.1.1: **Data Source: Environment and Climate Change Canada**, with alert content and intent left unaltered.
-- Global earthquakes: [EMSC](https://www.seismicportal.eu/) (live WebSocket push) and [USGS](https://earthquake.usgs.gov/) (GeoJSON summary, polled by the Host half).
-- Global tsunamis: [NOAA / Pacific Tsunami Warning Center](https://www.tsunami.gov/) (CAP 1.2 messages, polled by the Host half).
-- Municipality list (`lib/data/cities.js`): compiled from 総務省「都道府県コード及び市区町村コード」(Public Data Utilization Terms, ver. 1.0) plus the designated-city wards of [jp-local-gov](https://github.com/hideo54/jp-local-gov) (MIT). The shipped file is a processed derivative — merged, de-duplicated and grouped by prefecture.
-- Global city table (`lib/data/world-cities.js`): processed from [GeoNames](https://www.geonames.org/) (CC BY 4.0) `cities15000` dump and `admin1CodesASCII.txt` (population ≥ 100,000, excluding Japan and China, 166 countries / 5224 cities). The Chinese administrative-division table (`lib/data/cn-areas.js`) comes from the same source.
+- **[GUIDE.md](./GUIDE.md)** — how it works, coverage and data sources, known limitations, development.
+- **[CHANGELOG.md](./CHANGELOG.md)** — what was added, changed, fixed or removed in each version.
 
 ## License
 

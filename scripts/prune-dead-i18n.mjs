@@ -1,21 +1,8 @@
-// dsh-quake-alert · 删除无人消费的 i18n 键（0.9.4 / P3-43）
-//
-// 背景：一份只读审查报告点出 17 条键没有任何消费者。逐条核实后分两类处理：
-//  · `configIo.copied` / `configIo.copyFailed`：**不删**——配置页的"复制"功能当时不存在，
-//    0.9.4 把它做出来了（导出回退路径上的复制按钮），这两个键现在有消费者；
-//  · 其余 15 条**删掉**（每种语言各 15 条）：
-//      `scale.*`（10 条）—— 活的那份是 01-constants 的 `SCALE_TEXT`（05-parser 用它拼 headline）；
-//      `tsunami.*`（3 条）—— 活的那份是 `TSUNAMI_GRADE_TEXT`；
-//      `source.jma` / `source.nmc` —— 活的取词方案是 `settings.sourceLabels.*`（00f）。
-//    留着它们的坏处不是"多占几行"：下一个人会以为改这里能让界面跟着变，而实际没有任何路径读它。
-//
+// dsh-quake-alert · 删除无人消费的 i18n 键
+// 只扫 FILES 列的 00e-texts-units.js / 00a-texts-core.js，删除 DEAD 清单里的键（每种语言各一份）。
+// 00g-texts-events.js 里有同名的活键（scale.* / tsunami.*，由 05-parser 取词），本脚本碰不到它；
+// 新增待删键时只加 00a / 00e 的，别把 00g 的活键写进来。
 // 用法：node scripts/prune-dead-i18n.mjs（幂等：删过就报"没有可删除的键"）
-//
-// ⚠ 别把 DEAD 清单当成"这些键名永远是死的"：0.9.4 的本地化工作后来把**震度 / 海啸等级**的词
-// 复活了，用的还是 `scale.*` / `tsunami.*` 这套键名——只是落在 `client/src/00g-texts-events.js`
-// 里（由 05-parser 的 `'scale.' + v` / `'tsunami.' + grade` 取词）。本脚本只扫 FILES 列的
-// 00a / 00e 两个文件，**碰不到 00g**，所以重跑是安全的 no-op。要新增待删键时同样只加 00a / 00e
-// 里的，别把 00g 的活键写进来。
 
 import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'

@@ -1,14 +1,8 @@
 // dsh-quake-alert · GeoNames 加工工具的公共部分
 //
-// 作用：给 build-cn-areas.mjs（中国行政区划表）与 build-world-cities.mjs（全球主要城市表）
-//       提供同一套纯工具：dump 的读取、解压与按列解析。
-//
-// 为什么抽出来：两个脚本都要"下载 zip → 取出里面的 .txt → 按 tab 拆列"，这段逻辑与各自的
-// **挑选规则**无关（一个是中文建制名的优先级，一个是全球城市的中文名回退链），放在一起才不会
-// 出现两份会各自漂移的解析器——而"列序变了"这种事一旦只在一边修好，另一边会静默产出错数据。
-//
-// 来源与许可：GeoNames dump，CC BY 4.0（出典明記で利用可）。
-//   https://download.geonames.org/export/dump/readme.txt   （列序与字段含义）
+// 给 build-cn-areas.mjs（中国行政区划表）与 build-world-cities.mjs（全球主要城市表）提供同一套纯工具：
+//       dump 的读取、解压与按列解析（两个脚本各自的**挑选规则**不同，解析器只有这一份）。
+// 来源与许可：GeoNames dump，CC BY 4.0（出典明記で利用可）；列序与字段含义见 dump 的 readme.txt。
 //
 // 用法：import { createGeoReader, parseGeonames } from './lib/geonames.mjs'
 
@@ -22,32 +16,17 @@ export const GEONAMES_BASE = 'https://download.geonames.org/export/dump/'
 export const isCjk = (s) => /^[\u4e00-\u9fff]+$/.test(s)
 
 /**
- * 全球城市表用的城市名：**统一取 GeoNames 的拉丁字母名**（`asciiname`）。
- *
- * 0.9.4（PD-3，产品决策）：此前是"alternatenames 里的 CJK 候选优先"，于是同一张表里简繁与
- * 日汉字混用（罗马写作「羅馬」，而它的一级行政区是拉丁文的 Lazio）——既不是本地化的，也不统一。
- * 按界面语言本地化需要**带语言标签**的候选（GeoNames 的 `alternateNamesV2` 才有），也就是另一个
- * 大得多的下载；做不到就统一用拉丁文——这是用户选定的备选做法，也是唯一不依赖额外数据源的做法。
- * （国家 / 地区名不受影响：它们由 ICU 算出四种语言，见 `build-world-cities.mjs` 的 LANGS。）
- *
- * **已提交的 `lib/data/world-cities.js` 已按本函数重生成过**（0.9.4）：5224 条城市名里没有一个汉字，
- * 回归同时钉住规则（本函数）与数据（`tests/sync-test.cjs` 里 scripts/lib 那一节与"零汉字"断言）。
- * 下面这句曾经是实况、现在已经过期，别再照它判断数据状态——**0.9.4 生成期间**
- * `download.geonames.org` 一度不可达，那时提交的数据确实是旧名字；重跑成功之后不是了。
+ * 全球城市表用的城市名：统一取 GeoNames 的拉丁字母名（`asciiname`，缺失时退回 `name`）；城市名不做
+ * 本地化，国家 / 地区名另由 ICU 算出四种语言（见 `build-world-cities.mjs` 的 LANGS）。
  */
 export function latinCityNameOf(row) {
   const r = row || {}
   return String(r.ascii || r.name || '').trim()
 }
 
-/**
- * GeoNames 的 geoname 表（tab 分隔）→ 行数组。只留用得到的列。
- *
- * 列序（readme.txt）：0 geonameid / 1 name / 2 asciiname / 3 alternatenames / 4 latitude /
- * 5 longitude / 6 feature class / 7 feature code / 8 country code / 9 cc2 / 10 admin1 code /
- * 11 admin2 code / 12 admin3 / 13 admin4 / 14 population / …
- * 少于 15 列的行直接跳过（dump 里存在字段被截断的坏行）。
- */
+/** GeoNames 的 geoname 表（tab 分隔）→ 行数组，只留用得到的列；少于 15 列的行跳过（存在被截断的坏行）。
+ *  列序（readme.txt）：0 geonameid / 1 name / 2 asciiname / 3 alternatenames / 4 latitude / 5 longitude /
+ *  7 feature code / 8 country code / 10 admin1 / 11 admin2 / 14 population。 */
 export function parseGeonames(text) {
   const out = []
   for (const line of String(text).split('\n')) {
@@ -72,11 +51,8 @@ export function parseGeonames(text) {
 }
 
 /**
- * 建一个 dump 读取器。
- *
- * `--from <目录>` 时读本地已下载的文件（离线 / 回归用），否则联网取——
- * 运行期（插件工作的时候）永远不联网，联网只发生在构建数据表时。
- *
+ * 建一个 dump 读取器：`--from <目录>` 时读本地已下载的文件（离线 / 回归），否则联网取。
+ * 联网只发生在构建数据表时，运行期不联网。
  * @param {{ fromDir?: string|null, base?: string, timeoutMs?: number }} [opts]
  */
 export function createGeoReader(opts) {

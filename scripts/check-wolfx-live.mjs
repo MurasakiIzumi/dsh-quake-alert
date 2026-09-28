@@ -1,22 +1,12 @@
 #!/usr/bin/env node
 // dsh-quake-alert · 大陆源连通性诊断（开发 / 排障用，不入发行包）
-//
-// 用途：用**真实的 lib/wolfx-source.js** 连真实的 Wolfx，回答三个问题——
-//   ① 这台机器的网络能不能连上 `wss://ws-api.wolfx.jp`？
-//   ② 连上之后 `query_<id>` 指令能不能取回数据？（指令名错、被中间层拦截、上游停更都表现成"连上了但没数据"）
-//   ③ 拿到的数据有多旧？（速报每天都有数据，最新事件太旧 = 中继停更，不是"最近没有地震"）
-//
-// 这是 `TROUBLESHOOTING.zh.md` 里"AI 能直接跑的检查"之一：不需要人看界面，只读退出码与输出。
-// 与运行时链路的区别：这里**关掉年龄闸门**——排障要问的是"中继有没有在给数据"，
-// 而运行时要问的是"这条数据还值不值得播报"。两者判据不同，不能共用一次运行。
-//
-// 用法：
-//   node scripts/check-wolfx-live.mjs             # 两条链路都查
-//   node scripts/check-wolfx-live.mjs --source=cenc_eew
-//   node scripts/check-wolfx-live.mjs --wait=12   # 等待秒数（默认 8）
-//
+// 用途：用真实的 lib/wolfx-source.js 连真实的 Wolfx，回答三件事——① 这台机器能不能连上
+// `wss://ws-api.wolfx.jp`？② 连上后 `query_<id>` 指令能不能取回数据（指令名错、被中间层拦截、
+// 上游停更都表现成"连上了但没数据"）？③ 拿到的最新事件有多旧（太旧 = 中继停更）？排障问的是
+// "中继有没有在给数据"，运行时要问"这条数据还值不值得播报"，所以这里关掉年龄门槛。
+// 用法：node scripts/check-wolfx-live.mjs [--source=cenc_eew] [--wait=12]   （等待秒数默认 8）
 // 退出码：0 = 两条（或指定的一条）都拿到了数据；1 = 有链路没拿到（输出里有分类）。
-// 退出码为上界：它只能说"这台机器此刻能不能用"，不能替代运行时链路自身的健康状态。
+// 这个码是上界：它只说"这台机器此刻能不能用"，不替代运行时链路自身的健康状态。
 
 import { createWolfxSource, CENC_EEW_ID, CENC_EQLIST_ID, WOLFX_WS_BASE, WOLFX_REST_BASE } from '../lib/wolfx-source.js'
 import { createFetchText } from '../lib/poller.js'
@@ -27,9 +17,9 @@ const waitMs = (waitArg ? Number(waitArg.split('=')[1]) : 8) * 1000
 const onlyArg = argv.find((a) => a.startsWith('--source='))
 const wanted = onlyArg ? [onlyArg.split('=')[1]] : [CENC_EEW_ID, CENC_EQLIST_ID]
 
-// 0.9.4：REST 兜底不再只是"建议用户自己 curl"——这里真的请求一次，把两条通道的结论分开报。
-// WS 不通而 REST 通 ≠ 网络层不通：前者是中间设备掐 wss://，后者才是 DNS / 出网策略。
+// REST 兜底也真的请求一次，把两条通道的结论分开报：WS 不通而 REST 通 ≠ 网络层不通。
 const restFetch = createFetchText({ timeoutMs: 15 * 1000 })
+/** 直接请求该源的 REST 兜底地址，返回 { url, ok, note }，用于区分"两条通道都不通"与"只是没数据"。 */
 async function probeRest(id) {
   const url = WOLFX_REST_BASE + id + '.json'
   try {
@@ -74,15 +64,15 @@ setTimeout(async () => {
       (st.restLastError ? '（最后一条：' + st.restLastError + '）' : ''))
     console.log('  错误：' + st.errors + (st.lastError ? '（最后一条：' + st.lastError + '）' : ''))
     console.log('  最新事件时刻：' + (newest || '（没拿到任何事件）'))
-    console.log('  环缓冲：' + snap.entries.length + ' 条')
+    console.log('  固定长度缓冲：' + snap.entries.length + ' 条')
     const first = snap.entries[0]
     if (first) console.log('  样例：' + first.id + ' | ' + first.title)
     if (!st.connected) {
       failed += 1
       console.log('  → 归类：unreachable。这台机器连不上 ws-api.wolfx.jp。')
       if (st.restFetched > 0) {
-        // 0.9.4：运行时已经自己走过 REST 兜底并拿到了数据 —— 这不是"没有预警"，而是"走的另一条通道"。
-        console.log('    REST 兜底已成功 ' + st.restFetched + ' 次，数据是从 api.wolfx.jp 拿到的（环缓冲非空即说明这一点）。')
+        // 运行时已经自己走过 REST 兜底并拿到了数据：这不是"没有预警"，而是走的另一条通道。
+        console.log('    REST 兜底已成功 ' + st.restFetched + ' 次，数据是从 api.wolfx.jp 拿到的（固定长度缓冲非空即说明这一点）。')
         console.log('    → 结论：wss:// 这条路不通，REST 这条路通；插件仍会收到数据，只是延迟按轮询算。')
       } else {
         const probe = await probeRest(src.id)
@@ -104,11 +94,10 @@ setTimeout(async () => {
         Math.round((Date.now() - st.dataTime) / 3600000) + ' 小时前——是**中继停更**，不是"最近没有地震"。')
       failed += 1
     } else {
-      // 注意这里的"正常"判据是**中继是否还在转发**（48 小时），不是"数据够不够新到值得播报"。
-      // 速报一天几十条，所以超过 48 小时没有新事件才是异常；几小时前的数据是正常的安静期。
+      // "正常"判据是**中继是否还在转发**（48 小时）：速报一天几十条，超过 48 小时没有新事件才是异常。
       const ageH = Math.round((Date.now() - st.dataTime) / 3600000)
       console.log('  → 正常：中继在转发（最新事件 ' + ageH + ' 小时前，未超 48 小时阈值）。')
-      console.log('    注意这条判据探的是**中继**，不是"值不值得播报"——运行时还会按事件年龄闸门' +
+      console.log('    注意这条判据探的是**中继**，不是"值不值得播报"——运行时还会按事件年龄门槛' +
         '（预警 10 分钟 / 速报 6 小时）决定要不要打扰用户。')
     }
     console.log('')

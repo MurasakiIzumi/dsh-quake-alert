@@ -1,18 +1,10 @@
 #!/usr/bin/env node
 // dsh-quake-alert · 大陆源 Host↔Client 端到端复验（开发 / 排障用，不入发行包）
-//
-// 为什么需要它：仓库内的回归用例把两半**各自**用假件覆盖（Host 用假 socket、Client 用假
-// EventSource），而它们之间那段**真实协议**没人守——帧格式、事件名、`id:` 字段、
-// Last-Event-ID 补发、`sec-fetch-site` 防护。任何一侧改动都可能让另一边静默收不到数据。
-// 这个脚本把两半接起来跑一次真的：
-//
-//   真实 Wolfx WS → lib/wolfx-source → lib/index.js 的 createStreamHandler → 真实 HTTP SSE
-//   → 从零手写的 SSE 读流器（第三方视角，不用我们自己的客户端代码）
-//   → client/client.js 的解析契约 → Alert
-//
-// 需要能连上 api.wolfx.jp（本机出口在日本时可用；大陆网络下的可达性见 TROUBLESHOOTING.zh.md）。
-// **不进 CI**：它依赖外部服务，适合在改动传输层前后手动跑一次。
-//
+// 仓库内的回归用例把两半各自用假件覆盖（Host 用假 socket、Client 用假 EventSource），两半之间
+// 那段真实协议（帧格式、事件名、`id:` 字段、Last-Event-ID 补发、`sec-fetch-site`）没人守。
+// 这个脚本把两半接起来跑一次真的：真实 Wolfx WS → lib/wolfx-source → lib/index.js 的
+// createStreamHandler → 真实 HTTP SSE → 手写的 SSE 读流器（第三方视角）→ client/client.js
+// 的解析契约 → Alert；需要能连上 api.wolfx.jp，不进 CI，改传输层前后手动跑一次。
 // 用法：node scripts/check-cn-e2e.mjs
 // 退出码：0 = 全部通过；1 = 有断言失败（输出里逐条列出）。
 
@@ -47,7 +39,7 @@ function loadClientTest() {
   return sandbox.__exports.__test
 }
 
-// ---- 手写的最小 SSE 读流器（第三方视角，不用我们自己的客户端代码） ----
+// ---- 手写的最小 SSE 读流器（第三方视角，不用本仓库的客户端代码） ----
 async function readSse(url, lastEventId) {
   const headers = { accept: 'text/event-stream' }
   if (lastEventId) headers['last-event-id'] = String(lastEventId)
@@ -59,17 +51,15 @@ async function readSse(url, lastEventId) {
   const dec = new TextDecoder()
   let buf = ''
   const frames = []
-  // 帧数上限给足：一次补发是 1 帧 sync + 环缓冲里的全部 entry（上限 120）。
-  // 原来写死 8 帧，只有在"一次 TCP 读把整批吞下"时才够用——分片读取会把健康的系统判成 FAIL。
-  // 结束条件因此改成：读到足够多 / 连续 1.5 秒没有新数据 / 整体超时。
+  // 帧数上限给足：一次补发是 1 帧 sync + 固定长度缓冲里的全部 entry（上限 120）；结束条件是读到
+  // 足够多 / 连续 1.5 秒没有新数据 / 整体超时。
   const deadline = Date.now() + 10000
   while (Date.now() < deadline && frames.length < 200) {
     const chunk = await Promise.race([
       reader.read(),
       new Promise((r) => setTimeout(() => r({ timeout: true }), 1500)),
     ])
-    // 连续 1.5 秒没有新数据 → 补发已经结束（之后只有 60 秒一次的 keep-alive），可以收工。
-    // 不能等流自己结束：SSE 是长连接，服务端会一直挂着。
+    // 连续 1.5 秒没有新数据 → 补发已结束，可以收工；不能等流自己结束，SSE 是长连接。
     if (chunk.timeout) { if (frames.length > 0) break; continue }
     if (chunk.done) break
     buf += dec.decode(chunk.value, { stream: true })
@@ -109,12 +99,11 @@ const T = loadClientTest()
 const checks = []
 const ok = (name, cond, extra) => checks.push([name, !!cond, extra || ''])
 
-// ① 真 SSE：首帧 sync + 真实载荷的 entry（带 since=0 才能拿到已入缓冲的那条——
-//    不带游标时是 tail 语义：只对齐位置、不重放，那正是设计要的行为）
+// ① 真 SSE：第一条数据是 sync + 真实载荷的 entry（要带 since=0 才能拿到已入缓冲的那条，不带读取位置是 tail 语义、不重放）
 const r1 = await readSse(base + '/dsh-quake-alert/stream?source=cenc_eew&since=0')
 ok('HTTP 200 + text/event-stream', r1.status === 200 && r1.ctype.indexOf('text/event-stream') === 0, r1.status + ' ' + r1.ctype)
 const sync = r1.frames.find((f) => f.event === 'sync')
-ok('首帧是 event: sync', !!sync, JSON.stringify(sync && sync.data).slice(0, 120))
+ok('第一条数据是 event: sync', !!sync, JSON.stringify(sync && sync.data).slice(0, 120))
 const sdata = sync ? JSON.parse(sync.data) : {}
 ok('sync 带 cursor / frozen / replayed', Number.isFinite(sdata.cursor) && 'frozen' in sdata && 'replayed' in sdata, JSON.stringify(sdata))
 const entry = r1.frames.find((f) => f.event === 'entry')
@@ -130,9 +119,9 @@ if (entry) {
   ok('真实载荷 → cenc_eew 契约 ok', res.ok === true, res.ok ? '' : res.kind + ':' + res.detail)
   eewAlert = res.ok ? res.alert : null
   if (eewAlert) {
-    ok('归一出的 Alert 走坐标匹配', eewAlert.locator === 'point' && eewAlert.kind === 'eew')
+    ok('规整后的 Alert 走坐标匹配', eewAlert.locator === 'point' && eewAlert.kind === 'eew')
     ok('烈度只入库不进文案', typeof eewAlert.intensity === 'number' && eewAlert.headline.indexOf('烈度') === -1)
-    ok('事件键归一到 UTC 分钟', /^geo:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}@/.test(eewAlert.eventKey), eewAlert.eventKey)
+    ok('事件键换算到 UTC 分钟', /^geo:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}@/.test(eewAlert.eventKey), eewAlert.eventKey)
   }
 }
 

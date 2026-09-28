@@ -1,16 +1,9 @@
 // ============================================================================
 // dsh-quake-alert · client/src/00a-texts-core.js
-//
 // 作用：核心文案表（各语言并列）——通知、行动提示、免责行、机构名、状态条。
-// 内容：纯数据对象，**不 import 任何模块**（依赖方向：面文件 ← 00-i18n.js ← 其它）。
-// 依赖：无。
-//
-// key 命名：`面.子面.用途`，全小写驼峰段；插值写 `{name}`（由 t() 替换）。
-// zh-CN 一栏是**逐字现状**——0.9.0 的 i18n 只是把既有字符串搬进表里，
-// 默认语言下的输出必须与 0.8.2 完全一致（回归里有一条断言守这件事）。
-//
-// 范围（DESIGN 11.10）：只放**我们生成的文本**。源的 headline / detail / 地名 /
-// 解析层 kindLabel / 各源 reason 一律不进这里，它们原样透传。
+// 内容：纯数据对象，不 import 任何模块（依赖方向：文案文件 ← 00-i18n.js ← 其它）。
+// key 命名：`面.子面.用途`，全小写驼峰段；插值写 `{name}`（由 t() 替换）。只放我们生成的
+// 文本：源的 headline / detail / 地名 / 解析层 kindLabel / 各源 reason 一律原样透传。
 // ============================================================================
 
 const CORE = {
@@ -18,13 +11,12 @@ const CORE = {
     'app.name': '灾害预警',
     'app.statusPrefix': '灾害预警：',
 
-    // 大陆源的产品名与日本源的「緊急地震速報」是两家机构的不同产品（见 11-pipeline 的说明）。
     'product.cnEew': '大陆地震预警',
     'product.cnEqlist': '大陆地震速报',
     'product.jpEew': '紧急地震速报（警报）',
     'product.jpEewShort': '紧急地震速报',
 
-    // 免责声明里点名的机构（按源）。认不出时退回 disclaimer.generic，不硬编码任何一家。
+    // 依据源给免责声明点名的机构；认不出时退回 disclaimer.generic。
     'authority.emsc': '欧洲-地中海地震中心（EMSC）',
     'authority.usgs': '美国地质调查局（USGS）',
     'authority.noaa': '太平洋海啸警报中心（NOAA）',
@@ -42,30 +34,28 @@ const CORE = {
     'notify.cancelBody': '此前发出的警报已作废。',
     'notify.tsunamiLifted': '✅ 海啸预报已解除',
 
-    // 气象预警的行动提示：三家机构的处置口径不同，不能互相套用（见 11-pipeline 的说明）。
+    // 气象预警的行动提示：三家机构口径不同，不能互相套用。
     'action.generic': '请关注当地官方发布的指引',
     'action.overseas': '请关注当地官方发布的避难与撤离指引',
     'action.cnArea': '请关注当地气象台发布的防御指引',
     'action.jp': '请确认所在市町村的避难信息',
 
-    // 通知正文里的命中行。行政区的县名要跟着界面语言走（prefLabelOf），
-    // 所以这里只放"标签 + 占位符"，拼装仍在 11-pipeline。
+    // 通知正文里的命中行：县名跟着界面语言走（prefLabelOf），所以这里只有标签 + 占位符。
     'notify.hitPref': '命中地区：{pref}',
     'notify.hitPrefNamed': '命中地区：{pref}（{jp}）',
     'notify.hitPlaceDistance': '命中位置：{place}（距震中约 {km} km）',
     'notify.hitPlaceOfficial': '命中位置：{place}（按该点所在地的官方预警判定）',
-    // 海啸的行动提示：与气象的三家口径并列，单独一条（它不按机构分岔）。
+    // 海啸的行动提示：不按机构分岔，单独一条。
     'action.tsunami': '请立即远离海岸与河口',
 
-    // 源在状态区块里的显示名（短标签，与免责声明里点名的全称是两回事）。
+    // 源在状态区块里的短显示名，与免责声明里点名的全称是两回事。
     'status.emscConnected': '已连接 EMSC（全球地震实时推送）',
-    // 源状态摘要（07-store 拼的悬停提示 / 侧边栏 title）：源名与分隔符都要跟着语言走，
+    // 源状态摘要（07-store 拼的悬停提示 / 侧边栏 title）：源名与分隔符跟着语言走，
     // 状态码本身由 00f 的 statusTextOf 翻。
     'status.sourceDisabled': '{name}：已关闭',
     'status.sourceDetail': '{name}：{detail}',
 
-    // 取数层写给用户的**状态说明**（进 store.sources[id].detail：设置页的源状态区块、侧边栏
-    // 悬停提示、诊断快照）。它们不是源侧文本，而是我们自己写的降级 / 关闭 / 覆盖范围说明。
+    // 取数层写进 store.sources[id].detail 的降级 / 关闭 / 覆盖范围说明，不是源侧文本。
     'source.p2pConnected': '已连接 P2PQuake（约每 10 分钟自动重连）',
     'source.p2pSandbox': '沙箱源：回放 2023 年历史（约30秒/条）',
     'source.cnPollManual': '已按设置选择轮询',
@@ -205,8 +195,8 @@ const CORE = {
     'product.jpEew': 'Earthquake Early Warning (Alert)',
     'product.jpEewShort': 'Earthquake Early Warning',
 
-    // 英文的机构名前带 the：这些值只出现在 disclaimer.named 的 {authority} 位置，
-    // 单独展示机构名的位置（设置页 / 诊断）另有各自的表，不复用这一栏。
+    // 英文机构名带 the：只用在 disclaimer.named 的 {authority} 位置，单独展示机构名的位置
+    // （设置页 / 诊断）另有各自的表。
     'authority.emsc': 'the Euro-Mediterranean Seismological Centre (EMSC)',
     'authority.usgs': 'the U.S. Geological Survey (USGS)',
     'authority.noaa': 'the Pacific Tsunami Warning Center (NOAA)',

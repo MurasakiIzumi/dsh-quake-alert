@@ -1,27 +1,13 @@
 #!/usr/bin/env node
 // dsh-quake-alert · 河川予報区域表构建脚本
-//
-// 作用：把気象庁公开的「指定河川洪水予報区域と市区町村に関するCSVファイル」加工成
-//       lib/data/river-areas.js，供 Client 侧把洪水电文的「河川予報区域」映射到市町村。
-//
-// 为什么需要它：指定河川洪水予報的电文区域是**河川名**（「天塩川」「十勝川水系芽室川」），
-// 用户不可能关注这种名字；而泥石流电文的区域本身就是市町村。所以洪水必须先经本表
-// 映射到市町村，才能复用现有的 watch.cities 匹配。
-//
-// 来源（运行期不联网，只有构建时需要网络）：
-//   https://www.jma.go.jp/jma/kishou/know/bosai/keiho-update2026/tech-info/index.html
-//   → zip/20260527_river-areainfo.zip
-//   内含两份 UTF-8 CSV（国管理河川 / 都道府県管理河川），列结构：
-//     予報区域名, 予報区域コード, 市町村名1, 市町村コード1, 市町村名2, 市区町村コード2, …
-//   本文件为上述数据的加工产物（合并两份 CSV、去重、以区域代码为主键）。
-//   気象庁のコンテンツは政府標準利用規約に準拠（出典明記のうえで利用可）。
-//
-// 零依赖：zip 解压用 Node 内置 zlib（读取器见 scripts/lib/zip.mjs），不引入 unzip / xlsx 依赖，
-//         与 build-client.mjs、check-imports.mjs 的手写工具脚本传统一致。
+// 作用：把気象庁「指定河川洪水予報区域と市区町村に関するCSVファイル」加工成 lib/data/river-areas.js，
+//       供 Client 把洪水电文的河川名区域映射到市町村；源 zip 内含两份 UTF-8 CSV（国管理 / 都道府県管理），
+//       列为「予報区域名, 予報区域コード, 市町村名1, 市町村コード1, …」，产物按区域代码合并去重。
+//       気象庁内容は政府標準利用規約に準拠（出典明記のうえで利用可）。
 //
 // 用法：
 //   node scripts/build-areas.mjs                  # 联网取源 → 生成 lib/data/river-areas.js
-//   node scripts/build-areas.mjs --check          # 只校验产物是否与当前源一致（不写盘）
+//   node scripts/build-areas.mjs --check          # 只校验产物是否与当前源一致（退出码 1 = 陈旧或源有问题，不写入文件）
 //   node scripts/build-areas.mjs --from <zip路径>  # 用本地 zip（离线 / 回归测试用）
 
 import { readFileSync, writeFileSync } from 'node:fs'
@@ -36,8 +22,7 @@ const CHECK_ONLY = process.argv.includes('--check')
 const fromIdx = process.argv.indexOf('--from')
 const FROM_ZIP = fromIdx === -1 ? null : process.argv[fromIdx + 1]
 
-// ---------------------------------------------------------------- CSV → 区域条目
-// 表头形如 `#(2026年5月27日時点) 予報区域名, 予報区域コード, …`，取括号内的时点。
+// ---------------------------------------------------------------- CSV → 区域条目（表头 `#(时间) 予報区域名, 予報区域コード, …`，时间取括号内）
 function parseRiverCsv(text, fileName) {
   const lines = text.split(/\r?\n/).filter((l) => l.trim() !== '')
   const header = lines[0] || ''
@@ -111,21 +96,12 @@ function buildModel(zipBuf) {
 function renderModule(model) {
   const lines = []
   lines.push('// 河川予報区域 → 市町村（指定河川洪水予報の区域マッピング）。')
-  lines.push('//')
   lines.push('// 本文件由 scripts/build-areas.mjs 生成，请勿手改（改脚本后重跑 `pnpm build:areas`）。')
-  lines.push('//')
-  lines.push('// 来源：気象庁「指定河川洪水予報区域と市区町村に関するCSVファイル」（底稿 ' + model.dated + '）')
+  lines.push('// 来源：気象庁「指定河川洪水予報区域と市区町村に関するCSVファイル」（源文件 ' + model.dated + '）')
   lines.push('//   ' + model.sourceUrl)
   lines.push('//   内含：' + model.files.map((f) => path.basename(f)).join(' / '))
-  lines.push('//')
-  lines.push('// 用途：指定河川洪水予報的电文区域是河川名（用户不会关注这种名字），')
-  lines.push('//       匹配前先经本表映射到市町村，再与 watch.cities 比对；')
-  lines.push('//       泥石流（土砂災害）电文的区域本身就是市町村，不需要本表。')
-  lines.push('//')
-  lines.push('// 主键是 code 而不是 name：国管理河川与都道府県管理河川之间存在重名（例如「荒川」）。')
-  lines.push('//')
-  lines.push('// 统计：' + model.stats.areas + ' 个区域 / ' + model.stats.cities + ' 个去重市町村 / ' +
-    model.stats.citySlots + ' 个区域×市町村对')
+  lines.push('// 用途：洪水电文的区域是河川名，匹配前先经本表映射到市町村，再与 watch.cities 比对（泥石流电文不经本表）。')
+  lines.push('// 主键是 code：国管理河川与都道府県管理河川之间存在重名（例如「荒川」）。')
   lines.push('')
   lines.push('export const RIVER_AREA_META = ' + JSON.stringify({
     sourceUrl: model.sourceUrl,
@@ -151,8 +127,6 @@ if (FROM_ZIP) {
   zipBuf = readFileSync(FROM_ZIP)
   console.log('使用本地 zip：' + FROM_ZIP)
 } else {
-  // 0.9.4（P3-49）：这是全项目唯一没有超时的 fetch。构建脚本卡在半挂起的连接上时没有任何反馈，
-  // 而它拉的是几十 MB 的气象厅源包——超时值取得比运行时链路宽（120 秒）。
   const res = await fetch(SOURCE_URL, {
     redirect: 'follow',
     signal: typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
@@ -175,7 +149,7 @@ if (model.problems.length) {
   process.exit(1)
 }
 console.log('解析完成：' + model.stats.areas + ' 个区域 / ' + model.stats.cities + ' 个去重市町村' +
-  '（底稿 ' + model.dated + '）')
+  '（源文件 ' + model.dated + '）')
 
 const code = renderModule(model)
 if (CHECK_ONLY) {

@@ -2,20 +2,11 @@
 // dsh-quake-alert · client/src/00e-texts-units.js
 //
 // 作用：量纲类展示文案表（各语言并列）——震度、海啸等级、震级档位、关注半径档位。
-// 内容：纯数据对象，不 import 任何模块。
-// 依赖：无。
+// 内容：纯数据对象，不 import 任何模块。01-constants 的对应常量只保存「值 + 文案 key」。
 //
-// 这些字符串此前住在 `01-constants.js` 的常量里（`SCALE_TEXT` / `SCALE_OPTIONS` /
-// `TSUNAMI_GRADE_TEXT` / `TSUNAMI_OPTIONS` / `GLOBAL_MAG_OPTIONS` /
-// `CN_REPORT_MAG_OPTIONS` / `RADIUS_PRESETS`）。搬到表里之后，那些常量保留为
-// **值 + 文案 key**，`zh-CN` 一栏逐字等于搬走之前的原文（含其中的空格）。
-//
-// 震度的日文写法有讲究：`5弱` / `5強` 里的「強」是日文汉字，中文简体写作「强」——
-// 两者在 zh-CN 与 ja 两栏里**故意不同**，照抄各自的通行写法，不要统一。
-//
-// 震级的档位文案由两个数组共用（`GLOBAL_MAG_OPTIONS` 与 `CN_REPORT_MAG_OPTIONS` 对同一个
-// 数值给的是同一句话）。**若将来两者的默认值分家，这里必须拆成两组 key**——共用是基于
-// "同值同文案"这个事实，不是约定。
+// 震度的日文写法分语种：`5弱` / `5強` 的「強」是日文汉字，中文简体写作「强」，
+// 两栏故意不同，不要统一。震级档位文案由 `GLOBAL_MAG_OPTIONS` 与 `CN_REPORT_MAG_OPTIONS`
+// 共用（同值同文案）；两者默认值一旦分家，这里必须拆成两组 key。
 // ============================================================================
 
 const UNITS = {

@@ -1,38 +1,18 @@
 // ============================================================================
 // dsh-quake-alert · client/src/05e-cn-parsers.js
 //
-// 作用：把 Wolfx 转播的中国大陆地震源解析成与日本源 / 全球源同一套内部模型（Alert）。
-// 内容：`cenc_eew`（中国地震预警，秒级抢发）与 `cenc_eqlist`（中国地震速报，分钟级确认 / 补报）。
+// 作用：把 Wolfx 转播的中国大陆地震源（`cenc_eew` 预警 / `cenc_eqlist` 速报）解析成内部模型（Alert）。
 // 依赖：01-constants（cnTimeToIso）、02-storage（isPlainObject）、05c-global-parsers（severityOfMagnitude、geoEventKey）。
 //
-// 为什么与全球源同路径而不是与日本源同路径（DESIGN 8.2 / 8.5）：
-//   · 大陆源**没有分区烈度表**——官方渠道是小程序 / OS 内置，第三方中继只给震中坐标 + 震级。
-//     所以只能走 `locator:'point'`（坐标 + 半径），与 EMSC / USGS 完全同一条匹配路径，
-//     也因此**不需要中国行政区划表**。这是数据源能力的客观差异，不是功能裁剪。
+// 大陆源没有分区烈度表（中继只给震中坐标 + 震级），所以走 `locator:'point'`，与 EMSC / USGS 同一条
+// 匹配路径。实测字段：`cenc_eew` 10 个字段全是 number；`cenc_eqlist` 是 50 条整表（No1…No50 + md5）
+// 且**所有字段都是字符串**。两源的 EventID 格式互不相干 → 归并只能靠「发震时刻 + 震中」（geoEventKey）。
 //
-// 实测字段（samples/cn/，2026-09-18 真实数据）与踩过的坑：
-//   · `cenc_eew` 全部字段只有 10 个（加 WS 包裹的 type 共 11 个），数值都是 **number**。
-//   · `cenc_eqlist` 是一整张 50 条的**列表**（No1…No50 + md5），而且**所有字段都是字符串**
-//     （"magnitude":"3.7"、"latitude":"41.14"）——同一个上游的两种序列化风格，不能假定其一。
-//   · `MaxIntensity`（EEW，实测 5.8/5.9 连续小数）与 `intensity`（速报，实测 3…8 整数）是
-//     **中国地震烈度**（GB/T 17742-2020），不是日本震度、也不是震级。它是**震中附近的最大值**，
-//     不是用户所在地的烈度 —— **只入库、不上 UI**，否则会被读成后者的承诺。
-//     **0.9.5（P3-42）把这条差异写死在这里**：两条链路都把这个值写进 Alert 的**同一个**
-//     `intensity` 字段，而它们的**取值域不同**（EEW 是连续小数、速报是整数档）。今天无害
-//     ——全项目没有任何读取点（只入库），所以先保留上游的键名、不分裂字段；但**将来若要按
-//     `intensity` 分档，必须先分裂字段名**（例如 `maxIntensity` / `intensityGrade`），
-//     否则同一条"烈度 5.8"会在两条链路上被判成两个不同的档位。回归里有一条断言钉住
-//     "两个解析器写的是同一个字段名"（改名的当天它会红，提醒改的人同时处理另一条链路）。
-//   · `cenc_eqlist` 里**混有境外地震**（实测福克斯群岛 M6.5、印尼爪哇岛 M6.5、南桑威奇群岛 M6.2、
-//     台湾花莲县…）。所以它会与全球链路（EMSC / USGS）撞车——靠 geoEventKey 同一把钥匙归并。
-//   · 两个源的 **EventID 格式互不相干**：EEW 是随机串（仓库样本 `samples/cn/cenc-eew-last.json`
-//     实测 `b4kybfnuqayyy`），速报是 `CD.20260918205536.056` 这类带时刻的编号。
-//     （0.5.4 修正：此处原写 EEW 是 `202609182050.0001`，与样本不符。）
-//     同一场地震（实测四川甘孜州新龙县：EEW 20:50:23 M4.2 / 速报 20:50:24 M3.2）两边 ID 毫无关系，
-//     所以**归并只能靠「发震时刻 + 震中」**，绝不能靠 ID。这正是 geoEventKey 的用武之地。
-//   · **无取消 / 最终报标志**（既无 isCancel 也无 isFinal）。现有「取消只在此前提醒过时补一条」的
-//     链路对大陆源**失效**——这是安全相关的缺口，UI 必须如实说明（DESIGN 8.3 / 10.2），
-//     代码里不得假装能处理：cancelled 恒为 false。
+// 取值域事实：`MaxIntensity`（EEW，实测连续小数 5.8）与 `intensity`（速报，实测整数 3…8）都是
+// 中国地震烈度（GB/T 17742-2020），是震中附近的最大值、不是用户所在地的烈度——两条链路写进 Alert
+// 的同一个 `intensity` 字段但**取值域不同**，下游若要按它分档必须先分裂字段名。
+//
+// 大陆源**没有取消 / 最终报标志**，cancelled 恒为 false，代码里不得假装能处理。
 // ============================================================================
 
 import { cnTimeToIso } from './01-constants.js'
@@ -40,12 +20,8 @@ import { isPlainObject } from './02-storage.js'
 import { t } from './00-i18n.js'
 import { severityOfMagnitude, geoEventKey } from './05c-global-parsers.js'
 
-/**
- * 字符串或数字 → 有限数值；空串 / 垃圾值 / 缺失一律 null。
- * **不能用 Number('')**——它等于 0，会把"没有震级"变成"震级 0"（震级 0 会让阈值闸门放行一个
- * 根本不知道多大的事件，在大陆速报这种每条都要判阈值的链路上就是误报）。
- * 速报整表字段全是字符串，所以这个转换是必需的而不是防御性的。
- */
+/** 字符串或数字 → 有限数值；空串 / 垃圾值 / 缺失一律 null。
+ *  不能用 `Number('')`——它等于 0，会把"没有震级"变成"震级 0"并放行一个不知道多大的事件。 */
 function numOrNull(v) {
   if (typeof v === 'number') return Number.isFinite(v) ? v : null
   const s = String(v === undefined || v === null ? '' : v).trim()
@@ -65,10 +41,7 @@ function placeText(name, depthKm) {
 }
 
 /**
- * 大陆地震预警（`cenc_eew`）→ Alert。
- *
- * @param {object} raw WS 推送包（含 `type:'cenc_eew'`）或 REST 快照（无 type）——**两种都接受**：
- *   实测 REST 与 WS 的差别就是多一个 type 字段，其余 10 个字段完全一致。
+ * 大陆地震预警（`cenc_eew`）→ Alert。WS 推送包（含 `type`）与 REST 快照（无 type）都接受。
  * @returns {object|null} 结构不对时返回 null（由契约层的 schema 判据负责分类）
  */
 function parseCencEew(raw) {
@@ -81,28 +54,25 @@ function parseCencEew(raw) {
   const mag = numOrNull(raw.Magnitude)
   const depth = numOrNull(raw.Depth)
   const place = String(raw.HypoCenter === undefined || raw.HypoCenter === null ? '' : raw.HypoCenter).trim()
-  // OriginTime 是发震时刻，ReportTime 是发布时刻。实测两者**完全相同**——这是上游的填充习惯，
-  // **不能据此判定它"不是实时预警"**（DESIGN 8.3）。事件键用 OriginTime（与其它源同一口径）。
+  // OriginTime 是发震时刻，ReportTime 是发布时刻（实测两者相同，是上游的填充习惯，不能据此判定
+  // 它"不是实时预警"）。事件键用 OriginTime（与其它源同一口径）。
   const originIso = cnTimeToIso(raw.OriginTime)
   const reportIso = cnTimeToIso(raw.ReportTime)
   const reportNum = numOrNull(raw.ReportNum)
   const headline = magText(mag) + placeText(place, depth) +
     (reportNum !== null && reportNum > 1 ? t('kind.cencReportNo', { n: reportNum }) : '')
   return {
-    // id 前缀 cenc: ——与速报的 EventID 是两套命名空间，实测不会撞（EEW 是 b4kybfnuqayyy 这类）
+    // id 前缀 cenc: ——与速报的 EventID 是两套命名空间
     id: 'cenc:' + id,
     code: 'cenc_eew',
     kind: 'eew',
     kindLabel: t('kind.cencEew'),
     source: 'cenc_eew',
-    // 无分区烈度 → 坐标 + 半径匹配（DESIGN 8.3）；
-    // 震级闸门共用 thresholds.globalMagnitude（DESIGN 8.4：它不是速报，与预警同档）
+    // 无分区烈度 → 坐标 + 半径匹配；震级门槛共用 thresholds.globalMagnitude（与预警同档）
     locator: 'point',
     speedReport: false,
-    // **恒 red，与日本 556 同口径**（DESIGN 2 节：「EEW → red（警报本质）」）。severity 决定两件事：
-    // 通知配色，以及**静默时段能否穿透**（只有 red 穿透）。按震级分档会让一场 M4.2 的预警在夜间
-    // 被静默掉（severityOfMagnitude 给 info），而同配置下的日本 EEW 照常穿透——那是漏报方向。
-    // 速报（分钟级确认，不是警报）仍按震级分档。
+    // **恒 red，与日本 556 同口径**（EEW 本质是警报）。severity 决定配色与**静默时段能否穿透**
+    // （只有 red 穿透）：按震级分档会让 M4.2 的预警在夜间被静默掉，那是漏报方向。
     severity: 'red',
     issued: originIso,
     reportTime: reportIso,
@@ -116,20 +86,16 @@ function parseCencEew(raw) {
     regions: [],
     eventKey: geoEventKey(originIso, lat, lon),
     strength: mag === null ? 0 : mag,
-    // 中国地震烈度（震中附近最大值）：只入库、不上 UI。详见文件头。
-    // **注意取值域**（P3-42）：这里是 EEW 的 `MaxIntensity`，实测是**连续小数**（5.8），
-    // 与速报那条整数档共用同一个字段名——下游若要按它分档，先分裂字段（见文件头）。
+    // 中国地震烈度（震中附近最大值，只入库、不上 UI）。**取值域**：EEW 的 `MaxIntensity` 是连续
+    // 小数（5.8），与速报那条整数档共用同一个字段名——下游若要按它分档，先分裂字段（见文件头）。
     intensity: numOrNull(raw.MaxIntensity),
     reportNum,
-    cancelled: false, // 大陆源不提供取消 / 最终报标志——见文件头，不得假装能处理
+    cancelled: false, // 大陆源不提供取消 / 最终报标志，不得假装能处理
     raw,
   }
 }
 
-/**
- * 速报整表里的单项（`NoN`）→ Alert。
- * 所有字段都是字符串（实测）；`location` 与 `placeName` 实测总是一样，取 placeName 优先、location 回退。
- */
+/** 速报整表里的单项（`NoN`）→ Alert。所有字段都是字符串（实测）；地名取 placeName 优先。 */
 function parseCencEqlistItem(item) {
   if (!isPlainObject(item)) return null
   const eventId = String(item.EventID === undefined || item.EventID === null ? '' : item.EventID).trim()
@@ -143,7 +109,7 @@ function parseCencEqlistItem(item) {
     (item.placeName === undefined || item.placeName === null ? '' : item.placeName) ||
     (item.location === undefined || item.location === null ? '' : item.location)
   ).trim()
-  // time 是发震时刻，ReportTime 是发布时刻。实测 lag 209–1643 秒（DESIGN 8.3 记为 240–1608）。
+  // time 是发震时刻，ReportTime 是发布时刻。实测 lag 209–1643 秒。
   const originIso = cnTimeToIso(item.time)
   const reportIso = cnTimeToIso(item.ReportTime)
   const headline = magText(mag) + placeText(place, depth)
@@ -154,8 +120,7 @@ function parseCencEqlistItem(item) {
     kindLabel: t('kind.cencEqlist'),
     source: 'cenc_eqlist',
     locator: 'point',
-    // 速报不是预警：它管分钟级确认与补报，用**独立**的震级门槛（thresholds.cnReportMagnitude），
-    // 否则会被 M2.5–M3.8 的小震频繁打扰（DESIGN 8.4）。
+    // 速报不是预警：用**独立**的震级门槛（thresholds.cnReportMagnitude），否则会被小震频繁打扰。
     speedReport: true,
     severity: severityOfMagnitude(mag),
     issued: originIso,
@@ -170,11 +135,9 @@ function parseCencEqlistItem(item) {
     regions: [],
     eventKey: geoEventKey(originIso, lat, lon),
     strength: mag === null ? 0 : mag,
-    // 中国地震烈度（整数档）：只入库、不上 UI。与上面 EEW 那条**同名不同域**（P3-42）：
-    // 速报实测是 3…8 的整数，而 EEW 是 5.8 这样的连续小数——见文件头。
+    // 中国地震烈度（整数档，只入库、不上 UI）：与上面 EEW 那条**同名不同域**（速报 3…8 整数）。
     intensity: numOrNull(item.intensity),
-    // 实测全是 "reviewed"。不认识的取值**不丢弃**——它仍然是同一场真实地震，
-    // 丢弃等于漏报；原样带上供诊断，是否收窄由将来的实测决定（那时才知道有哪些取值）。
+    // 实测全是 "reviewed"。不认识的取值**不丢弃**——它仍是同一场真实地震，原样带上供诊断。
     reportType: String(item.type === undefined || item.type === null ? '' : item.type).trim(),
     cancelled: false,
     raw: item,
@@ -182,9 +145,8 @@ function parseCencEqlistItem(item) {
 }
 
 /**
- * 速报整表 → 按 `No1…NoN` **数值序**（不是字典序，否则 No10 会排到 No2 前面）的条目数组。
- * 实测 No1 是最新一条。非 `NoN` 键（type / md5）原样跳过。
- * @param {object} json WS / REST 的整表载荷
+ * 速报整表 → 按 `No1…NoN` **数值序**（不是字典序，否则 No10 会排到 No2 前面）；实测 No1 最新。
+ * 非 `NoN` 键（type / md5）原样跳过。
  * @returns {object[]} 原始条目（未解析），供逐条过契约
  */
 function cencEqlistItems(json) {
@@ -196,7 +158,7 @@ function cencEqlistItems(json) {
   return keys.map((e) => json[e.k]).filter(isPlainObject)
 }
 
-/** 速报整表的变更指纹。实测存在；缺失时返回空串（**不**据此判 schema——见契约层的说明）。 */
+/** 速报整表的变更指纹。实测存在；缺失时返回空串（**不**据此判 schema）。 */
 function cencEqlistMd5Of(json) {
   if (!isPlainObject(json)) return ''
   const v = json.md5

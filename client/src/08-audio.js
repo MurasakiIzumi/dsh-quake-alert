@@ -1,11 +1,7 @@
 // ============================================================================
 // dsh-quake-alert · client/src/08-audio.js
-//
-// 作用：提示音合成（Web Audio，零音频文件）。
-// 内容：AudioContext 懒创建与用户手势解锁、四种音色（地震/EEW/海啸/取消）、
-//       按灾害类型选音色并播放。
-// 依赖：01-constants。
-// 浏览器策略：AudioContext 需要一次用户交互才能出声，故有 unlock 逻辑。
+// 作用：提示音合成（Web Audio，零音频文件）——AudioContext 懒创建与解锁、按灾害类型选音色播放。
+// 依赖：01-constants。浏览器要求 AudioContext 先经一次用户交互才能出声，故有 unlock 逻辑。
 // ============================================================================
 
 // ---------- 音频（Web Audio 合成，零文件） ----------
@@ -21,19 +17,10 @@ function unlockAudio() {
   const ctx = ensureAudio()
   if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {})
 }
-/**
- * 当前音频可用状态（0.4.1）：'running' | 'suspended' | 'unavailable'。
- *
- * 为什么需要它：浏览器要求 AudioContext 必须先有一次用户交互才能出声，而**页面可见时
- * 通知路径只用页内 toast（不发系统通知）**。于是"打开 DSH 后从未点击过页面"的用户
- * 在设置里看到「提示音：开」，实际一条声音都听不到，且没有任何地方能发现这件事——
- * 这是纯静默失效。设置页据此显式提示"提示音尚未解锁"。
- */
+/** 当前音频可用状态：'running' | 'suspended' | 'unavailable'，设置页据此提示尚未解锁。 */
 function audioState() {
-  // 注意：**不能调用 ensureAudio()**（0.4.2）。设置页在渲染时会读这个函数，而 ensureAudio 会
-  // 真的 new 一个 AudioContext —— 于是"只是打开设置页"就创建了音频上下文（浏览器控制台会报
-  // "AudioContext was not allowed to start"），也破坏了"只在用户手势里创建"的设计。
-  // 未创建同样属于"未解锁"，直接按 suspended 回答。
+  // 不能调用 ensureAudio()：它真的会 new AudioContext，设置页渲染读本函数时会在无用户手势的
+  // 情况下创建音频上下文。未创建同样属于"未解锁"，按 suspended 回答。
   if (typeof window !== 'undefined' && !(window.AudioContext || window.webkitAudioContext)) return 'unavailable'
   if (audioCtx === null) return 'suspended'
   return audioCtx.state === 'running' ? 'running' : 'suspended'
@@ -53,9 +40,7 @@ const SOUNDS = {
     { freq: 659, start: 0, dur: 0.18, type: 'sine' },
     { freq: 880, start: 0.2, dur: 0.3, type: 'sine' },
   ] },
-  // 气象警报（泥石流 / 洪水 / 大雨 / 高潮）：下行三音 + triangle 波形。
-  // 与地震（上行双音 sine）、EEW（急促方波）、海啸（低频长音 sawtooth）都区分开——
-  // 气象灾害与地震的应对方式不同，不该共用一个音色。
+  // 气象警报（泥石流 / 洪水 / 大雨 / 高潮）：下行三音 + triangle 波形，与地震 / EEW / 海啸区分开
   weather: { notes: [
     { freq: 587, start: 0, dur: 0.22, type: 'triangle' },
     { freq: 494, start: 0.26, dur: 0.22, type: 'triangle' },
@@ -98,8 +83,7 @@ function playSound(kind, volume) {
       nodes.push(osc, g)
       if (n.start + n.dur > endAt) endAt = n.start + n.dur
     }
-    // 播完断开：osc.stop() 只是停止发声，节点仍挂在 destination 上；
-    // 每次警报都新建 2～3 个节点，长期运行会一直累积（disconnect 后交给 GC）。
+    // 播完断开：osc.stop() 只是停止发声，节点仍挂在 destination 上，长期运行会一直累积
     setTimeout(() => {
       for (const node of nodes) { try { node.disconnect() } catch (err) { /* 已断开等忽略 */ } }
       try { master.disconnect() } catch (err) { /* 忽略 */ }
@@ -108,7 +92,7 @@ function playSound(kind, volume) {
   if (ctx.state === 'suspended') ctx.resume().then(() => { if (ctx.state === 'running') doPlay() }).catch(() => {})
   else doPlay()
 }
-/** 按灾害类型选音色（抽成纯函数，便于断言"气象不再沿用地震音"）。 */
+/** 按灾害类型选音色（纯函数，便于断言气象不再沿用地震音）。 */
 function soundKindOf(alert) {
   if (!alert) return 'test'
   if (alert.kind === 'eew') return 'eew'
@@ -120,11 +104,8 @@ function playAlertSound(alert, volume) {
   playSound(soundKindOf(alert), volume)
 }
 /**
- * 这条提醒该不该**发声**（0.9.4 / C1：分灾害音效开关）。
- *
- * `notify.sound` 是总开关；三个分开关按**灾种类别**细分：地震（含 EEW）、海啸、气象。
- * 抽成纯函数是为了能被直接断言——沙箱里没有 AudioContext，"到底响没响"只能靠这个判据钉住。
- * 认不出的 kind（测试音等）不受分开关影响，只看总开关。
+ * 这条提醒该不该**发声**：`notify.sound` 是总开关，三个分开关按灾种类别细分——地震（含 EEW）/ 海啸 /
+ * 气象；认不出的 kind（测试音等）只看总开关。
  */
 function soundAllowedFor(cfg, alert) {
   const n = (cfg && cfg.notify) || {}

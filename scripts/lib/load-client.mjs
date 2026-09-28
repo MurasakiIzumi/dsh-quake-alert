@@ -1,19 +1,11 @@
-// dsh-quake-alert · 在 Node 里加载客户端 bundle（契约脚本与回归测试共用的约定）
+// dsh-quake-alert · 在 Node 里加载客户端 bundle（契约脚本与回归测试共用）
 //
 // 作用：stub 掉浏览器的 `window.__ModuleLoader__`，在 vm 沙箱里执行**已提交的**
 //       `client/client.js`，取回它的 `exports`（也就是 `__test` 那个纯函数导出面）。
 //
-// 为什么不与 `tests/sync-test.cjs` 顶部那一份合并：
-//   那边除了取 `__test`，还要注入假 WebSocket / 假定时器去驱动连接生命周期用例
-//   （`harness` / `makeSched` / `makeSocket`），合并会把「取纯函数」与「搭一个受控的假环境」
-//   两个用途绑死——而契约脚本只需要前者（DESIGN 11.9 E：拉真实数据、交给解析器、看它还认不认）。
-//   两份都建立在同一个约定上：`client/client.js` 是**单文件** bundle、`__test` 是**导出面**。
-//   任何一边失效（bundle 没构建、`__test` 改名、单文件假设被打破），另一边会立刻红
-//   ——约定本身因此是被两边共同守护的。
-//
-// 注意读的是**已提交的构建产物**而不是现场构建：CI 上不需要 pnpm、不需要 rollup，
-// 而"提交的 bundle 与 client/src/ 不同步"这件事由 `node scripts/build-client.mjs --check`
-// 单独负责（两件事分开，失败原因才不会混在一起）。
+// 读的是已提交的构建产物而不是现场构建：CI 上因此不需要 pnpm、不需要 rollup；而"提交的
+// bundle 与 client/src/ 不同步"由 `node scripts/build-client.mjs --check` 单独负责
+// （两件事分开，失败原因才不会混在一起）。
 
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -26,7 +18,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '.
 export const CLIENT_PATH = path.join(ROOT, 'client', 'client.js')
 
 // 文件内容读一次即可：同一个进程里它不会变。「模拟页面重载」指的是**重新执行**沙箱
-// （见 loadClientEx），不是重新读盘。
+// （见 loadClientEx），不是重新读取文件。
 let clientCode = null
 function codeOf() {
   if (clientCode === null) {

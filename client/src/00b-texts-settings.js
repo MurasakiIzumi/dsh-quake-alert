@@ -1,33 +1,25 @@
 // ============================================================================
 // dsh-quake-alert · client/src/00b-texts-settings.js
 //
-// 作用：设置页文案表（各语言并列）——区块标题、选项卡、控件标签、按钮、说明、
-//       折叠区、状态提示、错误提示、测试结果模板、履历条目的徽标与字段名。
-// 内容：纯数据对象，**不 import 任何模块**（依赖方向：面文件 ← 00-i18n.js ← 其它）。
-// 依赖：无。
+// 作用：设置页文案表（各语言并列）——区块标题、选项卡、控件标签、按钮、说明、折叠区、
+//       状态提示、错误提示、测试结果模板、履历条目的徽标与字段名。
+// 内容：纯数据对象，不 import 任何模块（依赖方向：文案文件 ← 00-i18n.js ← 其它）。
+//       key 命名 `settings.子面.用途`，全小写驼峰段；插值写 `{name}`（由 t() 替换）。
 //
-// key 命名：`settings.子面.用途`，全小写驼峰段；插值写 `{name}`（由 t() 替换）。
-// zh-CN 一栏是**逐字现状**——0.9.0 的 i18n 只是把既有字符串搬进表里，
-// 默认语言下的输出必须与 0.8.2 完全一致（回归里有一条断言守这件事）。
+// 只放我们生成的文本，下面这些一律不进表、原样透传：
+// 源侧标签（`SOURCE_CODE_TEXT` / `p2pCodeTextOf` 的来源标注、`P2P_KIND_CODE`、
+// `store.sources[id].label`、`store.weatherHint.label`）、地名（`place.name` / `c.name` /
+// `c.admin`）、`alert.detail`、`e.headline`、`e.label`（解析层 kindLabel）、`res.detail`、
+// 语义标签里的专有名词原文（'気象庁' / '東京都' / 'Data Source: Environment and Climate
+// Change Canada'）、源文本里的固定枚举（'Flood / Flood Warning' / 'Watch' / 'Advisory' /
+// 'Statement' / 'warning' / 'advisory'）、单位与标识（'km' / '%' / 'EEW' / 'CENC' /
+// 'NOAA' / 'NWS' / 'ECCC' / 'SSE' / 'Web Audio' / 'settings.yaml' / 'localStorage' /
+// 'TROUBLESHOOTING.zh.md' / 'dsh web' / 'QuakeAlert' / 'AI'）、间隔符与破折号
+// （' · ' / ' / ' / '—' / '…' / '（' / '）'）。
 //
-// 范围（DESIGN 11.10）：只放**我们生成的文本**。设置页里这些一律不进表、原样透传：
-//   · 源侧标签：`SOURCE_CODE_TEXT` / `p2pCodeTextOf` 的来源标注（'JMA 电文' / '中央气象台' …）、
-//     `P2P_KIND_CODE`、`store.sources[id].label`、`store.weatherHint.label`、地名
-//     （`place.name` / `c.name` / `c.admin`）、`alert.detail`（正文）、`e.headline`、
-//     `e.label`（解析层的 kindLabel）、测试结果里的 `res.detail`；
-//   · **曾经列在这里、0.9.1 起已经进表的两项**——留在这里是为了下一轮 review 不再把它们当漏翻：
-//     `store.detail`（源状态摘要：源名与状态文字现在都走 `t()`，见 07-store）、
-//     都道府县名（现在走 `prefLabelOf`：日文原名 / 中文名 / 罗马字三分支，见 01-constants）；
-//   · 语义标签里的专有名词原文：'気象庁'、'東京都'、'Data Source: Environment and Climate Change Canada'；
-//   · 源文本里的固定枚举（'Flood / Flood Warning' / 'Watch' / 'Advisory' /
-//     'Statement' / 'warning' / 'advisory'）——它们描述的是上游规则，不是我们的说法；
-//   · 单位与标识：'km'、'%'、'EEW'、'CENC'、'NOAA'、'NWS'、'ECCC'、'SSE'、'Web Audio'、
-//     'settings.yaml'、'localStorage'、'TROUBLESHOOTING.zh.md'、'dsh web'、'QuakeAlert'、'AI'；
-//   · 间隔符与破折号：' · '、' / '、'—'、'…'、'（'、'）'、'%' 这些不是文案。
-//
-// **归属待定（别当成漏翻）**：`e.suppressedReason`——它是管道层（11-pipeline）拼的"为什么没播报"，
-// 进履历条目的「说明」字段（日常可见），但既不在 11.10 的"要翻"清单里，也不属于"解析层 reason
-// 不翻"那一类。0.9.1 未做，登记在 CHANGELOG 的「有意不做」里。
+// 另有 `store.detail`（源状态摘要，源名与状态文字都走 t()，见 07-store）与都道府县名
+// （走 `prefLabelOf` 的日文原名 / 中文名 / 罗马字三分支，见 01-constants）已经进表。
+// `e.suppressedReason`（11-pipeline 拼的「为什么没播报」，进履历条目的说明字段）尚未进表。
 // ============================================================================
 
 const SETTINGS = {
@@ -38,14 +30,13 @@ const SETTINGS = {
     'settings.status.open': '已连接',
     'settings.status.reconnecting': '重连中（第 {n} 次）',
     'settings.status.closed': '已停止',
-    // 0.4.1：轮询源与"消息处理失败"也需要自己的状态（此前只有 WebSocket 的五个状态，
-    // 于是上游被墙 / 路由 500 / 主链抛错时界面上与"没有新闻"完全不可区分）。
+    // 轮询源与"消息处理失败"也有自己的状态：上游被墙 / 路由 500 / 主链抛错时不能与"没有新闻"同形
     'settings.status.unreachable': '无法连接',
     'settings.status.degraded': '链路降级',
     'settings.status.stale': '数据已过期',
     'settings.status.schemaError': '数据格式异常',
     'settings.status.disabled': '已关闭',
-    // 认不出的状态码原样回显（配置 / 上游里出现一个我们没登记的状态时不该显示空白）
+    // 认不出的状态码原样回显（配置 / 上游里出现没登记的状态时不该显示空白）
     'settings.status.raw': '{status}',
 
     // ---------- 配置存储位置的人话说明（settingsSyncLabel） ----------
@@ -53,10 +44,8 @@ const SETTINGS = {
     'settings.storage.memory': '只保存在这个浏览器里',
     'settings.storage.local': '浏览器本地存储',
 
-    // ---------- 源状态区块（SourceStatusBlock） ----------
-    // ---------- 源名标签（00f-source-labels 的 SOURCE_LABEL_KEYS 指向这里） ----------
-    // 与 `settings.source.*` 分开：这些是**源的名字**，会被侧边栏的悬停提示、设置页的源状态
-    // 区块、重试按钮三处共用；`settings.source.*` 是那个区块自己的措辞。
+    // ---------- 源名标签（被 00f 的 SOURCE_LABEL_KEYS 与 statusTextOf 指向） ----------
+    // 与 `settings.source.*` 分开：这些是源的名字，侧边栏悬停提示、源状态区块、重试按钮三处共用。
     'settings.sourceLabels.p2pquake': 'P2PQuake（日本地震 / EEW / 海啸，实时推送）',
     'settings.sourceLabels.emsc': 'EMSC（全球地震，实时推送）',
     'settings.sourceLabels.cencEew': '大陆地震预警（CENC，SSE 推送）',
@@ -76,7 +65,7 @@ const SETTINGS = {
     'settings.source.receivedIncrements': '已收到 {n} 条增量',
     'settings.source.localErrors': '，本地失败 {n} 次',
     'settings.source.truncated': '，增量缺口 {n} 次',
-    'settings.source.resets': '，游标重置 {n} 次',
+    'settings.source.resets': '，读取位置重置 {n} 次',
     'settings.source.hostErrors': '，Host 失败 {n} 次',
     'settings.source.hostDetailDropped': '，Host 放弃详情 {n} 条',
     'settings.source.lastFetch': ' · 最近拉取 {ago}',
@@ -99,7 +88,7 @@ const SETTINGS = {
     'settings.source.received': ' · 已收到 {n} 条',
     'settings.source.broadcast': '，已播报 {n}',
     'settings.source.fallbacks': '，降级 {n} 次',
-    'settings.source.probeTimeouts': '，无首帧 {n} 次',
+    'settings.source.probeTimeouts': '，未收到数据 {n} 次',
     'settings.source.lastData': ' · 最近数据 {ago}',
     'settings.source.retry': '重试 {name} 的数据解析',
 
@@ -161,8 +150,7 @@ const SETTINGS = {
     'settings.cities.overLimit': '…共 {n} 个，请输入关键词',
 
     // ---------- 已关注地区列表 ----------
-    // 只是**后缀**（原名），显示名由调用方按语言拼（`prefLabelOf`）——0.9.0 这里一度写成完整
-    // 形式 `'{zh}（{jp}）'`，而调用方前面已经拼过一次名字，界面上就成了「东京东京（東京都）」。
+    // 只是后缀（原名），显示名由调用方按语言拼（`prefLabelOf`）。
     'settings.watch.prefMeta': '（{jp}）',
     'settings.watch.prefOrFull': ' · 全境',
     'settings.watch.prefDetail': ' · 已细化 {n} 个市区町村',
@@ -328,8 +316,8 @@ const SETTINGS = {
     'settings.diag.outcomeUnknown': '未知原因',
     'settings.diag.sentWeather': '已发送：{label}（{pref} / 警戒レベル{level}，{note}）',
     'settings.diag.scenarios': '每次点击换一个场景：{list}。',
-    // 测试场景的**显示名与说明**。场景数据本身（TEST_SCENARIOS / TEST_GEO_SCENARIOS）留在
-    // 05b / 05c 里保持纯数据，key 用它们的稳定标识（`sc.key`），所以那两个文件不必 import t()。
+    // 测试场景的显示名与说明：场景数据（TEST_SCENARIOS / TEST_GEO_SCENARIOS）留在 05b / 05c
+    // 保持纯数据，key 用它们的稳定标识（`sc.key`），那两个文件不必 import t()。
     'settings.diag.scenario.landslide': '泥石流警戒情报',
     'settings.diag.scenarioNote.landslide': '市町村级 / 电文本身即 L4',
     'settings.diag.scenario.flood': '指定河川洪水予報（氾濫危険情報）',
@@ -410,8 +398,7 @@ const SETTINGS = {
     'settings.storage.memory': '只儲存在這個瀏覽器裡',
     'settings.storage.local': '瀏覽器本機儲存',
 
-    // ---------- 源状态区块（SourceStatusBlock） ----------
-    // ---------- 源名标签（00f-source-labels 的 SOURCE_LABEL_KEYS 指向这里） ----------
+    // ---------- 源名标签（SOURCE_LABEL_KEYS 指向这里） ----------
     'settings.sourceLabels.p2pquake': 'P2PQuake（日本地震 / EEW / 海嘯，即時推送）',
     'settings.sourceLabels.emsc': 'EMSC（全球地震，即時推送）',
     'settings.sourceLabels.cencEew': '大陸地震預警（CENC，SSE 推送）',
@@ -431,7 +418,7 @@ const SETTINGS = {
     'settings.source.receivedIncrements': '已收到 {n} 筆增量',
     'settings.source.localErrors': '，本機失敗 {n} 次',
     'settings.source.truncated': '，增量缺口 {n} 次',
-    'settings.source.resets': '，游標重設 {n} 次',
+    'settings.source.resets': '，讀取位置重設 {n} 次',
     'settings.source.hostErrors': '，Host 失敗 {n} 次',
     'settings.source.hostDetailDropped': '，Host 捨棄詳情 {n} 筆',
     'settings.source.lastFetch': ' · 最近取得 {ago}',
@@ -454,7 +441,7 @@ const SETTINGS = {
     'settings.source.received': ' · 已收到 {n} 筆',
     'settings.source.broadcast': '，已播報 {n} 筆',
     'settings.source.fallbacks': '，降級 {n} 次',
-    'settings.source.probeTimeouts': '，無首幀 {n} 次',
+    'settings.source.probeTimeouts': '，未收到資料 {n} 次',
     'settings.source.lastData': ' · 最近資料 {ago}',
     'settings.source.retry': '重試 {name} 的資料解析',
 
@@ -778,7 +765,7 @@ const SETTINGS = {
     'settings.source.receivedIncrements': '受信 {n} 件',
     'settings.source.localErrors': '、ローカル失敗 {n} 回',
     'settings.source.truncated': '、欠落 {n} 回',
-    'settings.source.resets': '、カーソル初期化 {n} 回',
+    'settings.source.resets': '、読み取り位置の初期化 {n} 回',
     'settings.source.hostErrors': '、Host 失敗 {n} 回',
     'settings.source.hostDetailDropped': '、Host が詳細を破棄 {n} 件',
     'settings.source.lastFetch': ' · 最終取得 {ago}',
@@ -801,7 +788,7 @@ const SETTINGS = {
     'settings.source.received': ' · 受信 {n} 件',
     'settings.source.broadcast': '、通知 {n} 件',
     'settings.source.fallbacks': '、降格 {n} 回',
-    'settings.source.probeTimeouts': '、初回フレームなし {n} 回',
+    'settings.source.probeTimeouts': '、初回データなし {n} 回',
     'settings.source.lastData': ' · 最終データ {ago}',
     'settings.source.retry': '{name} のデータ解析を再試行',
 
@@ -1109,7 +1096,7 @@ const SETTINGS = {
     'settings.source.receivedIncrements': 'Received {n} updates',
     'settings.source.localErrors': ', {n} local failures',
     'settings.source.truncated': ', {n} gaps',
-    'settings.source.resets': ', {n} cursor resets',
+    'settings.source.resets': ', {n} position resets',
     'settings.source.hostErrors': ', {n} host failures',
     'settings.source.hostDetailDropped': ', {n} details dropped by host',
     'settings.source.lastFetch': ' · Last fetch {ago}',
@@ -1132,7 +1119,7 @@ const SETTINGS = {
     'settings.source.received': ' · {n} received',
     'settings.source.broadcast': ', {n} alerted',
     'settings.source.fallbacks': ', {n} fallbacks',
-    'settings.source.probeTimeouts': ', {n} with no first frame',
+    'settings.source.probeTimeouts': ', {n} with no data received',
     'settings.source.lastData': ' · Last data {ago}',
     'settings.source.retry': 'Retry parsing {name} data',
 
