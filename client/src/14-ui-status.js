@@ -14,7 +14,7 @@ import { statusMetaOf } from './13-ui-settings.js'
 // ---------- 侧边栏状态指示（DESIGN 第 6 节：连接状态显示在插件图标与设置页） ----------
 function StatusIndicator(props) {
   const [, setTick] = useState(0)
-  useEffect(() => store.subscribe(() => setTick((t) => t + 1)), [])
+  useEffect(() => store.subscribe(() => setTick((n) => n + 1)), [])
   const meta = statusMetaOf(store.status, store.retries)
   const wide = Boolean(props && props.wide)
   // disabled（用户关掉了某个灾种 / 全部关掉）用**空心**圆点表示，与 stale / 未启动 的实心灰区分开

@@ -149,6 +149,10 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
     // stale（源可达但数据是旧的）：由 Host 的 sync / status 帧告知，Client 自己判不出来
     // ——"没有新 entry"与"这几天确实没有地震"在本地长得一模一样。
     stale: false, dataTime: 0,
+    // Host 侧的"中继连接是否还活着"与它最近一次错误（0.9.5 / fresh review）：SSE 路径下
+    // Client 不轮询 /feed，所以 Host 的 stats 在界面上零消费者——中继被掐断时界面会一直显示
+    // 绿色的 "SSE connected · received 0"，与"这段时间确实没有地震"同形。
+    hostConnected: null, hostError: '',
     lastAt: 0, lastEventAt: 0, cursor: 0, frozen: false, lastDetail: '',
   }
 
@@ -462,17 +466,25 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
       try { d = JSON.parse(String(ev && ev.data)) } catch (err) { d = null }
       if (!d || typeof d !== 'object') return
       stats.stale = d.stale === true
+      // 0.9.5（fresh review）：Host 说"中继连接断了"时，界面不能继续显示绿色已连接。
+      // `connected` 只有 Host 知道（它才持有那条 WebSocket），而在 SSE 路径下我们拿不到 /feed 的 stats。
+      if (typeof d.connected === 'boolean') stats.hostConnected = d.connected
+      stats.hostError = d.lastError ? String(d.lastError) : ''
       if (Number.isFinite(d.dataTime)) stats.dataTime = d.dataTime
       if (Number.isFinite(d.dataTime) && d.dataTime > 0) noteFreshness(id, d.dataTime)
       // 有意**不更新** stats.lastAt：它表示"最近一条数据"，而状态帧每 15 秒必到一次，
       // 更新它会让设置页永远显示"最近数据 0 秒前"，恰好把"其实很久没有数据了"盖掉。
       // 状态里同时带上 sync 那一刻算出的 connected 告警（见 connWarn）：只报"已连接"会把
       // 增量缺口 / 游标重置 / Host 未运行这三条在 15 秒后抹掉，而它们的条件仍然成立。
+      const hostWarn = []
+      if (stats.hostConnected === false) hostWarn.push('relay disconnected')
+      if (stats.hostError) hostWarn.push(stats.hostError)
+      const warnAll = connWarn.concat(hostWarn)
       reportStatus({
-        status: stats.stale ? 'stale' : (connWarn.length ? 'degraded' : 'open'),
+        status: stats.stale ? 'stale' : (warnAll.length ? 'degraded' : 'open'),
         detail: 'SSE connected · received ' + stats.received + '' +
           (stats.stale ? ' · relay stale' : '') +
-          (connWarn.length ? ' · ' + connWarn.join('；') : ''),
+          (warnAll.length ? ' · ' + warnAll.join(' · ') : ''),
       })
     }
     const onEntry = (ev) => {

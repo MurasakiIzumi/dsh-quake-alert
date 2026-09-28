@@ -286,6 +286,11 @@ export function sourceHealthOf(sourceId) {
  * 探针按契约判定并写进这里，各源只上报 dataTime。
  */
 export function effectiveStatusOf(sourceId, connStatus, detail) {
+  // 0.9.5（fresh review）：用户**主动关掉**的源优先于一切健康判定。此前蓝点（data 层升级）与
+  // stale 会覆盖 disabled，于是"我把这个灾种关了"被界面改写成"数据格式异常 / 上游停更"——
+  // 侧边栏挂着蓝点（最长 24h TTL）、聚合状态也不会变成 disabled，还给一个已关掉的源画「重试」。
+  // 这正是 P2-17 想消灭的那类"关掉之后仍被拖成异常"的残留，只是它当时只处理了 stale 那一层。
+  if (connStatus === 'disabled') return { status: 'disabled', detail }
   const r = health.get(sourceId)
   if (r && r.data && r.data.escalated) return { status: 'schema-error', detail: r.data.kind + '：' + r.data.detail }
   if (r && r.fresh && r.fresh.stale) return { status: 'stale', detail: detail || 'upstream data stale' }

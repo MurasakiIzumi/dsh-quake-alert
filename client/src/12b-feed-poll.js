@@ -61,7 +61,20 @@ function saveFeedCursor(v, key) {
 
 async function defaultFetchJson(url, signal) {
   const AS = (typeof window !== 'undefined' && window) ? window.AbortSignal : undefined
-  const timeout = (AS && typeof AS.timeout === 'function') ? AS.timeout(FEED_FETCH_TIMEOUT_MS) : undefined
+  let timeout = (AS && typeof AS.timeout === 'function') ? AS.timeout(FEED_FETCH_TIMEOUT_MS) : undefined
+  let timeoutTimer = null
+  // 0.9.5（fresh review）：`AbortSignal.timeout` 只有较新的引擎才有（Chrome 103+ / Firefox 124+）。
+  // 在"有 AbortController 却没有 AbortSignal.timeout"的引擎上 `timeout` 是 undefined，于是下面
+  // `if (signal && timeout)` 整支不成立 → 只剩"停用插件才 abort"的业务信号；而底部的 Promise.race
+  // 兜底又要求"连 AbortController 都没有"（那时才没有别的办法）——两处条件正好错开，
+  // **超时保护整条消失**：挂死的本地请求让 inFlight 永不 settle，schedule() 在 await 之后才重排，
+  // jma / usgs / noaa / nmc 四源同时永久停摆而状态停在上一次的绿。这里补上自建的那一支
+  // （照 12e-overseas-poll 的做法：AbortController + setTimeout）。
+  if (!timeout && typeof AbortController === 'function') {
+    const ctrl = new AbortController()
+    timeoutTimer = setTimeout(() => { try { ctrl.abort() } catch (err) { /* 已中止 */ } }, FEED_FETCH_TIMEOUT_MS)
+    timeout = ctrl.signal
+  }
   /**
    * 把「请求超时」与「插件停用时中止」合成**一个**信号。
    *
@@ -105,22 +118,27 @@ async function defaultFetchJson(url, signal) {
       if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : '?'))
       return res.json()
     })
-  // 兜底（只在没有 AbortController 的老引擎上生效）：让这一轮至少能按时结束，
-  // 而不是把 inFlight 一直占住——"轮询链永久停摆"比"少一个中止信号"严重得多。
-  if (!(typeof AbortController === 'function') && timeout) {
-    let timer = null
-    try {
-      return await Promise.race([
-        request,
-        new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error('local timeout (' + FEED_FETCH_TIMEOUT_MS + 'ms): ' + url)), FEED_FETCH_TIMEOUT_MS)
-        }),
-      ])
-    } finally {
-      if (timer) clearTimeout(timer)
+  // 兜底（只在"连 AbortController 都没有"的老引擎上生效——那时没有任何办法中止底层请求，
+  // 只能让这一轮按时结束）："轮询链永久停摆"比"少一个中止信号"严重得多。
+  try {
+    if (!(typeof AbortController === 'function') && timeout) {
+      let timer = null
+      try {
+        return await Promise.race([
+          request,
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error('local timeout (' + FEED_FETCH_TIMEOUT_MS + 'ms): ' + url)), FEED_FETCH_TIMEOUT_MS)
+          }),
+        ])
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
     }
+    return await request
+  } finally {
+    // 自建的超时定时器要在请求结束（成功 / 失败 / 被中止）时清掉，否则它会一直挂到超时点。
+    if (timeoutTimer) clearTimeout(timeoutTimer)
   }
-  return request
 }
 
 /**

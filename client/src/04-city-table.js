@@ -2,11 +2,12 @@
 // dsh-quake-alert · client/src/04-city-table.js
 //
 // 作用：市区町村表与「观测点 addr → 市町村」归一。
-// 内容：表的注入与规整（setCityTable/citiesOfPref/pruneUnknownCities）、
+// 内容：表的注入与规整（setCityTable/citiesOfPref/pruneUnknownCities、
+//       pruneCitiesOfUnwatchedPrefs）、
 //       地名假名归一（normKana）与规范写法反查（canonicalCityOf）、
 //       从 Host 只读路由拉表（loadCityTable）、写法变体展开（cityAliases）、
 //       前缀索引（buildAddrIndex）与查询（lookupAddrCity）。
-// 依赖：01-constants、02-storage、03-settings-bridge（pruneUnknownCities 会写配置）。
+// 依赖：01-constants、02-storage、03-settings-bridge（两个 prune 都会写配置）。
 // 要点：気象庁/P2PQuake 的观测点名用短名与消歧写法（大阪北区茶屋町、福島伊達市、
 //       渡島北斗市），必须先归一到市町村全称再比对，否则会大面积漏报；
 //       河川区域表与 JMA 电文还可能与本表假名写法不同（南アルプス市 / 南あるぷす市），
@@ -429,6 +430,36 @@ function pruneUnknownCities() {
   if (kept.length === cur.watch.cities.length) return
   applyCfg(Object.assign({}, cur, { watch: Object.assign({}, cur.watch, { cities: kept }) }))
 }
+/**
+ * 清掉「所属都道府县已经不在关注列表里」的市町村（0.9.5 / C11①）。
+ *
+ * 为什么需要它：设置页取消关注某个县时，`togglePref` 会顺手清掉该县下的市町村
+ * （13-ui-settings.js 的 togglePref）。那个清理**依赖市町村表**（`citiesOfPref`），
+ * 而表是异步取的：表未就绪时 `citiesOfPref` 返回空数组，于是"该县下的市町村"一个都
+ * 匹配不到，清理静默失效。后果**基本**不是误报：匹配层先看县，`regionInWatch` 对不在关注
+ * 列表里的县直接返回 false。**但有一个窄口子**——县归不出来（`region.pref === ''`）且整条
+ * 消息没有任何区域能归到县时，它会落到市级比对（`lookupAddrCity` → `watch.cities`），残留的
+ * 市町村仍可能在那里命中一次（多报方向，构造得出但罕见）。所以这条清理不只是"收拾界面"，
+ * 它同时关掉了那个口子（此前留下的条目会在下一次装载时被清掉）。
+ *
+ * 表就绪后补这一次清理，所以无论表什么时候到（包括 P2-18 的「重试」之后），残留都能收敛。
+ * 两个保守边界：**关注列表为空 = 全日本**，此时所有市町村都有效，不清；
+ * 归属认不出的条目保留（宁可留着用户的选择，也不擅自删他勾过的东西）。
+ */
+function pruneCitiesOfUnwatchedPrefs() {
+  if (!cityPrefIndex) return
+  const cur = currentCfg()
+  const watched = (cur.watch && cur.watch.prefectures) || []
+  if (watched.length === 0) return
+  const cities = (cur.watch && cur.watch.cities) || []
+  const kept = cities.filter((c) => {
+    const prefs = prefsOfCity(c)
+    if (prefs.length === 0) return true
+    return prefs.some((p) => watched.indexOf(p) !== -1)
+  })
+  if (kept.length === cities.length) return
+  applyCfg(Object.assign({}, cur, { watch: Object.assign({}, cur.watch, { cities: kept }) }))
+}
 let cityTableAbort = null // 在途请求的取消器（插件卸载时用）
 async function loadCityTable() {
   if (cityTableState === 'loading' || cityTableState === 'ready') return cityTableState
@@ -456,7 +487,13 @@ async function loadCityTable() {
     // 0.8.0：全球国家清单（城市本体按 `?country=` 分包另取，见 loadCountryCities）。
     // 缺失只影响「其他国家 / 地区」分支的城市列表，手填坐标那条路照常可用。
     if (isPlainObject(data) && Array.isArray(data.worldCountries)) setWorldCountries(data.worldCountries)
+    // 0.3.0 起就在的清理：配置里残留了表里不存在的市町村名（手工改过配置 / 数据表更新）→ 清掉。
+    // **不能省**：C11① 那次补修一度把这一行挤掉了（改成只调下面那个），而回归里 pruneUnknownCities
+    // 是**直接调用**的，所以没有任何断言会红——补修引入的回归正好落在测试盲区里。
     pruneUnknownCities()
+    // 0.9.5（C11①）：再把"所属县已不在关注列表里"的市町村清掉
+    //（取消关注时那次清理依赖本表，表没到位就静默失效了——见函数说明）。
+    pruneCitiesOfUnwatchedPrefs()
   } catch (err) {
     // 插件卸载造成的中止不算"失败"：下次装载应当能重试
     const aborted = !!(cityTableAbort && cityTableAbort.signal && cityTableAbort.signal.aborted)
@@ -505,4 +542,4 @@ const resetCityTable = () => {
 /** 大陆表的状态（0.9.4 / P2-19）：'idle' | 'ready' | 'failed'。设置页据此区分"加载中"与"失败"。 */
 const cnAreasStateOf = () => (cnAreas ? 'ready' : (cnAreasFailed ? 'failed' : 'idle'))
 
-export { AREAS_PATH, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, buildAddrIndex, lookupAddrCity, pruneUnknownCities, loadCityTable, retryCityTable, abortCityTableLoad, cityTableState, resetCityTable, setCnAreas, cnAreasStateOf, cnProvinces, cnCitiesOf, cnPlaceOf, cnAreaOf, normAliases, setWorldCountries, worldCountriesOf, countryNameOf, countryPackOf, loadCountryCities, resetWorldCities }
+export { AREAS_PATH, setCityTable, citiesOfPref, prefsOfCity, canonicalCityOf, normKana, setRiverAreas, riverAreaCities, cityAliases, buildAddrIndex, lookupAddrCity, pruneUnknownCities, pruneCitiesOfUnwatchedPrefs, loadCityTable, retryCityTable, abortCityTableLoad, cityTableState, resetCityTable, setCnAreas, cnAreasStateOf, cnProvinces, cnCitiesOf, cnPlaceOf, cnAreaOf, normAliases, setWorldCountries, worldCountriesOf, countryNameOf, countryPackOf, loadCountryCities, resetWorldCities }

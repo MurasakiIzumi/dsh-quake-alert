@@ -223,7 +223,8 @@ const NMC_LEVEL_KEY = { red: 'kind.cnLevelRed', orange: 'kind.cnLevelOrange', ye
  *  ② **先确认有没有大陆关注点，再看播报门槛**（0.8.2 调整，DESIGN 11.9 A）。原来门槛排在前面，
  *     于是"一个大陆关注点都没配"的用户，黄 / 蓝预警会持续写进履历——同一路数据橙色以上不进历史、
  *     蓝色却进，两种口径（11-pipeline 的 `noWatch` 只对走到后面那条分支的条目生效）。
- *  ③ 播报门槛：**橙色及以上**才打扰，黄 / 蓝只入历史。不满足时 reason 要说清是"等级不够"，
+ *  ③ 播报门槛：**橙色及以上**才打扰；黄 / 蓝是"未达档位"，0.9.4（PD-1）起**既不播报也不进
+ *     历史**（此前只入历史）。不满足时 reason 要说清是"等级不够"，
  *     而不是含糊的"未命中"——否则用户会把"这条预警我收到了但没响"读成故障。
  *  ④ 归属：市能对上就用市；市对不上（省直辖县 / 省台发布 / 机构名错字）时**按省放行**；
  *     连省都认不出（国家级机构等）也放行。后两条都是 DESIGN 3.2 / 8.5 的"宁可多报绝不漏报"
@@ -295,7 +296,8 @@ function matchCnAreaAlert(alert, cfg) {
  *
  * 剩下的三个判定都是"用户看不见的漏报"防线：
  *   ① 关注点被删了（用户改配置后取数器要下一轮才生效）→ 如实说明，不当成命中；
- *   ② 档位不够（NWS 的 Watch / Advisory / Statement）→ 只记历史，不打扰；
+ *   ② 档位不够（NWS 的 Watch / Advisory / Statement）→ 不播报；0.9.4（PD-1）起"未达档位"
+ *      也不再进历史（此前只记历史），与大陆源的黄 / 蓝同一口径；
  *   ③ 取数器没记归属（理论上不该发生）→ 不猜，明确说"无法判定"。
  */
 function matchOverseasAlert(alert, cfg) {
@@ -384,7 +386,8 @@ function matchAlert(alert, cfg) {
     if ((cfg.disasters || {}).weather === false) return { hit: false, reason: t('reason.weatherOff') }
     if (alert.cancelled) return { hit: false, reason: t('reason.clearedMuted') }
     if (alert.regions.length === 0) return { hit: false, cannotJudge: true, reason: t('reason.jmaNoUsableArea') }
-    // 播报边界写死在 L4：L1〜L3 仍然解析、仍然进历史（灰色条目），只是不打扰。
+    // 播报边界写死在 L4：L1〜L3 仍然解析，但 0.9.4（PD-1）起**不再进历史**
+    //（此前会留下灰色条目），只是不打扰。
     // 依据见 DESIGN 10.3——L3 是「高齢者等避難」，与 DSH 用户群不匹配；L4 才是避难指示级。
     //
     // **闸门必须看命中地区自己的级别**，不能看电文最大值：同一条 VPWW55 里姫路市是

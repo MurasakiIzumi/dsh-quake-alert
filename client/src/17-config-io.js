@@ -110,7 +110,17 @@ function backupCurrentConfig(now) {
 function loadConfigBackup() {
   const b = loadJSON(CONFIG_BACKUP_KEY, null)
   if (!isPlainObject(b) || !isPlainObject(b.config)) return null
-  return { at: String(b.at || ''), cfg: normalizeCfg(b.config) }
+  let cfg
+  try {
+    cfg = normalizeCfg(b.config)
+  } catch (err) {
+    // 0.9.5（fresh review）：备份同样是外部输入（用户在 localStorage 里就能改），而归一化会调
+    // i18n 取词、遇到字符串化不了的形状会抛 TypeError。调用方在**渲染期**（设置页要看"能不能撤销"），
+    // 所以这里按"没有可撤销的备份"处理——与上面那句契约一致。
+    try { console.warn('[dsh-quake-alert] 备份配置归一化失败，视为无备份：' + String((err && err.message) || err)) } catch (e) { /* 忽略 */ }
+    return null
+  }
+  return { at: String(b.at || ''), cfg }
 }
 
 function clearConfigBackup() {

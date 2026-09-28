@@ -346,7 +346,21 @@ function loadCfg() {
     setLanguage(fresh.language)
     return fresh
   }
-  const cfg = normalizeCfg(stored)
+  let cfg
+  try {
+    cfg = normalizeCfg(stored)
+  } catch (err) {
+    // 0.9.5（fresh review）：一条脏数据绝不能把整个插件拖崩——这正是本文件开头的承诺。
+    // 归一化会调 i18n 取词，而某些字符串化不了的形状（`{toString:null, valueOf:null}`，
+    // JSON / YAML 都造得出来）会让 `String(v)` 抛 TypeError。loadCfg 的调用方里有**渲染期**的
+    // （设置页 `useState(() => currentCfg())`），所以这里抛 = 整页白屏（插件没有 error boundary）。
+    // 退回默认配置，并留一条能查的日志。
+    try { console.warn('[dsh-quake-alert] 配置归一化失败，本次改用默认配置：' + String((err && err.message) || err)) } catch (e) { /* 忽略 */ }
+    const fresh = freshCfg()
+    saveJSON(STORAGE_KEY, fresh)
+    setLanguage(fresh.language)
+    return fresh
+  }
   // 版本不同（插件升级 / 用户手改）时不再直接清空：按当前 schema 归一保留可识别字段，再写回当前版本号。
   // 旧实现会在这里 saveJSON(默认值)，一次版本号变化就会静默丢掉用户选好的关注地区与阈值。
   if (stored.version !== DEFAULT_CFG.version) saveJSON(STORAGE_KEY, cfg)

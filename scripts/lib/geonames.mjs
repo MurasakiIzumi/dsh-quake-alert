@@ -30,9 +30,10 @@ export const isCjk = (s) => /^[\u4e00-\u9fff]+$/.test(s)
  * 大得多的下载；做不到就统一用拉丁文——这是用户选定的备选做法，也是唯一不依赖额外数据源的做法。
  * （国家 / 地区名不受影响：它们由 ICU 算出四种语言，见 `build-world-cities.mjs` 的 LANGS。）
  *
- * **已提交的 `lib/data/world-cities.js` 仍是旧名字**：换成拉丁名需要拿 `cities15000.zip` 重跑
- * `scripts/build-world-cities.mjs`，而准备 0.9.4 期间 `download.geonames.org` 不可达。
- * 这个函数就是给那次重跑用的，行为由 tests/sync-test.cjs 的 scripts/lib 一节钉住。
+ * **已提交的 `lib/data/world-cities.js` 已按本函数重生成过**（0.9.4）：5224 条城市名里没有一个汉字，
+ * 回归同时钉住规则（本函数）与数据（`tests/sync-test.cjs` 里 scripts/lib 那一节与"零汉字"断言）。
+ * 下面这句曾经是实况、现在已经过期，别再照它判断数据状态——**0.9.4 生成期间**
+ * `download.geonames.org` 一度不可达，那时提交的数据确实是旧名字；重跑成功之后不是了。
  */
 export function latinCityNameOf(row) {
   const r = row || {}

@@ -370,7 +370,19 @@ export const SOURCE_CONTRACTS = {
 // 每个包装函数先把"结构不符 / 值不可能"挡在解析器之前，再调用**真实解析器**（单一实现，
 // 不复制业务逻辑）。这样既得到契约要求的失败分类，又保证线上链路与测试走同一段代码。
 
-/** P2PQuake（551/552/556）。 */
+/**
+ * P2PQuake（551/552/556）。
+ *
+ * **它确实在运行时链路里**（0.9.5 / X-6 订正）：一份审查报告的"措辞校正"里写着这个包装函数
+ * 「只被 scripts/check-contracts.mjs 使用，**没进运行时链路**」—— 那是错的。真实调用点是
+ * `client/src/15-entry.js` 里 P2PQuake 的 `onRaw`（WebSocket 的每一帧；EMSC 那一侧同形），
+ * 而且调用之后立刻 `noteParseResult('p2pquake', res)`（05g-source-health），schema / value
+ * 失败会升级成界面上的**蓝点**（"数据格式异常，等插件更新"）并计入数据健康，不是被静静丢掉。
+ *
+ * 为什么把这句话留在这里：C2 / P3-41 的修法是"把 required 改成实现真的会拦下的"，那件事只
+ * 关系文档与 fixture 的可信度；而上面那条错误前提会让人以为"schema 失败没人看得见"，进而去
+ * 补一个并不存在的守卫。**要改这块之前先读这一段。**
+ */
 export function parseEpspResult(raw) {
   if (!isPlainObject(raw)) return failResult('schema', '顶层不是对象')
   const code = raw.code

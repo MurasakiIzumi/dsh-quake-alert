@@ -41,7 +41,14 @@ function cfgToSection(cfg) {
   return out
 }
 function sectionToCfg(section) {
-  return normalizeCfg(Object.assign({ version: DEFAULT_CFG.version }, isPlainObject(section) ? section : {}))
+  try {
+    return normalizeCfg(Object.assign({ version: DEFAULT_CFG.version }, isPlainObject(section) ? section : {}))
+  } catch (err) {
+    // 同 loadCfg 的理由（0.9.5 / fresh review）：Host 下发的 section 也是外部输入
+    // （settings.yaml / profile 都能手写），归一化抛错不该让调用方的渲染期炸掉。
+    try { console.warn('[dsh-quake-alert] Host section 归一化失败，本次改用默认配置：' + String((err && err.message) || err)) } catch (e) { /* 忽略 */ }
+    return freshCfg()
+  }
 }
 // 同步读取入口：保持 M1 的同步语义，调用方无需感知 Host 的存在
 function currentCfg() {

@@ -30,7 +30,7 @@ import { handleAlert } from './11-pipeline.js'
 import { activeClient } from './12-websocket.js'
 import { feedStatsOf } from './12b-feed-poll.js'
 import { overseasStatsOf } from './12e-overseas-poll.js'
-import { broadcastHistoryCleared } from './10-dedupe.js'
+import { broadcastHistoryCleared, forgetAllAlerted } from './10-dedupe.js'
 import { retrySource } from './05g-source-health.js'
 
 // ---------- 设置页 UI ----------
@@ -416,7 +416,7 @@ function SettingsPanel(props) {
   //（宿主按 `h(SettingsPanel, { close })` 渲染，不会传它）。
   const [tab, setTab] = useState(() => {
     const want = props && props.initialTab
-    return SETTINGS_TABS.some((t) => t.v === want) ? want : 'region'
+    return SETTINGS_TABS.some((tab) => tab.v === want) ? want : 'region'
   })
   // 关注地区的当前分支（0.8.0 / DESIGN 9.3）：地址是"用户视角的一条路径"，不是三块并列。
   const [regionTab, setRegionTab] = useState(() => inferRegionTab(currentCfg()))
@@ -427,7 +427,7 @@ function SettingsPanel(props) {
   const volPending = useRef(null) // 尚未落盘的草稿值：卸载时补写，拖完立刻关设置页也不丢改动
   const restartTimer = useRef(null) // 切换数据源后的重启延时（见下方）
   // store 变化（新预警、Host 配置同步）都要重新读一次当前配置
-  useEffect(() => store.subscribe(() => { setTick((t) => t + 1); setCfgState(currentCfg()) }), [])
+  useEffect(() => store.subscribe(() => { setTick((n) => n + 1); setCfgState(currentCfg()) }), [])
   useEffect(() => () => {
     if (volTimer.current) { clearTimeout(volTimer.current); volTimer.current = null }
     // 0.9.4（C11②）：挂起的"切换数据源后重启"要**执行**，而不是丢弃。
@@ -1069,8 +1069,18 @@ function SettingsPanel(props) {
   const volShown = volDraft === null ? cfg.notify.volume : volDraft
 
   const statusMeta = statusMetaOf(store.status, store.retries)
-  // 状态圆点。**不带外边距**：用到它的两处（常驻状态条、其他页）都是 flex + gap 排的。
-  const dot = h('span', { style: { display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: statusMeta.color, flexShrink: 0 } })
+  // 状态圆点。**不带外边距**：用它的唯一一处（statusStrip，位于页签之外，所以每个页签都能
+  // 看到）是 flex + gap 排的。
+  //
+  // 0.9.5（P3-45）：disabled（用户关掉了灾种 / 全部关掉）在这里也必须画**空心**，与侧边栏的
+  // StatusIndicator（14-ui-status.js:22-24）同一形态。此前这一处无条件实心，于是同一个
+  // "已关闭"在设置页是实心灰点、在侧边栏是空心灰圈——同一个状态两种画法。形状差异不只是
+  // 好看：DESIGN 5 节六态表要求把"已关闭"与 stale / 未启动 的实心灰分开，而颜色之外的
+  // 形状线索正是色觉障碍用户唯一能用的那个判据。
+  const dotStyle = store.status === 'disabled'
+    ? { display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: 'transparent', border: '1.5px solid ' + statusMeta.color, flexShrink: 0 }
+    : { display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: statusMeta.color, flexShrink: 0 }
+  const dot = h('span', { style: dotStyle })
 
   const permText = {
     granted: t('settings.perm.granted'),
@@ -1580,6 +1590,10 @@ function SettingsPanel(props) {
     s.row(s.btn(t('settings.history.clear'), () => {
       store.push({ events: [] })
       saveJSON(HISTORY_KEY, [])
+      // 0.9.5（fresh review）：本页的"已播报"记忆也要清，而且要落盘。此前只清了历史列表，
+      // 于是同一条解除到达时本页仍会播「已解除」（记忆还在）、别的标签页却写「无对应提醒」——
+      // 同一条消息两个结论；而且刷新之后记忆会从 ALERTED_KEY 复活。
+      forgetAllAlerted()
       // 还要广播：其它标签页的内存副本不清的话，它们下一次 addEvent 会把整份记录（含刚被
       // 清掉的条目）重新写回磁盘——用户以为清空了，实际只是本标签页看不见（若清空的动机
       // 是隐私，这就是实际的信息泄露面）。

@@ -52,7 +52,7 @@ const NMC_LEVEL_TEXT = { red: 'kind.cnLevelRed', orange: 'kind.cnLevelOrange', y
 const NMC_LEVEL_SEVERITY = { red: 'red', orange: 'orange', yellow: 'yellow', blue: 'info' }
 /** 等级序（越大越重），与 Host 的 NMC_LEVEL_RANK 一致。 */
 const NMC_LEVEL_RANK = { red: 4, orange: 3, yellow: 2, blue: 1 }
-/** 播报门槛：橙色及以上（DESIGN 8.4）。低于它的条目仍然解析、仍然进历史，只是不打扰。 */
+/** 播报门槛：橙色及以上（DESIGN 8.4）。低于它的条目仍然解析，但 0.9.4（PD-1）起不再进历史，只是不打扰。 */
 export const NMC_BROADCAST_MIN_RANK = 3
 
 /**

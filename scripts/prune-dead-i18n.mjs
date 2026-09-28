@@ -10,6 +10,12 @@
 //    留着它们的坏处不是"多占几行"：下一个人会以为改这里能让界面跟着变，而实际没有任何路径读它。
 //
 // 用法：node scripts/prune-dead-i18n.mjs（幂等：删过就报"没有可删除的键"）
+//
+// ⚠ 别把 DEAD 清单当成"这些键名永远是死的"：0.9.4 的本地化工作后来把**震度 / 海啸等级**的词
+// 复活了，用的还是 `scale.*` / `tsunami.*` 这套键名——只是落在 `client/src/00g-texts-events.js`
+// 里（由 05-parser 的 `'scale.' + v` / `'tsunami.' + grade` 取词）。本脚本只扫 FILES 列的
+// 00a / 00e 两个文件，**碰不到 00g**，所以重跑是安全的 no-op。要新增待删键时同样只加 00a / 00e
+// 里的，别把 00g 的活键写进来。
 
 import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'

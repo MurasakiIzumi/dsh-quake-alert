@@ -101,7 +101,7 @@ function ecccKindTextOf(nameEn) {
   return t('kind.caWeather')
 }
 
-/** 播报门槛（两个源共用）：`overseasRank >= 3` 才打扰用户，否则只进历史。 */
+/** 播报门槛（两个源共用）：`overseasRank >= 3` 才打扰用户；未达档位的 0.9.4（PD-1）起也不进历史。 */
 export const OVERSEAS_BROADCAST_MIN_RANK = 3
 
 /** NWS 的 `event` → 中文（供 UI / 测试使用）。 */

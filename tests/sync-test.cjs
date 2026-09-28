@@ -9643,6 +9643,302 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(false, '0.8.2 检查失败：' + e.message + '\n' + (e && e.stack ? e.stack.split('\n').slice(1, 3).join('\n') : ''))
   }
 
+  // ==========================================================================
+  // 0.9.5 复验补修（第二轮逐条复验测试C 清单时找到的漏项）
+  //
+  // 这三条都不是"清单没写"，而是"清单说处理了、仓库里其实没落"：
+  //   · X-7 / C7③ —— Wolfx 环缓冲只有条数上限，没有 poller 那样的字节预算；
+  //   · C11① —— 取消关注某县时那次市町村清理依赖异步取回的表，表未就绪就静默失效；
+  //   · P3-45① —— 同一个"已关闭"在设置页画实心点、在侧边栏画空心圈。
+  // ==========================================================================
+
+  // ---- X-7 / C7③：Wolfx 环缓冲的字节预算 ----
+  // poller 0.5.3 就有 DEFAULT_MAX_BUFFER_BYTES（8MB），而两个大陆源只按条数淘汰：条数只管
+  // "够不够补齐"，管不住内存——单条载荷多大完全由上游决定。这里用注入的小预算把那条路径
+  // 跑出来（真实的 8MB 在测试里造不出来），并且把 maxEntries 设得很大，让 dropped 只可能
+  // 来自字节约束——否则这条断言分不清是哪个约束生效。
+  try {
+    console.log('== 0.9.5 复验补修：Wolfx 环缓冲的字节预算（X-7 / C7③）==')
+    const wx2 = await import(pathToFileURL(path.join(ROOT, 'lib', 'wolfx-source.js')).href)
+    const clock2 = { t: Date.parse('2026-09-18T12:52:23Z') } // = 样本发震时刻 + 2 分钟（在年龄闸门内）
+    const q2 = new Map()
+    let qid = 0
+    const sched2 = {
+      set(fn, ms) { const k = ++qid; q2.set(k, { fn, at: clock2.t + (Number(ms) || 0) }); return k },
+      clear(k) { q2.delete(k) },
+      advance(ms) {
+        clock2.t += ms
+        for (const [k, v] of Array.from(q2)) if (v.at <= clock2.t) { q2.delete(k); v.fn() }
+      },
+    }
+    const socks2 = []
+    const base2 = JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'cn', 'cenc-eew-last.json'), 'utf8'))
+    // 每条帧都塞一段 pad：payload 原样入缓冲，所以条目大小可控（解析只看固定字段，不受影响）
+    const frame2 = (n, pad) => {
+      const f = JSON.parse(JSON.stringify(base2))
+      f.ReportNum = n
+      f.pad = 'p'.repeat(pad)
+      return JSON.stringify(f)
+    }
+    const mkSrc2 = (opts) => wx2.createWolfxSource(Object.assign({
+      id: 'cenc_eew',
+      now: () => clock2.t,
+      setTimer: (fn, ms) => sched2.set(fn, ms),
+      clearTimer: (k) => sched2.clear(k),
+      createSocket: () => { const s = { sent: [], closed: false, send(m) { s.sent.push(m) }, close() { s.closed = true } }; socks2.push(s); return s },
+      idleMs: 0, firstDelayMs: 0, connectTimeoutMs: 0, heartbeatTimeoutMs: 0,
+    }, opts || {}))
+    const pollerMod42 = await import(pathToFileURL(path.join(ROOT, 'lib', 'poller.js')).href)
+    assert(wx2.DEFAULT_MAX_BUFFER_BYTES === pollerMod42.DEFAULT_MAX_BUFFER_BYTES,
+      '与 poller 的字节预算是**同一个值**（而不是各写一个字面量）：' + wx2.DEFAULT_MAX_BUFFER_BYTES)
+    assert(wx2.DEFAULT_MAX_BUFFER_BYTES === 8 * 1024 * 1024, '该值是 8MB（改它要同时说清为什么）')
+    // 默认**接线**也必须有断言：生产过程里 `lib/index.js` 不传这个选项，所以"默认 8MB"如果只是
+    // 注释、实际接成 0（= 不限），X-7 就等于没修——而下面两个用例都显式传了预算，拦不住这件事。
+    assert(mkSrc2({}).stats().maxBufferBytes === wx2.DEFAULT_MAX_BUFFER_BYTES,
+      '不传 maxBufferBytes 时真的吃默认值（生产路径就是这条）')
+    {
+      const budget = 900
+      const src = mkSrc2({ maxEntries: 100, maxBufferBytes: budget })
+      src.start()
+      sched2.advance(0)
+      const s = socks2[socks2.length - 1]
+      s.onopen()
+      for (let i = 1; i <= 4; i++) s.onmessage({ data: frame2(i, 700) })
+      const st = src.stats()
+      assert(typeof st.bufferBytes === 'number' && st.bufferBytes > 0, 'stats 暴露 bufferBytes 读数（诊断可见）')
+      assert(st.dropped >= 1, '字节超限真的触发了淘汰（maxEntries=100，所以它只可能来自字节预算）')
+      assert(st.bufferBytes <= budget || st.bufferSize === 1,
+        '压到预算内，或只剩一条（单条就超预算时也留一条——那一条正是用户要看的数据）：' +
+        st.bufferSize + ' 条 / ' + st.bufferBytes + ' 字节')
+      assert(st.bufferSize === 4 - st.dropped, '留存数与淘汰数自洽（bufferSize + dropped = 送入条数）')
+      assert(src.snapshot(0).truncated === true, '中间被淘汰过 → truncated 为真（Client 不会以为补齐了）')
+      src.stop()
+    }
+    {
+      const src0 = mkSrc2({ maxEntries: 100, maxBufferBytes: 0 })
+      src0.start()
+      sched2.advance(0)
+      const s0 = socks2[socks2.length - 1]
+      s0.onopen()
+      for (let i = 1; i <= 4; i++) s0.onmessage({ data: frame2(i, 700) })
+      assert(src0.stats().bufferSize === 4 && src0.stats().dropped === 0,
+        'maxBufferBytes=0 = 不限（显式保留旧行为，不是"默认关掉约束"）')
+      src0.stop()
+    }
+  } catch (e) {
+    assert(false, '0.9.5 Wolfx 字节预算检查失败：' + e.message)
+  }
+
+  // ---- C11①：取消关注后残留的市町村（表到位时补清）----
+  try {
+    console.log('== 0.9.5 复验补修：取消关注后残留的市町村（C11①）==')
+    const seedResidual = {
+      'dsh.quakeAlert.v1': JSON.stringify({ version: 1, watch: { prefectures: ['福島県'], cities: ['白河市', '千代田区'] } }),
+    }
+    const tp = loadClientEx(seedResidual).exports.__test
+    // 现场还原：表还没到位时，"该县下的市町村"取不到任何一条 → 取消关注时那次清理静默失效
+    assert(tp.citiesOfPref('東京都').length === 0, '（前置）表未就绪时按县取市町村是空数组——这正是清理失效的原因')
+    tp.setCityTable({ '福島県': ['白河市', '郡山市'], '東京都': ['千代田区'] })
+    tp.pruneCitiesOfUnwatchedPrefs()
+    assert(tp.currentCfg().watch.cities.join() === '白河市',
+      '表到位后清掉"所属县已不在关注列表"的市町村（实际 ' + tp.currentCfg().watch.cities.join() + '）')
+    assert(tp.currentCfg().watch.prefectures.join() === '福島県', '清理市町村不影响都道府县')
+    // 关注列表为空 = 全日本：所有市町村都有效，一条都不能清
+    const seedAll = {
+      'dsh.quakeAlert.v1': JSON.stringify({ version: 1, watch: { prefectures: [], cities: ['白河市', '千代田区'] } }),
+    }
+    const tAll = loadClientEx(seedAll).exports.__test
+    tAll.setCityTable({ '福島県': ['白河市'], '東京都': ['千代田区'] })
+    tAll.pruneCitiesOfUnwatchedPrefs()
+    assert(tAll.currentCfg().watch.cities.length === 2, '关注列表为空（= 全日本）时一条都不清')
+
+    // 覆盖盲区（补修当轮就踩到了）：既有用例**一直在跑真实装载路径**（注入 window.fetch + await
+    // loadCityTable()），但它们的配置里没有残留条目，所以那两行清理的**效果**从来没被观测到。
+    // C11① 的补修一度把同一处既有的 `pruneUnknownCities()` 挤掉，2118 条断言全都照样绿——
+    // 断言覆盖了函数、也走了装载路径，却没有任何一条把"残留配置"喂进去。这里补上那一口。
+    {
+      const areasPayload94 = { prefectures: { '福島県': ['白河市', '郡山市'], '東京都': ['千代田区'] } }
+      const seedPath = {
+        'dsh.quakeAlert.v1': JSON.stringify({
+          version: 1,
+          watch: { prefectures: ['福島県'], cities: ['白河市', '架空市', '千代田区'] },
+        }),
+      }
+      const tPath = loadClientEx(seedPath, {
+        window: { fetch: async () => ({ ok: true, status: 200, json: async () => areasPayload94 }) },
+      }).exports.__test
+      const stPath = await tPath.loadCityTable()
+      assert(stPath === 'ready', '（前置）/areas 装载成功')
+      const keptPath = tPath.currentCfg().watch.cities
+      assert(keptPath.indexOf('架空市') === -1,
+        'loadCityTable 仍然调用 pruneUnknownCities（表里没有的条目被清掉）')
+      assert(keptPath.indexOf('千代田区') === -1,
+        'loadCityTable 也调用 pruneCitiesOfUnwatchedPrefs（所属县没关注 → 清掉）')
+      assert(keptPath.join() === '白河市', '两条清理叠加后的结果：' + keptPath.join())
+    }
+  } catch (e) {
+    assert(false, '0.9.5 C11① 检查失败：' + e.message)
+  }
+
+  // ---- P3-45①：设置页与侧边栏的"已关闭"圆点同形 ----
+  try {
+    console.log('== 0.9.5 复验补修：两处的"已关闭"圆点同形（P3-45①）==')
+    // 查产物字符串而不是渲染树：dot 由两个模块各自构造，而"空心"就是那两行 style 的字面写法。
+    const hollow = "background: 'transparent', border: '1.5px solid '"
+    const hollowCount = CLIENT_CODE.split(hollow).length - 1
+    assert(hollowCount >= 2,
+      '侧边栏与设置页都用空心表达 disabled（实际 ' + hollowCount + ' 处；颜色之外的形状线索是色觉障碍用户唯一能用的判据）')
+    // 判据也要**数够**：`store.status === 'disabled'` 这个串在产物里有两处（14-ui-status 与 13-ui-settings），
+    // 只判"存在"等于恒真——把设置页那一处改回实心它照样绿。
+    assert(CLIENT_CODE.split("store.status === 'disabled'").length - 1 >= 2,
+      '两处都用同一个判据（实际 ' + (CLIENT_CODE.split("store.status === 'disabled'").length - 1) + ' 处）')
+  } catch (e) {
+    assert(false, '0.9.5 P3-45① 检查失败：' + e.message)
+  }
+
+  // ---- P3-42：中国大陆两条链路把两种取值域写进**同名**的 intensity 字段 ----
+  // 今天没有消费点（只入库、不上 UI），所以它无害；有害的是将来有人按 intensity 分档——
+  // 那时"烈度 5.8"与"烈度 5"会在两条链路上被判成不同的档。这条断言不阻止改名，它只是让
+  // 改名的那一天必然有人看见（见 05e 文件头里写死的处置规则）。
+  try {
+    console.log('== 0.9.5 复验补修：CN 两条链路共用 intensity 字段（P3-42）==')
+    const t42 = loadClientEx().exports.__test
+    const eew42 = JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'cn', 'cenc-eew-last.json'), 'utf8'))
+    const list42 = JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'cn', 'cenc-eqlist-last.json'), 'utf8'))
+    const a42 = t42.parseCencEewResult(eew42).alert
+    const q42 = t42.parseCencEqlistResult(list42).alerts[0]
+    assert(!!a42 && !!q42, '（前置）两条链路各解析出一份 Alert')
+    assert(Object.prototype.hasOwnProperty.call(a42, 'intensity') === true &&
+      Object.prototype.hasOwnProperty.call(q42, 'intensity') === true,
+      '两条链路写的是同一个字段名 intensity —— 谁改名这条会红，提醒他一并处理另一条链路')
+    // 取值域差异只做**观察性**记录，不钉成不变量：EEW 的 MaxIntensity 实测 5.8（连续小数）、
+    // 速报的 intensity 实测 "5"（整数档），但"一定不是整数 / 一定是整数"是样本的性质，不是契约
+    // ——重新抓样本时 EEW 恰好是 9.0 会让断言无谓变红。真正要钉住的是"两条链路写的是同一个字段名"。
+    assert(typeof a42.intensity === 'number' && Number.isFinite(a42.intensity),
+      'EEW 那条是有限数（实测连续小数 5.8）：' + a42.intensity)
+    assert(typeof q42.intensity === 'number' && Number.isFinite(q42.intensity),
+      '速报那条是有限数（实测整数档 5，上游给的是字符串 "5"）：' + q42.intensity)
+  } catch (e) {
+    assert(false, '0.9.5 P3-42 检查失败：' + e.message)
+  }
+
+  // ==========================================================================
+  // 0.9.5：抛开测试C 的 fresh review 找到并修掉的缺陷（Host 侧 + Client 侧）
+  //
+  // 这一批大多属"静默失效"（不抛错、不报警、界面也不提示），所以每一条都要有能拦住它的断言。
+  // ==========================================================================
+  try {
+    console.log('== 0.9.5 fresh review 修复：/stream 的断流、方法与连接回收 ==')
+    const hostRv = await import(pathToFileURL(path.join(ROOT, 'lib', 'index.js')).href)
+    const mkRes = () => ({
+      status: 0, headers: null, frames: [], writableEnded: false, headersSent: false, destroyed: false,
+      endCalls: 0, destroyCalls: 0, writeFalse: false,
+      writeHead(s, h) { this.status = s; this.headers = h; this.headersSent = true },
+      write(b) { this.frames.push(b); return !this.writeFalse },
+      end() { this.endCalls += 1; this.writableEnded = true },
+      destroy() { this.destroyCalls += 1; this.destroyed = true },
+      on(ev, fn) { if (ev === 'close') this.onClose = fn },
+    })
+    const mkSrc = (stats) => ({
+      markRead() {},
+      snapshot() { return { cursor: 1, entries: [], truncated: false, reset: false, frozen: false } },
+      subscribe() { return () => {} },
+      stats() { return stats || {} },
+    })
+    // ① 背压断流必须真的关连接（此前只"停止写"，而 Node 只在 end() 之后才开始 keepAliveTimeout）
+    {
+      const subs = []
+      const src = mkSrc({ connected: false, lastError: 'relay down' })
+      src.subscribe = (fn) => { subs.push(fn); return () => {} }
+      const h = hostRv.createStreamHandler({ sources: { cenc_eew: src }, keepAliveMs: 100000, setInterval: () => 1, clearInterval: () => {} })
+      const res = mkRes()
+      res.writeFalse = true
+      h({ url: '/dsh-quake-alert/stream?source=cenc_eew', headers: {} }, res)
+      for (let i = 0; i < 205; i++) for (const fn of subs) fn({ seq: i, id: 'x', title: 't', updated: '', xml: '{}' })
+      assert(res.endCalls >= 1 && res.writableEnded === true,
+        '背压断流会真的结束响应（此前只停止写：连接半开驻留、close 永不触发）')
+      assert(res.destroyCalls >= 1, '并且销毁连接（客户端才会收到 disconnect，不必靠自己的静默探针超时）')
+    }
+    // ② 非 GET / HEAD → 405（DSH 自己的 SSE 路由这么做，而宿主不会代做）
+    {
+      const h = hostRv.createStreamHandler({ sources: { cenc_eew: mkSrc() }, setInterval: () => 1, clearInterval: () => {} })
+      const res = mkRes()
+      h({ url: '/dsh-quake-alert/stream?source=cenc_eew', method: 'POST', headers: {} }, res)
+      assert(res.status === 405, '非 GET / HEAD 回 405（此前一条 POST 也能换来一个长连接）')
+    }
+    // ③ closeAll：停用 / 重载时断掉在飞的流（register 的 disposer 只删路由，不碰连接）
+    {
+      const h = hostRv.createStreamHandler({ sources: { cenc_eew: mkSrc() }, keepAliveMs: 100000, setInterval: () => 1, clearInterval: () => {} })
+      const a = mkRes()
+      const b = mkRes()
+      h({ url: '/dsh-quake-alert/stream?source=cenc_eew', headers: {} }, a)
+      h({ url: '/dsh-quake-alert/stream?source=cenc_eew', headers: {} }, b)
+      assert(typeof h.closeAll === 'function', 'handler 暴露 closeAll（路由清理时用它断掉在飞的流）')
+      h.closeAll()
+      assert(a.endCalls >= 1 && b.endCalls >= 1 && a.destroyCalls >= 1 && b.destroyCalls >= 1,
+        'closeAll 关掉所有在飞的流（否则停用后旧流继续推数据，wolfx 也会因为还有订阅者而不空闲）')
+    }
+    // ④ status 帧带上 Host 的连接状态：SSE 路径下 Client 不轮询 /feed，否则这两个读数零消费者
+    {
+      let tick = null
+      const h = hostRv.createStreamHandler({
+        sources: { cenc_eew: mkSrc({ connected: false, lastError: 'relay down' }) },
+        keepAliveMs: 5, setInterval: (fn) => { tick = fn; return 1 }, clearInterval: () => {},
+      })
+      const res = mkRes()
+      h({ url: '/dsh-quake-alert/stream?source=cenc_eew', headers: {} }, res)
+      if (tick) tick()
+      const frame = res.frames.filter((f) => f.indexOf('event: status') === 0).pop()
+      assert(!!frame && frame.indexOf('"connected":false') !== -1 && frame.indexOf('relay down') !== -1,
+        'status 帧带上 connected / lastError（"中继断了"与"这段时间确实没数据"从此不同形）')
+    }
+
+    console.log('== 0.9.5 fresh review 修复：Client 侧的脏数据 / 记忆 / 关闭源 ==')
+    // ⑤ 脏数据不得把插件拖崩：`{toString:null, valueOf:null}` 是 JSON 就造得出、字符串化即抛的形状
+    const evilCfg = { version: 1, language: { toString: null, valueOf: null } }
+    {
+      const tE = loadClientEx({ 'dsh.quakeAlert.v1': JSON.stringify(evilCfg) }).exports.__test
+      let threw = null
+      let cfg = null
+      try { cfg = tE.currentCfg() } catch (e) { threw = e }
+      assert(!threw, '脏配置下 currentCfg() 不抛（它在设置页的渲染期被调用，抛了就是整页白屏）：' + (threw && threw.message))
+      assert(cfg && typeof cfg.language === 'string', '退回一份可用的配置（语言回到默认值）')
+      const tB = loadClientEx({
+        'dsh.quakeAlert.v1': JSON.stringify({ version: 1 }),
+        'dsh.quakeAlert.backup': JSON.stringify({ at: 'x', config: evilCfg }),
+      }).exports.__test
+      let threw2 = null
+      try { tB.loadConfigBackup() } catch (e) { threw2 = e }
+      assert(!threw2, '备份里的脏数据同样不抛（当作"没有可撤销的备份"）')
+    }
+    // ⑥ 「清空记录」要连"已播报"记忆一起清，并且落盘（否则刷新后记忆复活、两个标签页结论相反）
+    {
+      const mem = new Map([['dsh.quakeAlert.alerted', JSON.stringify({ 'jma:summary:大雨:130000': Date.now() })]])
+      const tA = loadClientEx(undefined, {
+        window: {
+          localStorage: {
+            getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+            setItem: (k, v) => mem.set(k, String(v)),
+            removeItem: (k) => mem.delete(k),
+          },
+        },
+      }).exports.__test
+      assert(tA.alertedEvents.size >= 1, '（前置）"已播报"记忆已从磁盘读回（' + tA.alertedEvents.size + ' 条）')
+      tA.forgetAllAlerted()
+      assert(tA.alertedEvents.size === 0, '清空后内存里的记忆没了')
+      const onDisk = JSON.parse(mem.get('dsh.quakeAlert.alerted') || 'null')
+      assert(onDisk && Object.keys(onDisk).length === 0, '磁盘上那份也清了（否则刷新后记忆复活）')
+    }
+    // ⑦ 用户关掉的源优先于一切健康判定（此前蓝点 / 停更会覆盖 disabled）
+    {
+      const tH = loadClientEx().exports.__test
+      assert(tH.effectiveStatusOf('jma', 'disabled', 'x').status === 'disabled',
+        '用户关掉的源优先于一切健康判定（界面不该把"我关了"改写成"数据格式异常 / 上游停更"）')
+    }
+  } catch (e) {
+    assert(false, '0.9.5 fresh review 修复检查失败：' + e.message)
+  }
+
   console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败')
   process.exit(fail === 0 ? 0 : 1)
 })()

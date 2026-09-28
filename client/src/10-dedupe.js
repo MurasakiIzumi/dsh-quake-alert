@@ -412,6 +412,18 @@ function forgetAlerted(alert) {
   if (alertedEvents.delete(key)) persistAlerted()
 }
 /**
+ * 清空**整份**"此前提醒过"的记忆（内存 + 磁盘）。
+ *
+ * 0.9.5（fresh review）：「清空记录」此前只清内存里的这一份、且只清了一半——发起页压根不清，
+ * 接收页清了内存却不落盘。后果不只是"记忆残留"：同一条解除到达时，A 页因为记忆还在而播
+ * 「已解除」并写一条历史，B 页（已清内存）只写一条「无对应提醒」的历史——**同一条消息在两个
+ * 标签页上得出相反结论**；任意一页刷新后记忆又从 ALERTED_KEY 复活。
+ */
+function forgetAllAlerted() {
+  alertedEvents.clear()
+  try { saveJSON(ALERTED_KEY, {}) } catch (err) { /* 写盘失败：内存已清，下一次写入会覆盖 */ }
+}
+/**
  * 取消 / 解除消息是否有"此前确实提醒过的同一事件"。
  *
  * 窗口必须与 alertedEvents 的保留期（24 小时）一致，**不能**用 dedupe.windowMinutes（默认 10 分钟）：
@@ -449,6 +461,9 @@ function ensureAlertChannel() {
       // 另一个标签页清空了历史 → 本标签页也要清（否则它的下一次 addEvent 会把整份记录写回磁盘）
       if (d.type === 'history-cleared') {
         alertedEvents.clear()
+        // 0.9.5（fresh review）：**磁盘上那份也要清**。此前只清了内存，于是本页刷新后
+        // "已播报"记忆又从 ALERTED_KEY 复活——发起清空的那一页反而没被清干净。
+        try { saveJSON(ALERTED_KEY, {}) } catch (err) { /* 写盘失败：内存已清 */ }
         // **内存副本与磁盘都要清**（0.5.4）：此前只清了 alertedEvents，于是本标签页的历史列表
         // 仍然显示着那些条目，而下一次 addEvent 会把它们（连同新条目）重新写回 localStorage
         // ——发起清空的那个标签页一刷新又看到了。「清空记录」若出于隐私动机，这就是实际的泄漏面。
@@ -491,4 +506,4 @@ function closeAlertChannel() {
   try { if (alertChannel) { alertChannel.close(); alertChannel = null } } catch (err) { /* 忽略 */ }
 }
 
-export { isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, ensureAlertChannel, closeAlertChannel, claimAlertForTab, broadcastHistoryCleared, cancelKeyOf, rememberAlerted, forgetAlerted, wasRecentlyAlerted, sourceIdOf, crossSourceCopyOf, noteAuthoritySuppressed, authorityStatsOf, SOURCE_RANK, sourceNameOf, SOURCE_AGENCY, agencyOf, CROSS_SOURCE_KINDS, rankOfSource, sourceZhOf, alertedEvents }
+export { isDuplicate, isEventRepeat, isStrengthUpgrade, weakenEvent, forgetEvent, ensureAlertChannel, closeAlertChannel, claimAlertForTab, broadcastHistoryCleared, cancelKeyOf, rememberAlerted, forgetAlerted, forgetAllAlerted, wasRecentlyAlerted, sourceIdOf, crossSourceCopyOf, noteAuthoritySuppressed, authorityStatsOf, SOURCE_RANK, sourceNameOf, SOURCE_AGENCY, agencyOf, CROSS_SOURCE_KINDS, rankOfSource, sourceZhOf, alertedEvents }

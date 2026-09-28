@@ -338,6 +338,13 @@ function handleAlert(alert, cfg, opts) {
     }
     return { notified: false, reason: 'not-hit', detail: m.reason }
   }
+  // 0.9.5（fresh review）：命中的提示必须在**任何抑制分支之前**更新。此前它只在那条"真的播报
+  // 出去了"的路径末尾调用，于是过老 / 静默时段 / 其它标签页 / 重放这些分支都会跳过它——最刺眼的
+  // 一次：22:00 的 L3 写下「未达 L4、未播报」，00:30 同一官署同一灾种升到 L4 却被静默时段吞掉，
+  // 侧边栏于是继续显示"未播报"，而历史里如实标着"已命中"。这条不变量就写在 updateWeatherHint
+  // 自己的注释里（"L4 以上必须清掉它，否则文案与事实自相矛盾"）。它内部会判是否达 L4 并清旧提示，
+  // 所以提到前面是安全的。
+  updateWeatherHint(alert, cfg)
   const hitPref = m.region ? m.region.pref : ''
   // 严重度见 hitSeverityOf 的注释（全球点型地震此前被算成 info，静默穿透因此失效）
   const hitSeverity = hitSeverityOf(alert, m)
@@ -478,7 +485,6 @@ function handleAlert(alert, cfg, opts) {
     id: alert.id, code: alert.code, kind: alert.kind, label: alert.kindLabel, severity: hitSeverity,
     issued: alert.issued, headline: alert.headline, hit: true, pref: hitPref,
   })
-  updateWeatherHint(alert, cfg)
   const vol = cfg.notify.volume
   // 0.9.4（C1）：总开关 + 分灾害开关（地震含 EEW / 海啸 / 气象），见 soundAllowedFor
   if (soundAllowedFor(cfg, alert)) playAlertSound(alert, vol)

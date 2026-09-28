@@ -17,6 +17,12 @@
 //   · `MaxIntensity`（EEW，实测 5.8/5.9 连续小数）与 `intensity`（速报，实测 3…8 整数）是
 //     **中国地震烈度**（GB/T 17742-2020），不是日本震度、也不是震级。它是**震中附近的最大值**，
 //     不是用户所在地的烈度 —— **只入库、不上 UI**，否则会被读成后者的承诺。
+//     **0.9.5（P3-42）把这条差异写死在这里**：两条链路都把这个值写进 Alert 的**同一个**
+//     `intensity` 字段，而它们的**取值域不同**（EEW 是连续小数、速报是整数档）。今天无害
+//     ——全项目没有任何读取点（只入库），所以先保留上游的键名、不分裂字段；但**将来若要按
+//     `intensity` 分档，必须先分裂字段名**（例如 `maxIntensity` / `intensityGrade`），
+//     否则同一条"烈度 5.8"会在两条链路上被判成两个不同的档位。回归里有一条断言钉住
+//     "两个解析器写的是同一个字段名"（改名的当天它会红，提醒改的人同时处理另一条链路）。
 //   · `cenc_eqlist` 里**混有境外地震**（实测福克斯群岛 M6.5、印尼爪哇岛 M6.5、南桑威奇群岛 M6.2、
 //     台湾花莲县…）。所以它会与全球链路（EMSC / USGS）撞车——靠 geoEventKey 同一把钥匙归并。
 //   · 两个源的 **EventID 格式互不相干**：EEW 是随机串（仓库样本 `samples/cn/cenc-eew-last.json`
@@ -111,6 +117,8 @@ function parseCencEew(raw) {
     eventKey: geoEventKey(originIso, lat, lon),
     strength: mag === null ? 0 : mag,
     // 中国地震烈度（震中附近最大值）：只入库、不上 UI。详见文件头。
+    // **注意取值域**（P3-42）：这里是 EEW 的 `MaxIntensity`，实测是**连续小数**（5.8），
+    // 与速报那条整数档共用同一个字段名——下游若要按它分档，先分裂字段（见文件头）。
     intensity: numOrNull(raw.MaxIntensity),
     reportNum,
     cancelled: false, // 大陆源不提供取消 / 最终报标志——见文件头，不得假装能处理
@@ -162,7 +170,9 @@ function parseCencEqlistItem(item) {
     regions: [],
     eventKey: geoEventKey(originIso, lat, lon),
     strength: mag === null ? 0 : mag,
-    intensity: numOrNull(item.intensity), // 中国地震烈度（整数档）：只入库、不上 UI
+    // 中国地震烈度（整数档）：只入库、不上 UI。与上面 EEW 那条**同名不同域**（P3-42）：
+    // 速报实测是 3…8 的整数，而 EEW 是 5.8 这样的连续小数——见文件头。
+    intensity: numOrNull(item.intensity),
     // 实测全是 "reviewed"。不认识的取值**不丢弃**——它仍然是同一场真实地震，
     // 丢弃等于漏报；原样带上供诊断，是否收窄由将来的实测决定（那时才知道有哪些取值）。
     reportType: String(item.type === undefined || item.type === null ? '' : item.type).trim(),
