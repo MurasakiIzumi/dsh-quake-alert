@@ -4657,7 +4657,7 @@ console.log('== 对源时区与全局严重度修复的回归检查 ==')
       try { json = JSON.stringify(snap) } catch (err) { json = '' }
       assert(json.length > 50, '快照可 JSON 化（活对象/循环引用会在这里炸）')
       assert(!('version' in snap) && json.indexOf('"version"') === -1,
-        '快照不含插件版本——版本号只在 package.json / CHANGELOG / README 三处（避免多一个会漂移的位置）')
+        '快照不含插件版本——版本号只在 package.json / CHANGELOG 两处（避免多一个会漂移的位置）')
       assert(snap.config.cnTransport === 'auto', '快照带链路选择（诊断"为什么走轮询"要看它）')
       assert(Array.isArray(snap.warnings), '生成过程中被捕获的异常要可见（不是假装一切正常）')
       // lib 下每个 .js 都必须出现在 pnpm check 的 node --check 清单里（清单是手写的）

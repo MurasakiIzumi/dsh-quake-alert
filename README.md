@@ -2,41 +2,43 @@
 
 **English** · [中文](./README.zh.md) · [日本語](./README.ja.md)
 
-A DeepSeek Harness (DSH) plugin that alerts you in real time to **Japanese** and **global** earthquakes,
-tsunamis and weather hazards, matched against the regions and thresholds you configured. A matching
-alert gives you an alert tone, an in-page toast and a system notification.
+QuakeAlert is a disaster-warning plugin for DeepSeek Harness (DSH). While you are working in DSH it keeps
+live feeds open for earthquakes, tsunamis and weather hazards in **Japan** and around the **world**, and
+the moment an event matches the regions and thresholds you have configured, it plays an alert tone and
+puts a notice in front of you. A visible page gets an in-page toast; a page in the background gets a
+system notification instead.
 
-⚠️ **Disclaimer — please read first**: alert data is provided or relayed by
-[P2PQuake](https://www.p2pquake.net/), the Japan Meteorological Agency's public XML feed,
-[EMSC](https://www.seismicportal.eu/), [USGS](https://earthquake.usgs.gov/) and
-[NOAA](https://www.tsunami.gov/) — none of them a direct official push channel, and the content and
-delivery quality of Earthquake Early Warnings (EEW) are not guaranteed. Alerts from this plugin are
-**for reference only**; for evacuation decisions always follow the official announcements of your local
-authority. The plugin works only while a DSH page is open.
+⚠️ **Please read this first**: the alert data is provided or relayed by [P2PQuake](https://www.p2pquake.net/),
+the Japan Meteorological Agency's public XML telegrams, [EMSC](https://www.seismicportal.eu/),
+[USGS](https://earthquake.usgs.gov/) and [NOAA](https://www.tsunami.gov/). None of those is a direct
+official push channel, and neither the content nor the delivery quality of Earthquake Early Warnings
+(EEW) comes with any guarantee. Treat everything this plugin shows as **reference only**; when it comes
+to evacuation, follow what your local authority publishes. The plugin runs only while a DSH page is
+open.
 
 ## Features
 
-- **Realtime push, Japan**: a persistent WebSocket to P2PQuake for earthquake reports (551), Earthquake Early Warnings (556) and tsunami forecasts (552). EEW reaches P2PQuake a few hundred milliseconds after the JMA issues it.
-- **Realtime push, global**: an EMSC WebSocket for worldwide earthquakes.
-- **Japanese weather alerts**: landslides, floods, heavy rain and storm surges from the JMA's public XML telegrams, announced at warning level 4 and above.
-- **Mainland China**: CENC earthquake early warnings and reports relayed by Wolfx, plus heavy-rain and geological-disaster warning signals from nmc.cn (orange and above).
-- **United States and Canada**: NWS flood warnings and ECCC rainfall / flood / storm-surge warnings, fetched directly by the browser from the official APIs.
-- **Global earthquakes and tsunamis**: the USGS catalog and NOAA tsunami CAP messages, both polled by the Host half.
-- **Watch regions**: one entry point — pick a country / region, then that country's own controls. Japan → prefectures, optionally narrowed to municipalities; mainland China → province → city + radius; other countries / regions → a city list or coordinates + radius.
-- **Radius in semantic steps**: local only (~30 km) / city and surroundings (~100 km, the default for new watch points) / wider area (~300 km), or type an exact number of kilometres.
-- **Thresholds in one table**: one hazard per row, with the switch on the left deciding whether to alert and the threshold on the right deciding how strong it has to be. Weather hazards have fixed boundaries, so they get a switch and nothing else.
-- **Notifications**: synthesized alert tones with adjustable volume, an in-page toast while the page is visible and a system notification while it is in the background. Earthquake and EEW headlines carry the intensity.
-- **Cancellation notices**: a short follow-up tone when an EEW you were alerted about is cancelled or a tsunami forecast is cleared. NWS cancellations are matched through the warning's VTEC tracking number.
-- **Quiet hours**: silence non-critical alerts during a daily window. Red-level alerts break through unless you turn that off.
-- **Reconnection**: exponential backoff (1s → 60s). P2PQuake force-closes connections about every 10 minutes, so reconnecting is normal; a connection that never opens and a connection that goes silent afterwards are both detected and recovered from.
-- **Only once per earthquake**: multiple releases of the same earthquake notify once, and again only when the intensity is upgraded. When several agencies report the same earthquake, only the first source to arrive announces it.
-- **History**: the most recent 30 processed messages from the past 5 days, keeping only the alerts that actually rang and the ones the plugin genuinely could not judge.
-- **Interface language**: 简体中文 / 繁體中文 / 日本語 / English, switched in the settings and applied immediately. Text that comes from a source stays verbatim.
-- **Settings export and import**: write your configuration to a JSON file and load it on another machine or browser. Import replaces the whole configuration and backs up the previous one first.
-- **Saved on this machine**: configuration is stored through DSH, so it survives across browsers and machines, with a browser copy as a mirror and fallback.
-- **Source status**: a status dot at the sidebar foot with per-source details on hover, plus increments, failures, gaps, last poll and upstream staleness under Settings → Test & diagnostics.
+- **Japan, live**: a WebSocket to P2PQuake stays connected and delivers earthquake reports (551), Earthquake Early Warnings (556) and tsunami forecasts (552). EEW normally reaches P2PQuake a few hundred milliseconds after the JMA issues it.
+- **Global, live**: a second WebSocket, this one to EMSC, covers earthquakes worldwide.
+- **Japanese weather hazards**: landslides, floods, heavy rain and storm surges, read from the JMA's public XML telegrams. Only warning level 4 and above is announced.
+- **Mainland China**: CENC earthquake early warnings and rapid reports relayed by Wolfx, plus the heavy-rain and geological-disaster warning signals published on nmc.cn at orange or above.
+- **United States and Canada**: the browser queries NWS directly for flood warnings, and ECCC for rainfall, flood and storm-surge warnings.
+- **Worldwide earthquakes and tsunamis**: the USGS global catalog and NOAA tsunami CAP messages, both polled by the Host half.
+- **Watch regions**: one entry point for all of them. Pick a country or region and the controls underneath change to suit it. Japan gives you prefectures, optionally narrowed to municipalities; mainland China runs province → city plus a radius; anywhere else offers a city list or raw coordinates with a radius.
+- **Radius presets**: local only (~30 km), city and surroundings (~100 km, what a new watch point starts with), or wider area (~300 km). You can also type an exact number of kilometres.
+- **Thresholds in one table**: one hazard per row. The switch on the left decides whether that hazard alerts at all, the value on the right decides how strong an event has to be. Weather hazards have fixed boundaries, so their rows carry a switch and nothing else.
+- **Notifications**: alert tones are synthesized with Web Audio at a volume you set. A page in front gets an in-page toast, a page in the background gets a system notification, and earthquake and EEW headlines carry the intensity.
+- **Cancellations**: a short descending tone follows when an EEW you were alerted about is cancelled, or a tsunami forecast is lifted. NWS cancellations are matched through the warning's VTEC tracking number.
+- **Quiet hours**: a daily window in which non-critical alerts stay silent. Red-level alerts break through unless you turn that exception off.
+- **Reconnection**: backoff widens from 1s up to a 60s ceiling. P2PQuake force-closes connections roughly every 10 minutes, which is normal behaviour; a connection that never opens and one that goes quiet after it opens are both detected and recovered from.
+- **One alert per earthquake**: repeated releases about the same earthquake notify once, and again only if the intensity is upgraded. When several agencies report the same event, only the first source to arrive announces it.
+- **History**: the last 30 processed messages from the past 5 days. It holds two kinds of entry only, alerts that actually rang and messages the plugin genuinely could not judge.
+- **Interface language**: 简体中文 / 繁體中文 / 日本語 / English, switched in the settings and applied immediately. Text arriving from a source is shown verbatim.
+- **Export and import**: write the configuration out to a JSON file and load it on another machine or in another browser. Import replaces the whole configuration, and backs up the current one first.
+- **Stored on this machine**: configuration lives in DSH's machine-level storage, so it is still there after a browser or machine change. Browser local storage keeps a copy and serves as the fallback whenever the main store is unavailable.
+- **Source status**: a dot at the foot of the sidebar, with per-source detail on hover. Settings → Test & diagnostics goes further and lists increments received, failure counts, gaps, the last poll time and whether an upstream has gone stale.
 - **Data source switch**: production (live) or sandbox (replays 2023 history, roughly one message every 30 seconds).
-- **Local diagnostics**: two test buttons build telegrams in the source format and run them through the real parsers and matcher, making no network request at all.
+- **Local diagnostics**: two test buttons build telegrams in the source format and run them through the real parsers and matcher. No network request is made.
 
 ## Installation
 
@@ -47,35 +49,36 @@ dsh plugin --profile web add github:MurasakiIzumi/dsh-quake-alert
 # Restart dsh web to activate the plugin
 ```
 
-**Updating**: replace the package contents, then restart `dsh web`. Changes confined to the Client half
-(`client/`) take effect after a page refresh; anything under `lib/` needs the restart.
+**Updating**: replace the package contents and restart `dsh web`. Changes that stay inside the Client
+half (`client/`) are live after a page refresh; anything under `lib/` needs the restart.
 
 ## Usage
 
 1. Open **Settings → Disaster Alerts** (灾害预警).
-2. **Watch regions** — pick a **country / region** first, then work through that country's own controls:
-   - **Japan**: select the prefectures you care about (leave empty for all of Japan); a selected prefecture can be narrowed to municipalities.
-   - **Mainland China**: pick a province → a city → a radius → "Add this city", or use "Use my location". The coordinates in the table are administrative centres, so widen the radius for very large prefectures.
-   - **Other countries / regions**: pick a country, find a city and add it in one click, or fill in the coordinate form by hand. The city list holds towns of 100,000+ inhabitants.
+2. **Watch regions**. Start with the **country / region**, then work through the controls that appear for it.
+   - **Japan**: click the prefectures you care about, or leave them all unselected to watch the whole country. A selected prefecture can be narrowed further to municipalities.
+   - **Mainland China**: province → city → radius, then "Add this city". "Use my location" fills in the same form from where you are. Coordinates in the table mark administrative centres, so give very large provinces and cities a wider radius.
+   - **Other countries / regions**: choose a country and click a city to add it, or fill in the coordinate form by hand. The city list holds towns of 100,000 inhabitants and up.
 
-   Watched places are listed together below this block and can be removed at any time.
-3. **Disaster types and thresholds** — one hazard per row: the switch decides whether to alert, the threshold decides how strong it has to be.
-4. **Notifications and sound** — enable the alert tone and/or system notifications, adjust the volume, and use the preview buttons to check them.
-5. **Data source** — keep "Production" for daily use, or switch to "Sandbox" to verify the pipeline.
-6. **Test & diagnostics** — the two test buttons build telegrams in the source format locally and run them through the real parsers and matcher, making no network request, so you can click them as often as you like. Below them are the per-source status and a diagnostic snapshot you can paste into an AI assistant.
+   Everything you have added is listed together below this block, and you can remove entries from there at any time.
+3. **Disaster types and thresholds**. One hazard per row, with the switch deciding whether to alert and the threshold deciding how strong an event has to be.
+4. **Notifications and sound**. Enable the alert tone and system notifications, set the volume, and use the preview buttons to check both.
+5. **Data source**. Leave it on "Production" for everyday use, or switch to "Sandbox" when you want to verify the pipeline.
+6. **Test & diagnostics**. The two test buttons build telegrams in the source format locally and push them through the real parsers and matcher, so nothing goes over the network and you can click them repeatedly. Below them sit the per-source status and a diagnostic snapshot you can paste into an AI assistant.
 
-When an alert matches, you get a tone plus a foreground toast or a background system notification, and
-the event is recorded in "Recent alerts".
+A matched alert gives you a tone, an in-page toast while the page is in front or a system notification
+while it is not, and a new entry under "Recent alerts".
 
 ## A source is unreachable? (mainland-China networks)
 
-Under mainland-China networks a data source may become unreachable, stop updating, or alerts may stay
-silent. Those failures only reproduce there, so the plugin makes every failure **visible** under
-**Settings → Disaster alerts → Test & diagnostics → Source status**, and ships a troubleshooting
-document written **for an AI assistant** (Chinese only, since mainland users are its only audience):
+On a mainland-China network a data source can become unreachable, stop updating, or alerts can simply
+never fire. Those failures reproduce nowhere else, so the plugin turns each one into **visible state**
+under **Settings → Disaster alerts → Test & diagnostics → Source status**, and ships a troubleshooting
+document written **for an AI assistant** to work through (Chinese only, since mainland users are its
+whole audience):
 
-> **Hand [`TROUBLESHOOTING.zh.md`](./TROUBLESHOOTING.zh.md) to your AI assistant and let it work
-> through it step by step.**
+> **Hand [`TROUBLESHOOTING.zh.md`](./TROUBLESHOOTING.zh.md) to your AI assistant and let it follow the
+> steps.**
 
 ## More documentation
 
