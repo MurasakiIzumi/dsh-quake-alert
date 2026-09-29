@@ -2695,8 +2695,8 @@ console.log('== UI 文案与配色（气象 code / severity 配色 / 标题分�
 
     // severity → 颜色：yellow 是默认阈值 40 下最常见的命中档，不能落进"信息蓝"
     assert(t.sevColor('yellow') === '#d9a406', 'yellow 有独立配色（震度4 命中不再显示成信息蓝）')
-    assert(t.sevColor('red') === '#e5484d' && t.sevColor('orange') === '#f76b15' && t.sevColor('info') === '#3b82f6',
-      '其余档位配色不变')
+    assert(t.sevColor('red') === '#e8565b' && t.sevColor('orange') === '#f76b15' && t.sevColor('info') === '#3b82f6',
+      '其余档位配色不变（红用调亮后的 AA 达标值）')
 
     // 标题在非「各地」分支不得留下悬空的「 · 」
     assert(t.alertTitleOf({ kind: 'quake', kindLabel: '地震情报·各地震度' }) === '🌐 地震情报·各地震度',
@@ -8180,6 +8180,10 @@ console.log('== 尾项：常量、简写、强度、权限、死键 ==')
     const manyCities = t.normalizeCfg({ watch: { cities: Array.from({ length: 400 }, (_, i) => '市' + i) } })
     assert(manyCities.watch.cities.length === t.MAX_WATCH_CITIES || manyCities.watch.cities.length === 300,
       '市区町村上限走 MAX_WATCH_CITIES 常量：' + manyCities.watch.cities.length)
+    const citiesAudit = { total: 0, dropped: 0, radiusFixed: 0, citiesDropped: 0 }
+    t.normalizeCfg({ watch: { cities: Array.from({ length: 400 }, (_, i) => '市' + i) } }, citiesAudit)
+    assert(citiesAudit.citiesDropped === 400 - (t.MAX_WATCH_CITIES || 300),
+      '导入时被截断的市町村条数记进 audit（导入结果会如实说明，不再静默丢弃）：' + citiesAudit.citiesDropped)
     assert(t.normalizePref('北海道') === '北海道', '北海道本身是全称，不被削后缀')
     assert(t.normalizePref('北海') === '北海', '「北海」不是任何县的简写（以前会被当成北海道）')
     assert(t.normalizePref('東京') === '東京都' && t.normalizePref('大阪') === '大阪府',

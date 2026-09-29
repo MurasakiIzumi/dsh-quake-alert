@@ -34,9 +34,9 @@ function statusMetaOf(status, retries) {
     connecting: { color: '#d9a406', text: t('settings.status.connecting') },
     open: { color: '#4ade80', text: t('settings.status.open') },
     reconnecting: { color: '#d9a406', text: t('settings.status.reconnecting', { n: retries }) },
-    closed: { color: '#e5484d', text: t('settings.status.closed') },
+    closed: { color: '#e8565b', text: t('settings.status.closed') },
     // 轮询源与"消息处理失败"也有自己的状态：否则上游被墙 / 路由 500 / 主链抛错在界面上与"没有新闻"完全不可区分。
-    unreachable: { color: '#e5484d', text: t('settings.status.unreachable') },
+    unreachable: { color: '#e8565b', text: t('settings.status.unreachable') },
     degraded: { color: '#d9a406', text: t('settings.status.degraded') },
     stale: { color: '#8b8f98', text: t('settings.status.stale') },
     'schema-error': { color: '#3b82f6', text: t('settings.status.schemaError') },
@@ -95,7 +95,7 @@ function p2pCodeTextOf(kind, code, id) {
   // 兜底：气象（kind='weather'）在出现大陆气象源之前只有日本这一个来源，故这里必须注明是日方的。
   return kind === 'weather' ? t('sourceCode.jma') : '—'
 }
-const KIND_COLORS = { eew: '#e5484d', quake: '#3b82f6', tsunami: '#f76b15', weather: '#8b5cf6' }
+const KIND_COLORS = { eew: '#e8565b', quake: '#3b82f6', tsunami: '#f76b15', weather: '#a78bfa' }
 const kindColorOf = (kind) => own(KIND_COLORS, kind) || '#7c8494'
 /** 下拉框的自绘箭头（data URI）：原生箭头的水平位置由浏览器决定，选项文字短于 `min-width: 180px` 时
  *  它会落在框中段而不是贴着右边缘；自绘的位置由 `background-position` 固定，多宽都贴右 8px。 */
@@ -303,6 +303,7 @@ function SettingsPanel(props) {
   const [testMsg, setTestMsg] = useState('')
   const [expanded, setExpanded] = useState(null)
   const [cityQuery, setCityQuery] = useState({}) // 每个县的市町村搜索词
+  const [cityMsg, setCityMsg] = useState('') // 市町村上限的反馈：超限时说明原因，不静默丢弃
   const [weatherTestMsg, setWeatherTestMsg] = useState('') // 「发送测试气象警报」的结果提示
   const [weatherTestSeq, setWeatherTestSeq] = useState(0) // 测试场景轮换序号
   // 全球关注点的输入草稿与反馈：校验失败必须给出文字原因，不能静默吞掉用户输入。默认半径只影响新建的关注点。
@@ -375,12 +376,19 @@ function SettingsPanel(props) {
       : c.watch.cities
     return { ...c, watch: { ...c.watch, prefectures: next, cities } }
   })
-  const toggleCity = (city) => setCfg((c) => {
-    const cur = c.watch.cities
-    let next = cur.indexOf(city) === -1 ? cur.concat(city) : cur.filter((x) => x !== city)
-    if (next.length > MAX_WATCH_CITIES) next = next.slice(0, MAX_WATCH_CITIES)
-    return { ...c, watch: { ...c.watch, cities: next } }
-  })
+  // 取消选中永远允许；新增到上限时拒绝并说明原因（与 MAX_WATCH_PLACES 同一套写法，不做静默截断）。
+  const toggleCity = (city) => {
+    const cur = cfg.watch.cities
+    const selected = cur.indexOf(city) !== -1
+    if (!selected && cur.length >= MAX_WATCH_CITIES) {
+      setCityMsg(t('settings.cities.max', { n: MAX_WATCH_CITIES })); return
+    }
+    setCityMsg('')
+    setCfg((c) => {
+      const list = c.watch.cities
+      return { ...c, watch: { ...c.watch, cities: list.indexOf(city) === -1 ? list.concat(city) : list.filter((x) => x !== city) } }
+    })
+  }
 
   // ---------- 全球关注点：全球源给的是震中坐标，没有都道府县，所以关注表达是「位置 + 半径」----------
   const addPlace = () => {
@@ -604,6 +612,7 @@ function SettingsPanel(props) {
               : null),
         )
       }),
+      cityMsg ? h('div', { role: 'status', style: { fontSize: 11, color: '#93c5fd', marginTop: 6 } }, cityMsg) : null,
     )
   }
   // ---------- 关注地区的统合 ----------
@@ -1228,6 +1237,7 @@ function SettingsPanel(props) {
       const parts = []
       if (w.dropped > 0) parts.push(t('settings.configIo.importedSkipped', { n: w.dropped }))
       if (w.radiusFixed > 0) parts.push(t('settings.configIo.importedRadius', { n: w.radiusFixed }))
+      if (w.citiesDropped > 0) parts.push(t('settings.configIo.importedCities', { n: w.citiesDropped }))
       setCfgIoMsg(parts.length
         ? t('settings.configIo.imported') + ' ' + parts.join(' ')
         : t('settings.configIo.imported'))

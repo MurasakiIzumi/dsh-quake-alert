@@ -77,7 +77,7 @@ function showToast(opts) {
   try {
     if (!window.document || !window.document.body) return
     const doc = window.document
-    const color = opts.color || '#e5484d'
+    const color = opts.color || '#e8565b'
     const key = color + '|' + (opts.title || '') + '|' + (opts.body || '')
     // 同一条已经在屏上就不再叠一条；参数名不用 `t`（那是 i18n 取词函数名）
     if (liveToasts.some((live) => live.key === key)) return

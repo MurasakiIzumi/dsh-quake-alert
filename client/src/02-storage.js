@@ -112,7 +112,7 @@ function placeOriginOf(p, name) {
   if (own(PLACE_ORIGINS, raw)) return raw
   return String(name || '').indexOf('·') > 0 ? 'cn' : 'global'
 }
-/** @param {{ total?: number, dropped?: number, radiusFixed?: number }} [audit] 可选的**检查清单**： 本函数的契约是静默丢弃非法条目（
+/** @param {{ total?: number, dropped?: number, radiusFixed?: number, citiesDropped?: number }} [audit] 可选的**检查清单**： 本函数的契约是静默丢弃非法条目（
  *   对 localStorage 里的数据是对的），但"导入一份配置"时需要 如实说明少了什么，传了 audit 就记下"总共几条 / 丢了几条 / 几条的半径不是数值"。 */
 function normalizePlaces(list, audit) {
   const out = []
@@ -177,6 +177,14 @@ function snapOr(v, fallback, options, min, max) {
   return best
 }
 
+/** 关注市区町村列表的规整：只保类型、去重与长度上限（名字是否真实存在由数据表校验）。
+ *  @param {object} [audit] 见 normalizePlaces：超出 MAX_WATCH_CITIES 被截断的条数记进 `audit.citiesDropped`。 */
+function normalizeCities(list, audit) {
+  const out = Array.from(new Set(list.filter((c) => typeof c === 'string' && c.length > 0 && c.length <= 30)))
+  if (out.length <= MAX_WATCH_CITIES) return out
+  if (audit) audit.citiesDropped += out.length - MAX_WATCH_CITIES
+  return out.slice(0, MAX_WATCH_CITIES)
+}
 // 逐字段校验 + 回退默认值：任何形状的输入都规整成一份合法配置。audit 见 normalizePlaces， 只有导入路径会传它。
 function normalizeCfg(input, audit) {
   // 调用方都保证传对象，但本函数的契约是"任何脏输入都能规整"，不该因为传进 null/undefined 就抛错
@@ -197,10 +205,8 @@ function normalizeCfg(input, audit) {
       prefectures: Array.isArray(w.prefectures)
         ? Array.from(new Set(w.prefectures.filter((p) => typeof p === 'string' && PREF_SET.has(p))))
         : [],
-      // 市区町村：这里只保证类型、去重与规模（上限与设置页同一常量），名字是否存在由数据表校验
-      cities: Array.isArray(w.cities)
-        ? Array.from(new Set(w.cities.filter((c) => typeof c === 'string' && c.length > 0 && c.length <= 30))).slice(0, MAX_WATCH_CITIES)
-        : [],
+      // 市区町村：只保证类型、去重与规模（上限与设置页同一常量），名字是否存在由数据表校验
+      cities: Array.isArray(w.cities) ? normalizeCities(w.cities, audit) : [],
       // 旧配置没有这个字段 → 统一成空数组
       places: Array.isArray(w.places) ? normalizePlaces(w.places, audit) : [],
     },

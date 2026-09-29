@@ -105,7 +105,7 @@ const scaleText = (v) => {
 const scaleSuffix = (v, prefix) => (typeof v === 'number' && v > 0 ? ' · ' + prefix + scaleText(v) : '')
 // severity → 颜色。'yellow'（默认阈值 40 下最常见的命中，震度4）必须显式处理，否则落到默认的"信息蓝"。
 const sevColor = (s) => (
-  s === 'red' ? '#e5484d'
+  s === 'red' ? '#e8565b'
     : (s === 'orange' ? '#f76b15'
       : (s === 'yellow' ? '#d9a406' : '#3b82f6'))
 )

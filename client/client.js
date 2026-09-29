@@ -91,7 +91,7 @@ function showToast(opts) {
   try {
     if (!window.document || !window.document.body) return
     const doc = window.document;
-    const color = opts.color || '#e5484d';
+    const color = opts.color || '#e8565b';
     const key = color + '|' + (opts.title || '') + '|' + (opts.body || '');
     // 同一条已经在屏上就不再叠一条；参数名不用 `t`（那是 i18n 取词函数名）
     if (liveToasts.some((live) => live.key === key)) return
@@ -535,6 +535,7 @@ const SETTINGS = {
     'settings.cities.hint': '不选就是全县。EEW 和海啸只到县一级。',
     'settings.cities.prefAll': '全县',
     'settings.cities.prefSelected': '已选 {n} 个',
+    'settings.cities.max': '最多 {n} 个市町村',
     'settings.cities.searchPlaceholder': '搜索 {pref} 的市町村…',
     'settings.cities.searchLabel': '搜索 {pref} 的市町村',
     'settings.cities.overLimit': '…共 {n} 个，请输入关键词',
@@ -888,6 +889,7 @@ const SETTINGS = {
     'settings.cities.hint': '不選就是全縣。EEW 和海嘯只到縣一級。',
     'settings.cities.prefAll': '全縣',
     'settings.cities.prefSelected': '已選 {n} 個',
+    'settings.cities.max': '最多 {n} 個市町村',
     'settings.cities.searchPlaceholder': '搜尋 {pref} 的市區町村…',
     'settings.cities.searchLabel': '搜尋 {pref} 的市區町村',
     'settings.cities.overLimit': '…共 {n} 個，請輸入關鍵字',
@@ -1230,6 +1232,7 @@ const SETTINGS = {
     'settings.cities.hint': '未選択なら県全体です。緊急地震速報と津波は県単位までです。',
     'settings.cities.prefAll': '県全体',
     'settings.cities.prefSelected': '{n} 件選択',
+    'settings.cities.max': '登録できる市区町村は最大 {n} 件です',
     'settings.cities.searchPlaceholder': '{pref} の市区町村を検索…',
     'settings.cities.searchLabel': '{pref} の市区町村を検索',
     'settings.cities.overLimit': '…全 {n} 件です。キーワードを入力してください',
@@ -1561,6 +1564,7 @@ const SETTINGS = {
     'settings.cities.hint': 'No selection means the whole prefecture. EEW and tsunami only go down to prefecture level.',
     'settings.cities.prefAll': 'Whole prefecture',
     'settings.cities.prefSelected': '{n} selected',
+    'settings.cities.max': 'At most {n} municipalities',
     'settings.cities.searchPlaceholder': 'Search municipalities in {pref}…',
     'settings.cities.searchLabel': 'Search municipalities in {pref}',
     'settings.cities.overLimit': '…{n} in total, type a keyword',
@@ -1803,6 +1807,7 @@ const CONFIG_IO = {
     'settings.configIo.imported': '已导入配置。',
     'settings.configIo.importedSkipped': '其中 {n} 个关注点因坐标无效被跳过。',
     'settings.configIo.importedRadius': '另有 {n} 个关注点没有有效半径，已按默认 300 km 处理。',
+    'settings.configIo.importedCities': '另有 {n} 个市町村超出上限，已忽略。',
     'settings.configIo.undoBtn': '撤销上次导入',
     'settings.configIo.undoAt': '备份于 {at}',
     'settings.configIo.undone': '已恢复导入前的配置。',
@@ -1831,6 +1836,7 @@ const CONFIG_IO = {
     'settings.configIo.imported': '已匯入設定。',
     'settings.configIo.importedSkipped': '其中 {n} 個關注點因座標無效被略過。',
     'settings.configIo.importedRadius': '另有 {n} 個關注點沒有有效半徑，已按預設 300 km 處理。',
+    'settings.configIo.importedCities': '另有 {n} 個市町村超出上限，已忽略。',
     'settings.configIo.undoBtn': '復原上次匯入',
     'settings.configIo.undoAt': '備份於 {at}',
     'settings.configIo.undone': '已還原匯入前的設定。',
@@ -1859,6 +1865,7 @@ const CONFIG_IO = {
     'settings.configIo.imported': '設定をインポートしました。',
     'settings.configIo.importedSkipped': 'うち {n} 件の監視地点は座標が無効なためスキップしました。',
     'settings.configIo.importedRadius': 'さらに {n} 件の監視地点には有効な半径がないため、既定の 300 km で扱います。',
+    'settings.configIo.importedCities': 'さらに {n} 件の市区町村が上限を超えるため、無視しました。',
     'settings.configIo.undoBtn': '直前のインポートを元に戻す',
     'settings.configIo.undoAt': 'バックアップ日時：{at}',
     'settings.configIo.undone': 'インポート前の設定に戻しました。',
@@ -1887,6 +1894,7 @@ const CONFIG_IO = {
     'settings.configIo.imported': 'Settings imported.',
     'settings.configIo.importedSkipped': '{n} watch location(s) were skipped because their coordinates were invalid.',
     'settings.configIo.importedRadius': '{n} more watch location(s) had no valid radius and now use the 300 km default.',
+    'settings.configIo.importedCities': '{n} more municipalities exceeded the limit and were ignored.',
     'settings.configIo.undoBtn': 'Undo last import',
     'settings.configIo.undoAt': 'Backed up at {at}',
     'settings.configIo.undone': 'Restored the settings from before the import.',
@@ -3239,7 +3247,7 @@ function placeOriginOf(p, name) {
   if (own(PLACE_ORIGINS, raw)) return raw
   return String(name || '').indexOf('·') > 0 ? 'cn' : 'global'
 }
-/** @param {{ total?: number, dropped?: number, radiusFixed?: number }} [audit] 可选的**检查清单**： 本函数的契约是静默丢弃非法条目（
+/** @param {{ total?: number, dropped?: number, radiusFixed?: number, citiesDropped?: number }} [audit] 可选的**检查清单**： 本函数的契约是静默丢弃非法条目（
  *   对 localStorage 里的数据是对的），但"导入一份配置"时需要 如实说明少了什么，传了 audit 就记下"总共几条 / 丢了几条 / 几条的半径不是数值"。 */
 function normalizePlaces(list, audit) {
   const out = [];
@@ -3304,6 +3312,14 @@ function snapOr(v, fallback, options, min, max) {
   return best
 }
 
+/** 关注市区町村列表的规整：只保类型、去重与长度上限（名字是否真实存在由数据表校验）。
+ *  @param {object} [audit] 见 normalizePlaces：超出 MAX_WATCH_CITIES 被截断的条数记进 `audit.citiesDropped`。 */
+function normalizeCities(list, audit) {
+  const out = Array.from(new Set(list.filter((c) => typeof c === 'string' && c.length > 0 && c.length <= 30)));
+  if (out.length <= MAX_WATCH_CITIES) return out
+  if (audit) audit.citiesDropped += out.length - MAX_WATCH_CITIES;
+  return out.slice(0, MAX_WATCH_CITIES)
+}
 // 逐字段校验 + 回退默认值：任何形状的输入都规整成一份合法配置。audit 见 normalizePlaces， 只有导入路径会传它。
 function normalizeCfg(input, audit) {
   // 调用方都保证传对象，但本函数的契约是"任何脏输入都能规整"，不该因为传进 null/undefined 就抛错
@@ -3324,10 +3340,8 @@ function normalizeCfg(input, audit) {
       prefectures: Array.isArray(w.prefectures)
         ? Array.from(new Set(w.prefectures.filter((p) => typeof p === 'string' && PREF_SET.has(p))))
         : [],
-      // 市区町村：这里只保证类型、去重与规模（上限与设置页同一常量），名字是否存在由数据表校验
-      cities: Array.isArray(w.cities)
-        ? Array.from(new Set(w.cities.filter((c) => typeof c === 'string' && c.length > 0 && c.length <= 30))).slice(0, MAX_WATCH_CITIES)
-        : [],
+      // 市区町村：只保证类型、去重与规模（上限与设置页同一常量），名字是否存在由数据表校验
+      cities: Array.isArray(w.cities) ? normalizeCities(w.cities, audit) : [],
       // 旧配置没有这个字段 → 统一成空数组
       places: Array.isArray(w.places) ? normalizePlaces(w.places, audit) : [],
     },
@@ -4259,7 +4273,7 @@ const scaleText = (v) => {
 const scaleSuffix = (v, prefix) => (typeof v === 'number' && v > 0 ? ' · ' + prefix + scaleText(v) : '');
 // severity → 颜色。'yellow'（默认阈值 40 下最常见的命中，震度4）必须显式处理，否则落到默认的"信息蓝"。
 const sevColor = (s) => (
-  s === 'red' ? '#e5484d'
+  s === 'red' ? '#e8565b'
     : (s === 'orange' ? '#f76b15'
       : (s === 'yellow' ? '#d9a406' : '#3b82f6'))
 );
@@ -10227,9 +10241,9 @@ function statusMetaOf(status, retries) {
     connecting: { color: '#d9a406', text: t('settings.status.connecting') },
     open: { color: '#4ade80', text: t('settings.status.open') },
     reconnecting: { color: '#d9a406', text: t('settings.status.reconnecting', { n: retries }) },
-    closed: { color: '#e5484d', text: t('settings.status.closed') },
+    closed: { color: '#e8565b', text: t('settings.status.closed') },
     // 轮询源与"消息处理失败"也有自己的状态：否则上游被墙 / 路由 500 / 主链抛错在界面上与"没有新闻"完全不可区分。
-    unreachable: { color: '#e5484d', text: t('settings.status.unreachable') },
+    unreachable: { color: '#e8565b', text: t('settings.status.unreachable') },
     degraded: { color: '#d9a406', text: t('settings.status.degraded') },
     stale: { color: '#8b8f98', text: t('settings.status.stale') },
     'schema-error': { color: '#3b82f6', text: t('settings.status.schemaError') },
@@ -10288,7 +10302,7 @@ function p2pCodeTextOf(kind, code, id) {
   // 兜底：气象（kind='weather'）在出现大陆气象源之前只有日本这一个来源，故这里必须注明是日方的。
   return kind === 'weather' ? t('sourceCode.jma') : '—'
 }
-const KIND_COLORS = { eew: '#e5484d', quake: '#3b82f6', tsunami: '#f76b15', weather: '#8b5cf6' };
+const KIND_COLORS = { eew: '#e8565b', quake: '#3b82f6', tsunami: '#f76b15', weather: '#a78bfa' };
 const kindColorOf = (kind) => own(KIND_COLORS, kind) || '#7c8494';
 /** 下拉框的自绘箭头（data URI）：原生箭头的水平位置由浏览器决定，选项文字短于 `min-width: 180px` 时
  *  它会落在框中段而不是贴着右边缘；自绘的位置由 `background-position` 固定，多宽都贴右 8px。 */
@@ -10494,6 +10508,7 @@ function SettingsPanel(props) {
   const [testMsg, setTestMsg] = useState('');
   const [expanded, setExpanded] = useState(null);
   const [cityQuery, setCityQuery] = useState({}); // 每个县的市町村搜索词
+  const [cityMsg, setCityMsg] = useState(''); // 市町村上限的反馈：超限时说明原因，不静默丢弃
   const [weatherTestMsg, setWeatherTestMsg] = useState(''); // 「发送测试气象警报」的结果提示
   const [weatherTestSeq, setWeatherTestSeq] = useState(0); // 测试场景轮换序号
   // 全球关注点的输入草稿与反馈：校验失败必须给出文字原因，不能静默吞掉用户输入。默认半径只影响新建的关注点。
@@ -10566,12 +10581,19 @@ function SettingsPanel(props) {
       : c.watch.cities;
     return { ...c, watch: { ...c.watch, prefectures: next, cities } }
   });
-  const toggleCity = (city) => setCfg((c) => {
-    const cur = c.watch.cities;
-    let next = cur.indexOf(city) === -1 ? cur.concat(city) : cur.filter((x) => x !== city);
-    if (next.length > MAX_WATCH_CITIES) next = next.slice(0, MAX_WATCH_CITIES);
-    return { ...c, watch: { ...c.watch, cities: next } }
-  });
+  // 取消选中永远允许；新增到上限时拒绝并说明原因（与 MAX_WATCH_PLACES 同一套写法，不做静默截断）。
+  const toggleCity = (city) => {
+    const cur = cfg.watch.cities;
+    const selected = cur.indexOf(city) !== -1;
+    if (!selected && cur.length >= MAX_WATCH_CITIES) {
+      setCityMsg(t('settings.cities.max', { n: MAX_WATCH_CITIES })); return
+    }
+    setCityMsg('');
+    setCfg((c) => {
+      const list = c.watch.cities;
+      return { ...c, watch: { ...c.watch, cities: list.indexOf(city) === -1 ? list.concat(city) : list.filter((x) => x !== city) } }
+    });
+  };
 
   // ---------- 全球关注点：全球源给的是震中坐标，没有都道府县，所以关注表达是「位置 + 半径」----------
   const addPlace = () => {
@@ -10795,6 +10817,7 @@ function SettingsPanel(props) {
               : null),
         )
       }),
+      cityMsg ? h('div', { role: 'status', style: { fontSize: 11, color: '#93c5fd', marginTop: 6 } }, cityMsg) : null,
     )
   };
   // ---------- 关注地区的统合 ----------
@@ -11419,6 +11442,7 @@ function SettingsPanel(props) {
       const parts = [];
       if (w.dropped > 0) parts.push(t('settings.configIo.importedSkipped', { n: w.dropped }));
       if (w.radiusFixed > 0) parts.push(t('settings.configIo.importedRadius', { n: w.radiusFixed }));
+      if (w.citiesDropped > 0) parts.push(t('settings.configIo.importedCities', { n: w.citiesDropped }));
       setCfgIoMsg(parts.length
         ? t('settings.configIo.imported') + ' ' + parts.join(' ')
         : t('settings.configIo.imported'));
