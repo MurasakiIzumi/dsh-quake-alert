@@ -3,6 +3,7 @@
 [English](./README.md) · **中文** · [日本語](./README.ja.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![npm version](https://img.shields.io/npm/v/dsh-quake-alert)](https://www.npmjs.com/package/dsh-quake-alert)
 
 这是给 DeepSeek Harness（DSH）用的灾害预警插件。你使用 DSH 期间，它会实时推送**日本**和**全球**的
 地震、海啸与气象灾害预警；一旦命中你设置的关注地区与阈值，就会响一声、在页面上弹条提示
@@ -40,14 +41,17 @@
 ## 安装
 
 ```sh
-# 直接从 GitHub 安装
-dsh plugin --profile web add github:MurasakiIzumi/dsh-quake-alert
+# 从 npm 安装
+dsh plugin --profile web add dsh-quake-alert
 
 # 重启 dsh web 使插件生效
 ```
 
-**升级**：替换包内容后重启 `dsh web`。改动只落在 `client/`（浏览器端）时，刷新页面就生效；动了 `lib/`
-（后台端）就得重启。
+想跟仓库最新提交的话，也可以直接从 GitHub 装：
+`dsh plugin --profile web add github:MurasakiIzumi/dsh-quake-alert`。
+
+**升级**：重跑一次上面的命令，再重启 `dsh web`。改动只落在 `client/`（浏览器端）时，刷新页面就生效；
+动了 `lib/`（后台端）就得重启。
 
 ## 使用
 

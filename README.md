@@ -3,6 +3,7 @@
 **English** · [中文](./README.zh.md) · [日本語](./README.ja.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![npm version](https://img.shields.io/npm/v/dsh-quake-alert)](https://www.npmjs.com/package/dsh-quake-alert)
 
 QuakeAlert is a disaster-warning plugin for DeepSeek Harness (DSH). While you are working in DSH it keeps
 live feeds open for earthquakes, tsunamis and weather hazards in **Japan** and around the **world**, and
@@ -48,13 +49,16 @@ open.
 ## Installation
 
 ```sh
-# Straight from GitHub
-dsh plugin --profile web add github:MurasakiIzumi/dsh-quake-alert
+# From npm
+dsh plugin --profile web add dsh-quake-alert
 
 # Restart dsh web to activate the plugin
 ```
 
-**Updating**: replace the package contents and restart `dsh web`. Changes that stay inside the Client
+To track the repository instead, install it straight from GitHub:
+`dsh plugin --profile web add github:MurasakiIzumi/dsh-quake-alert`.
+
+**Updating**: run the command above again and restart `dsh web`. Changes that stay inside the Client
 half (`client/`) are live after a page refresh; anything under `lib/` needs the restart.
 
 ## Usage

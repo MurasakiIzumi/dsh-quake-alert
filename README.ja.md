@@ -3,6 +3,7 @@
 [English](./README.md) · [中文](./README.zh.md) · **日本語**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![npm version](https://img.shields.io/npm/v/dsh-quake-alert)](https://www.npmjs.com/package/dsh-quake-alert)
 
 DeepSeek Harness（DSH）でお使いいただける災害警報プラグインです。DSH を使っている間、**日本**と**世界**の地震・津波・気象災害の情報をリアルタイムで受け取り、あらかじめ登録した地域としきい値に当てはまるものがあれば、通知音とページ内のトーストでお知らせします（ページが裏に回っているときはシステム通知に切り替わります）。
 
@@ -35,13 +36,16 @@ DeepSeek Harness（DSH）でお使いいただける災害警報プラグイン�
 ## インストール
 
 ```sh
-# GitHub から直接インストール
-dsh plugin --profile web add github:MurasakiIzumi/dsh-quake-alert
+# npm からインストール
+dsh plugin --profile web add dsh-quake-alert
 
 # dsh web を再起動するとプラグインが有効になります
 ```
 
-**アップデート**：パッケージを差し替えて `dsh web` を再起動してください。変更が `client/`（ブラウザ側）だけなら、ページを再読み込みすれば反映されます。`lib/`（バックグラウンド側）に触れた場合は再起動が必須です。
+リポジトリの最新コミットを使いたい場合は、GitHub から直接インストールすることもできます：
+`dsh plugin --profile web add github:MurasakiIzumi/dsh-quake-alert`。
+
+**アップデート**：上記のコマンドをもう一度実行し、`dsh web` を再起動してください。変更が `client/`（ブラウザ側）だけなら、ページを再読み込みすれば反映されます。`lib/`（バックグラウンド側）に触れた場合は再起動が必須です。
 
 ## 使い方
 
