@@ -2,6 +2,8 @@
 
 **English** · [中文](./README.zh.md) · [日本語](./README.ja.md)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 QuakeAlert is a disaster-warning plugin for DeepSeek Harness (DSH). While you are working in DSH it keeps
 live feeds open for earthquakes, tsunamis and weather hazards in **Japan** and around the **world**, and
 the moment an event matches the regions and thresholds you have configured, it plays an alert tone and
@@ -64,6 +66,7 @@ half (`client/`) are live after a page refresh; anything under `lib/` needs the 
    - **Other countries / regions**: choose a country and click a city to add it, or fill in the coordinate form by hand. The city list holds towns of 100,000 inhabitants and up.
 
    Everything you have added is listed together below this block, and you can remove entries from there at any time.
+
 3. **Disaster types and thresholds**. One hazard per row, with the switch deciding whether to alert and the threshold deciding how strong an event has to be.
 4. **Notifications and sound**. Enable the alert tone and system notifications, set the volume, and use the preview buttons to check both.
 5. **Data source**. Leave it on "Production" for everyday use, or switch to "Sandbox" when you want to verify the pipeline.
