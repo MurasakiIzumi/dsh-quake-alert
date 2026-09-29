@@ -39,7 +39,7 @@ function ensure(id) {
   let r = health.get(id)
   if (!r) {
     r = {
-      data: null, // { errorKey, kind, detail, at, firstAt, count, escalated }
+      data: null, // { errorKey, kind, subject, detail, at, firstAt, count, escalated }
       fresh: { dataTime: 0, stale: false, staleSince: 0 },
       counters: { ok: 0, schema: 0, value: 0, empty: 0 },
       consecutiveFail: 0,
@@ -56,7 +56,7 @@ function persist() {
     if (!r.data) continue
     const d = r.data
     out[id] = {
-      errorKey: d.errorKey, kind: d.kind, detail: d.detail,
+      errorKey: d.errorKey, kind: d.kind, subject: d.subject, detail: d.detail,
       at: d.at, firstAt: d.firstAt, escalated: d.escalated === true,
     }
   }
@@ -79,6 +79,7 @@ export function loadHealth(now) {
     r.data = {
       errorKey: d.errorKey,
       kind: typeof d.kind === 'string' ? d.kind : 'schema',
+      subject: typeof d.subject === 'string' ? d.subject : '',
       detail: typeof d.detail === 'string' ? d.detail : '',
       at: d.at,
       firstAt: Number.isFinite(d.firstAt) ? d.firstAt : d.at,
@@ -115,29 +116,45 @@ function clearData(sourceId, detail, t) {
 }
 
 /**
+ * 这次"恢复"能不能清掉记下的失败：只有**同一种数据**（subject 相同）才算恢复。
+ * 失败记录没写种类（旧版本留下的记录，或认不出种类）时按原样清掉——不把蓝点无谓地挂满 24 小时。
+ */
+function recovered(r, subject) {
+  if (!r || !r.data) return false
+  if (!r.data.subject) return true
+  return r.data.subject === String(subject || '')
+}
+
+/**
  * 记录一次解析结果。返回 true = "这条数据不可用，调用方不应继续处理它"——与"是否点亮蓝点"**解耦**：
  * 单条坏数据不该让整个源变蓝。
  *
- * empty 仍算"结构是好的"，**默认**清掉蓝点（JMA 的常态就是 empty）。**唯一例外是逐条上报
- * （`opts.perItem`）**：那时 empty 只计数、不清 data 层——empty 只说明"**这一条**无关"，不能证明
- * 同批次此前那条 schema 失败已恢复；批量取数（12e 一轮查 N 个关注点）里立即 clearData 会连**其它
- * 条目**的失败计数一起清掉，两条升级阈值都不可达、蓝点永不点亮，即"局部改版 / 局部拦截"退化成
- * **静默漏报**。「条级独立」的来源（12b 的 feed、15-entry 的 WS）不传 perItem；只有"一轮 = 一批
- * 请求"的海外源传。
+ * `opts.subject` 是**数据种类**（P2P 的电文 code：551 / 552 / 556；nmc 的灾种：rainstorm /
+ * geology）：同一个源里不同种类的结构各自独立，种类 A 正常不能证明种类 B 没改版。它进 `errorKey`
+ * （不同种类不共享计数）并决定一次成功能不能清掉蓝点（见 recovered）——否则 551 照常到达就会一直清掉
+ * 556 的结构告警，而 EEW 那条链路已经悄悄不响了。**JMA 不传**：它的 schema 失败只发生在整份载荷级，
+ * 那时取不到电文种类（登记在 DESIGN 11.9）。
+ *
+ * empty 仍算"结构是好的"，**默认**清掉蓝点（JMA 的常态就是 empty）。两种例外：① 逐条上报
+ * （`opts.perItem`）时 empty 只计数、不清 data 层——empty 只说明"**这一条**无关"，不能证明同批次
+ * 此前那条 schema 失败已恢复；批量取数（12e 一轮查 N 个关注点）里立即 clearData 会连**其它条目**
+ * 的失败计数一起清掉；② 种类对不上时不清。
  */
 export function noteParseResult(sourceId, res, now, opts) {
   if (!res || res.ok) return false
   const t = now === undefined ? Date.now() : now
   const r = ensure(sourceId)
   const kind = res.kind === 'value' ? 'value' : (res.kind === 'empty' ? 'empty' : 'schema')
+  const subject = String((opts && opts.subject) || '')
   if (kind === 'empty') {
     r.counters.empty += 1
-    if (!(opts && opts.perItem)) clearData(sourceId, 'schema recovered')
+    if (!(opts && opts.perItem) && recovered(r, subject)) clearData(sourceId, 'schema recovered')
     return false
   }
   r.counters[kind] += 1
   r.consecutiveFail += 1
-  const key = kind + '|' + String(res.detail || '')
+  // 种类进 errorKey：两种电文各自坏法不同时，它们的计数不该互相覆盖、也不该互相续上。
+  const key = kind + '|' + subject + '|' + String(res.detail || '')
   const prev = r.data
   const sameReason = !!prev && prev.errorKey === key && (t - prev.firstAt) <= SCHEMA_ESCALATE_WINDOW_MS
   const count = sameReason ? prev.count + 1 : 1
@@ -147,22 +164,30 @@ export function noteParseResult(sourceId, res, now, opts) {
     count >= SCHEMA_ESCALATE_COUNT ||
     r.consecutiveFail >= SCHEMA_ESCALATE_CONSECUTIVE
   const wasEscalated = !!(prev && prev.escalated === true)
-  r.data = { errorKey: key, kind, detail: String(res.detail || ''), at: t, firstAt, count, escalated: !!escalated }
+  r.data = { errorKey: key, kind, subject, detail: String(res.detail || ''), at: t, firstAt, count, escalated: !!escalated }
   if (escalated && !wasEscalated) {
     try {
       console.warn('[dsh-quake-alert] ' + sourceId + ' repeated parse failures (' + kind + ', ' + count + '): ' + res.detail)
     } catch (e) { /* 忽略 */ }
     persist()
-    publishStatus(sourceId, { status: connBaseOf(sourceId), detail: kind + '：' + res.detail })
+    publishStatus(sourceId, { status: connBaseOf(sourceId), detail: kind + ': ' + res.detail })
   }
   return true
 }
 
-/** 解析成功。清掉蓝点（若此前有），并累加成功计数。 */
-export function noteSourceSuccess(sourceId, now) {
+/**
+ * 解析成功。累加成功计数，并清掉蓝点（若此前有）。
+ *
+ * 两种"不清"的例外，都由 opts 表达：① `perItem`（逐条上报）——同轮其它条目可能正失败着，一条成功
+ * 不能证明结构已恢复，清蓝点收敛到轮末的轮级判定（12e 一轮 = 一批请求）；② `subject` 与记下的失败
+ * 种类不同——种类 A 的正常数据不能证明种类 B 没改版（见 recovered）。
+ */
+export function noteSourceSuccess(sourceId, now, opts) {
   const t = now === undefined ? Date.now() : now
   const r = ensure(sourceId)
   r.counters.ok += 1
+  if (opts && opts.perItem) return false
+  if (!recovered(r, opts && opts.subject)) return false
   return clearData(sourceId, 'schema recovered')
 }
 
@@ -233,7 +258,7 @@ export function effectiveStatusOf(sourceId, connStatus, detail) {
   // 改写成"数据格式异常 / 上游停更"。
   if (connStatus === 'disabled') return { status: 'disabled', detail }
   const r = health.get(sourceId)
-  if (r && r.data && r.data.escalated) return { status: 'schema-error', detail: r.data.kind + '：' + r.data.detail }
+  if (r && r.data && r.data.escalated) return { status: 'schema-error', detail: r.data.kind + ': ' + r.data.detail }
   if (r && r.fresh && r.fresh.stale) return { status: 'stale', detail: detail || 'upstream data stale' }
   return { status: connStatus, detail }
 }

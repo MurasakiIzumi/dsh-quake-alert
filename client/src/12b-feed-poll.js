@@ -130,6 +130,10 @@ export function createFeedClient(opts = {}) {
   const saveCursor = opts.saveCursor || ((v) => saveFeedCursor(v, cursorKey))
   const apply = opts.apply || ((entry, cfg) => {
     // 走解析契约：schema / value 失败会计入数据健康且**不播报**，empty（与本插件无关的电文）静静跳过。
+    // 这里**不传 `subject`**：feed 是逐电文入队，但 JMA 的 schema 失败取不到电文种类——它只发生在
+    // 整份载荷级（空响应 / 被拦截成 HTML / 缺 `<Report>`），那时 XML 里没有 `<Control><Title>` 可读；
+    // 传一个恒为空串的 subject 只是白扫一遍正则，而空 subject 的失败本来就允许被任何成功清掉。
+    // 由此留下的两个盲区（同源其它电文成功会清掉这条失败、电文种类漂移退化成 empty）记在 DESIGN 11.9。
     const res = parseJmaResult(entry && entry.xml, { id: entry && entry.id })
     if (noteParseResult(id, res)) return false
     if (!res.ok) return false

@@ -181,7 +181,9 @@ function SourceStatusBlock() {
     const meta = statusMetaOf(st.status, st.retries)
     rows.push(t('settings.source.keyValue', {
       k: sourceLabelOf(id),
-      v: meta.text + (st.detail ? ' · ' + st.detail : ''),
+      // 只显示本地化的状态词：detail 是排障文本（含上游原文与技术判据、刻意写成简短英文），
+      // 进界面就成中英 / 日英混排。它仍逐源写进诊断快照，由用户贴给 AI 排查（DESIGN 11.10 规则 4）。
+      v: meta.text,
     }))
   }
   for (const id of FEED_STAT_ORDER) {

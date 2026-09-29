@@ -2967,6 +2967,7 @@ const MAX_WATCH_CITIES = 300; // 关注市区町村上限（防止配置与 UI �
 const MAX_WATCH_PLACES = 20;
 const RECONNECT_BASE = 1000; // 重连间隔递增的起点 1s
 const RECONNECT_MAX = 60000; // 封顶 60s
+
 // 用户可选的最低震度档位（值 = P2PQuake scale）。labelKey 由渲染时的取词函数解析成各语言文案。
 const SCALE_OPTIONS = [
   { v: 10, labelKey: 'scaleOpt.10' }, { v: 20, labelKey: 'scaleOpt.20' }, { v: 30, labelKey: 'scaleOpt.30' },
@@ -6062,7 +6063,7 @@ const SOURCE_CONTRACTS = {
     timezone: 'Asia/Shanghai（+08:00，无夏令时）—— time / ReportTime 是裸北京时间，由 cnTimeToIso 补偏移',
     required: [
       '整表载荷：No1…NoN（数值序，No1 最新）；**md5 不是判据**——它只作诊断读数与' +
-      '（P3-31 之前）的整表短路，缺了照常逐条比对',
+      '整表短路，缺了照常逐条比对',
       '每项：EventID string 非空',
       '每项：latitude / longitude 为数字字符串或数值，且落在合法范围内',
       '每项：magnitude 为数字字符串或数值（缺它这条速报就没有阈值可判）',
@@ -6094,7 +6095,7 @@ const SOURCE_CONTRACTS = {
     required: [
       'alertid string 非空（每条预警的唯一键，Host 用它去重与拼详情 URL）',
       'kind 是 string；`{rainstorm, geology}` 之外的取值判 **empty 而不是 schema**' +
-      '（0.9.4 / C2：实现里走的是 `own(NMC_KIND_TEXT, kind)` 判空，说明这两种之外只是"不在我们范围内"，' +
+      '（实现里走的是 `own(NMC_KIND_TEXT, kind)` 判空，说明这两种之外只是"不在我们范围内"，' +
       '不是源坏了——此前写在 required 里会让人以为要判故障）',
       'level ∈ {red, orange, yellow, blue}（Host 从 pic 的等级码译出）',
       'title string 非空，且形如「…气象台发布…预警信号」——**匹配完全依赖它**，解析不出机构名即判 schema',
@@ -6416,7 +6417,7 @@ function parseCencEqlistResult(json) {
     if (res.ok) { alerts.push(res.alert); continue }
     if (res.kind === 'empty') continue
     dropped++;
-    if (!firstDetail) firstDetail = res.kind + '：' + res.detail;
+    if (!firstDetail) firstDetail = res.kind + ': ' + res.detail;
   }
   if (alerts.length === 0) {
     return failResult('schema', '整表 ' + items.length + ' 条全部无法解析（' + firstDetail + '）')
@@ -6550,7 +6551,7 @@ function ensure(id) {
   let r = health.get(id);
   if (!r) {
     r = {
-      data: null, // { errorKey, kind, detail, at, firstAt, count, escalated }
+      data: null, // { errorKey, kind, subject, detail, at, firstAt, count, escalated }
       fresh: { dataTime: 0, stale: false, staleSince: 0 },
       counters: { ok: 0, schema: 0, value: 0, empty: 0 },
       consecutiveFail: 0,
@@ -6567,7 +6568,7 @@ function persist() {
     if (!r.data) continue
     const d = r.data;
     out[id] = {
-      errorKey: d.errorKey, kind: d.kind, detail: d.detail,
+      errorKey: d.errorKey, kind: d.kind, subject: d.subject, detail: d.detail,
       at: d.at, firstAt: d.firstAt, escalated: d.escalated === true,
     };
   }
@@ -6590,6 +6591,7 @@ function loadHealth(now) {
     r.data = {
       errorKey: d.errorKey,
       kind: typeof d.kind === 'string' ? d.kind : 'schema',
+      subject: typeof d.subject === 'string' ? d.subject : '',
       detail: typeof d.detail === 'string' ? d.detail : '',
       at: d.at,
       firstAt: Number.isFinite(d.firstAt) ? d.firstAt : d.at,
@@ -6626,29 +6628,45 @@ function clearData(sourceId, detail, t) {
 }
 
 /**
+ * 这次"恢复"能不能清掉记下的失败：只有**同一种数据**（subject 相同）才算恢复。
+ * 失败记录没写种类（旧版本留下的记录，或认不出种类）时按原样清掉——不把蓝点无谓地挂满 24 小时。
+ */
+function recovered(r, subject) {
+  if (!r || !r.data) return false
+  if (!r.data.subject) return true
+  return r.data.subject === String(subject || '')
+}
+
+/**
  * 记录一次解析结果。返回 true = "这条数据不可用，调用方不应继续处理它"——与"是否点亮蓝点"**解耦**：
  * 单条坏数据不该让整个源变蓝。
  *
- * empty 仍算"结构是好的"，**默认**清掉蓝点（JMA 的常态就是 empty）。**唯一例外是逐条上报
- * （`opts.perItem`）**：那时 empty 只计数、不清 data 层——empty 只说明"**这一条**无关"，不能证明
- * 同批次此前那条 schema 失败已恢复；批量取数（12e 一轮查 N 个关注点）里立即 clearData 会连**其它
- * 条目**的失败计数一起清掉，两条升级阈值都不可达、蓝点永不点亮，即"局部改版 / 局部拦截"退化成
- * **静默漏报**。「条级独立」的来源（12b 的 feed、15-entry 的 WS）不传 perItem；只有"一轮 = 一批
- * 请求"的海外源传。
+ * `opts.subject` 是**数据种类**（P2P 的电文 code：551 / 552 / 556；nmc 的灾种：rainstorm /
+ * geology）：同一个源里不同种类的结构各自独立，种类 A 正常不能证明种类 B 没改版。它进 `errorKey`
+ * （不同种类不共享计数）并决定一次成功能不能清掉蓝点（见 recovered）——否则 551 照常到达就会一直清掉
+ * 556 的结构告警，而 EEW 那条链路已经悄悄不响了。**JMA 不传**：它的 schema 失败只发生在整份载荷级，
+ * 那时取不到电文种类（登记在 DESIGN 11.9）。
+ *
+ * empty 仍算"结构是好的"，**默认**清掉蓝点（JMA 的常态就是 empty）。两种例外：① 逐条上报
+ * （`opts.perItem`）时 empty 只计数、不清 data 层——empty 只说明"**这一条**无关"，不能证明同批次
+ * 此前那条 schema 失败已恢复；批量取数（12e 一轮查 N 个关注点）里立即 clearData 会连**其它条目**
+ * 的失败计数一起清掉；② 种类对不上时不清。
  */
 function noteParseResult(sourceId, res, now, opts) {
   if (!res || res.ok) return false
   const t = now === undefined ? Date.now() : now;
   const r = ensure(sourceId);
   const kind = res.kind === 'value' ? 'value' : (res.kind === 'empty' ? 'empty' : 'schema');
+  const subject = String((opts && opts.subject) || '');
   if (kind === 'empty') {
     r.counters.empty += 1;
-    if (!(opts && opts.perItem)) clearData(sourceId, 'schema recovered');
+    if (!(opts && opts.perItem) && recovered(r, subject)) clearData(sourceId, 'schema recovered');
     return false
   }
   r.counters[kind] += 1;
   r.consecutiveFail += 1;
-  const key = kind + '|' + String(res.detail || '');
+  // 种类进 errorKey：两种电文各自坏法不同时，它们的计数不该互相覆盖、也不该互相续上。
+  const key = kind + '|' + subject + '|' + String(res.detail || '');
   const prev = r.data;
   const sameReason = !!prev && prev.errorKey === key && (t - prev.firstAt) <= SCHEMA_ESCALATE_WINDOW_MS;
   const count = sameReason ? prev.count + 1 : 1;
@@ -6658,21 +6676,29 @@ function noteParseResult(sourceId, res, now, opts) {
     count >= SCHEMA_ESCALATE_COUNT ||
     r.consecutiveFail >= SCHEMA_ESCALATE_CONSECUTIVE;
   const wasEscalated = !!(prev && prev.escalated === true);
-  r.data = { errorKey: key, kind, detail: String(res.detail || ''), at: t, firstAt, count, escalated: !!escalated };
+  r.data = { errorKey: key, kind, subject, detail: String(res.detail || ''), at: t, firstAt, count, escalated: !!escalated };
   if (escalated && !wasEscalated) {
     try {
       console.warn('[dsh-quake-alert] ' + sourceId + ' repeated parse failures (' + kind + ', ' + count + '): ' + res.detail);
     } catch (e) { /* 忽略 */ }
     persist();
-    publishStatus(sourceId, { status: connBaseOf(sourceId), detail: kind + '：' + res.detail });
+    publishStatus(sourceId, { status: connBaseOf(sourceId), detail: kind + ': ' + res.detail });
   }
   return true
 }
 
-/** 解析成功。清掉蓝点（若此前有），并累加成功计数。 */
-function noteSourceSuccess(sourceId, now) {
+/**
+ * 解析成功。累加成功计数，并清掉蓝点（若此前有）。
+ *
+ * 两种"不清"的例外，都由 opts 表达：① `perItem`（逐条上报）——同轮其它条目可能正失败着，一条成功
+ * 不能证明结构已恢复，清蓝点收敛到轮末的轮级判定（12e 一轮 = 一批请求）；② `subject` 与记下的失败
+ * 种类不同——种类 A 的正常数据不能证明种类 B 没改版（见 recovered）。
+ */
+function noteSourceSuccess(sourceId, now, opts) {
   const r = ensure(sourceId);
   r.counters.ok += 1;
+  if (opts && opts.perItem) return false
+  if (!recovered(r, opts && opts.subject)) return false
   return clearData(sourceId, 'schema recovered')
 }
 
@@ -6743,7 +6769,7 @@ function effectiveStatusOf(sourceId, connStatus, detail) {
   // 改写成"数据格式异常 / 上游停更"。
   if (connStatus === 'disabled') return { status: 'disabled', detail }
   const r = health.get(sourceId);
-  if (r && r.data && r.data.escalated) return { status: 'schema-error', detail: r.data.kind + '：' + r.data.detail }
+  if (r && r.data && r.data.escalated) return { status: 'schema-error', detail: r.data.kind + ': ' + r.data.detail }
   if (r && r.fresh && r.fresh.stale) return { status: 'stale', detail: detail || 'upstream data stale' }
   return { status: connStatus, detail }
 }
@@ -7260,16 +7286,19 @@ function playAlertSound(alert, volume) {
   playSound(soundKindOf(alert), volume);
 }
 /**
- * 这条提醒该不该**发声**：`notify.sound` 是总开关，三个分开关按灾种类别细分——地震（含 EEW）/ 海啸 /
- * 气象；认不出的 kind（测试音等）只看总开关。
+ * 这条提醒该不该**发声**：`notify.sound` 是总开关，三个分开关按**灾害种类**（`alert.kind`）细分
+ * ——地震（含 EEW）/ 海啸 / 气象；认不出的 kind（测试音等）只看总开关。
+ *
+ * 按 kind 直接分派，**不要**改成复用 `soundKindOf`：那个函数回答的是"听起来像什么"，而海啸会按
+ * 档位借用地震音色，复用它会把 rank 1 / 2 的海啸（津波注意報 / 津波警報）算进地震开关。
  */
 function soundAllowedFor(cfg, alert) {
   const n = (cfg && cfg.notify) || {};
   if (n.sound === false) return false
-  const k = soundKindOf(alert);
-  if (k === 'eew' || k === 'quake') return n.soundQuake !== false
-  if (k === 'tsunami') return n.soundTsunami !== false
-  if (k === 'weather') return n.soundWeather !== false
+  if (!alert) return true
+  if (alert.kind === 'eew' || alert.kind === 'quake') return n.soundQuake !== false
+  if (alert.kind === 'tsunami') return n.soundTsunami !== false
+  if (alert.kind === 'weather') return n.soundWeather !== false
   return true
 }
 
@@ -7376,7 +7405,11 @@ function isEventRepeat(alert, windowMinutes, nowMs) {
   // kind / test 一并存下来：findPrevEvent 的近似那一级靠它们过滤候选
   eventSeen.set(alert.eventKey, {
     ts: now,
-    strength: alert.strength,
+    // strength 只在是有限数值时覆盖记忆：缺字段的那条若把 undefined 写进去，之后真正的震级上修
+    // （`6.4 > undefined` 恒 false）就会被判成"重复发布"而静默。
+    strength: isFiniteStrength(alert.strength)
+      ? alert.strength
+      : (prev && isFiniteStrength(prev.strength) ? prev.strength : alert.strength),
     at,
     geo,
     source: sourceIdOf(alert),
@@ -7748,13 +7781,24 @@ function hitSeverityOf(alert, m) {
 // 气象警报的「静默提示」：命中关注地区、但未达 L4 所以没有播报时留一笔，供侧边栏悬停提示与设置页显示。
 // 命中地区已达 L4（已真正播报）时必须清掉，否则「未达 L4，未播报」的文案与事实矛盾。
 // 只对日本气象电文生效：大陆源（`locator === 'area'`）与海外源（`locator === 'overseas'`）的
-// `regions` 恒为空数组，它们会走到"清空提示"分支、把日本电文刚留下的提示抹掉。
+// `regions` 不是"关注地区自己的级别"，它们（**包括它们的解除**）动不了日本电文留下的那一笔。
 function updateWeatherHint(alert, cfg) {
-  if (alert.kind !== 'weather' || alert.cancelled) return
+  if (alert.kind !== 'weather') return
+  // 这道来源守卫要排在解除分支**之前**：NWS 的 Cancel 是 `kind:'weather'` + `locator:'overseas'`
+  // + `cancelled:true`，排在后面时一条与日本无关的海外取消会抹掉日本电文的提示。
   if (alert.locator === 'area' || alert.locator === 'overseas') return
+  // 解除电文先把提示清掉再返回：解除的 regions 是空数组，走下面的判定只会落到"不涉及关注地区"。
+  if (alert.cancelled) {
+    if (store.weatherHint) store.push({ weatherHint: null });
+    return
+  }
   if ((cfg.disasters || {}).weather === false) return
   const w = cfg.watch || {};
   const lvOf = (r) => (typeof r.level === 'number' ? r.level : alert.level);
+  // 这条电文**根本不涉及**关注地区时什么都别动（例如用户只关注東京都，而这条只报了北海道）：
+  // 它不是"关注地区的警报解除了"，清掉会抹掉一条仍然有效的提示。JMA 气象电文频繁、多数都不涉及
+  // 某一位用户关注的县，混进下面那条清空判据会让提示长期显示不出来。
+  if (!alert.regions.some((r) => regionInWeatherWatch(r, w))) return
   // 只看**关注地区自己的级别**：整条电文最大 L4 时关注地区可能只有 L3（提示要保留），
   // 反之命中地区已达 L4（已播报）就该清掉。
   const hit = alert.regions.find((r) => regionInWeatherWatch(r, w) && lvOf(r) === 3);
@@ -7867,6 +7911,9 @@ function handleAlert(alert, cfg, opts) {
   }
   if (alert.cancelled) {
     handleCancelled(alert, cfg);
+    // 解除也要清掉「未达播报级别」的静默提示：这个分支在两条 updateWeatherHint 调用点**之前**
+    // 返回，不在这里补一次，气象 L3 的提示会在解除后永久挂着。
+    updateWeatherHint(alert, cfg);
     return { notified: false, reason: 'cancelled', detail: t('reason.clearedIsNotAlert') }
   }
   const m = matchAlert(alert, cfg);
@@ -8421,6 +8468,10 @@ function createFeedClient(opts = {}) {
   const saveCursor = opts.saveCursor || ((v) => saveFeedCursor(v, cursorKey));
   const apply = opts.apply || ((entry, cfg) => {
     // 走解析契约：schema / value 失败会计入数据健康且**不播报**，empty（与本插件无关的电文）静静跳过。
+    // 这里**不传 `subject`**：feed 是逐电文入队，但 JMA 的 schema 失败取不到电文种类——它只发生在
+    // 整份载荷级（空响应 / 被拦截成 HTML / 缺 `<Report>`），那时 XML 里没有 `<Control><Title>` 可读；
+    // 传一个恒为空串的 subject 只是白扫一遍正则，而空 subject 的失败本来就允许被任何成功清掉。
+    // 由此留下的两个盲区（同源其它电文成功会清掉这条失败、电文种类漂移退化成 empty）记在 DESIGN 11.9。
     const res = parseJmaResult(entry && entry.xml, { id: entry && entry.id });
     if (noteParseResult(id, res)) return false
     if (!res.ok) return false
@@ -9549,6 +9600,9 @@ function createOverseasSource(opts = {}) {
     let okCount = 0;
     let failCount = 0;
     let applied = 0;
+    /** 本轮**逐条**解析失败数：它不进 `failCount`（那个只在请求级 catch 里加），轮末清蓝点必须看它，
+     *  否则"一个响应里坏一条、其余正常"会被当成整轮健康。 */
+    let itemFails = 0;
     let rejectedNow = 0;
     let newestDataAt = 0;
     /** 本轮有多少个响应被 ECCC 的分页上限截断（轮末汇总成 stats.truncated，见下）。 */
@@ -9602,14 +9656,14 @@ function createOverseasSource(opts = {}) {
             lastError = 'item parse threw: ' + String((parseErr && parseErr.message) || parseErr);
             continue
           }
-          // 逐条 empty 必须传 `perItem`：只计数、不清蓝点——单条"不在范围内"不能证明同轮其它
-          // 条目的 schema 失败已恢复。
-          if (noteParseResult(id, res, undefined, { perItem: true })) continue
+          // 逐条上报一律传 `perItem`：只计数、不清蓝点——单条"不在范围内"或单条解析成功，都不能
+          // 证明同轮其它条目的 schema 失败已恢复。清蓝点收敛到轮末的轮级判定。
+          if (noteParseResult(id, res, undefined, { perItem: true })) { itemFails += 1; continue }
           if (!res.ok) continue
           const alert = res.alert;
           if (seen.has(alert.id)) continue
           seen.add(alert.id);
-          noteSourceSuccess(id);
+          noteSourceSuccess(id, undefined, { perItem: true });
           const issued = Date.parse(alert.issued);
           if (Number.isFinite(issued) && issued > newestDataAt) newestDataAt = issued;
           const stale = gated && Number.isFinite(issued) && (now - issued) > OVERSEAS_FRESH_GATE_MS;
@@ -9667,9 +9721,13 @@ function createOverseasSource(opts = {}) {
     // 轮末的两条轮级判定：① 分页截断按轮计数（按响应累加时 N 个关注点的一轮会 +N，与 UI 说法
     // 不符）；② 结构正常的空结果只在整轮无失败时才判"结构没问题"（05g 的 empty 语义，清蓝点）。
     if (truncatedNow) stats.truncated += 1;
-    // `applied === 0` 时才需要它：有成功解析的条目时 `noteSourceSuccess` 已经清过蓝点。
-    if (okCount > 0 && failCount === 0 && applied === 0) {
-      noteParseResult(id, failResult('empty', 'ok structure, nothing in scope'));
+    // 清蓝点只在这个轮级判定里做，且要求**整轮没有任何失败**——请求级（`failCount`）与逐条
+    // （`itemFails`）都算。逐条失败不进 `failCount`，漏掉 `itemFails` 时"一个响应里坏一条、其余
+    // 正常"会被当成整轮健康：蓝点的两条升级路径双双不可达，界面一片绿而数据在静默丢弃。
+    // 有内容按成功、整轮空按 empty（两者都表示结构没问题）。
+    if (okCount > 0 && failCount === 0 && itemFails === 0) {
+      if (applied === 0) noteParseResult(id, failResult('empty', 'ok structure, nothing in scope'));
+      else noteSourceSuccess(id);
     }
     // 停用之后不再写状态，否则"用户主动关掉插件"会在侧边栏留下红点、诊断里多一条中止信息。
     if (stopped) return { applied, aborted: true }
@@ -10122,8 +10180,10 @@ function parseConfigImport(text) {
   if (!isPlainObject(parsed.config)) return { ok: false, error: 'shape' }
   // 规整出错也返回错误码：畸形配置（字段是转不成字符串的对象）会在规整里抛，抛出去 UI 那条 .then 链上没人接得住。
   let cfg;
-  // 关注点检查清单：规整流程会**静默**丢弃坐标非法的关注点，这里把清单交出去，由界面如实说明少了什么。
-  const audit = { total: 0, dropped: 0, radiusFixed: 0 };
+  // 关注点检查清单：规整流程会**静默**丢弃坐标非法的关注点、把超上限的市町村截断，这里把清单
+  // 交出去，由界面如实说明少了什么。字段必须与 normalizePlaces / normalizeCities 写入的一致
+  // （漏一个字段就是 `undefined + n = NaN`，界面上的 `> 0` 判定恒假 → 提示永不出现）。
+  const audit = { total: 0, dropped: 0, radiusFixed: 0, citiesDropped: 0 };
   try {
     cfg = normalizeCfg(parsed.config, audit);
   } catch (err) {
@@ -10386,7 +10446,9 @@ function SourceStatusBlock() {
     const meta = statusMetaOf(st.status, st.retries);
     rows.push(t('settings.source.keyValue', {
       k: sourceLabelOf(id),
-      v: meta.text + (st.detail ? ' · ' + st.detail : ''),
+      // 只显示本地化的状态词：detail 是排障文本（含上游原文与技术判据、刻意写成简短英文），
+      // 进界面就成中英 / 日英混排。它仍逐源写进诊断快照，由用户贴给 AI 排查（DESIGN 11.10 规则 4）。
+      v: meta.text,
     }));
   }
   for (const id of FEED_STAT_ORDER) {
@@ -11636,7 +11698,7 @@ function StatusIndicator(props) {
   return h('div', {
     role: 'status',
     'aria-label': t('app.statusPrefix') + meta.text + hintText,
-    title: t('app.statusPrefix') + meta.text + (store.detail ? ' · ' + store.detail : '') + hintText,
+    title: t('app.statusPrefix') + meta.text + hintText,
     style: { display: 'flex', alignItems: 'center', gap: 6, padding: wide ? '4px 8px' : '4px', fontSize: 12, color: 'inherit', cursor: 'default' },
   },
     h('span', { style: dotStyle }),
@@ -11754,9 +11816,11 @@ function apply(ctx) {
   const client = createWsClient({
     onRaw: (raw, cfg) => {
       const res = parseEpspResult(raw);
-      if (noteParseResult('p2pquake', res)) return
+      // 551 / 552 / 556 是三种结构各自独立的电文：551 照常到达不能证明 556 没改版。
+      const subject = String((raw && raw.code) || '');
+      if (noteParseResult('p2pquake', res, undefined, { subject })) return
       if (!res.ok) return
-      noteSourceSuccess('p2pquake');
+      noteSourceSuccess('p2pquake', undefined, { subject });
       handleAlert(res.alert, cfg);
     },
   });
@@ -11848,9 +11912,11 @@ function apply(ctx) {
         return false
       }
       const res = parseNmcAlarmResult(raw);
-      if (noteParseResult('nmc_alarm', res)) return false
+      // 暴雨 / 地质灾害是两个灾种（同一个 Host 源）：暴雨正常不能证明地质灾害没改版。
+      const subject = String((raw && raw.kind) || '');
+      if (noteParseResult('nmc_alarm', res, undefined, { subject })) return false
       if (!res.ok) return false
-      noteSourceSuccess('nmc_alarm');
+      noteSourceSuccess('nmc_alarm', undefined, { subject });
       handleAlert(res.alert, cfg);
       return true
     },

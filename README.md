@@ -36,7 +36,10 @@ open.
 - **Interface language**: 简体中文 / 繁體中文 / 日本語 / English, switched in the settings and applied immediately. Text arriving from a source is shown verbatim.
 - **Export and import**: write the configuration out to a JSON file and load it on another machine or in another browser. Import replaces the whole configuration, and backs up the current one first.
 - **Stored on this machine**: configuration lives in DSH's machine-level storage, so it is still there after a browser or machine change. Browser local storage keeps a copy and serves as the fallback whenever the main store is unavailable.
-- **Source status**: a dot at the foot of the sidebar, with per-source detail on hover. Settings → Test & diagnostics goes further and lists increments received, failure counts, gaps, the last poll time and whether an upstream has gone stale.
+- **Source status**: a dot at the foot of the sidebar shows the current state, and a weather alert that
+  has not reached the alert level shows up alongside it. Per-source details — increments received,
+  failure counts, gaps, the last poll time, whether an upstream has gone stale — live under
+  Settings → Test & diagnostics.
 - **Data source switch**: production (live) or sandbox (replays 2023 history, roughly one message every 30 seconds).
 - **Local diagnostics**: two test buttons build telegrams in the source format and run them through the real parsers and matcher. No network request is made.
 

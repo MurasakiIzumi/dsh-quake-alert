@@ -104,16 +104,19 @@ function playAlertSound(alert, volume) {
   playSound(soundKindOf(alert), volume)
 }
 /**
- * 这条提醒该不该**发声**：`notify.sound` 是总开关，三个分开关按灾种类别细分——地震（含 EEW）/ 海啸 /
- * 气象；认不出的 kind（测试音等）只看总开关。
+ * 这条提醒该不该**发声**：`notify.sound` 是总开关，三个分开关按**灾害种类**（`alert.kind`）细分
+ * ——地震（含 EEW）/ 海啸 / 气象；认不出的 kind（测试音等）只看总开关。
+ *
+ * 按 kind 直接分派，**不要**改成复用 `soundKindOf`：那个函数回答的是"听起来像什么"，而海啸会按
+ * 档位借用地震音色，复用它会把 rank 1 / 2 的海啸（津波注意報 / 津波警報）算进地震开关。
  */
 function soundAllowedFor(cfg, alert) {
   const n = (cfg && cfg.notify) || {}
   if (n.sound === false) return false
-  const k = soundKindOf(alert)
-  if (k === 'eew' || k === 'quake') return n.soundQuake !== false
-  if (k === 'tsunami') return n.soundTsunami !== false
-  if (k === 'weather') return n.soundWeather !== false
+  if (!alert) return true
+  if (alert.kind === 'eew' || alert.kind === 'quake') return n.soundQuake !== false
+  if (alert.kind === 'tsunami') return n.soundTsunami !== false
+  if (alert.kind === 'weather') return n.soundWeather !== false
   return true
 }
 

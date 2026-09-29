@@ -112,13 +112,24 @@ function hitSeverityOf(alert, m) {
 // 气象警报的「静默提示」：命中关注地区、但未达 L4 所以没有播报时留一笔，供侧边栏悬停提示与设置页显示。
 // 命中地区已达 L4（已真正播报）时必须清掉，否则「未达 L4，未播报」的文案与事实矛盾。
 // 只对日本气象电文生效：大陆源（`locator === 'area'`）与海外源（`locator === 'overseas'`）的
-// `regions` 恒为空数组，它们会走到"清空提示"分支、把日本电文刚留下的提示抹掉。
+// `regions` 不是"关注地区自己的级别"，它们（**包括它们的解除**）动不了日本电文留下的那一笔。
 function updateWeatherHint(alert, cfg) {
-  if (alert.kind !== 'weather' || alert.cancelled) return
+  if (alert.kind !== 'weather') return
+  // 这道来源守卫要排在解除分支**之前**：NWS 的 Cancel 是 `kind:'weather'` + `locator:'overseas'`
+  // + `cancelled:true`，排在后面时一条与日本无关的海外取消会抹掉日本电文的提示。
   if (alert.locator === 'area' || alert.locator === 'overseas') return
+  // 解除电文先把提示清掉再返回：解除的 regions 是空数组，走下面的判定只会落到"不涉及关注地区"。
+  if (alert.cancelled) {
+    if (store.weatherHint) store.push({ weatherHint: null })
+    return
+  }
   if ((cfg.disasters || {}).weather === false) return
   const w = cfg.watch || {}
   const lvOf = (r) => (typeof r.level === 'number' ? r.level : alert.level)
+  // 这条电文**根本不涉及**关注地区时什么都别动（例如用户只关注東京都，而这条只报了北海道）：
+  // 它不是"关注地区的警报解除了"，清掉会抹掉一条仍然有效的提示。JMA 气象电文频繁、多数都不涉及
+  // 某一位用户关注的县，混进下面那条清空判据会让提示长期显示不出来。
+  if (!alert.regions.some((r) => regionInWeatherWatch(r, w))) return
   // 只看**关注地区自己的级别**：整条电文最大 L4 时关注地区可能只有 L3（提示要保留），
   // 反之命中地区已达 L4（已播报）就该清掉。
   const hit = alert.regions.find((r) => regionInWeatherWatch(r, w) && lvOf(r) === 3)
@@ -231,6 +242,9 @@ function handleAlert(alert, cfg, opts) {
   }
   if (alert.cancelled) {
     handleCancelled(alert, cfg)
+    // 解除也要清掉「未达播报级别」的静默提示：这个分支在两条 updateWeatherHint 调用点**之前**
+    // 返回，不在这里补一次，气象 L3 的提示会在解除后永久挂着。
+    updateWeatherHint(alert, cfg)
     return { notified: false, reason: 'cancelled', detail: t('reason.clearedIsNotAlert') }
   }
   const m = matchAlert(alert, cfg)

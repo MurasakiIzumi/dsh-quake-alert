@@ -3,7 +3,7 @@
 // 作用：P2PQuake 原始消息（code 551/552/556）→ 统一 Alert：字段映射、区域名对齐 prefsOfArea、
 //       跨县区域展开、震度/海啸文案与 headline 组装。依赖 01-constants、02-storage、00-i18n。
 
-import { PREFECTURES, SCALE_TEXT, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, normalizePref, p2pTimeToIso } from './01-constants.js'
+import { PREFECTURES, TSUNAMI_RANK, normalizePref, p2pTimeToIso } from './01-constants.js'
 import { own } from './02-storage.js'
 import { t } from './00-i18n.js'
 

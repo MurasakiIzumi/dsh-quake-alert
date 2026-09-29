@@ -59,8 +59,10 @@ function parseConfigImport(text) {
   if (!isPlainObject(parsed.config)) return { ok: false, error: 'shape' }
   // 规整出错也返回错误码：畸形配置（字段是转不成字符串的对象）会在规整里抛，抛出去 UI 那条 .then 链上没人接得住。
   let cfg
-  // 关注点检查清单：规整流程会**静默**丢弃坐标非法的关注点，这里把清单交出去，由界面如实说明少了什么。
-  const audit = { total: 0, dropped: 0, radiusFixed: 0 }
+  // 关注点检查清单：规整流程会**静默**丢弃坐标非法的关注点、把超上限的市町村截断，这里把清单
+  // 交出去，由界面如实说明少了什么。字段必须与 normalizePlaces / normalizeCities 写入的一致
+  // （漏一个字段就是 `undefined + n = NaN`，界面上的 `> 0` 判定恒假 → 提示永不出现）。
+  const audit = { total: 0, dropped: 0, radiusFixed: 0, citiesDropped: 0 }
   try {
     cfg = normalizeCfg(parsed.config, audit)
   } catch (err) {

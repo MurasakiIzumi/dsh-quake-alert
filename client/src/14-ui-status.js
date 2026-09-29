@@ -25,7 +25,7 @@ function StatusIndicator(props) {
   return h('div', {
     role: 'status',
     'aria-label': t('app.statusPrefix') + meta.text + hintText,
-    title: t('app.statusPrefix') + meta.text + (store.detail ? ' · ' + store.detail : '') + hintText,
+    title: t('app.statusPrefix') + meta.text + hintText,
     style: { display: 'flex', alignItems: 'center', gap: 6, padding: wide ? '4px 8px' : '4px', fontSize: 12, color: 'inherit', cursor: 'default' },
   },
     h('span', { style: dotStyle }),

@@ -295,6 +295,9 @@ export function createOverseasSource(opts = {}) {
     let okCount = 0
     let failCount = 0
     let applied = 0
+    /** 本轮**逐条**解析失败数：它不进 `failCount`（那个只在请求级 catch 里加），轮末清蓝点必须看它，
+     *  否则"一个响应里坏一条、其余正常"会被当成整轮健康。 */
+    let itemFails = 0
     let rejectedNow = 0
     let newestDataAt = 0
     /** 本轮有多少个响应被 ECCC 的分页上限截断（轮末汇总成 stats.truncated，见下）。 */
@@ -348,14 +351,14 @@ export function createOverseasSource(opts = {}) {
             lastError = 'item parse threw: ' + String((parseErr && parseErr.message) || parseErr)
             continue
           }
-          // 逐条 empty 必须传 `perItem`：只计数、不清蓝点——单条"不在范围内"不能证明同轮其它
-          // 条目的 schema 失败已恢复。
-          if (noteParseResult(id, res, undefined, { perItem: true })) continue
+          // 逐条上报一律传 `perItem`：只计数、不清蓝点——单条"不在范围内"或单条解析成功，都不能
+          // 证明同轮其它条目的 schema 失败已恢复。清蓝点收敛到轮末的轮级判定。
+          if (noteParseResult(id, res, undefined, { perItem: true })) { itemFails += 1; continue }
           if (!res.ok) continue
           const alert = res.alert
           if (seen.has(alert.id)) continue
           seen.add(alert.id)
-          noteSourceSuccess(id)
+          noteSourceSuccess(id, undefined, { perItem: true })
           const issued = Date.parse(alert.issued)
           if (Number.isFinite(issued) && issued > newestDataAt) newestDataAt = issued
           const stale = gated && Number.isFinite(issued) && (now - issued) > OVERSEAS_FRESH_GATE_MS
@@ -413,9 +416,13 @@ export function createOverseasSource(opts = {}) {
     // 轮末的两条轮级判定：① 分页截断按轮计数（按响应累加时 N 个关注点的一轮会 +N，与 UI 说法
     // 不符）；② 结构正常的空结果只在整轮无失败时才判"结构没问题"（05g 的 empty 语义，清蓝点）。
     if (truncatedNow) stats.truncated += 1
-    // `applied === 0` 时才需要它：有成功解析的条目时 `noteSourceSuccess` 已经清过蓝点。
-    if (okCount > 0 && failCount === 0 && applied === 0) {
-      noteParseResult(id, failResult('empty', 'ok structure, nothing in scope'))
+    // 清蓝点只在这个轮级判定里做，且要求**整轮没有任何失败**——请求级（`failCount`）与逐条
+    // （`itemFails`）都算。逐条失败不进 `failCount`，漏掉 `itemFails` 时"一个响应里坏一条、其余
+    // 正常"会被当成整轮健康：蓝点的两条升级路径双双不可达，界面一片绿而数据在静默丢弃。
+    // 有内容按成功、整轮空按 empty（两者都表示结构没问题）。
+    if (okCount > 0 && failCount === 0 && itemFails === 0) {
+      if (applied === 0) noteParseResult(id, failResult('empty', 'ok structure, nothing in scope'))
+      else noteSourceSuccess(id)
     }
     // 停用之后不再写状态，否则"用户主动关掉插件"会在侧边栏留下红点、诊断里多一条中止信息。
     if (stopped) return { applied, aborted: true }

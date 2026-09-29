@@ -203,7 +203,7 @@ export const SOURCE_CONTRACTS = {
     timezone: 'Asia/Shanghai（+08:00，无夏令时）—— time / ReportTime 是裸北京时间，由 cnTimeToIso 补偏移',
     required: [
       '整表载荷：No1…NoN（数值序，No1 最新）；**md5 不是判据**——它只作诊断读数与' +
-      '（P3-31 之前）的整表短路，缺了照常逐条比对',
+      '整表短路，缺了照常逐条比对',
       '每项：EventID string 非空',
       '每项：latitude / longitude 为数字字符串或数值，且落在合法范围内',
       '每项：magnitude 为数字字符串或数值（缺它这条速报就没有阈值可判）',
@@ -235,7 +235,7 @@ export const SOURCE_CONTRACTS = {
     required: [
       'alertid string 非空（每条预警的唯一键，Host 用它去重与拼详情 URL）',
       'kind 是 string；`{rainstorm, geology}` 之外的取值判 **empty 而不是 schema**' +
-      '（0.9.4 / C2：实现里走的是 `own(NMC_KIND_TEXT, kind)` 判空，说明这两种之外只是"不在我们范围内"，' +
+      '（实现里走的是 `own(NMC_KIND_TEXT, kind)` 判空，说明这两种之外只是"不在我们范围内"，' +
       '不是源坏了——此前写在 required 里会让人以为要判故障）',
       'level ∈ {red, orange, yellow, blue}（Host 从 pic 的等级码译出）',
       'title string 非空，且形如「…气象台发布…预警信号」——**匹配完全依赖它**，解析不出机构名即判 schema',
@@ -557,7 +557,7 @@ export function parseCencEqlistResult(json) {
     if (res.ok) { alerts.push(res.alert); continue }
     if (res.kind === 'empty') continue
     dropped++
-    if (!firstDetail) firstDetail = res.kind + '：' + res.detail
+    if (!firstDetail) firstDetail = res.kind + ': ' + res.detail
   }
   if (alerts.length === 0) {
     return failResult('schema', '整表 ' + items.length + ' 条全部无法解析（' + firstDetail + '）')

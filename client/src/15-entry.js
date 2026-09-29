@@ -139,9 +139,11 @@ export function apply(ctx) {
   const client = createWsClient({
     onRaw: (raw, cfg) => {
       const res = parseEpspResult(raw)
-      if (noteParseResult('p2pquake', res)) return
+      // 551 / 552 / 556 是三种结构各自独立的电文：551 照常到达不能证明 556 没改版。
+      const subject = String((raw && raw.code) || '')
+      if (noteParseResult('p2pquake', res, undefined, { subject })) return
       if (!res.ok) return
-      noteSourceSuccess('p2pquake')
+      noteSourceSuccess('p2pquake', undefined, { subject })
       handleAlert(res.alert, cfg)
     },
   })
@@ -233,9 +235,11 @@ export function apply(ctx) {
         return false
       }
       const res = parseNmcAlarmResult(raw)
-      if (noteParseResult('nmc_alarm', res)) return false
+      // 暴雨 / 地质灾害是两个灾种（同一个 Host 源）：暴雨正常不能证明地质灾害没改版。
+      const subject = String((raw && raw.kind) || '')
+      if (noteParseResult('nmc_alarm', res, undefined, { subject })) return false
       if (!res.ok) return false
-      noteSourceSuccess('nmc_alarm')
+      noteSourceSuccess('nmc_alarm', undefined, { subject })
       handleAlert(res.alert, cfg)
       return true
     },

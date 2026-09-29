@@ -28,11 +28,6 @@ const MAX_WATCH_PLACES = 20
 const RECONNECT_BASE = 1000 // 重连间隔递增的起点 1s
 const RECONNECT_MAX = 60000 // 封顶 60s
 
-const SCALE_TEXT = {
-  10: '震度1', 20: '震度2', 30: '震度3', 40: '震度4',
-  45: '震度5弱', 46: '震度5弱以上', 50: '震度5强', 55: '震度6弱',
-  60: '震度6强', 70: '震度7',
-}
 // 用户可选的最低震度档位（值 = P2PQuake scale）。labelKey 由渲染时的取词函数解析成各语言文案。
 const SCALE_OPTIONS = [
   { v: 10, labelKey: 'scaleOpt.10' }, { v: 20, labelKey: 'scaleOpt.20' }, { v: 30, labelKey: 'scaleOpt.30' },
@@ -40,7 +35,6 @@ const SCALE_OPTIONS = [
   { v: 55, labelKey: 'scaleOpt.55' }, { v: 60, labelKey: 'scaleOpt.60' }, { v: 70, labelKey: 'scaleOpt.70' },
 ]
 const TSUNAMI_RANK = { Watch: 1, Warning: 2, MajorWarning: 3 }
-const TSUNAMI_GRADE_TEXT = { Watch: '津波注意报', Warning: '海啸警报', MajorWarning: '大海啸警报' }
 const TSUNAMI_OPTIONS = [
   { g: 'Watch', labelKey: 'tsunamiOpt.Watch' },
   { g: 'Warning', labelKey: 'tsunamiOpt.Warning' },
@@ -203,4 +197,4 @@ const DEFAULT_CFG = {
 }
 
 
-export { React, h, useState, useEffect, useRef, WS_URL, SANDBOX_URL, EMSC_WS_URL, STORAGE_KEY, HISTORY_KEY, HEALTH_KEY, ALERTED_KEY, HISTORY_MAX, HISTORY_MAX_AGE_MS, MAX_WATCH_CITIES, MAX_WATCH_PLACES, RECONNECT_BASE, RECONNECT_MAX, SCALE_TEXT, SCALE_OPTIONS, TSUNAMI_RANK, TSUNAMI_GRADE_TEXT, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, CN_REPORT_MAG_OPTIONS, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, LEGACY_PLACE_RADIUS_KM, LANGUAGE_OPTIONS, PREFECTURES, PREF_SET, PREF_SHORT, PREF_BY_CODE, prefOfCode, prefCodeOf, normalizePref, prefLabelOf, P2P_TZ_OFFSET, P2P_TIME_RE, p2pTimeToIso, CN_TZ_OFFSET, CN_TIME_RE, cnTimeToIso, issuedToDate, formatIssuedLocal, DEFAULT_CFG }
+export { React, h, useState, useEffect, useRef, WS_URL, SANDBOX_URL, EMSC_WS_URL, STORAGE_KEY, HISTORY_KEY, HEALTH_KEY, ALERTED_KEY, HISTORY_MAX, HISTORY_MAX_AGE_MS, MAX_WATCH_CITIES, MAX_WATCH_PLACES, RECONNECT_BASE, RECONNECT_MAX, SCALE_OPTIONS, TSUNAMI_RANK, TSUNAMI_OPTIONS, GLOBAL_MAG_OPTIONS, CN_REPORT_MAG_OPTIONS, RADIUS_PRESETS, DEFAULT_PLACE_RADIUS_KM, MIN_PLACE_RADIUS_KM, MAX_PLACE_RADIUS_KM, LEGACY_PLACE_RADIUS_KM, LANGUAGE_OPTIONS, PREFECTURES, PREF_SET, PREF_SHORT, PREF_BY_CODE, prefOfCode, prefCodeOf, normalizePref, prefLabelOf, P2P_TZ_OFFSET, P2P_TIME_RE, p2pTimeToIso, CN_TZ_OFFSET, CN_TIME_RE, cnTimeToIso, issuedToDate, formatIssuedLocal, DEFAULT_CFG }

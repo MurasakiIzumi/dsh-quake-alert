@@ -107,7 +107,11 @@ function isEventRepeat(alert, windowMinutes, nowMs) {
   // kind / test 一并存下来：findPrevEvent 的近似那一级靠它们过滤候选
   eventSeen.set(alert.eventKey, {
     ts: now,
-    strength: alert.strength,
+    // strength 只在是有限数值时覆盖记忆：缺字段的那条若把 undefined 写进去，之后真正的震级上修
+    // （`6.4 > undefined` 恒 false）就会被判成"重复发布"而静默。
+    strength: isFiniteStrength(alert.strength)
+      ? alert.strength
+      : (prev && isFiniteStrength(prev.strength) ? prev.strength : alert.strength),
     at,
     geo,
     source: sourceIdOf(alert),

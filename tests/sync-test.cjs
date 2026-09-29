@@ -2071,6 +2071,31 @@ console.log('== 全球源解析（EMSC / USGS / NOAA CAP）==')
       'USGS → 经纬度没写反（coordinates 顺序是 lon,lat）')
     assert(u0.issued.indexOf('T') !== -1 && u0.issued.indexOf('Z') !== -1, 'USGS → epoch 毫秒已转成 ISO 字符串')
     assert(us.every((a) => a.regions.length === 0), 'USGS → 全部没有行政区区域')
+    // 「能力真的生效」：真实 feature 必须走完**匹配与播报**，而不只是解析出字段。此前 usgs 的播报
+    // 证据全部来自手工构造的 Alert，真实 feature 从没进过 matchAlert —— magnitude 字段一旦改名 /
+    // 类型漂移（解析成 null），匹配层的震级门槛会被短路（06-matcher 只在 mag 是数值时才比较），
+    // 于是真实地震按距离全响，而解析层断言全绿。
+    assert(u0.magnitude === usFeed.features[0].properties.mag,
+      'USGS → magnitude 直接取自 properties.mag（' + u0.magnitude + '）')
+    {
+      // 独立实例：handleAlert 会写历史与去重表，不污染上面的解析断言。
+      const usT = loadClientEx().exports.__test
+      const uReal = usT.parseUsgsFeature(usFeed.features[0])
+      const usCfg = (minMag) => Object.assign({}, usT.DEFAULT_CFG, {
+        watch: {
+          prefectures: [], cities: [],
+          places: [{ name: '样本点', lat: uReal.geo.lat, lon: uReal.geo.lon, radiusKm: 50 }],
+        },
+        thresholds: Object.assign({}, usT.DEFAULT_CFG.thresholds, { globalMagnitude: minMag }),
+      })
+      assert(usT.matchAlert(uReal, usCfg(1.0)).hit === true,
+        'USGS → 真实样本落在关注点半径内、达 M1.0 阈值时命中')
+      assert(usT.matchAlert(uReal, usCfg(4.5)).hit === false,
+        'USGS → 同一个真实样本在默认 M4.5 下不命中（震级门槛真的读到了真实 feature 的 magnitude）')
+      const rUs = usT.handleAlert(uReal, usCfg(1.0), { skipQuietHours: true })
+      assert(rUs.notified === true,
+        'USGS → 真实 feature 走完 handleAlert 并播报（解析→匹配→播报整条链路）：' + JSON.stringify(rUs))
+    }
     // 缺坐标不造「看起来有效」的事件对象
     assert(t.parseUsgsFeature(null) === null && t.parseUsgsFeature([]) === null, 'USGS → 脏输入返回 null')
     assert(t.parseUsgsFeature({ properties: { mag: 5 } }) === null,
@@ -2126,6 +2151,30 @@ console.log('== 全球源解析（EMSC / USGS / NOAA CAP）==')
       { id: 'adv' })
     assert(t.matchAlert(nAdv, tsunamiCfg).hit === true, '端到端：Tsunami Advisory 命中 Scotia 海关注点')
     assert(t.matchAlert(n, JSON.parse(JSON.stringify(gcfg))).hit === false, '端到端：海啸没命中任何关注点 → 不提醒')
+    // 「能力真的生效」到播报层：真实 CAP 原样是 Information（等级 0，不响），把它的等级字段换成
+    // Advisory 之后必须能走完 handleAlert 并**真的播报**——此前只验到 matchAlert，而「命中判定通过」
+    // 不等于「播报闸门放行」（静默时段 / 事件年龄 / 解除 / 灾种开关都可能挡在中间）。
+    {
+      const nt = loadClientEx().exports.__test
+      // issued 取当前时刻：本条验的是真实 CAP 结构能否走通匹配与播报闸门，事件年龄另有用例守；
+      // 写死 fixture 的发布时间会让这条断言随真实时钟变红。
+      const adv = Object.assign(
+        nt.parseNoaaCap(
+          fs.readFileSync(path.join(ROOT, 'samples', 'global', 'noaa-pheb-cap.xml'), 'utf8')
+            .replace('<event>Tsunami Information</event>', '<event>Tsunami Advisory</event>'),
+          { id: 'adv-runtime' }),
+        { issued: new Date().toISOString() })
+      const nCfg = Object.assign({}, nt.DEFAULT_CFG, {
+        watch: {
+          prefectures: [], cities: [],
+          places: [{ name: 'Scotia 海', lat: -60.48, lon: -47.19, radiusKm: 300 }],
+        },
+        thresholds: Object.assign({}, nt.DEFAULT_CFG.thresholds, { tsunamiGrade: 'Watch' }),
+      })
+      const rAdv = nt.handleAlert(adv, nCfg, { skipQuietHours: true })
+      assert(rAdv.notified === true,
+        'NOAA → 真实 CAP（仅把 event 换成 Advisory）走完 handleAlert 并播报：' + JSON.stringify(rAdv))
+    }
   } catch (err) {
     assert(false, '全球源解析验证失败：' + err.message)
   }
@@ -2929,6 +2978,14 @@ console.log('== 设置页「发送测试气象警报」的轮换场景 ==')
     assert(t.store.weatherHint.label === '東京都', '提示里的地区不再重复成「東京都東京都」')
     t.updateWeatherHint(l4, cfg)
     assert(t.store.weatherHint === null, 'L4 播报后清除静默提示（否则与「未达 L4，未播报」文案自相矛盾）')
+    // 解除电文也要清：解除的 regions 是空数组，且 cancelled 在主链的两条 updateWeatherHint
+    // 调用点**之前**就返回了——不补这一句，解除后提示会永久留在侧边栏与设置页。
+    t.updateWeatherHint(l3, cfg)
+    assert(t.store.weatherHint && t.store.weatherHint.level === 3, '（前置）重新写入 L3 静默提示')
+    const clearedL3 = Object.assign({}, l3, { id: l3.id + '-cleared', cancelled: true })
+    t.handleAlert(clearedL3, cfg, { skipQuietHours: true })
+    assert(t.store.weatherHint === null,
+      '气象警报解除后静默提示被清掉（解除电文走 cancelled 早退路径，提示不能停在"未达 L4"那一笔）')
 
     // handleAlert 如实回报结果：设置页的提示据此生成，不再写死"应看到弹窗"
     const off = Object.assign({}, cfg, { disasters: { earthquake: true, tsunami: true, weather: false } })
@@ -3096,6 +3153,58 @@ console.log('== 源时区与全局严重度 ==')
     t.noteParseResult('nws_alerts', t.failResult('empty', '本轮响应结构正常，但没有本插件范围内的条目'))
     assert(t.sourceHealthOf('nws_alerts').data === null && t.store.sources.nws_alerts.status === 'open',
       '对照：轮级 empty（不传 perItem）照旧清蓝点（0.4.2 的 JMA 语义没有被顺手改掉）')
+    // 数据种类（opts.subject）：同一个源里不同种类的电文结构各自独立——种类 A 正常不能证明种类 B 没改版。
+    // 此前成功一律清蓝点，于是 552/556 改版后同源其它电文照常到达就会一直把它清掉，两条升级阈值都到
+    // 不了、蓝点永不点亮、界面一片绿，而那条链路已经悄悄不响了。
+    t.resetSourceHealth()
+    t.store.clearSources()
+    for (let i = 0; i < t.SCHEMA_ESCALATE_CONSECUTIVE; i++) {
+      t.noteParseResult('p2pquake', t.failResult('schema', '552 缺少 areas 数组'), undefined, { subject: '552' })
+    }
+    assert(t.store.sources.p2pquake.status === 'schema-error', '（前置）552 结构改版 → 蓝点升起')
+    t.noteSourceSuccess('p2pquake', undefined, { subject: '551' })
+    assert(t.sourceHealthOf('p2pquake').data !== null && t.store.sources.p2pquake.status === 'schema-error',
+      '551 照常到达**不能**清掉 552 的蓝点（修复前这里会被清掉，海啸那条链路已悄悄不响了）')
+    t.noteSourceSuccess('p2pquake', undefined, { subject: '552' })
+    assert(t.sourceHealthOf('p2pquake').data === null && t.store.sources.p2pquake.status === 'open',
+      '同种类（552）的数据正常到达才算恢复')
+    // empty 也按种类算：别的种类"与本插件无关"不等于本种类恢复了
+    t.resetSourceHealth()
+    t.store.clearSources()
+    for (let i = 0; i < t.SCHEMA_ESCALATE_CONSECUTIVE; i++) {
+      t.noteParseResult('p2pquake', t.failResult('schema', '552 缺少 areas 数组'), undefined, { subject: '552' })
+    }
+    t.noteParseResult('p2pquake', t.failResult('empty', '与本插件无关的电文'), undefined, { subject: '554' })
+    assert(t.sourceHealthOf('p2pquake').data !== null, '别的种类的 empty 不清本种类的蓝点')
+    t.noteParseResult('p2pquake', t.failResult('empty', '与本插件无关的电文'), undefined, { subject: '552' })
+    assert(t.sourceHealthOf('p2pquake').data === null, '同种类的 empty 才算"结构是好的"')
+    // 种类进 errorKey：两种电文各坏一条、detail 恰好相同时，不该凑成"同一原因累计 2 条"
+    t.resetSourceHealth()
+    t.store.clearSources()
+    t.noteParseResult('nmc_alarm', t.failResult('schema', '缺少 title'), undefined, { subject: 'rainstorm' })
+    t.noteParseResult('nmc_alarm', t.failResult('schema', '缺少 title'), undefined, { subject: 'geology' })
+    assert(t.sourceHealthOf('nmc_alarm').data.count === 1,
+      '不同种类的同句 detail 不互相续上计数（实得 ' + t.sourceHealthOf('nmc_alarm').data.count + '）')
+    // 老记录（没写种类）照旧被任何成功清掉：不把蓝点无谓地挂满 24 小时
+    t.resetSourceHealth()
+    t.store.clearSources()
+    t.noteParseResult('emsc', t.failResult('schema', '缺 data'))
+    t.noteSourceSuccess('emsc', undefined, { subject: 'whatever' })
+    assert(t.sourceHealthOf('emsc').data === null,
+      '失败记录没写种类时任何成功都能清掉（旧版本留下的记录 / 认不出种类）')
+    // 接线也要守：种类是**调用点**传进去的（P2P 的电文 code、nmc 的灾种）。机制层再正确，调用点
+    // 不传就退化成"任何成功都清蓝点"，而上面这些机制层断言照不出来。
+    // 读**源文件**而不是构建产物：rollup 会把"函数从来不读"的对象属性整个删掉（实测 `{ subject }`
+    // 会变成 `{ }`），于是产物断言会随机制层一起红绿、报出与接线无关的失败。
+    const entrySrc = fs.readFileSync(path.join(ROOT, 'client', 'src', '15-entry.js'), 'utf8')
+    assert(entrySrc.indexOf("noteParseResult('p2pquake', res, undefined, { subject })") !== -1,
+      'P2P 的失败上报也带种类（不带的失败记录无从归属，任何成功都会把它清掉）')
+    assert(entrySrc.indexOf("noteSourceSuccess('p2pquake', undefined, { subject })") !== -1,
+      'P2P 的调用点把电文 code 当种类传下去')
+    assert(entrySrc.indexOf("noteParseResult('nmc_alarm', res, undefined, { subject })") !== -1,
+      'nmc 的失败上报也带种类')
+    assert(entrySrc.indexOf("noteSourceSuccess('nmc_alarm', undefined, { subject })") !== -1,
+      'nmc 的调用点把灾种当种类传下去')
     // 第二条升级路径：坏法不重样时按连续失败数也能捕获（按原因计数永远到不了阈值）
     t.resetSourceHealth()
     t.store.clearSources()
@@ -5377,6 +5486,40 @@ console.log('== nmc.cn Client：行政区层级匹配 ==')
         '「省·市」解析：自由坐标点不参与行政区匹配')
     }
 
+    // 真实 nmc.cn 列表 → Host parseNmcList 产出 payload → Client 解析 → 匹配判定。
+    // 此前 Client 侧的输入全是手写对象，两半之间那段真实接口（payload 的字段名与取值域）没有守护：
+    // Host 改了字段名，Client 会一律判 schema，而两边各自的用例都还是绿的。
+    {
+      const nmcHost = await import(pathToFileURL(path.join(ROOT, 'lib', 'nmc-source.js')).href)
+      const listReal = JSON.parse(fs.readFileSync(path.join(ROOT, 'samples', 'nmc', 'alarm-list.json'), 'utf8'))
+      const hosted = nmcHost.parseNmcList(JSON.stringify(listReal))
+      assert(hosted.length > 0, '（前置）真实列表裁剪出 ' + hosted.length + ' 条')
+      // 真实链路是 `JSON.parse(entry.xml)` 之后才交给解析器（15-entry 的 nmc 分支），payload 就是这个 xml。
+      const bad = hosted.filter((e) => !T.parseNmcAlarmResult(JSON.parse(e.payload)).ok)
+      assert(bad.length === 0,
+        'Host 产出的全部 ' + hosted.length + ' 条 payload 都能被 Client 解析（两半接口一致；不合的：' +
+        JSON.stringify(bad.slice(0, 2).map((e) => e.payload)) + '）')
+      // 拿等级最高的一条走匹配：达橙色应命中；当季只有蓝 / 黄时应当是"未达橙色"而不是静默。
+      const rank = { red: 4, orange: 3, yellow: 2, blue: 1 }
+      const top = hosted.slice().sort((a, b) => (rank[b.level] || 0) - (rank[a.level] || 0))[0]
+      const topAlert = T.parseNmcAlarmResult(JSON.parse(top.payload)).alert
+      const area = topAlert.cnArea || {}
+      const cnPlace = {
+        name: (area.province || '') + '·' + (area.city || area.province || ''), lat: 30, lon: 110, radiusKm: 100,
+      }
+      const mTop = T.matchAlert(topAlert, {
+        watch: { prefectures: [], cities: [], places: [cnPlace] },
+        disasters: { earthquake: true, tsunami: true, weather: true, cnRainstorm: true, cnGeology: true },
+        thresholds: {},
+      })
+      if ((rank[top.level] || 0) >= 3) {
+        assert(mTop.hit === true, '真实列表里等级最高的一条（' + top.level + '）达门槛 → 命中：' + mTop.reason)
+      } else {
+        assert(mTop.hit === false && mTop.reason.indexOf('未达橙色') !== -1,
+          '真实列表当季最高只有 ' + top.level + ' → 不播报且说明是等级不够（不是静默）：' + mTop.reason)
+      }
+    }
+
     // 契约层：新源必须同时出现在 SOURCE_CONTRACTS 与设置页的源状态里
     assert(T.SOURCE_CONTRACTS && T.SOURCE_CONTRACTS.nmc_alarm, 'nmc_alarm 有校验约定（字段契约 / 时区 / 新鲜度阈值）')
     assert(T.SOURCE_CONTRACTS.nmc_alarm.staleAfterMs === 3 * 60 * 60 * 1000, '停更阈值 3 小时')
@@ -5666,6 +5809,17 @@ console.log('== 状态合成 / 跨标签页清空 / 契约原型链 / JMA 标签
       t.updateWeatherHint(nmc, cfg)
       assert(!!(t.store.weatherHint && t.store.weatherHint.level === 3),
         '大陆气象电文（regions 恒为空）不会把日本电文的 L3 提示清成 null')
+      // 与关注县**无关**的日本气象电文也不是"本县的警报解除了"：清掉会抹掉一条仍然有效的提示。
+      // JMA 气象电文频繁、多数都不涉及某一位用户关注的县，所以这条路径比跨源那条更容易走到。
+      const cfgTokyo = Object.assign({}, cfg, {
+        watch: Object.assign({}, cfg.watch, { prefectures: ['東京都'], cities: [] }),
+      })
+      t.updateWeatherHint(l3, cfgTokyo)
+      assert(!!(t.store.weatherHint && t.store.weatherHint.level === 3), '（前置）只关注东京 → 东京那条 L3 写入提示')
+      const hokkaido = t.parseJma(t.buildTestTelegram('北海道', 1700000000100, 'landslide-l3', ''), { id: 'test-hokkaido-l3' })
+      t.updateWeatherHint(hokkaido, cfgTokyo)
+      assert(!!(t.store.weatherHint && t.store.weatherHint.level === 3),
+        '只涉及其它县的电文（北海道）不清掉东京的 L3 提示：' + JSON.stringify(t.store.weatherHint))
     }
 
     {
@@ -6473,6 +6627,18 @@ console.log('== NWS / ECCC review：修掉的三条各配一条守卫 ==')
       assert(T6.store.weatherHint && T6.store.weatherHint.level === 3,
         '海外预警（regions 恒空）不再抹掉日本电文留下的「L3 未达 L4」提示：' + JSON.stringify(T6.store.weatherHint))
       T6.store.push({ weatherHint: null })
+      // 解除同样按来源分：NWS 的 Cancel 是 kind=weather + locator=overseas + cancelled=true，来源守卫
+      // 若排在解除分支之后，这条会抹掉日本电文的提示。用独立实例，避免取消链的 id 撞上去重表。
+      const tc = loadClientEx().exports.__test
+      const cancelAlert = nwsCancelChain
+        .map((f) => tc.parseNwsAlertResult(f, { place: usPlace }).alert)
+        .filter(Boolean).find((a) => a.cancelled === true)
+      assert(!!cancelAlert, '（前置）取消链样本里有一条 Cancel 电文')
+      tc.store.push({ weatherHint: { level: 3, label: 'テスト県', at: Date.now() } })
+      tc.handleAlert(cancelAlert, tc.loadCfg())
+      assert(tc.store.weatherHint && tc.store.weatherHint.level === 3,
+        '海外气象源的**解除**（locator=overseas 的 Cancel）也不抹掉日本电文的 L3 提示：' +
+        JSON.stringify(tc.store.weatherHint))
     }
 
     {
@@ -6933,6 +7099,58 @@ console.log('== review：第二轮 ==')
       await clean.pollOnce()
       assert(!T6.sourceHealthOf('nws_alerts').data,
         '整轮都是结构正确的空响应 → 仍然清掉蓝点（本轮一条失败都没有，结构就是好的）')
+    }
+
+    // 混合轮的另一种：同一轮里既有 schema 失败、**又有成功解析出 Alert 的条目**——成功那条不能
+    // 把失败计数清掉。逐条上报的 success 与 empty 一样只计数不清蓝点，清蓝点只由轮末的轮级判定做。
+    {
+      T6.resetSourceHealth()
+      const cfgHit = mkCfg([usPlace])
+      const nwsHit = nwsByEvent('Flash Flood Warning') || nwsSample.features[0]
+      assert(T6.parseNwsAlertResult(nwsHit, { place: usPlace }).ok === true,
+        '（前置）这条 NWS 样本能解析出 Alert —— 否则本轮只有失败，测不出「成功清计数」这条路径')
+      const okBody = JSON.stringify({ type: 'FeatureCollection', features: [nwsHit] })
+      let k = 0
+      const mixedHit = T6.createNwsSource({
+        getCfg: () => cfgHit,
+        onStatus: () => {}, onAlert: () => {},
+        // 每轮：第 1 个采样点被拦截（schema），其余 4 个返回一条能解析出 Alert 的正常响应
+        fetchText: async () => {
+          k += 1
+          return (k % 5 === 1) ? '<html>拦截页</html>' : okBody
+        },
+      })
+      for (let i = 0; i < 6; i += 1) await mixedHit.pollOnce()
+      const hHit = T6.sourceHealthOf('nws_alerts')
+      assert(hHit.consecutiveFail >= 5,
+        '同轮里有成功解析的条目时也不清连续失败计数：' + hHit.consecutiveFail)
+      assert(hHit.data && hHit.data.escalated === true,
+        '混合轮（1 条拦截 + 4 条成功）× 6 轮 → 蓝点照样升级（逐条 success 清蓝点的写法会让它永不升级）：' +
+        JSON.stringify(hHit.data))
+    }
+
+    // 逐条失败必须挡住轮末清蓝点：`failCount` 只在**请求级** catch 里加，而"一个响应里坏一条 + 好一条"
+    // 的请求本身是 200 —— 只看 failCount 时每轮都会被当成整轮健康，蓝点永不升起（两条升级阈值双双
+    // 不可达），界面一片绿而数据在静默丢弃。
+    {
+      T6.resetSourceHealth()
+      const nwsGood = nwsByEvent('Flood Warning') || nwsSample.features[0]
+      const badFeat = { type: 'Feature', properties: null, geometry: { type: 'Point', coordinates: [-95.37, 29.76] } }
+      assert(T6.parseNwsAlertResult(badFeat, { place: usPlace }).kind === 'schema', '（前置）坏 feature 判 schema')
+      const mixedBody = JSON.stringify({ type: 'FeatureCollection', features: [badFeat, nwsGood] })
+      const mixSrc = T6.createNwsSource({
+        getCfg: () => mkCfg([usPlace]), onStatus: () => {}, onAlert: () => {},
+        fetchText: async () => mixedBody,
+      })
+      await mixSrc.pollOnce()
+      const hMix = T6.sourceHealthOf('nws_alerts')
+      assert(hMix.data !== null && hMix.consecutiveFail >= 1,
+        '同一响应里坏一条、好一条 → 轮末不清掉那条逐条 schema 失败（data=' + JSON.stringify(hMix.data) +
+        '，consecutiveFail=' + hMix.consecutiveFail + '）')
+      for (let i = 0; i < 2; i += 1) await mixSrc.pollOnce()
+      const hMix2 = T6.sourceHealthOf('nws_alerts')
+      assert(hMix2.data && hMix2.data.escalated === true,
+        '这样的轮次继续下去能点亮蓝点（修复前它每轮都被轮末清掉）：' + JSON.stringify(hMix2.data))
     }
 
     {
@@ -7485,6 +7703,32 @@ console.log('== 跨源优先源 + 关注点来源分支 ==')
           'importConfig 把检查清单透传给界面（P1-6 的另一半）')
         assert(t11.t('settings.configIo.importedSkipped', { n: 3 }).indexOf('3') !== -1,
           '警告文案四种语言都有，且带得上数字：' + t11.t('settings.configIo.importedSkipped', { n: 3 }))
+      }
+
+      // ---- 导入时超上限的市町村要如实报数（走真实导入路径，不是自造 audit） ----
+      // 这条与下面「normalizeCfg 的 audit 字段」那条分工不同：那条直接调 normalizeCfg 并自带一份
+      // 字段齐全的 audit，守的是**机制**；实际接线在 parseConfigImport 里，它漏初始化一个字段，
+      // 界面上 `NaN > 0` 就恒假、提示永不出现——那种漏法只有走真实路径才照得出来。
+      {
+        const cap = t11.MAX_WATCH_CITIES || 300
+        const over = cap + 7
+        const manyCities = []
+        for (let i = 0; i < over; i += 1) manyCities.push('市町村' + i)
+        const text = JSON.stringify({
+          format: t11.CONFIG_FORMAT, formatVersion: t11.CONFIG_FORMAT_VERSION, config: { watch: { cities: manyCities } },
+        })
+        const parsed = t11.parseConfigImport(text)
+        assert(parsed.ok, '（前置）市町村超上限的配置仍能导入')
+        assert(parsed.cfg.watch.cities.length === cap,
+          '规整后只留 ' + cap + ' 条市町村')
+        assert(parsed.warnings.citiesDropped === 7,
+          '被截断的 7 条记进检查清单（audit 漏初始化时这里是 NaN，界面判定恒假）：' +
+          String(parsed.warnings.citiesDropped))
+        const ioCities = t11.importConfig(text)
+        assert(ioCities.ok && ioCities.warnings && ioCities.warnings.citiesDropped === 7,
+          'importConfig 把市町村检查清单透传给界面：' + JSON.stringify(ioCities.warnings))
+        assert(t11.t('settings.configIo.importedCities', { n: 7 }).indexOf('7') !== -1,
+          '超上限文案四种语言都有，且带得上数字：' + t11.t('settings.configIo.importedCities', { n: 7 }))
       }
 
       // ---- 量纲文案表（震度 / 海啸 / 震级 / 半径）：三种语言都得有，且都不是占位符 ----
@@ -8200,6 +8444,20 @@ console.log('== 尾项：常量、简写、强度、权限、死键 ==')
     assert(t.isEventRepeat(noStrength, 10) === false, '（前置）第一次见到 → 不是重复')
     assert(t.isEventRepeat(Object.assign({}, noStrength, { issued: '2026-09-27T10:01:00Z' }), 10) === false,
       '同事件键再来一条、但 strength 缺失 → **不**判重复（宁可多响一次，也不因为缺字段静默）')
+    // 缺 strength 的那条除了"自己不被判重复"，还**不能把记忆里的强度抹成 undefined**：抹掉之后
+    // 真正的震级上修（`6.4 > undefined` 恒 false）会被后续的 isStrengthUpgrade 判成"没升级"而静默。
+    {
+      const evB2 = Object.assign({}, noStrength, {
+        eventKey: 'geo:b2-check', geo: { lat: 12.34, lon: 56.78 }, strength: 5.2,
+      })
+      assert(t.isEventRepeat(evB2, 10) === false, '（前置）登记一条 M5.2 的事件')
+      const noStrB2 = Object.assign({}, evB2, { issued: '2026-09-27T10:05:00Z' })
+      delete noStrB2.strength
+      assert(t.isEventRepeat(noStrB2, 10) === false, '（前置）缺 strength 的后续发布也不判重复')
+      assert(t.isStrengthUpgrade(Object.assign({}, evB2, { strength: 6.4 })) === true,
+        '缺 strength 的中间版本不覆盖记忆 → 之后 M5.2 → M6.4 仍被判为升级' +
+        '（修复前记忆里的强度被写成 undefined，这条上修会被静默）')
+    }
     {
       const s = loadClientEx({}, {
         window: {
@@ -8553,6 +8811,24 @@ console.log('== 分灾害音效开关 ==')
     // 关掉海啸 / 气象
     assert(t.soundAllowedFor(cfgOf({ soundTsunami: false }), aOf('tsunami')) === false, '关掉海啸 → 海啸不响')
     assert(t.soundAllowedFor(cfgOf({ soundWeather: false }), aOf('weather')) === false, '关掉气象 → 气象不响')
+    // 海啸的**开关**按灾种判，与音色分档无关：津波注意報（rank 1）/ 津波警報（rank 2）的音色虽然
+    // 沿用地震音色，但它们属于海啸开关——否则关掉地震音效的用户听不到海啸（该响没响），而关掉
+    // 海啸音效的用户照旧听得到它（开关失效）。
+    for (const [rank, name] of [[1, '津波注意報'], [2, '津波警報']]) {
+      assert(t.soundAllowedFor(cfgOf(), aOf('tsunami', { maxScale: rank })) === true,
+        '默认海啸响（' + name + '，rank ' + rank + '）')
+      assert(t.soundAllowedFor(cfgOf({ soundTsunami: false }), aOf('tsunami', { maxScale: rank })) === false,
+        '关掉海啸 → ' + name + ' 也不响（不因音色分档绕过开关）')
+      assert(t.soundAllowedFor(cfgOf({ soundQuake: false }), aOf('tsunami', { maxScale: rank })) === true,
+        '关掉地震不影响 ' + name)
+    }
+    // 音色分档本身保留：修的是开关，不是音色（大津波用海啸音色，津波警報沿用地震音色）
+    assert(t.soundKindOf(aOf('tsunami', { maxScale: 3 })) === 'tsunami', '大津波用海啸音色')
+    assert(t.soundKindOf(aOf('tsunami', { maxScale: 2 })) === 'quake', '津波警報沿用地震音色（音色设计，未变）')
+    // 认不出的 kind 只看总开关：音色兜底成地震音色，但开关不该跟着走地震那一路
+    assert(t.soundAllowedFor(cfgOf({ soundQuake: false }), aOf('mystery')) === true,
+      '认不出的 kind 不受地震分开关影响（只看总开关）')
+    assert(t.soundAllowedFor(cfgOf({ sound: false }), aOf('mystery')) === false, '认不出的 kind 仍受总开关管')
     // 总开关优先
     assert(t.soundAllowedFor(cfgOf({ sound: false }), aOf('quake')) === false, '总开关关掉 → 一律不响')
     assert(t.soundAllowedFor(cfgOf({ sound: false, soundQuake: true }), aOf('eew')) === false, '总开关优先于分开关')
@@ -9130,6 +9406,23 @@ console.log('== 复验补修：两处的「已关闭」圆点同形 ==')
     assert(false, '0.9.5 P3-45① 检查失败：' + e.message)
   }
 
+  // ---- 状态层的 detail 只进诊断快照，不进界面 ----
+  try {
+console.log('== 复验补修：状态层 detail 不进界面 ==')
+    // detail 是各源链路拼的**简短英文**诊断串（`last fetch …` / `schema error not seen for 24h …`），
+    // 它是排障文本、不是界面文案，混进界面就是中英 / 日英混排。设置页「源状态」行与侧边栏 tooltip
+    // 都只显示本地化的状态词；detail 仍逐源写进诊断快照，由用户贴给 AI 排查。
+    const uiDetail = CLIENT_CODE.split("' · ' + st.detail").length - 1
+    const tipDetail = CLIENT_CODE.split("' · ' + store.detail").length - 1
+    assert(uiDetail === 0, '设置页「源状态」行不再拼 detail（实际 ' + uiDetail + ' 处）')
+    assert(tipDetail === 0, '侧边栏 tooltip 不再拼 detail（实际 ' + tipDetail + ' 处）')
+    // 信息没丢：快照里必须还有它，否则这次是"把排障信息删了"而不是"移到快照里"。
+    assert(CLIENT_CODE.split('detail: str(s.detail)').length - 1 >= 1,
+      '诊断快照仍然逐源写 detail（信息只是从界面移到快照）')
+  } catch (e) {
+    assert(false, '状态层 detail 检查失败：' + e.message)
+  }
+
   // ---- 中国大陆两条链路把两种取值域写进**同名**的 intensity 字段 ----
   // 今天没有消费点（只入库、不上 UI），但将来按 intensity 分档时，「烈度 5.8」与「烈度 5」会被判成不同的档。
   try {
@@ -9191,6 +9484,26 @@ console.log('== fresh review 修复：/stream 的断流、方法与连接回收 
       const res = mkRes()
       h({ url: '/dsh-quake-alert/stream?source=cenc_eew', method: 'POST', headers: {} }, res)
       assert(res.status === 405, '非 GET / HEAD 回 405（此前一条 POST 也能换来一个长连接）')
+    }
+    {
+      // 未知源走的是 `live.add` **之后**的早退路径：不自己摘掉的话，一个已结束的响应会永久留在集合里
+      // （集合无上限，持续请求会让 Host 内存无界增长），closeAll 还会反过来去销毁它。
+      const h = hostRv.createStreamHandler({ sources: { cenc_eew: mkSrc() }, keepAliveMs: 100000, setInterval: () => 1, clearInterval: () => {} })
+      const dead = mkRes()
+      h({ url: '/dsh-quake-alert/stream?source=nope', headers: {} }, dead)
+      assert(dead.status === 400, '未知源 → 400')
+      h.closeAll()
+      assert(dead.destroyCalls === 0,
+        '未知源的早退不进 live 集合：closeAll 不该去动它（实际 destroyCalls=' + dead.destroyCalls + '）')
+    }
+    {
+      // 三条路由走同一层注册防护：`webServer` 服务重挂时 effect 回调可能重跑，而重复注册同一条路由
+      // 会抛（宿主行为）。只给 /stream 上防护时，/areas 或 /feed 重注册会把整个 apply 抛崩。
+      const libSrc = fs.readFileSync(path.join(ROOT, 'lib', 'index.js'), 'utf8')
+      const guarded = (libSrc.match(/registerRoute\(\{/g) || []).length
+      assert(guarded === 3, '三条路由（/areas、/feed、/stream）都经 registerRoute 注册（实际 ' + guarded + ' 条）')
+      assert(libSrc.indexOf('const registerRoute = (route, label) => {') !== -1,
+        'registerRoute 存在（重复注册只告警、不把 apply 抛崩）')
     }
     {
       const h = hostRv.createStreamHandler({ sources: { cenc_eew: mkSrc() }, keepAliveMs: 100000, setInterval: () => 1, clearInterval: () => {} })
