@@ -5,6 +5,7 @@
 [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![npm version](https://img.shields.io/npm/v/dsh-quake-alert)](https://www.npmjs.com/package/dsh-quake-alert)
+[![dsh.so risk](https://www.dsh.so/badge/dsh-quake-alert.svg)](https://www.dsh.so/artifact/dsh-quake-alert/)
 
 QuakeAlert is a disaster-warning plugin for DeepSeek Harness (DSH). While you are working in DSH it keeps
 live feeds open for earthquakes, tsunamis and weather hazards in **Japan** and around the **world**, and

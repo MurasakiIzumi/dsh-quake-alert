@@ -5,6 +5,7 @@
 [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![npm version](https://img.shields.io/npm/v/dsh-quake-alert)](https://www.npmjs.com/package/dsh-quake-alert)
+[![dsh.so risk](https://www.dsh.so/badge/dsh-quake-alert.svg)](https://www.dsh.so/artifact/dsh-quake-alert/)
 
 DeepSeek Harness（DSH）でお使いいただける災害警報プラグインです。DSH を使っている間、**日本**と**世界**の地震・津波・気象災害の情報をリアルタイムで受け取り、あらかじめ登録した地域としきい値に当てはまるものがあれば、通知音とページ内のトーストでお知らせします（ページが裏に回っているときはシステム通知に切り替わります）。
 
