@@ -13,6 +13,7 @@ import { noteParseResult, effectiveStatusOf, noteFreshness } from './05g-source-
 import { store } from './07-store.js'
 import { handleAlert } from './11-pipeline.js'
 import { createFeedClient, FEED_PATH, FEED_CURSOR_KEY } from './12b-feed-poll.js'
+import { createGapDetector, onResume } from './12f-resume.js'
 
 /** Host 侧的 SSE 路由（与 lib/index.js 的 STREAM_PATH 对应）。 */
 export const STREAM_PATH = '/dsh-quake-alert/stream'
@@ -26,6 +27,11 @@ export const SSE_MAX_FAILS = 3
 export const CN_RECHECK_MS = 5000
 /** 已连接的流"多久没有任何帧"即判定连接已死：Host 每 15 秒必发一个 status 帧，45 秒 = 3 倍余量可靠；看似连着其实已断的长连接在浏览器里**不会**触发 onerror。 */
 export const SSE_SILENCE_DEAD_MS = 45 * 1000
+/** Host 侧错误文案的新鲜度：超过它就不再算作「当前故障」。Host 已在恢复时清空（wolfx 的 clearLastError），
+ *  这一层防的是那份文案只写不清再犯——长连接页面可能开着几天，一条早已自愈的话不该永久把链路显示成降级。 */
+export const HOST_ERROR_TTL_MS = 10 * 60 * 1000
+/** 自动降级之后两次"复探 SSE"的最小间隔。恢复事件本身很频繁（切标签页就会来），不加节流会来回切换。 */
+export const FALLBACK_PROBE_MIN_GAP_MS = 5 * 60 * 1000
 
 /** 读回已持久化的读取位置；任何格式不合法的数据一律当作"没有记录"。 */
 function loadCursorOf(key) {
@@ -43,6 +49,7 @@ function saveCursorOf(key, v) {
  *   （默认建一个 12b 的轮询客户端）；[opts.createFeedClient] 供断言"降级客户端拿了哪个读取位置键"。
  * @param {() => object} [opts.getCfg]、[opts.loadCursor]、[opts.saveCursor]、[opts.now]（与 silenceDeadMs 配套的假时钟）。
  * @param {number} [opts.probeMs]、[opts.maxFails]、[opts.silenceDeadMs]（已连接的流多久无帧即判死；0 = 不判）。
+ * @param {number} [opts.resumeGapMs] 一轮 tick 间隔超过它即判为「被冻结过」（默认取 12f 的 RESUME_GAP_MS）。
  */
 export function createCnStream(opts = {}) {
   const id = opts.id
@@ -102,17 +109,26 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
   // 最近一次收到**任何**帧（sync / entry / status）的时刻。Host 每 15 秒必发一个 status 帧，"长时间一个帧都没有"
   // 是可靠的死连接判据（只看"第一条数据之前"发现不了曾经成功、之后被中间设备静默掐断的长连接）。
   let lastFrameAt = 0
+  // 冻结恢复的两个入口：墙钟跳变（定时器被停跳过）与浏览器事件（visibilitychange / focus / pageshow）。
+  // 恢复后的每一处判定都必须以"现在"为基准，绝不能拿冻结前的时刻去算——那必然得出"死了"。
+  const gap = createGapDetector({ now, gapMs: opts.resumeGapMs })
+  let offResume = null
+  /** 最近一次「复探 SSE」的时刻（节流用，见 FALLBACK_PROBE_MIN_GAP_MS）。 */
+  let lastFallbackProbeAt = 0
   const stats = {
     mode: 'idle', connections: 0, syncs: 0, received: 0, applied: 0, errors: 0,
     sseErrors: 0, probeTimeouts: 0, fallbacks: 0, fallbackManual: false, truncated: 0, resets: 0,
     // 已连接的流被判"静默死亡"的次数：与 probeTimeouts（第一条数据之前超时）成因不同，分开统计。
     silentDeaths: 0,
+    // 冻结恢复引起的主动重建次数、以及自动降级后的复探次数：排障时要能分辨"这条连接是被判死换掉的"
+    // 与"是恢复时主动换掉的"——后者不该被当成故障。
+    resumeReconnects: 0, fallbackProbes: 0,
     // stale（源可达但数据是旧的）：由 Host 的 sync / status 帧告知；Client 自己判不出来——"没有新 entry"与
     // "这几天确实没有地震"在本地长得一模一样。
     stale: false, dataTime: 0,
     // Host 侧的"中继连接是否还活着"与它最近一次错误：SSE 路径下 Client 不轮询 /feed，Host 的 stats 在界面上
     // 零消费者，中继被掐断时界面会一直显示绿色的 "SSE connected · received 0"。
-    hostConnected: null, hostError: '',
+    hostConnected: null, hostError: '', hostErrorAt: 0,
     lastAt: 0, lastEventAt: 0, cursor: 0, frozen: false, lastDetail: '',
   }
 
@@ -241,6 +257,39 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
     connectSse()
   }
 
+  /**
+   * 页面 / 进程从冻结中恢复（休眠、锁屏、后台标签页被冻住）。两件事，主题都是"冻结不该被当成故障"：
+   * ① **重建或刷新**连接——长冻结期间对端 / NAT 早就把这条连接掐了，而半开连接不会触发任何事件，
+   *    所以既不能假装它还活着（那要再等 45 秒才判死），也不能拿冻结前的时刻判它"静默死亡"；
+   * ② 若正处在**自动**降级（不是用户选的轮询），复探一次 SSE——降级的判据是"这条链路已经证明过
+   *    不通"，而休眠不是"不通"，不该让它把一条好链路永久留在轮询上（那样黄灯再也不会自己变绿）。
+   */
+  function handleResume(t, cause) {
+    if (!running) return
+    if (mode === 'sse') {
+      const at = (typeof t === 'number' && Number.isFinite(t)) ? t : now()
+      // 判据是"这条连接还新不新鲜"，而不是"事件类型"：Host 每 15 秒必发一帧（sync / entry / status），
+      // 所以"距上一帧已超过静默阈值"本身就是可靠的死连接证据。**短暂切走（< 45 秒）不换连接**——
+      // 恢复事件很频繁（切一次标签页就来一次），每次都白建一条流是浪费。
+      const cold = silenceDeadMs > 0 && !!lastFrameAt && (at - lastFrameAt) > silenceDeadMs
+      lastFrameAt = now()
+      if (!source) return // 正在等重连：计时基准已刷新，交给下一轮
+      if (cause !== 'gap' && !cold) return
+      stats.resumeReconnects += 1
+      closeSource()
+      connectSse()
+      return
+    }
+    // 灾种开关关着、或用户显式选了「强制轮询」：这两处的"不建 SSE"都是用户的决定，恢复不该推翻它。
+    if (!inFallback || fallbackManual || mode === 'disabled') return
+    // 局部变量不能叫 `t`（那是 00-i18n 的取词函数，遮蔽后 t('key') 会变成数字）
+    const at = now()
+    if (lastFallbackProbeAt && (at - lastFallbackProbeAt) < FALLBACK_PROBE_MIN_GAP_MS) return
+    lastFallbackProbeAt = at
+    stats.fallbackProbes += 1
+    leaveFallback()
+  }
+
   /** 单一的周期检查（每 5 秒）。用**一个**定时器同时管三个方向，因为它们会互相打架：灾种开关被关掉 → 主动
    *  断开 SSE（Host 侧十分钟后自然断开与 Wolfx 的连接）；开关又打开 → 恢复消费；「链路」选择变了 → 强制轮询
    *  ↔ 自动。分成多个定时器容易写出"关掉之后再也回不来"这种半途状态。 */
@@ -253,6 +302,10 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
       // 整段捕获异常：这个 tick 是**唯一**的恢复链（灾种开关往返、手动 / 自动链路切换都靠它），一次抛错就不会再
       // self-reschedule；reschedule 放在 catch 之外，保证无论成败都会重排。
       try {
+        // 冻结恢复检测放最前面：判出跳变时它会广播恢复（订阅者据此刷新计时基准 / 换连接），**本轮到此为止**。
+        // 下面那段的静默判死有个前提——"定时器一直在跑"；这个前提刚被推翻，拿冻结前的 lastFrameAt 去算
+        // 必然得出"静默死亡"，于是白拆一条健康的流，连续几次还会跌进不可逆的自动降级。
+        if (gap.tick()) { scheduleTick(); return }
         const cfg = getCfg()
         const on = enabled(cfg)
         if (!on) {
@@ -376,12 +429,19 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
       // Host 说"中继连接断了"时界面不能继续显示绿色已连接：`connected` 只有 Host 知道（它才持有那条 WebSocket）。
       if (typeof d.connected === 'boolean') stats.hostConnected = d.connected
       stats.hostError = d.lastError ? String(d.lastError) : ''
+      // 错误是什么时候记下的：Host 侧清空是根本修复，这里按新鲜度再兜一层（见 HOST_ERROR_TTL_MS）。
+      stats.hostErrorAt = (Number.isFinite(d.lastErrorAt) && d.lastErrorAt > 0) ? d.lastErrorAt : 0
       if (Number.isFinite(d.dataTime)) stats.dataTime = d.dataTime
       if (Number.isFinite(d.dataTime) && d.dataTime > 0) noteFreshness(id, d.dataTime)
       // 有意**不更新** stats.lastAt：它表示"最近一条数据"，而状态帧每 15 秒必到，更新它会让设置页永远显示"最近数据 0 秒前"。
       const hostWarn = []
       if (stats.hostConnected === false) hostWarn.push('relay disconnected')
-      if (stats.hostError) hostWarn.push(stats.hostError)
+      // 只认**还新鲜**的错误：Host 侧已在恢复时清空（wolfx 的 clearLastError），这一层防的是那份文案
+      // 只写不清再犯——长连接页面可能开着几天，一条早已自愈的话不该永久把链路显示成「链路降级」。
+      // 没有时间戳（旧版 Host）时按新鲜处理，保持原行为不倒退。
+      const errFresh = !!stats.hostError &&
+        (!stats.hostErrorAt || (now() - stats.hostErrorAt) < HOST_ERROR_TTL_MS)
+      if (errFresh) hostWarn.push(stats.hostError)
       const warnAll = connWarn.concat(hostWarn)
       reportStatus({
         status: stats.stale ? 'stale' : (warnAll.length ? 'degraded' : 'open'),
@@ -471,6 +531,8 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
     start() {
       if (running) return
       running = true
+      // 恢复订阅与 start / stop 成对：stop 之后还挂着的订阅会让一个"已停用"的实例去重建连接。
+      if (!offResume) offResume = onResume(handleResume)
       registerSelf() // 与 stop() 里的注销配对
       stats.cursor = cursorNow()
       scheduleTick()
@@ -482,6 +544,7 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
     },
     stop() {
       running = false
+      if (offResume) { offResume(); offResume = null }
       closeSource()
       if (tickTimer) { clearTimer(tickTimer); tickTimer = null }
       if (fallbackClient) { try { fallbackClient.stop() } catch (err) { /* 忽略 */ } }

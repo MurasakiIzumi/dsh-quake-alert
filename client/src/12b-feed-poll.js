@@ -12,6 +12,7 @@ import { parseJmaResult } from './05d-source-contracts.js'
 import { noteParseResult, noteSourceSuccess, effectiveStatusOf, noteFreshness } from './05g-source-health.js'
 import { store } from './07-store.js'
 import { handleAlert } from './11-pipeline.js'
+import { onResume, RESUME_POLL_GAP_MS } from './12f-resume.js'
 
 /** Host 侧的电文增量路由（与 lib/index.js 的 FEED_PATH 对应）。只从回环地址取增量：Host 是每台机器唯一的
  *  外部请求者（気象庁要求「一度取得したファイルを再度取得しない」，多标签页不会放大请求）。 */
@@ -339,6 +340,21 @@ export function createFeedClient(opts = {}) {
     }, delay)
   }
 
+  let offResume = null
+
+  /**
+   * 页面 / 进程从冻结中恢复：把下一轮取数提前到**立刻**执行。冻结期间定时器停跳，恢复后若仍按原间隔
+   * 等下去，界面会多停在「数据已过期」（12d 自检按契约阈值判 stale）好几分钟——而用户正看着屏幕。
+   * 门槛取"距上次取数多久"而不是事件类型：切标签页太频繁，不该每次都打上游。
+   */
+  function handleResume(t) {
+    if (!running) return
+    const nowMs = (typeof t === 'number' && Number.isFinite(t)) ? t : Date.now()
+    const last = Number(stats.lastAt) || 0
+    if (last && (nowMs - last) < RESUME_POLL_GAP_MS) return
+    schedule(0)
+  }
+
   return {
     id,
     path,
@@ -347,11 +363,14 @@ export function createFeedClient(opts = {}) {
       if (running) return
       stopped = false
       running = true
+      // 与 stop 成对：订阅若留着，一个"已停用"的实例会在恢复时重新排起轮询链。
+      if (!offResume) offResume = onResume(handleResume)
       schedule(firstDelayMs)
     },
     stop() {
       stopped = true
       running = false
+      if (offResume) { offResume(); offResume = null }
       if (timer) { clearTimeout(timer); timer = null }
       // 中止在途请求：插件停用后回来的响应不该再 apply（响铃 / 弹窗 / 写历史）
       if (abortCtl) { try { abortCtl.abort() } catch (err) { /* 已结束等忽略 */ } abortCtl = null }

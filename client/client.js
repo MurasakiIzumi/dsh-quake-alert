@@ -8068,6 +8068,145 @@ function handleAlert(alert, cfg, opts) {
 }
 
 // ============================================================================
+// dsh-quake-alert · client/src/12f-resume.js
+//
+// 作用：**机制层**——识别「页面 / 进程被冻结过」并广播「已恢复」。三种触发源合起来才算完备：
+//       ① document 的 visibilitychange；② window 的 focus / pageshow；③ **墙钟跳变**（gap 检测）。
+//       只有 ①② 不够：系统休眠 / 锁屏时页面往往仍是 `visible`，一个事件都不来；只靠 ③ 又会漏掉
+//       "浏览器把后台标签页冻住"这类不跨休眠、但同样让定时器停跳的冻结。
+//
+// 为什么必须有这一层：各链路判「还活着吗」用的都是**上次活动时刻与现在的差**（SSE 静默判死 45 秒、
+// P2PQuake 假死检测 20 分钟、新鲜度自检按契约阈值）。这些判据都默认"定时器一直在跑"——冻结期间
+// 定时器停跳，恢复后一算就是"很久没有活动"，于是一条健康的连接被判死、一条死掉的连接被当成活的。
+// 恢复事件就是把这一刻告诉它们：**这是冻结，不是故障**。
+// 依赖：无。刻意不 import 任何模块（否则容易成为循环依赖的源头）；doc / now 都可注入以便测试。
+// ============================================================================
+
+/**
+ * 判定「被冻结过」的墙钟间隔。取 3 分钟的依据是**浏览器自己的行为**：隐藏 / 后台标签页的定时器会被
+ * 节流（Chrome 最长约 1 分钟一次），拿"跳过了一轮"当冻结会把这个正常现象误判成恢复，于是每次切到
+ * 后台都被当成死过一次。所以要"明显大于节流间隔"，而不是"大于自己的周期"。
+ * 调用方可按自己的定时器周期覆盖，但阈值必须**大于浏览器的节流间隔**。
+ */
+const RESUME_GAP_MS = 3 * 60 * 1000;
+
+/** 同一次恢复往往同时来好几个事件（visibilitychange → focus → pageshow），这个窗口内只广播一次。 */
+const RESUME_DEDUPE_MS = 1000;
+
+/**
+ * 「恢复后立刻补一次取数」的门槛：距上次取数超过它才值得插一轮。切一次标签页（几秒～几十秒）没必要
+ * 打上游，而休眠 / 锁屏一定远大于它——那正是该尽快把界面从「数据已过期」拉回来的时候。
+ */
+const RESUME_POLL_GAP_MS = 60 * 1000;
+
+/** 最近一次判定为「恢复」的时刻与来源（0 / '' = 本次会话还没恢复过）。 */
+let lastResumeAt = 0;
+let lastResumeCause = '';
+const listeners = new Set();
+let eventsBound = false;
+
+/**
+ * 广播一次恢复。同一毫秒级的连发会被去重——订阅者的典型动作是重建连接，不该因为浏览器连发两个
+ * 事件就建两次。
+ * @param {number} [at] 恢复时刻（默认 `Date.now()`）
+ * @param {'gap'|'event'} [cause] 来源：`gap` = 定时器确实停跳过（墙钟跳变），`event` = 只是浏览器事件。
+ *   订阅者要区分两者——**事件本身很频繁**（切一次标签页就来一次），而"被冻结过"才是要换连接的理由。
+ * @returns {boolean} 是否真的广播了（被去重则为 false）
+ */
+function emitResume(at, cause) {
+  const t = (typeof at === 'number' && Number.isFinite(at)) ? at : Date.now();
+  if (lastResumeAt && (t - lastResumeAt) < RESUME_DEDUPE_MS) return false
+  lastResumeAt = t;
+  lastResumeCause = cause === 'gap' ? 'gap' : 'event';
+  // 复制一份再遍历：订阅者在回调里退订是正常写法，边遍历边改会让它后面的订阅者被跳过。
+  for (const fn of Array.from(listeners)) {
+    try { fn(t, lastResumeCause); } catch (err) { /* 一个订阅者抛错不该带走其它订阅者的恢复机会 */ }
+  }
+  return true
+}
+
+/** 订阅恢复事件；回调收到 `(时刻, 来源)`。返回取消订阅函数。 */
+function onResume(fn) {
+  if (typeof fn !== 'function') return () => {}
+  listeners.add(fn);
+  return () => { listeners.delete(fn); }
+}
+
+/** 最近一次恢复的时刻（0 = 还没恢复过）。 */
+function lastResumeAtOf() { return lastResumeAt }
+
+/** 最近一次恢复的来源：`'gap'`（定时器停跳过）或 `'event'`（浏览器事件）；空串 = 还没恢复过。 */
+function lastResumeCauseOf() { return lastResumeCause }
+
+/** 现在是否处在「刚恢复」的宽限期内。给"恢复后第一轮该特殊对待"的调用方用。 */
+function resumedWithin(ms, nowMs) {
+  if (!(ms > 0) || !lastResumeAt) return false
+  const t = (typeof nowMs === 'number' && Number.isFinite(nowMs)) ? nowMs : Date.now();
+  return (t - lastResumeAt) <= ms
+}
+
+/**
+ * 建一个「墙钟跳变」检测器：每个定时器周期调一次 `tick()`，返回 true = **本轮是冻结后的第一轮**。
+ * 每个调用方各持一个（各自的周期不同，共用一份"上次时刻"会让周期长的那个把周期短的误判成恢复）。
+ * @param {object} [opts] `gapMs`（覆盖阈值）、`now`（假时钟注入）。
+ */
+function createGapDetector(opts) {
+  const o = opts || {};
+  const now = o.now || (() => Date.now());
+  const gapMs = (typeof o.gapMs === 'number' && o.gapMs > 0) ? o.gapMs : RESUME_GAP_MS;
+  let last = 0;
+  return {
+    gapMs,
+    tick() {
+      const t = now();
+      const gap = last ? (t - last) : 0; // 第一次 tick 没有可比的前值
+      last = t;
+      if (gap > gapMs) { emitResume(t, 'gap'); return true }
+      return false
+    },
+    /** 显式对齐基准（例如刚重建连接、不希望下一轮被算成跳变）。 */
+    mark() { last = now(); },
+  }
+}
+
+/**
+ * 绑定浏览器侧的恢复事件源（幂等）。`document` / `window` 可注入（测试用）。
+ * @returns {boolean} 本次是否真的绑定了
+ */
+function bindResumeEvents(opts) {
+  const o = {};
+  if (eventsBound) return false
+  const doc = o.document || (typeof document !== 'undefined' ? document : null);
+  const win = o.window || (typeof window !== 'undefined' ? window : null);
+  if (!doc && !win) return false
+  const onVisible = () => {
+    // 只在"回到前台"时广播：hidden 那一下不广播，否则各源会在页面正要被冻结时重建连接，
+    // 白建一条马上就没人读的链路。
+    if (doc && doc.visibilityState === 'hidden') return
+    emitResume(undefined, 'event');
+  };
+  const onShow = () => emitResume(undefined, 'event');
+  if (doc && typeof doc.addEventListener === 'function') {
+    doc.addEventListener('visibilitychange', onVisible);
+    doc.addEventListener('pageshow', onShow); // 从 bfcache 回来：不触发 visibilitychange
+  }
+  if (win && typeof win.addEventListener === 'function') win.addEventListener('focus', onShow);
+  eventsBound = true;
+  return true
+}
+
+/** 测试钩子：清空订阅与状态（模块级变量会跨用例存活）。 */
+function resetResumeForTest() {
+  listeners.clear();
+  lastResumeAt = 0;
+  lastResumeCause = '';
+  eventsBound = false;
+}
+
+// 模块加载时绑一次：DSH 客户端 bundle 在页面里加载，这里就是"页面恢复"的唯一入口。
+bindResumeEvents();
+
+// ============================================================================
 // dsh-quake-alert · client/src/12-websocket.js
 // 作用：P2PQuake WebSocket 连接管理（状态机、重连间隔递增、数据源切换、建连超时监控、连接假死检测、断线补拉、转交主链）。
 // 依赖：00-i18n、01-constants、02-storage、03-settings-bridge、05g-source-health、11-pipeline。
@@ -8081,6 +8220,14 @@ const CONNECT_TIMEOUT_MS = 15 * 1000;
  *  会被 onclose → 重连 → onopen 不断刷新，所以 20 分钟无活动即判死。 */
 const STALE_AFTER_MS = 20 * 60 * 1000;
 const STALE_CHECK_MS = 60 * 1000;
+
+/**
+ * 恢复可见 / 焦点时，距上次活动超过它即按「这条连接已经没在转」处理（见 onResumeEvent）。
+ * 取 12 分钟的依据是**服务端自己的节奏**：P2PQuake 约每 10 分钟强制断线一次、重连是常态路径，所以
+ * 正常情况下 `lastActivityAt` 不会被拉开到 10 分钟以上——超过 12 分钟只可能是这条连接真的死了
+ * （休眠 / 锁屏期间 TCP 被掐，而半开连接不会触发任何事件）。取小了会把"切走一会儿再回来"误判成故障。
+ */
+const RESUME_RECONNECT_MS = 12 * 60 * 1000;
 
 /** 断线补拉：P2PQuake 的 WS **没有回放**，断线窗口里的 551 / 552 / 556 永久丢失，而 EEW 的有效窗口只有几十秒。
  *  官方 REST `/v2/history` 返回与 WS 同一套 JSON，补拉后走同一条主链（按 id 去重）；只在重连时补，窗口 2 分钟，
@@ -8120,31 +8267,39 @@ function createWsClient(opts) {
   let retries = 0;
   let lastActivityAt = 0; // 最近一次 onopen / onmessage 的时刻
   let processFails = 0; // 连续的消息处理失败次数（主链异常必须可见）
-  let visibilityBound = false;
+  // 恢复事件的订阅句柄。取代原先只绑 visibilitychange 的做法：系统休眠时页面往往仍是 visible，
+  // 一个事件都不来；12f 把可见性 / 焦点 / pageshow 与墙钟跳变合起来判，才盖得住这个场景。
+  let resumeBound = false;
+  let resumeOff = null;
 
   /**
-   * 页面从冻结 / 休眠中恢复时刷新活动时刻：冻结期间消息事件不会被派发，恢复后立刻按「20 分钟无活动」判死
-   * 会拆掉健康的连接，而 P2PQuake 没有回放、冻结期间的消息永久丢失。
+   * 页面从冻结 / 休眠中恢复。分两种情形，判据只有一个——**距上次活动隔了多久**：
+   * ① 只隔了一小会儿（切标签页再切回来）：冻结期间消息事件不会被派发，不刷新计时会按「20 分钟无活动」
+   *    拆掉一条健康连接（而 P2PQuake 没有回放，冻结期间的消息永久丢失）→ 刷新时刻即可。
+   * ② 隔了很久（系统休眠 / 锁屏过夜）：那条 TCP 早被 NAT 或对端掐了，而半开连接**不会**触发任何事件，
+   *    浏览器也不会为它给 onclose。此时把 lastActivityAt 刷成"现在"等于替一条僵尸连接续命，界面还会
+   *    一直显示绿色——直接换一条：代价是一次握手，收益是确定的活性。
    */
-  function onVisibilityChange() {
+  function onResumeEvent() {
     if (stopped) return
-    const doc = typeof document !== 'undefined' ? document : null;
-    if (!doc || doc.visibilityState !== 'visible') return
     if (!ws || ws.readyState !== 1) return
+    if (lastActivityAt && (Date.now() - lastActivityAt) > RESUME_RECONNECT_MS) {
+      report({ status: 'reconnecting', retries, detail: 'resumed after gap · reconnecting' });
+      teardown();
+      connect();
+      return
+    }
     lastActivityAt = Date.now();
     armStaleWatch();
   }
-  function bindVisibility() {
-    const doc = typeof document !== 'undefined' ? document : null;
-    if (!doc || visibilityBound || typeof doc.addEventListener !== 'function') return
-    doc.addEventListener('visibilitychange', onVisibilityChange);
-    visibilityBound = true;
+  function bindResumeWatch() {
+    if (resumeBound || resumeOff) return
+    resumeOff = onResume(onResumeEvent);
+    resumeBound = true;
   }
-  function unbindVisibility() {
-    const doc = typeof document !== 'undefined' ? document : null;
-    if (!doc || !visibilityBound || typeof doc.removeEventListener !== 'function') return
-    doc.removeEventListener('visibilitychange', onVisibilityChange);
-    visibilityBound = false;
+  function unbindResumeWatch() {
+    if (resumeOff) { resumeOff(); resumeOff = null; }
+    resumeBound = false;
   }
 
   function stopStaleWatch() {
@@ -8316,13 +8471,13 @@ function createWsClient(opts) {
       stopped = false;
       retries = 0;
       processFails = 0;
-      bindVisibility();
+      bindResumeWatch();
       connect();
     },
     stop() {
       stopped = true;
       teardown();
-      unbindVisibility();
+      unbindResumeWatch();
       report({ status: 'closed', retries, detail: 'stopped (plugin disabled)' });
     },
     backfillStatsOf() { return Object.assign({}, backfillStats) },
@@ -8330,7 +8485,7 @@ function createWsClient(opts) {
       stopped = false;
       retries = 0; // 切数据源后立即从 1s 的间隔重新开始，而不是沿用上一条连接的递增进度
       processFails = 0;
-      bindVisibility(); // stop() 会解绑；restart 之后这条 socket 同样需要"恢复可见时重置 stale 计时"
+      bindResumeWatch(); // stop() 会解绑；restart 之后这条 socket 同样需要"恢复可见时重置 stale 计时"
       teardown();
       connect();
     },
@@ -8677,6 +8832,21 @@ function createFeedClient(opts = {}) {
     }, delay);
   }
 
+  let offResume = null;
+
+  /**
+   * 页面 / 进程从冻结中恢复：把下一轮取数提前到**立刻**执行。冻结期间定时器停跳，恢复后若仍按原间隔
+   * 等下去，界面会多停在「数据已过期」（12d 自检按契约阈值判 stale）好几分钟——而用户正看着屏幕。
+   * 门槛取"距上次取数多久"而不是事件类型：切标签页太频繁，不该每次都打上游。
+   */
+  function handleResume(t) {
+    if (!running) return
+    const nowMs = (typeof t === 'number' && Number.isFinite(t)) ? t : Date.now();
+    const last = Number(stats.lastAt) || 0;
+    if (last && (nowMs - last) < RESUME_POLL_GAP_MS) return
+    schedule(0);
+  }
+
   return {
     id,
     path,
@@ -8685,11 +8855,14 @@ function createFeedClient(opts = {}) {
       if (running) return
       stopped = false;
       running = true;
+      // 与 stop 成对：订阅若留着，一个"已停用"的实例会在恢复时重新排起轮询链。
+      if (!offResume) offResume = onResume(handleResume);
       schedule(firstDelayMs);
     },
     stop() {
       stopped = true;
       running = false;
+      if (offResume) { offResume(); offResume = null; }
       if (timer) { clearTimeout(timer); timer = null; }
       // 中止在途请求：插件停用后回来的响应不该再 apply（响铃 / 弹窗 / 写历史）
       if (abortCtl) { try { abortCtl.abort(); } catch (err) { /* 已结束等忽略 */ } abortCtl = null; }
@@ -8724,6 +8897,11 @@ const SSE_MAX_FAILS = 3;
 const CN_RECHECK_MS = 5000;
 /** 已连接的流"多久没有任何帧"即判定连接已死：Host 每 15 秒必发一个 status 帧，45 秒 = 3 倍余量可靠；看似连着其实已断的长连接在浏览器里**不会**触发 onerror。 */
 const SSE_SILENCE_DEAD_MS = 45 * 1000;
+/** Host 侧错误文案的新鲜度：超过它就不再算作「当前故障」。Host 已在恢复时清空（wolfx 的 clearLastError），
+ *  这一层防的是那份文案只写不清再犯——长连接页面可能开着几天，一条早已自愈的话不该永久把链路显示成降级。 */
+const HOST_ERROR_TTL_MS = 10 * 60 * 1000;
+/** 自动降级之后两次"复探 SSE"的最小间隔。恢复事件本身很频繁（切标签页就会来），不加节流会来回切换。 */
+const FALLBACK_PROBE_MIN_GAP_MS = 5 * 60 * 1000;
 
 /** 读回已持久化的读取位置；任何格式不合法的数据一律当作"没有记录"。 */
 function loadCursorOf(key) {
@@ -8741,6 +8919,7 @@ function saveCursorOf(key, v) {
  *   （默认建一个 12b 的轮询客户端）；[opts.createFeedClient] 供断言"降级客户端拿了哪个读取位置键"。
  * @param {() => object} [opts.getCfg]、[opts.loadCursor]、[opts.saveCursor]、[opts.now]（与 silenceDeadMs 配套的假时钟）。
  * @param {number} [opts.probeMs]、[opts.maxFails]、[opts.silenceDeadMs]（已连接的流多久无帧即判死；0 = 不判）。
+ * @param {number} [opts.resumeGapMs] 一轮 tick 间隔超过它即判为「被冻结过」（默认取 12f 的 RESUME_GAP_MS）。
  */
 function createCnStream(opts = {}) {
   const id = opts.id;
@@ -8800,17 +8979,26 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
   // 最近一次收到**任何**帧（sync / entry / status）的时刻。Host 每 15 秒必发一个 status 帧，"长时间一个帧都没有"
   // 是可靠的死连接判据（只看"第一条数据之前"发现不了曾经成功、之后被中间设备静默掐断的长连接）。
   let lastFrameAt = 0;
+  // 冻结恢复的两个入口：墙钟跳变（定时器被停跳过）与浏览器事件（visibilitychange / focus / pageshow）。
+  // 恢复后的每一处判定都必须以"现在"为基准，绝不能拿冻结前的时刻去算——那必然得出"死了"。
+  const gap = createGapDetector({ now, gapMs: opts.resumeGapMs });
+  let offResume = null;
+  /** 最近一次「复探 SSE」的时刻（节流用，见 FALLBACK_PROBE_MIN_GAP_MS）。 */
+  let lastFallbackProbeAt = 0;
   const stats = {
     mode: 'idle', connections: 0, syncs: 0, received: 0, applied: 0, errors: 0,
     sseErrors: 0, probeTimeouts: 0, fallbacks: 0, fallbackManual: false, truncated: 0, resets: 0,
     // 已连接的流被判"静默死亡"的次数：与 probeTimeouts（第一条数据之前超时）成因不同，分开统计。
     silentDeaths: 0,
+    // 冻结恢复引起的主动重建次数、以及自动降级后的复探次数：排障时要能分辨"这条连接是被判死换掉的"
+    // 与"是恢复时主动换掉的"——后者不该被当成故障。
+    resumeReconnects: 0, fallbackProbes: 0,
     // stale（源可达但数据是旧的）：由 Host 的 sync / status 帧告知；Client 自己判不出来——"没有新 entry"与
     // "这几天确实没有地震"在本地长得一模一样。
     stale: false, dataTime: 0,
     // Host 侧的"中继连接是否还活着"与它最近一次错误：SSE 路径下 Client 不轮询 /feed，Host 的 stats 在界面上
     // 零消费者，中继被掐断时界面会一直显示绿色的 "SSE connected · received 0"。
-    hostConnected: null, hostError: '',
+    hostConnected: null, hostError: '', hostErrorAt: 0,
     lastAt: 0, lastEventAt: 0, cursor: 0, frozen: false, lastDetail: '',
   };
 
@@ -8939,6 +9127,39 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
     connectSse();
   }
 
+  /**
+   * 页面 / 进程从冻结中恢复（休眠、锁屏、后台标签页被冻住）。两件事，主题都是"冻结不该被当成故障"：
+   * ① **重建或刷新**连接——长冻结期间对端 / NAT 早就把这条连接掐了，而半开连接不会触发任何事件，
+   *    所以既不能假装它还活着（那要再等 45 秒才判死），也不能拿冻结前的时刻判它"静默死亡"；
+   * ② 若正处在**自动**降级（不是用户选的轮询），复探一次 SSE——降级的判据是"这条链路已经证明过
+   *    不通"，而休眠不是"不通"，不该让它把一条好链路永久留在轮询上（那样黄灯再也不会自己变绿）。
+   */
+  function handleResume(t, cause) {
+    if (!running) return
+    if (mode === 'sse') {
+      const at = (typeof t === 'number' && Number.isFinite(t)) ? t : now();
+      // 判据是"这条连接还新不新鲜"，而不是"事件类型"：Host 每 15 秒必发一帧（sync / entry / status），
+      // 所以"距上一帧已超过静默阈值"本身就是可靠的死连接证据。**短暂切走（< 45 秒）不换连接**——
+      // 恢复事件很频繁（切一次标签页就来一次），每次都白建一条流是浪费。
+      const cold = silenceDeadMs > 0 && !!lastFrameAt && (at - lastFrameAt) > silenceDeadMs;
+      lastFrameAt = now();
+      if (!source) return // 正在等重连：计时基准已刷新，交给下一轮
+      if (cause !== 'gap' && !cold) return
+      stats.resumeReconnects += 1;
+      closeSource();
+      connectSse();
+      return
+    }
+    // 灾种开关关着、或用户显式选了「强制轮询」：这两处的"不建 SSE"都是用户的决定，恢复不该推翻它。
+    if (!inFallback || fallbackManual || mode === 'disabled') return
+    // 局部变量不能叫 `t`（那是 00-i18n 的取词函数，遮蔽后 t('key') 会变成数字）
+    const at = now();
+    if (lastFallbackProbeAt && (at - lastFallbackProbeAt) < FALLBACK_PROBE_MIN_GAP_MS) return
+    lastFallbackProbeAt = at;
+    stats.fallbackProbes += 1;
+    leaveFallback();
+  }
+
   /** 单一的周期检查（每 5 秒）。用**一个**定时器同时管三个方向，因为它们会互相打架：灾种开关被关掉 → 主动
    *  断开 SSE（Host 侧十分钟后自然断开与 Wolfx 的连接）；开关又打开 → 恢复消费；「链路」选择变了 → 强制轮询
    *  ↔ 自动。分成多个定时器容易写出"关掉之后再也回不来"这种半途状态。 */
@@ -8951,6 +9172,10 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
       // 整段捕获异常：这个 tick 是**唯一**的恢复链（灾种开关往返、手动 / 自动链路切换都靠它），一次抛错就不会再
       // self-reschedule；reschedule 放在 catch 之外，保证无论成败都会重排。
       try {
+        // 冻结恢复检测放最前面：判出跳变时它会广播恢复（订阅者据此刷新计时基准 / 换连接），**本轮到此为止**。
+        // 下面那段的静默判死有个前提——"定时器一直在跑"；这个前提刚被推翻，拿冻结前的 lastFrameAt 去算
+        // 必然得出"静默死亡"，于是白拆一条健康的流，连续几次还会跌进不可逆的自动降级。
+        if (gap.tick()) { scheduleTick(); return }
         const cfg = getCfg();
         const on = enabled(cfg);
         if (!on) {
@@ -9074,12 +9299,19 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
       // Host 说"中继连接断了"时界面不能继续显示绿色已连接：`connected` 只有 Host 知道（它才持有那条 WebSocket）。
       if (typeof d.connected === 'boolean') stats.hostConnected = d.connected;
       stats.hostError = d.lastError ? String(d.lastError) : '';
+      // 错误是什么时候记下的：Host 侧清空是根本修复，这里按新鲜度再兜一层（见 HOST_ERROR_TTL_MS）。
+      stats.hostErrorAt = (Number.isFinite(d.lastErrorAt) && d.lastErrorAt > 0) ? d.lastErrorAt : 0;
       if (Number.isFinite(d.dataTime)) stats.dataTime = d.dataTime;
       if (Number.isFinite(d.dataTime) && d.dataTime > 0) noteFreshness(id, d.dataTime);
       // 有意**不更新** stats.lastAt：它表示"最近一条数据"，而状态帧每 15 秒必到，更新它会让设置页永远显示"最近数据 0 秒前"。
       const hostWarn = [];
       if (stats.hostConnected === false) hostWarn.push('relay disconnected');
-      if (stats.hostError) hostWarn.push(stats.hostError);
+      // 只认**还新鲜**的错误：Host 侧已在恢复时清空（wolfx 的 clearLastError），这一层防的是那份文案
+      // 只写不清再犯——长连接页面可能开着几天，一条早已自愈的话不该永久把链路显示成「链路降级」。
+      // 没有时间戳（旧版 Host）时按新鲜处理，保持原行为不倒退。
+      const errFresh = !!stats.hostError &&
+        (!stats.hostErrorAt || (now() - stats.hostErrorAt) < HOST_ERROR_TTL_MS);
+      if (errFresh) hostWarn.push(stats.hostError);
       const warnAll = connWarn.concat(hostWarn);
       reportStatus({
         status: stats.stale ? 'stale' : (warnAll.length ? 'degraded' : 'open'),
@@ -9169,6 +9401,8 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
     start() {
       if (running) return
       running = true;
+      // 恢复订阅与 start / stop 成对：stop 之后还挂着的订阅会让一个"已停用"的实例去重建连接。
+      if (!offResume) offResume = onResume(handleResume);
       registerSelf(); // 与 stop() 里的注销配对
       stats.cursor = cursorNow();
       scheduleTick();
@@ -9180,6 +9414,7 @@ const silenceDeadMs = opts.silenceDeadMs === undefined ? SSE_SILENCE_DEAD_MS : o
     },
     stop() {
       running = false;
+      if (offResume) { offResume(); offResume = null; }
       closeSource();
       if (tickTimer) { clearTimer(tickTimer); tickTimer = null; }
       if (fallbackClient) { try { fallbackClient.stop(); } catch (err) { /* 忽略 */ } }
@@ -9258,6 +9493,10 @@ function createHealthProbe(opts = {}) {
   // "数据已恢复更新"刷掉 schema-error 蓝点。
   const push = opts.pushSource || ((id, patch) => publishStatus(id, patch));
   let timer = null;
+  let offResume = null;
+  // 这一层也是「冻结恢复」的检出来源之一（周期 30 秒，所以阈值取周期的 3 倍：阈值必须明显大于自己的
+  // 周期，否则每轮都会被算成一次跳变）。判出跳变时它会广播恢复，各链路据此重建 / 补取数。
+  const gap = createGapDetector({ now, gapMs: Math.max(RESUME_GAP_MS, intervalMs * 3) });
 
   /**
    * 跑一轮：先做 TTL 自愈，再逐源判新鲜度。`dataTime` 从未上报（0）时不判——"不知道数据什么时候
@@ -9265,6 +9504,10 @@ function createHealthProbe(opts = {}) {
    */
   function tick() {
     const t = now();
+    // 先判冻结：恢复后的第一轮里各源的最后数据时间都还是冻结前的，照常判必然全判"停更"。判出跳变时
+    // 这里只负责广播（各链路自己决定重建还是补取数），本轮照常判——数据确实旧了，如实说出去比瞒着好，
+    // 而补取数的那一轮会让它很快翻回来。
+    gap.tick();
     pruneHealth(t);
     for (const id of Object.keys(SOURCE_CONTRACTS)) {
       const after = staleAfterOf(id);
@@ -9301,10 +9544,13 @@ function createHealthProbe(opts = {}) {
     tick,
     start() {
       if (timer) return
+      // 恢复时立刻补跑一轮：TTL 自愈与停更判定都该按"现在"算，不必再等一个整周期。
+      if (!offResume) offResume = onResume(() => { if (timer) tick(); });
       timer = setTimer(tick, intervalMs);
       if (timer && typeof timer.unref === 'function') timer.unref();
     },
     stop() {
+      if (offResume) { offResume(); offResume = null; }
       if (timer) { clearTimer(timer); timer = null; }
     },
   }
@@ -9791,6 +10037,21 @@ function createOverseasSource(opts = {}) {
     }, delay);
   }
 
+  let offResume = null;
+
+  /**
+   * 页面 / 进程从冻结中恢复：把下一轮取数提前到立刻执行。冻结期间定时器停跳，恢复后若还按原间隔等下去，
+   * 界面会多停在「数据已过期」好几分钟（自检按契约阈值判 stale）——而用户正在看屏幕。
+   * 顺带一提，恢复后的这一轮走的正是**门槛路径**（`gated`：与上次成功取数隔得久 → 只记历史不响铃），
+   * 所以"睡了一夜醒来被积压的旧预警吵醒"这件事不会因此发生。
+   */
+  function handleResume(t) {
+    if (!running) return
+    const nowMs = (typeof t === 'number' && Number.isFinite(t)) ? t : Date.now();
+    if (lastSuccessAt && (nowMs - lastSuccessAt) < RESUME_POLL_GAP_MS) return
+    schedule(0);
+  }
+
   return {
     id,
     label,
@@ -9802,11 +10063,14 @@ function createOverseasSource(opts = {}) {
       // 门槛标志也要复位：它记的是"上一轮门槛是否激活"，在门槛激活期间 stop() 之后重新开始
       // 会让"进入过几次门槛"少计一次。
       gateActive = false;
+      // 与 stop 成对：订阅若留着，一个"已停用"的实例会在恢复时重新排起轮询链。
+      if (!offResume) offResume = onResume(handleResume);
       schedule(firstDelayMs);
     },
     stop() {
       stopped = true;
       running = false;
+      if (offResume) { offResume(); offResume = null; }
       if (timer) { clearTimeout(timer); timer = null; }
       // 中止在途请求：插件停用后回来的响应不该再进主链（响铃 / 弹窗 / 写历史）
       if (abortCtl) { try { abortCtl.abort(); } catch (err) { /* 已结束等忽略 */ } abortCtl = null; }
@@ -12035,6 +12299,9 @@ const __test = {
   CONFIG_FORMAT, CONFIG_FORMAT_VERSION,
   // 机制层（统一健康记录 + 自检 + 升级阈值）
   createHealthProbe, staleAfterOf, PROBE_INTERVAL_MS,
+  // 机制层（冻结 / 休眠恢复的识别与广播：所有"上次活动时刻"判定的前提都是它）
+  createGapDetector, onResume, emitResume, resetResumeForTest, lastResumeAtOf, lastResumeCauseOf, resumedWithin,
+  RESUME_GAP_MS, RESUME_DEDUPE_MS, RESUME_POLL_GAP_MS,
   resetConnHealth, pruneHealth, noteFreshness, noteStale, loadHealth, publishStatus, republishDataHealth,
   SCHEMA_ESCALATE_COUNT, SCHEMA_ESCALATE_CONSECUTIVE, SCHEMA_ESCALATE_WINDOW_MS, HEALTH_TTL_MS,
   // 大陆气象源（nmc.cn）：解析层 / 契约 / 行政区层级匹配

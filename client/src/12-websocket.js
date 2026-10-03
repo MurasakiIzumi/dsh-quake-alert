@@ -8,6 +8,7 @@ import { WS_URL, SANDBOX_URL, RECONNECT_BASE, RECONNECT_MAX, p2pTimeToIso } from
 import { currentCfg } from './03-settings-bridge.js'
 import { publishStatus } from './05g-source-health.js'
 import { handleRaw } from './11-pipeline.js'
+import { onResume } from './12f-resume.js'
 import { t } from './00-i18n.js'
 
 /** 建连超时监控：连接假死时浏览器既不给 onopen 也不给 onclose，没有它状态点会永远停在「连接中…」。 */
@@ -17,6 +18,14 @@ const CONNECT_TIMEOUT_MS = 15 * 1000
  *  会被 onclose → 重连 → onopen 不断刷新，所以 20 分钟无活动即判死。 */
 const STALE_AFTER_MS = 20 * 60 * 1000
 const STALE_CHECK_MS = 60 * 1000
+
+/**
+ * 恢复可见 / 焦点时，距上次活动超过它即按「这条连接已经没在转」处理（见 onResumeEvent）。
+ * 取 12 分钟的依据是**服务端自己的节奏**：P2PQuake 约每 10 分钟强制断线一次、重连是常态路径，所以
+ * 正常情况下 `lastActivityAt` 不会被拉开到 10 分钟以上——超过 12 分钟只可能是这条连接真的死了
+ * （休眠 / 锁屏期间 TCP 被掐，而半开连接不会触发任何事件）。取小了会把"切走一会儿再回来"误判成故障。
+ */
+const RESUME_RECONNECT_MS = 12 * 60 * 1000
 
 /** 断线补拉：P2PQuake 的 WS **没有回放**，断线窗口里的 551 / 552 / 556 永久丢失，而 EEW 的有效窗口只有几十秒。
  *  官方 REST `/v2/history` 返回与 WS 同一套 JSON，补拉后走同一条主链（按 id 去重）；只在重连时补，窗口 2 分钟，
@@ -56,31 +65,39 @@ function createWsClient(opts) {
   let retries = 0
   let lastActivityAt = 0 // 最近一次 onopen / onmessage 的时刻
   let processFails = 0 // 连续的消息处理失败次数（主链异常必须可见）
-  let visibilityBound = false
+  // 恢复事件的订阅句柄。取代原先只绑 visibilitychange 的做法：系统休眠时页面往往仍是 visible，
+  // 一个事件都不来；12f 把可见性 / 焦点 / pageshow 与墙钟跳变合起来判，才盖得住这个场景。
+  let resumeBound = false
+  let resumeOff = null
 
   /**
-   * 页面从冻结 / 休眠中恢复时刷新活动时刻：冻结期间消息事件不会被派发，恢复后立刻按「20 分钟无活动」判死
-   * 会拆掉健康的连接，而 P2PQuake 没有回放、冻结期间的消息永久丢失。
+   * 页面从冻结 / 休眠中恢复。分两种情形，判据只有一个——**距上次活动隔了多久**：
+   * ① 只隔了一小会儿（切标签页再切回来）：冻结期间消息事件不会被派发，不刷新计时会按「20 分钟无活动」
+   *    拆掉一条健康连接（而 P2PQuake 没有回放，冻结期间的消息永久丢失）→ 刷新时刻即可。
+   * ② 隔了很久（系统休眠 / 锁屏过夜）：那条 TCP 早被 NAT 或对端掐了，而半开连接**不会**触发任何事件，
+   *    浏览器也不会为它给 onclose。此时把 lastActivityAt 刷成"现在"等于替一条僵尸连接续命，界面还会
+   *    一直显示绿色——直接换一条：代价是一次握手，收益是确定的活性。
    */
-  function onVisibilityChange() {
+  function onResumeEvent() {
     if (stopped) return
-    const doc = typeof document !== 'undefined' ? document : null
-    if (!doc || doc.visibilityState !== 'visible') return
     if (!ws || ws.readyState !== 1) return
+    if (lastActivityAt && (Date.now() - lastActivityAt) > RESUME_RECONNECT_MS) {
+      report({ status: 'reconnecting', retries, detail: 'resumed after gap · reconnecting' })
+      teardown()
+      connect()
+      return
+    }
     lastActivityAt = Date.now()
     armStaleWatch()
   }
-  function bindVisibility() {
-    const doc = typeof document !== 'undefined' ? document : null
-    if (!doc || visibilityBound || typeof doc.addEventListener !== 'function') return
-    doc.addEventListener('visibilitychange', onVisibilityChange)
-    visibilityBound = true
+  function bindResumeWatch() {
+    if (resumeBound || resumeOff) return
+    resumeOff = onResume(onResumeEvent)
+    resumeBound = true
   }
-  function unbindVisibility() {
-    const doc = typeof document !== 'undefined' ? document : null
-    if (!doc || !visibilityBound || typeof doc.removeEventListener !== 'function') return
-    doc.removeEventListener('visibilitychange', onVisibilityChange)
-    visibilityBound = false
+  function unbindResumeWatch() {
+    if (resumeOff) { resumeOff(); resumeOff = null }
+    resumeBound = false
   }
 
   function stopStaleWatch() {
@@ -252,13 +269,13 @@ function createWsClient(opts) {
       stopped = false
       retries = 0
       processFails = 0
-      bindVisibility()
+      bindResumeWatch()
       connect()
     },
     stop() {
       stopped = true
       teardown()
-      unbindVisibility()
+      unbindResumeWatch()
       report({ status: 'closed', retries, detail: 'stopped (plugin disabled)' })
     },
     backfillStatsOf() { return Object.assign({}, backfillStats) },
@@ -266,7 +283,7 @@ function createWsClient(opts) {
       stopped = false
       retries = 0 // 切数据源后立即从 1s 的间隔重新开始，而不是沿用上一条连接的递增进度
       processFails = 0
-      bindVisibility() // stop() 会解绑；restart 之后这条 socket 同样需要"恢复可见时重置 stale 计时"
+      bindResumeWatch() // stop() 会解绑；restart 之后这条 socket 同样需要"恢复可见时重置 stale 计时"
       teardown()
       connect()
     },

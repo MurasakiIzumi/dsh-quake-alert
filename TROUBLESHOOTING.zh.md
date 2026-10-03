@@ -70,7 +70,8 @@ Invoke-RestMethod "http://127.0.0.1:3080/dsh-quake-alert/feed?source=jma&since=t
 | `stats.errors` 为 0，`stats.lastPollAt` 在前进，`stats.feedEntries` 正常 | 链路正常 | **不要报故障。** `feedEntries` 里大多数电文与本插件无关（天气预报等），`received` 少是正常的 |
 | `stats.stale === true` | **上游数据停更**（源在响应，但给的是旧数据） | 不可降级。如实说明，等上游恢复 |
 | `stats.detailDropped > 0` | 详情电文反复抓取失败后已放弃 | 说明"有几条电文没取到"，并检查第 2 节 |
-| `stats.lastError` 非空 | 最近一次失败的原因（含 `HTTP 4xx/5xx`、`ECONNRESET`、`响应体过大` 等） | 按关键字对照第 2 节 |
+| `stats.lastError` 非空 | **当前**这条故障的原因（含 `HTTP 4xx/5xx`、`ECONNRESET`、`响应体过大` 等），`stats.lastErrorAt` 是它记下的时刻。语义是"现在还不正常"，不是"曾经出过错"：重连成功（onopen）与"一整帧正常解析"都会清零 | 按关键字对照第 2 节。**`lastError` 非空但 `messages` 在涨 = 一条已经自愈的旧文案**——1.0.1 之前这条字段只写不清，界面会永久停在「链路降级」（现在 Host 侧清零，`12c` 也只在 10 分钟内的错误上判降级） |
+| `stats.lastSchemaNote` 非空 | 最近一次**结构观测**（个别条目字段缺失 / 事件时间认不出）。不是故障：上游常态，只作可见性留档 | 不要据此报故障；条数看 `itemSkipped` / `unparseableTime` |
 
 > `stats` 里的 `cursor` / `dropped` / `seenSize` / `bufferSize` 是内部读取位置与缓冲状态，
 > 只在判断"是否有增量缺口"时用，不要拿来当故障证据。
@@ -272,7 +273,7 @@ AI 完成上述检查后，按这个结构回答：
 | 入口 | 用途 | 状态 |
 |---|---|---|
 | `GET /dsh-quake-alert/feed?source=jma\|usgs\|noaa&since=tail&stats=1` | 读 Host 侧健康计数 | 0.4.1 可用 |
-| `GET /dsh-quake-alert/feed?source=cenc_eew\|cenc_eqlist&since=tail&stats=1` | 读大陆源的 WS 健康计数（`connected` / `messages` / `reconnects` / `lastError` / `dataTime` / `stale` / `ageSkipped`）。`stale` 由时钟推动，中继真停更时也会变 true | 0.5.0 可用 |
+| `GET /dsh-quake-alert/feed?source=cenc_eew\|cenc_eqlist&since=tail&stats=1` | 读大陆源的 WS 健康计数（`connected` / `messages` / `reconnects` / `lastError` / `lastErrorAt` / `lastSchemaNote` / `dataTime` / `stale` / `ageSkipped`）。`stale` 由时钟推动，中继真停更时也会变 true；`lastError` 是「**当前**故障」，恢复即清零（见第 1 节） | 0.5.0 可用，1.0.1 加时间戳与结构观测 |
 | `GET /dsh-quake-alert/stream?source=cenc_eew\|cenc_eqlist` | 大陆源的 SSE 推送（`event: sync` 第一条数据给出读取位置、缓冲状态与数据健康；此后每 15 秒一帧 `event: status`，兼作 keep-alive 并承载"中继停更"） | 0.5.0 可用 |
 | `GET /dsh-quake-alert/feed?source=nmc_alarm&since=tail&stats=1` | 读大陆**气象**源（中央气象台 nmc.cn）的健康计数与条目载荷。载荷是 JSON：`alertid` / `title` / `issued` / `kind`（rainstorm / geology）/ `level`（red / orange / yellow / blue）/ `detail`（只有橙 / 红才有正文）。`stats.stale` 由**列表里最新一条的发布时间**推动（超 3 小时），`stats.errors` 增长说明列表请求失败或响应结构变了 | 0.5.2 可用 |
 | `GET /dsh-quake-alert/areas` | 验证本地回环 webServer 是否活着（返回市区町村表 / 河川予報区域表 / 中国行政区划表 / 国家地区清单） | 可用 |
@@ -285,6 +286,7 @@ AI 完成上述检查后，按这个结构回答：
 | 设置页「测试与诊断」里的大陆源行 | 显示**当前链路模式**（SSE 推送 / 已降级为轮询 / 已关闭）与收到、失败、降级次数 | 0.5.0 可用 |
 | Client 侧只读诊断快照 | 设置页「其他 → 测试与诊断」一键生成并复制：聚合状态、逐源状态与数据健康、增量计数、大陆源链路模式、**被跨源优先源压掉的条数**、关注点摘要（含每个点的来源分支 `origin`，大陆点还有 `province` / `city`）、最近几条记录为什么没响铃。快照格式版本 **3**（0.8.2 起；2 = 0.8.0/0.8.1） | 0.5.0 可用，0.8.0 加 `authority` 段，0.8.2 加省市与提号 |
 | WS → HTTP 轮询降级开关 | 中间设备重置长连接时的降级路径 | Host 侧**已可用**（`/feed?source=cenc_*`）；Client **已自动降级**（EventSource 不可用 / 连续拿不到第一条数据 / 连上不推流）；手动强制开关在设置页「大陆源链路」 | 0.5.0 可用 |
+| 锁屏 / 休眠过夜后一直黄灯「链路降级」 | **1.0.1 起自愈**：恢复时主动换一条连接、不把冻结判成静默死亡，自动降级也会复探回 SSE。若仍停在黄灯，按顺序看三处——① 「源状态」里的大陆源链路模式（`已降级为轮询` = Client 那条；`SSE 推送` 但仍黄 = 看 next）；② 该源 `lastError` 与 `lastErrorAt`（**旧文案** = Host 侧未清零，**新鲜文案** = 真故障）；③ `connected === false` 或 `messages` 不再上涨 = 中继真的断了，按第 1 节查 Host | 1.0.1 可用 |
 | 插件内代理支持 | 需要走代理的网络 | **0.5.x 补齐** |
 | 设置页「测试与诊断」里的海外源行 | 海外源是 **Client 直连**（不经 Host），所以没有 `/feed` 路由可查。这一行显示：已查询轮数 · 请求次数 · **响应条目数** · 交给主链条数 · **过老只记历史** · **被上游拒绝** · 上游结果被分页上限截断的轮数 · 超上限跳过 · 失败次数 · 最近查询时间。「响应条目数」比真实预警条数大（NWS 按 5 个采样点各查一次，同一批会被重复计入）；「被上游拒绝」涨说明有关注点被上游拒了（例如多伦多不在美国 NWS 内，NWS 对覆盖外坐标回 400——那不是故障），**代码与文案都不替上游断言"这个点不在覆盖范围"** | 0.6.0 可用，0.6.1 订正字段与文案 |
 | 诊断快照里的 `overseas` 段 | 与 `feed` / `streams` 并列的一张表，逐源给出 `requests` / `received` / `applied` / `rejected` / `ageSkipped` / `truncated` / `gated` / `throttledLast` / `throttledTotal` / `lastDataAt` / `lastError`。**`ageSkipped` 解释"我看到预警但没响"**（打开页面时已发布超 6 小时、或页面休眠超 30 分钟后恢复，只记历史）；**`gated` 是"进入过几次首轮 / 休眠恢复状态"**，不是"门槛激活的轮数"（0.6.1 订正；此前那份注释写的字段名 `uncovered` 在快照里根本不存在，实际是 `rejected`） | 0.6.0 可用，0.6.1 订正 |

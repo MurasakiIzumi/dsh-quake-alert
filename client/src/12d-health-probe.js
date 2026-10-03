@@ -9,6 +9,7 @@
 
 import { SOURCE_CONTRACTS } from './05d-source-contracts.js'
 import { sourceHealthOf, noteStale, pruneHealth, publishStatus } from './05g-source-health.js'
+import { createGapDetector, onResume, RESUME_GAP_MS } from './12f-resume.js'
 
 /** 自检周期。最短阈值是 USGS 的 30 分钟，30 秒分辨率够用，每轮只遍历 8 条记录、不发请求。 */
 export const PROBE_INTERVAL_MS = 30 * 1000
@@ -50,6 +51,10 @@ export function createHealthProbe(opts = {}) {
   // "数据已恢复更新"刷掉 schema-error 蓝点。
   const push = opts.pushSource || ((id, patch) => publishStatus(id, patch))
   let timer = null
+  let offResume = null
+  // 这一层也是「冻结恢复」的检出来源之一（周期 30 秒，所以阈值取周期的 3 倍：阈值必须明显大于自己的
+  // 周期，否则每轮都会被算成一次跳变）。判出跳变时它会广播恢复，各链路据此重建 / 补取数。
+  const gap = createGapDetector({ now, gapMs: Math.max(RESUME_GAP_MS, intervalMs * 3) })
 
   /**
    * 跑一轮：先做 TTL 自愈，再逐源判新鲜度。`dataTime` 从未上报（0）时不判——"不知道数据什么时候
@@ -57,6 +62,10 @@ export function createHealthProbe(opts = {}) {
    */
   function tick() {
     const t = now()
+    // 先判冻结：恢复后的第一轮里各源的最后数据时间都还是冻结前的，照常判必然全判"停更"。判出跳变时
+    // 这里只负责广播（各链路自己决定重建还是补取数），本轮照常判——数据确实旧了，如实说出去比瞒着好，
+    // 而补取数的那一轮会让它很快翻回来。
+    gap.tick()
     pruneHealth(t)
     for (const id of Object.keys(SOURCE_CONTRACTS)) {
       const after = staleAfterOf(id)
@@ -93,10 +102,13 @@ export function createHealthProbe(opts = {}) {
     tick,
     start() {
       if (timer) return
+      // 恢复时立刻补跑一轮：TTL 自愈与停更判定都该按"现在"算，不必再等一个整周期。
+      if (!offResume) offResume = onResume(() => { if (timer) tick() })
       timer = setTimer(tick, intervalMs)
       if (timer && typeof timer.unref === 'function') timer.unref()
     },
     stop() {
+      if (offResume) { offResume(); offResume = null }
       if (timer) { clearTimer(timer); timer = null }
     },
   }

@@ -29,6 +29,10 @@ import { createWsClient, setActiveClient } from './12-websocket.js'
 import { createFeedClient, feedStatsOf, FEED_PATH, FEED_POLL_MS, FEED_CURSOR_KEY, FEED_TAIL } from './12b-feed-poll.js'
 import { createCnStream, cnStreamRegistry, STREAM_PATH, CN_CURSOR_KEY } from './12c-cn-stream.js'
 import { createHealthProbe, PROBE_INTERVAL_MS, staleAfterOf } from './12d-health-probe.js'
+import {
+  createGapDetector, onResume, emitResume, resetResumeForTest, lastResumeAtOf, lastResumeCauseOf, resumedWithin,
+  RESUME_GAP_MS, RESUME_DEDUPE_MS, RESUME_POLL_GAP_MS,
+} from './12f-resume.js'
 import { createNwsSource, createEcccSource, overseasStatsOf, nwsSamplePoints, ecccBboxOf, placesInBoxes, US_BOXES, CA_BOX, defaultFetchText, NWS_ALERTS_BASE, ECCC_ALERTS_BASE, NWS_EVENT_QUERY, MIN_SAMPLE_RADIUS_KM, MAX_REQUESTS_PER_ROUND, OVERSEAS_FRESH_GATE_MS, OVERSEAS_GATE_RESET_MS, UNCOVERED_TTL_MS, OVERSEAS_MIN_BACKOFF_MS, OVERSEAS_MAX_BACKOFF_MS } from './12e-overseas-poll.js'
 import { SettingsPanel, p2pCodeTextOf, kindColorOf, SOURCE_ORDER, SOURCE_CODE_TEXT, statusMetaOf } from './13-ui-settings.js'
 import { sourceLabelOf } from './00f-source-labels.js'
@@ -358,6 +362,9 @@ export const __test = {
   CONFIG_FORMAT, CONFIG_FORMAT_VERSION,
   // 机制层（统一健康记录 + 自检 + 升级阈值）
   createHealthProbe, staleAfterOf, PROBE_INTERVAL_MS,
+  // 机制层（冻结 / 休眠恢复的识别与广播：所有"上次活动时刻"判定的前提都是它）
+  createGapDetector, onResume, emitResume, resetResumeForTest, lastResumeAtOf, lastResumeCauseOf, resumedWithin,
+  RESUME_GAP_MS, RESUME_DEDUPE_MS, RESUME_POLL_GAP_MS,
   resetConnHealth, pruneHealth, noteFreshness, noteStale, loadHealth, publishStatus, republishDataHealth,
   SCHEMA_ESCALATE_COUNT, SCHEMA_ESCALATE_CONSECUTIVE, SCHEMA_ESCALATE_WINDOW_MS, HEALTH_TTL_MS,
   // 大陆气象源（nmc.cn）：解析层 / 契约 / 行政区层级匹配

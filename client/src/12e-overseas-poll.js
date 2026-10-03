@@ -11,6 +11,7 @@ import { noteParseResult, noteSourceSuccess, noteFreshness, effectiveStatusOf } 
 import { NWS_EVENT_WHITELIST, OVERSEAS_BROADCAST_MIN_RANK } from './05h-overseas-parsers.js'
 import { store } from './07-store.js'
 import { handleAlert } from './11-pipeline.js'
+import { onResume, RESUME_POLL_GAP_MS } from './12f-resume.js'
 
 /** NWS 的洪水类查询端点（全量 `/alerts/active` 1.67MB 不可用）。 */
 export const NWS_ALERTS_BASE = 'https://api.weather.gov/alerts/active'
@@ -486,6 +487,21 @@ export function createOverseasSource(opts = {}) {
     }, delay)
   }
 
+  let offResume = null
+
+  /**
+   * 页面 / 进程从冻结中恢复：把下一轮取数提前到立刻执行。冻结期间定时器停跳，恢复后若还按原间隔等下去，
+   * 界面会多停在「数据已过期」好几分钟（自检按契约阈值判 stale）——而用户正在看屏幕。
+   * 顺带一提，恢复后的这一轮走的正是**门槛路径**（`gated`：与上次成功取数隔得久 → 只记历史不响铃），
+   * 所以"睡了一夜醒来被积压的旧预警吵醒"这件事不会因此发生。
+   */
+  function handleResume(t) {
+    if (!running) return
+    const nowMs = (typeof t === 'number' && Number.isFinite(t)) ? t : Date.now()
+    if (lastSuccessAt && (nowMs - lastSuccessAt) < RESUME_POLL_GAP_MS) return
+    schedule(0)
+  }
+
   return {
     id,
     label,
@@ -497,11 +513,14 @@ export function createOverseasSource(opts = {}) {
       // 门槛标志也要复位：它记的是"上一轮门槛是否激活"，在门槛激活期间 stop() 之后重新开始
       // 会让"进入过几次门槛"少计一次。
       gateActive = false
+      // 与 stop 成对：订阅若留着，一个"已停用"的实例会在恢复时重新排起轮询链。
+      if (!offResume) offResume = onResume(handleResume)
       schedule(firstDelayMs)
     },
     stop() {
       stopped = true
       running = false
+      if (offResume) { offResume(); offResume = null }
       if (timer) { clearTimeout(timer); timer = null }
       // 中止在途请求：插件停用后回来的响应不该再进主链（响铃 / 弹窗 / 写历史）
       if (abortCtl) { try { abortCtl.abort() } catch (err) { /* 已结束等忽略 */ } abortCtl = null }

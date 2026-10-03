@@ -4006,10 +4006,48 @@ console.log('== 对源时区与全局严重度修复的回归检查 ==')
         assert(h3.src.stats().itemSkipped === 3,
           '逐条丢弃有计数（itemSkipped=' + h3.src.stats().itemSkipped + '）—— 此前那 3 条无声消失')
         assert(h3.src.stats().errors === errBefore3, '个别条目脏不算源的故障（不把蓝点点亮）')
-        assert(h3.src.stats().lastError.indexOf('有 3 条无法解析') !== -1,
-          '原因写进 lastError（"少了 3 条"与"这批没有新地震"必须不同形）')
+        // 原因要可见，但**不能**写进 lastError：那一条会被每 15 秒一帧的 status 帧当成"当前故障"推到
+        // 界面，于是"上游有个别条目缺字段"（常态）会给黄灯一条永不消失的理由。
+        assert(h3.src.stats().lastError === '' &&
+          h3.src.stats().lastSchemaNote.indexOf('有 3 条无法解析') !== -1,
+          '原因写进 lastSchemaNote 而不是 lastError（"少了 3 条"与"这批没有新地震"仍然不同形，' +
+          '但不构成降级理由）：lastError=' + JSON.stringify(h3.src.stats().lastError) +
+          ' lastSchemaNote=' + JSON.stringify(h3.src.stats().lastSchemaNote))
         assert(h3.src.stats().lastAdded === 3, '窗口内的新鲜条目照常入缓冲（门槛与"丢条"互不干扰）')
         h3.src.stop()
+      }
+
+      // lastError 的语义是「**当前**这条故障」，不是"曾经出过错"：Host 把它放进每 15 秒一帧的 status 帧，
+      // Client 只要看到非空就合成「链路降级」。只写不清 = 黄灯永久钉在界面上——长休眠唤醒后心跳必然超时
+      // 一次，正是这条路径让"睡一夜醒来一直是黄灯"每次都发生。
+      {
+        const hL = harness('cenc_eew', { heartbeatTimeoutMs: 0 })
+        hL.src.markRead(); hL.src.start(); hL.sched.advance(0)
+        const sL = hL.sockets[0]
+        sL.onopen()
+        sL.onmessage({ data: JSON.stringify({ type: 'cenc_eew' }) }) // 缺 ID / 坐标 → 帧结构不符
+        assert(/帧结构不符/.test(hL.src.stats().lastError), '坏帧写 lastError（前置）：' + hL.src.stats().lastError)
+        assert(hL.src.stats().lastErrorAt === hL.clock.t,
+          '同时打上时间戳（Client 据此判新鲜度）：' + hL.src.stats().lastErrorAt)
+        sL.onmessage({ data: JSON.stringify(eewRaw) }) // 紧接着一帧完全正常
+        assert(hL.src.stats().lastError === '',
+          '恢复正常的那一帧把 lastError 清掉（"曾经出过错" ≠ "现在还是坏的"）')
+        assert(hL.src.stats().lastErrorAt === 0, '时间戳一并归零（否则 Client 会拿旧时间戳继续判降级）')
+        hL.src.stop()
+      }
+      {
+        const hB = harness('cenc_eew', { heartbeatTimeoutMs: 2000 })
+        hB.src.markRead(); hB.src.start(); hB.sched.advance(0)
+        hB.sockets[0].onopen()
+        hB.sched.advance(31000) // housekeeping 每 30 秒一轮：超过 2 秒没有消息即判死
+        assert(/超过 2000ms/.test(hB.src.stats().lastError),
+          '心跳超时写 lastError（前置）：' + hB.src.stats().lastError)
+        hB.sched.advance(60000) // 等重连
+        assert(hB.sockets.length >= 2, '判死后确实重连了（前置）：' + hB.sockets.length)
+        hB.sockets[hB.sockets.length - 1].onopen()
+        assert(hB.src.stats().lastError === '',
+          '重连成功（onopen）即清空 lastError —— 中继早就好了、文案还留着，就是界面一直黄灯的那条路径')
+        hB.src.stop()
       }
 
       // md5 只是**观测读数**，不再是「整表没变」的判定条件：上游改了表却忘了刷指纹时旧实现整帧跳过，与「没有新地震」完全同形。
@@ -4636,6 +4674,120 @@ console.log('== 对源时区与全局严重度修复的回归检查 ==')
       hSilent.sched.advance(5000)
       assert(hSilent.client.stats().silentDeaths === quietDead,
         '有帧在流动时不判死（状态帧本身就算活着）')
+    }
+
+    // ④ 长冻结（休眠 / 锁屏过夜）恢复：**不能**拿冻结前的时刻判「静默死亡」——那个判据的前提是
+    //    "定时器一直在跑"，而冻结恰恰推翻了它。这是"睡一夜醒来一直是黄灯"的第一条路径。
+    {
+      const hR = cnHarness({ over: { silenceDeadMs: 45000 } })
+      T.resetResumeForTest()
+      hR.client.start()
+      hR.created[0].emit('sync', { cursor: 5, replayed: 0, reset: false, truncated: false, frozen: false })
+      hR.sched.advance(5000) // 正常跑一轮：基准时刻落在这里
+      const deathsBefore = hR.client.stats().silentDeaths
+      hR.clock.t += 8 * 3600 * 1000 // 睡 8 小时（这期间一个定时器都没跑）
+      hR.sched.advance(0) // 唤醒后的第一轮
+      assert(hR.client.stats().silentDeaths === deathsBefore,
+        '冻结不被判成静默死亡（修复前：now - lastFrameAt = 8 小时 > 45 秒 → 判死并报 degraded）')
+      assert(hR.client.stats().resumeReconnects === 1,
+        '改成主动换一条连接：半开连接不会给任何事件，干等着只会一直显示绿')
+      assert(hR.created.length === 2, '确实重建了（而不是对着一条僵尸连接再等 45 秒）')
+      assert(!hR.statuses.some((p) => /SSE silent/.test(String(p.detail))), '不把"这是冻结"说成"SSE 静默死亡"')
+      hR.client.stop()
+    }
+
+    // ④b 但**短暂切走**不该换连接：恢复事件很频繁（切一次标签页就来一次），判据要落在"帧还新不新鲜"
+    //     上，而不是"有没有收到事件"。
+    {
+      const hS = cnHarness({})
+      T.resetResumeForTest()
+      hS.client.start()
+      hS.created[0].emit('sync', { cursor: 5, replayed: 0, reset: false, truncated: false, frozen: false })
+      hS.sched.advance(5000)
+      T.emitResume(hS.clock.t) // 来源是浏览器事件，且上一帧才过去 5 秒
+      assert(hS.created.length === 1, '短暂切走（帧还很新）不重建这条流')
+      // 距上一帧超过静默阈值 → 仍然要换：Host 每 15 秒必发一帧，那是"这条连接确实没在转"的可靠证据
+      hS.clock.t += 60000
+      T.emitResume(hS.clock.t)
+      assert(hS.created.length === 2, '距上一帧超过静默阈值 → 换一条（判据是帧的新鲜度，不是事件类型）')
+      hS.client.stop()
+    }
+
+    // ⑤ 自动降级（非用户选择）在恢复时要能自己升回 SSE：它的判据是"这条链路已经证明过不通"，而休眠不是
+    //    "不通"——否则黄灯再也不会自己变绿，只能手动去设置页把链路往返改一次。
+    {
+      const hU = cnHarness({ over: { probeMs: 0 } })
+      T.resetResumeForTest()
+      hU.client.start()
+      const es0 = hU.created[0]
+      es0.emit('error', {}) // 一次 sync 都还没收到的流：连续失败 3 次即降级
+      es0.emit('error', {})
+      es0.emit('error', {})
+      assert(hU.client.modeOf() === 'poll' && hU.fallbacks.indexOf('start') !== -1,
+        '连续 3 次拿不到首帧 → 自动降级到轮询（前置）：mode=' + hU.client.modeOf())
+      assert(hU.statuses.some((p) => p.status === 'degraded'), '降级本身要说出来（前置）')
+      const createdBefore = hU.created.length
+      hU.clock.t += 8 * 3600 * 1000
+      T.emitResume(hU.clock.t) // 睡醒 / 回到前台
+      assert(hU.client.stats().fallbackProbes === 1, '恢复时复探一次 SSE')
+      assert(hU.client.modeOf() === 'sse', '探到就升回 SSE（修复前：自动降级永不升回，黄灯一直挂着）')
+      assert(hU.created.length === createdBefore + 1, '复探就是真的重建一条 SSE 连接')
+      hU.client.stop()
+    }
+
+    // ⑥ Host 侧的旧错误文案不再造成永久降级：Host 已在恢复时清空，这里按**新鲜度**再兜一层（防那份
+    //    文案"只写不清"再犯）。
+    {
+      const hE = cnHarness({})
+      T.resetResumeForTest()
+      hE.client.start()
+      const esE = hE.created[0]
+      // 先把"现在"推离假时钟起点（1000000），否则"8 小时前"会算成负数——真实 Date.now() 永远为正，
+      // 而实现里"时间戳必须是正数"是有意的（0 / 缺失 = 旧版 Host，按新鲜处理，保持原行为）。
+      hE.clock.t += 8 * 3600 * 1000
+      esE.emit('sync', { cursor: 5, replayed: 0, reset: false, truncated: false, frozen: false })
+      // 8 小时前记下的那条（休眠期间唯一一次心跳超时）→ 不该再算当前故障
+      esE.emit('status', {
+        stale: false, dataTime: 0, connected: true,
+        lastError: '超过 120000ms 没有收到任何消息（心跳实测 60 秒一次）→ 判定连接已死',
+        lastErrorAt: hE.clock.t - 8 * 3600 * 1000,
+      })
+      assert(!hE.statuses.some((p) => p.status === 'degraded'), '隔夜的旧文案不造成 degraded（按新鲜度失效）')
+      // 刚刚记下的错误 → 照旧降级（这一层只过滤旧的，不掩盖真故障）
+      esE.emit('status', {
+        stale: false, dataTime: 0, connected: true,
+        lastError: '整表 12 条全部无法解析（字段改名 / 类型变化）', lastErrorAt: hE.clock.t,
+      })
+      assert(hE.statuses.some((p) => p.status === 'degraded'), '新鲜错误照旧判降级')
+      hE.client.stop()
+    }
+
+    // ⑦ P2PQuake 的 WS：恢复时按"距上次活动多久"决定是刷新计时还是换一条连接。
+    {
+      const clockRef = { t: Date.parse('2026-09-26T12:00:00Z') }
+      class SandboxDate extends Date {
+        constructor(...args) { if (args.length === 0) super(clockRef.t); else super(...args) }
+        static now() { return clockRef.t }
+      }
+      const socketsW = []
+      class FakeWSW {
+        constructor(url) { this.url = url; this.readyState = 1; socketsW.push(this) }
+        close() { this.readyState = 3 }
+      }
+      const exW = loadClientEx({}, { window: { WebSocket: FakeWSW }, Date: SandboxDate }).exports.__test
+      exW.resetResumeForTest()
+      const cW = exW.createWsClient({ staleAfterMs: 0 })
+      cW.start()
+      socketsW[0].onopen()
+      assert(socketsW.length === 1, '（前置）已建连')
+      clockRef.t += 5000
+      exW.emitResume(clockRef.t)
+      assert(socketsW.length === 1, '短暂切走再回来不重连（否则每切一次标签页都白换一条连接）')
+      clockRef.t += 8 * 3600 * 1000
+      exW.emitResume(clockRef.t)
+      assert(socketsW.length === 2,
+        '冻结很久后恢复 → 直接换一条（修复前：把死连接的时间戳刷成"刚刚活跃"，最长 20 分钟不重连、期间还显示绿色）')
+      cW.stop()
     }
 
     {
