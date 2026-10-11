@@ -6,6 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![npm version](https://img.shields.io/npm/v/dsh-quake-alert)](https://www.npmjs.com/package/dsh-quake-alert)
 [![dsh.so risk](https://www.dsh.so/badge/dsh-quake-alert.svg)](https://www.dsh.so/artifact/dsh-quake-alert/)
+[![dsh.so install · dsh 0.2.0-rc.2](https://www.dsh.so/badge/install/dsh-quake-alert@0.2.0-rc.2.svg)](https://www.dsh.so/artifact/dsh-quake-alert/)
 
 这是给 DeepSeek Harness（DSH）用的灾害预警插件。你使用 DSH 期间，它会实时推送**日本**和**全球**的
 地震、海啸与气象灾害预警；一旦命中你设置的关注地区与阈值，就会响一声、在页面上弹条提示
