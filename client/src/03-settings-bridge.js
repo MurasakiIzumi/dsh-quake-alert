@@ -11,10 +11,11 @@ import { setLanguage, getLanguage } from './00-i18n.js'
 import { store } from './07-store.js'
 
 // ---------- 机器级持久化：Host 存储为主，localStorage 为回退与镜像 ----------
-// 本模块只认一个**形状**（两代宿主都提供它），不关心它来自哪个服务：DSH 0.1.6 及以前是
+// 本模块只认一个**形状**（三代宿主都提供它），不关心它来自哪个服务：DSH 0.1.6 及以前是
 // `ctx.settingsScope.bind({ namespace })` 返回的 scope，0.1.7 起是 `ctx.configForms.get('quake-alert')`
 // 返回的 ConfigForm。两边同名同义：`getSnapshot()` / `subscribe(fn)` / `mutate(ops)`，快照字段
-// `status / value / user / writable / mode` 一一对应。分派在 15-entry.js。scope 快照是**同步**可读的，
+// `status / value / user / writable` 一一对应。`mode` 在 0.1.x 有、0.2.x 去掉了，所以只拿它做补充判断，
+// 主判据是 `writable`（0.1.x 的 memory 模式同样是 writable=false）。分派在 15-entry.js。scope 快照是**同步**可读的，
 // 所以内部读取（重连、handleRaw）仍然同步；写入先更新内存与 localStorage 镜像，再异步推给 Host。
 const SETTINGS_NS = 'quake-alert'
 /** 「本地配置已迁移到 Host」写在本地的标记：迁移只能发生一次，见 bindSettingsScope。 */
@@ -96,7 +97,8 @@ function pushCfgToHost(cfg) {
   if (!scope || settingsSync !== 'host') return null
   try {
     const snap = scope.getSnapshot()
-    if (!snap || snap.status !== 'ready' || snap.writable !== true || snap.mode !== 'host') return null
+    // 主判据是 writable：0.2.x 的快照没有 mode 字段，按 mode 判定会把可写的 Host 误判成 memory。
+    if (!snap || snap.status !== 'ready' || snap.writable !== true || snap.mode === 'memory') return null
     const ops = settingsOpsFor(cfg)
     if (ops.length === 0) return null
     const pending = scope.mutate(ops)
@@ -116,7 +118,7 @@ function bindSettingsScope(scope) {
     let snap = null
     try { snap = scope.getSnapshot() } catch (err) { return }
     if (!snap || snap.status !== 'ready' || snap.value === undefined) { settingsSync = 'local'; store.push({}); return }
-    if (snap.mode !== 'host' || snap.writable !== true) { settingsSync = 'memory'; store.push({}); return }
+    if (snap.writable !== true || snap.mode === 'memory') { settingsSync = 'memory'; store.push({}); return }
     settingsSync = 'host'
     const user = isPlainObject(snap.user) ? snap.user : {}
     const claimed = loadJSON(MIGRATED_KEY, null) === 1

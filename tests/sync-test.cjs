@@ -972,6 +972,26 @@ console.log('== 机器级持久化：Host settings 桥 ==')
     assert(t.settingsState().sync === 'memory', 'Host 只做进程内存储 → memory 模式')
     assert(scope.writes.length === 0, 'memory 模式不写 Host')
   }
+  // dsh 0.2.x 的 ConfigFormSnapshot 删掉了 mode，只剩 writable。按 mode 判定的旧写法会把它误判成 memory，
+  // 配置从此只写 localStorage。这两条守着「有 writable 就够」。
+  {
+    const t = loadClientEx({}).exports.__test
+    const scope = fakeScope({ mode: undefined, writable: true })
+    t.bindSettingsScope(scope)
+    assert(t.settingsState().sync === 'host', '0.2.x 快照没有 mode 时按 writable 判为 host')
+    scope.writes.length = 0
+    const cur = t.currentCfg()
+    t.applyCfg(Object.assign({}, cur, { thresholds: Object.assign({}, cur.thresholds, { quakeScale: 55 }) }))
+    const set = (scope.writes[0] || []).find((o) => o.op === 'set' && pathOf(o) === 'thresholds.quakeScale')
+    assert(set && set.value === 55, '0.2.x 形态下配置仍能写回 Host')
+  }
+  {
+    const t = loadClientEx({}).exports.__test
+    const scope = fakeScope({ mode: undefined, writable: false })
+    t.bindSettingsScope(scope)
+    assert(t.settingsState().sync === 'memory', '0.2.x 形态下 writable=false 判为 memory')
+    assert(scope.writes.length === 0, '不可写的 Host 不接收写入')
+  }
   {
     const t = loadClientEx({}).exports.__test
     const scope = fakeScope()

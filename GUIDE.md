@@ -33,8 +33,9 @@ matching, notifications and the history list.
 
 The Host half does three things:
 
-- Wires the `quake-alert` configuration into DSH's settings service. From 0.1.7 the settings form comes
-  from the exported `Config` schema; up to 0.1.6 the plugin registered the namespace itself.
+- Wires the `quake-alert` configuration into DSH's settings service. From 0.1.7 on (0.2.x included) the
+  settings form comes from the exported `Config` schema; up to 0.1.6 the plugin registered the namespace
+  itself.
 - Serves the read-only tables at `/dsh-quake-alert/areas`: municipalities, river forecast areas,
   Chinese administrative divisions and the country / region list. City rows come in per-country chunks
   through `?country=XX`.
@@ -284,7 +285,7 @@ Data attribution:
 
 **Configuration**
 
-- **A wrongly typed value in the locally saved config falls back to browser storage**: if a value in the Host's settings file fails schema validation, the plugin uses the configuration kept in the page's localStorage instead. On the 0.1.6 path a warning was visible; on the current one the rejection happens on the Host side and this plugin never sees it, so the only symptom is "the value I edited did not take effect". What fails validation is a value outside the declared ranges or of the wrong type; the plugin does not merge partially valid objects.
+- **A wrongly typed value in the locally saved config falls back to browser storage**: if a value in the Host's settings file fails schema validation, the plugin uses the configuration kept in the page's localStorage instead. On the 0.1.6 path a warning was visible; from 0.1.7 on, the rejection happens on the Host side and this plugin never sees it, so the only symptom is "the value I edited did not take effect". What fails validation is a value outside the declared ranges or of the wrong type; the plugin does not merge partially valid objects.
 - The **status / diagnostic layer** (connection, backoff, stalled feeds, parse failures) is deliberately **English-only and kept short**: about 70 strings, and only a person reading the sidebar or pasting a diagnostic snapshot ever looks at them. Everything the plugin composes for an alert itself follows the interface language, in all four languages: type labels, intensity and tsunami grade words, match reasons, the `（未命中：…）` suffix in the history, and the test-telegram dropdown in the settings page. Wording that comes from a source is passed through verbatim: JMA's own Japanese sentences, place names, agency names, NWS / ECCC official event names.
 - The global city table only contains towns of 100,000+ inhabitants, so small towns and villages are missing from it. Use the coordinate form or "Use current location" when you need one. Cities with the same name inside one country get their first-level administrative area appended to the name ("Springfield (Illinois)"), and that area name is in English, because GeoNames only provides Latin-script names. It only affects how readable the list is and takes no part in matching.
 - City names in the global table are plain Latin while country names are localized. City names used to come from GeoNames' `alternatenames`, preferring a CJK candidate, so one table mixed Simplified, Traditional and Japanese forms (Rome read 羅馬 while its administrative area was the Latin "Lazio"). Localizing them would need GeoNames' language-tagged candidates (`alternateNamesV2`, a much larger download), so they are uniformly Latin instead (Rome / Milan / New York City; none of the 5224 entries contains a Han character). Country / region names come from ICU per interface language rather than from a table. Regenerating the city table needs the GeoNames dump: `node scripts/build-world-cities.mjs` (it downloads the dump, or reads a local copy with `--from <directory>`).

@@ -2,6 +2,17 @@
 
 本文件记录 dsh-quake-alert 的显著变更，格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.0.2] - 2026-10-24
+
+### Fixed
+
+- 在 dsh 0.2.x 上，客户端会把可写的 Host 配置误判成 `memory`，`quake-alert` 从此只写浏览器 localStorage：0.2 的 `ConfigFormSnapshot` 删掉了 `mode` 字段，而 `03-settings-bridge` 用 `mode !== 'host'` 判只读。改为主看 `writable`（0.1.x 的 memory 模式同样是 `writable=false`），`mode` 只在存在时补充判断。回归 2213 → 2217，补「无 mode + writable=true 仍能写回 Host」与「writable=false 判 memory」两条。
+
+### Changed
+
+- 文档审校（中文 / 日文 / 英文）：`README.zh.md`「让故障变成看得见的状态」改为具体说法，`README.ja.md` 同句的「目に見える状態に変える方針を採っています」改为「画面上で見える状態に変えてから調べる方針です」。
+- `GUIDE.zh.md` / `GUIDE.md` 的 settings 说明补上 0.2.x 沿用的路径，`TROUBLESHOOTING.zh.md` 的「适用版本」由 0.4.1 更新为 1.0.2。
+
 ## [1.0.1] - 2026-10-03
 
 ### Fixed
